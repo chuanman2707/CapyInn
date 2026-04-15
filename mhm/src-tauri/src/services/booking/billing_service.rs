@@ -1,4 +1,4 @@
-use sqlx::{Pool, Sqlite};
+use sqlx::{Pool, Sqlite, Transaction};
 
 use crate::domain::booking::{BookingError, BookingResult};
 
@@ -12,6 +12,32 @@ pub async fn record_charge(
     created_at: impl Into<String>,
 ) -> BookingResult<()> {
     let mut tx = begin_tx(pool).await?;
+    record_charge_tx(&mut tx, booking_id, amount, note, created_at).await?;
+
+    tx.commit().await.map_err(BookingError::from)?;
+    Ok(())
+}
+
+pub async fn record_payment(
+    pool: &Pool<Sqlite>,
+    booking_id: &str,
+    amount: f64,
+    note: impl Into<String>,
+) -> BookingResult<()> {
+    let mut tx = begin_tx(pool).await?;
+    record_payment_tx(&mut tx, booking_id, amount, note).await?;
+
+    tx.commit().await.map_err(BookingError::from)?;
+    Ok(())
+}
+
+pub async fn record_charge_tx(
+    tx: &mut Transaction<'_, Sqlite>,
+    booking_id: &str,
+    amount: f64,
+    note: impl Into<String>,
+    created_at: impl Into<String>,
+) -> BookingResult<()> {
     let id = uuid::Uuid::new_v4().to_string();
     let note = note.into();
     let created_at = created_at.into();
@@ -25,20 +51,18 @@ pub async fn record_charge(
     .bind(amount)
     .bind(&note)
     .bind(&created_at)
-    .execute(&mut *tx)
+    .execute(&mut **tx)
     .await?;
 
-    tx.commit().await.map_err(BookingError::from)?;
     Ok(())
 }
 
-pub async fn record_payment(
-    pool: &Pool<Sqlite>,
+pub async fn record_payment_tx(
+    tx: &mut Transaction<'_, Sqlite>,
     booking_id: &str,
     amount: f64,
     note: impl Into<String>,
 ) -> BookingResult<()> {
-    let mut tx = begin_tx(pool).await?;
     let id = uuid::Uuid::new_v4().to_string();
     let note = note.into();
     let created_at = rfc3339_now();
@@ -52,7 +76,7 @@ pub async fn record_payment(
     .bind(amount)
     .bind(&note)
     .bind(&created_at)
-    .execute(&mut *tx)
+    .execute(&mut **tx)
     .await?;
 
     let result = sqlx::query(
@@ -62,7 +86,7 @@ pub async fn record_payment(
     )
     .bind(amount)
     .bind(booking_id)
-    .execute(&mut *tx)
+    .execute(&mut **tx)
     .await?;
 
     if result.rows_affected() == 0 {
@@ -72,6 +96,5 @@ pub async fn record_payment(
         )));
     }
 
-    tx.commit().await.map_err(BookingError::from)?;
     Ok(())
 }

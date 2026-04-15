@@ -2,7 +2,7 @@ use sqlx::{sqlite::SqlitePoolOptions, Pool, Sqlite};
 
 use crate::domain::booking::BookingResult;
 
-use super::billing_service::record_payment;
+use super::billing_service::{record_payment, record_payment_tx};
 
 pub async fn test_pool() -> Pool<Sqlite> {
     let pool = SqlitePoolOptions::new()
@@ -160,4 +160,26 @@ async fn record_payment_updates_paid_amount_cache() {
     assert_eq!(txn.get::<String, _>("type"), "payment");
     assert_eq!(txn.get::<f64, _>("amount"), 25_000.0);
     assert_eq!(txn.get::<String, _>("note"), "deposit");
+}
+
+#[tokio::test]
+async fn record_payment_tx_can_compose_inside_outer_transaction() {
+    let pool = test_pool().await;
+    seed_room(&pool, "R102").await.unwrap();
+    seed_active_booking(&pool, "B102", "R102").await.unwrap();
+
+    let mut tx = pool.begin().await.unwrap();
+    record_payment_tx(&mut tx, "B102", 12_500.0, "deposit")
+        .await
+        .unwrap();
+
+    let booking = sqlx::query("SELECT paid_amount FROM bookings WHERE id = ?")
+        .bind("B102")
+        .fetch_one(&mut *tx)
+        .await
+        .unwrap();
+
+    assert_eq!(booking.get::<Option<f64>, _>("paid_amount"), Some(12_500.0));
+
+    tx.rollback().await.unwrap();
 }
