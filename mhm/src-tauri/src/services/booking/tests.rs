@@ -1,7 +1,7 @@
 use sqlx::{sqlite::SqlitePoolOptions, Pool, Row, Sqlite};
 
 use crate::{
-    domain::booking::BookingResult,
+    domain::booking::{pricing::calculate_stay_price_tx, BookingResult},
     models::{CheckInRequest, CheckOutRequest, CreateGuestRequest},
 };
 
@@ -325,6 +325,46 @@ async fn record_payment_tx_can_compose_inside_outer_transaction() {
         .unwrap();
 
     assert_eq!(booking.get::<Option<f64>, _>("paid_amount"), Some(12_500.0));
+
+    tx.rollback().await.unwrap();
+}
+
+#[tokio::test]
+async fn calculate_stay_price_tx_reads_uncommitted_pricing_rule() {
+    let pool = test_pool().await;
+    seed_room(&pool, "R150").await.unwrap();
+
+    let mut tx = pool.begin().await.unwrap();
+    sqlx::query(
+        "INSERT INTO pricing_rules (
+            id, room_type, hourly_rate, overnight_rate, daily_rate,
+            overnight_start, overnight_end, daily_checkin, daily_checkout,
+            early_checkin_surcharge_pct, late_checkout_surcharge_pct,
+            weekend_uplift_pct, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, '22:00', '11:00', '14:00', '12:00', 0, 0, 0, ?, ?)",
+    )
+    .bind("rule-standard")
+    .bind("standard")
+    .bind(50_000.0_f64)
+    .bind(150_000.0_f64)
+    .bind(600_000.0_f64)
+    .bind("2026-04-15T10:00:00+07:00")
+    .bind("2026-04-15T10:00:00+07:00")
+    .execute(&mut *tx)
+    .await
+    .unwrap();
+
+    let pricing = calculate_stay_price_tx(
+        &mut tx,
+        "R150",
+        "2026-04-15T10:00:00+07:00",
+        "2026-04-17T10:00:00+07:00",
+        "nightly",
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(pricing.total, 1_200_000.0);
 
     tx.rollback().await.unwrap();
 }

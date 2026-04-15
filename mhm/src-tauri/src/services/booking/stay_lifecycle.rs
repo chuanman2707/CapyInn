@@ -2,7 +2,7 @@ use chrono::{Duration, Local, NaiveDate};
 use sqlx::{Pool, Row, Sqlite, Transaction};
 
 use crate::{
-    domain::booking::{pricing::calculate_stay_price, BookingError, BookingResult},
+    domain::booking::{pricing::calculate_stay_price_tx, BookingError, BookingResult},
     models::{status, Booking, CheckInRequest, CheckOutRequest, CreateGuestRequest},
 };
 
@@ -71,8 +71,8 @@ pub async fn check_in(
         )));
     }
 
-    let pricing = calculate_stay_price(
-        pool,
+    let pricing = calculate_stay_price_tx(
+        &mut tx,
         &req.room_id,
         &check_in_at,
         &expected_checkout,
@@ -261,8 +261,8 @@ pub async fn extend_stay(pool: &Pool<Sqlite>, booking_id: &str) -> BookingResult
         )));
     }
 
-    let incremental_pricing = calculate_stay_price(
-        pool,
+    let incremental_pricing = calculate_stay_price_tx(
+        &mut tx,
         &room_id,
         &old_expected_checkout,
         &new_expected.to_rfc3339(),
