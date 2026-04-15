@@ -38,23 +38,16 @@ pub async fn record_charge_tx(
     note: impl Into<String>,
     created_at: impl Into<String>,
 ) -> BookingResult<()> {
-    let id = uuid::Uuid::new_v4().to_string();
-    let note = note.into();
-    let created_at = created_at.into();
-
-    sqlx::query(
-        "INSERT INTO transactions (id, booking_id, amount, type, note, created_at)
-         VALUES (?, ?, ?, 'charge', ?, ?)",
+    record_money_tx(
+        tx,
+        booking_id,
+        amount,
+        note,
+        "charge",
+        created_at,
+        false,
     )
-    .bind(&id)
-    .bind(booking_id)
-    .bind(amount)
-    .bind(&note)
-    .bind(&created_at)
-    .execute(&mut **tx)
-    .await?;
-
-    Ok(())
+    .await
 }
 
 pub async fn record_payment_tx(
@@ -63,37 +56,97 @@ pub async fn record_payment_tx(
     amount: f64,
     note: impl Into<String>,
 ) -> BookingResult<()> {
+    record_money_tx(
+        tx,
+        booking_id,
+        amount,
+        note,
+        "payment",
+        rfc3339_now(),
+        true,
+    )
+    .await
+}
+
+pub async fn record_deposit_tx(
+    tx: &mut Transaction<'_, Sqlite>,
+    booking_id: &str,
+    amount: f64,
+    note: impl Into<String>,
+) -> BookingResult<()> {
+    record_money_tx(
+        tx,
+        booking_id,
+        amount,
+        note,
+        "deposit",
+        rfc3339_now(),
+        true,
+    )
+    .await
+}
+
+pub async fn record_cancellation_fee_tx(
+    tx: &mut Transaction<'_, Sqlite>,
+    booking_id: &str,
+    amount: f64,
+    note: impl Into<String>,
+) -> BookingResult<()> {
+    record_money_tx(
+        tx,
+        booking_id,
+        amount,
+        note,
+        "cancellation_fee",
+        rfc3339_now(),
+        false,
+    )
+    .await
+}
+
+async fn record_money_tx(
+    tx: &mut Transaction<'_, Sqlite>,
+    booking_id: &str,
+    amount: f64,
+    note: impl Into<String>,
+    txn_type: &str,
+    created_at: impl Into<String>,
+    update_paid_amount: bool,
+) -> BookingResult<()> {
     let id = uuid::Uuid::new_v4().to_string();
     let note = note.into();
-    let created_at = rfc3339_now();
+    let created_at = created_at.into();
 
     sqlx::query(
         "INSERT INTO transactions (id, booking_id, amount, type, note, created_at)
-         VALUES (?, ?, ?, 'payment', ?, ?)",
+         VALUES (?, ?, ?, ?, ?, ?)",
     )
     .bind(&id)
     .bind(booking_id)
     .bind(amount)
+    .bind(txn_type)
     .bind(&note)
     .bind(&created_at)
     .execute(&mut **tx)
     .await?;
 
-    let result = sqlx::query(
-        "UPDATE bookings
-         SET paid_amount = COALESCE(paid_amount, 0) + ?
-         WHERE id = ?",
-    )
-    .bind(amount)
-    .bind(booking_id)
-    .execute(&mut **tx)
-    .await?;
+    if update_paid_amount {
+        let result = sqlx::query(
+            "UPDATE bookings
+             SET paid_amount = COALESCE(paid_amount, 0) + ?
+             WHERE id = ?",
+        )
+        .bind(amount)
+        .bind(booking_id)
+        .execute(&mut **tx)
+        .await?;
 
-    if result.rows_affected() == 0 {
-        return Err(BookingError::not_found(format!(
-            "Không tìm thấy booking {}",
-            booking_id
-        )));
+        if result.rows_affected() == 0 {
+            return Err(BookingError::not_found(format!(
+                "Không tìm thấy booking {}",
+                booking_id
+            )));
+        }
     }
 
     Ok(())

@@ -2,11 +2,13 @@ use sqlx::{sqlite::SqlitePoolOptions, Pool, Row, Sqlite};
 
 use crate::{
     domain::booking::{pricing::calculate_stay_price_tx, BookingResult},
-    models::{CheckInRequest, CheckOutRequest, CreateGuestRequest},
+    models::{CheckInRequest, CheckOutRequest, CreateGuestRequest, CreateReservationRequest},
 };
 
 use super::{
-    billing_service::{record_payment, record_payment_tx},
+    billing_service::{
+        record_cancellation_fee_tx, record_deposit_tx, record_payment, record_payment_tx,
+    },
     stay_lifecycle,
 };
 
@@ -81,6 +83,10 @@ pub async fn test_pool() -> Pool<Sqlite> {
             created_by TEXT,
             booking_type TEXT DEFAULT 'walk-in',
             pricing_type TEXT DEFAULT 'nightly',
+            deposit_amount REAL,
+            guest_phone TEXT,
+            scheduled_checkin TEXT,
+            scheduled_checkout TEXT,
             pricing_snapshot TEXT,
             created_at TEXT NOT NULL
         )",
@@ -195,6 +201,32 @@ pub async fn seed_room(pool: &Pool<Sqlite>, room_id: &str) -> BookingResult<()> 
     Ok(())
 }
 
+pub async fn seed_pricing_rule(
+    pool: &Pool<Sqlite>,
+    room_type: &str,
+    daily_rate: f64,
+) -> BookingResult<()> {
+    let now = "2026-04-15T10:00:00+07:00";
+
+    sqlx::query(
+        "INSERT INTO pricing_rules (
+            id, room_type, hourly_rate, overnight_rate, daily_rate,
+            overnight_start, overnight_end, daily_checkin, daily_checkout,
+            early_checkin_surcharge_pct, late_checkout_surcharge_pct,
+            weekend_uplift_pct, created_at, updated_at
+        ) VALUES (?, ?, 0, 0, ?, '22:00', '11:00', '14:00', '12:00', 0, 0, 0, ?, ?)",
+    )
+    .bind(format!("rule-{}", room_type))
+    .bind(room_type)
+    .bind(daily_rate)
+    .bind(now)
+    .bind(now)
+    .execute(pool)
+    .await?;
+
+    Ok(())
+}
+
 pub async fn seed_active_booking(pool: &Pool<Sqlite>, booking_id: &str, room_id: &str) -> BookingResult<()> {
     let guest_id = format!("guest-{}", booking_id);
     let now = "2026-04-15T10:00:00+07:00";
@@ -255,6 +287,92 @@ pub async fn seed_active_booking(pool: &Pool<Sqlite>, booking_id: &str, room_id:
     Ok(())
 }
 
+pub async fn seed_booked_reservation(
+    pool: &Pool<Sqlite>,
+    booking_id: &str,
+    room_id: &str,
+) -> BookingResult<()> {
+    let guest_id = format!("guest-{}", booking_id);
+    let guest_name = format!("Reserved Guest {}", booking_id);
+    let now = "2026-04-15T10:00:00+07:00";
+    let phone = "0901234567";
+    let check_in = "2026-04-20";
+    let check_out = "2026-04-22";
+    let nights = 2_i64;
+    let deposit = 50_000.0_f64;
+    let total_price = 500_000.0_f64;
+
+    sqlx::query(
+        "INSERT INTO guests (
+            id, guest_type, full_name, doc_number, dob, gender, nationality,
+            address, visa_expiry, scan_path, phone, created_at
+        ) VALUES (?, 'domestic', ?, ?, NULL, NULL, NULL, NULL, NULL, NULL, ?, ?)",
+    )
+    .bind(&guest_id)
+    .bind(&guest_name)
+    .bind(format!("DOC-{}", booking_id))
+    .bind(phone)
+    .bind(now)
+    .execute(pool)
+    .await?;
+
+    sqlx::query(
+        "INSERT INTO bookings (
+            id, room_id, primary_guest_id, check_in_at, expected_checkout,
+            actual_checkout, nights, total_price, paid_amount, status,
+            source, notes, created_by, booking_type, pricing_type,
+            deposit_amount, guest_phone, scheduled_checkin, scheduled_checkout,
+            pricing_snapshot, created_at
+        ) VALUES (?, ?, ?, ?, ?, NULL, ?, ?, ?, 'booked', ?, ?, NULL, 'reservation', 'nightly', ?, ?, ?, ?, NULL, ?)",
+    )
+    .bind(booking_id)
+    .bind(room_id)
+    .bind(&guest_id)
+    .bind(check_in)
+    .bind(check_out)
+    .bind(nights)
+    .bind(total_price)
+    .bind(deposit)
+    .bind("phone")
+    .bind("seed reservation")
+    .bind(deposit)
+    .bind(phone)
+    .bind(check_in)
+    .bind(check_out)
+    .bind(now)
+    .execute(pool)
+    .await?;
+
+    sqlx::query("INSERT INTO booking_guests (booking_id, guest_id) VALUES (?, ?)")
+        .bind(booking_id)
+        .bind(&guest_id)
+        .execute(pool)
+        .await?;
+
+    sqlx::query("UPDATE rooms SET status = 'booked' WHERE id = ?")
+        .bind(room_id)
+        .execute(pool)
+        .await?;
+
+    sqlx::query(
+        "INSERT INTO room_calendar (room_id, date, booking_id, status) VALUES (?, '2026-04-20', ?, 'booked')",
+    )
+    .bind(room_id)
+    .bind(booking_id)
+    .execute(pool)
+    .await?;
+
+    sqlx::query(
+        "INSERT INTO room_calendar (room_id, date, booking_id, status) VALUES (?, '2026-04-21', ?, 'booked')",
+    )
+    .bind(room_id)
+    .bind(booking_id)
+    .execute(pool)
+    .await?;
+
+    Ok(())
+}
+
 pub fn minimal_checkin_request(room_id: &str) -> CheckInRequest {
     CheckInRequest {
         room_id: room_id.to_string(),
@@ -275,6 +393,21 @@ pub fn minimal_checkin_request(room_id: &str) -> CheckInRequest {
         notes: Some("test check-in".to_string()),
         paid_amount: None,
         pricing_type: Some("nightly".to_string()),
+    }
+}
+
+pub fn minimal_reservation_request(room_id: &str) -> CreateReservationRequest {
+    CreateReservationRequest {
+        room_id: room_id.to_string(),
+        guest_name: "Nguyen Van B".to_string(),
+        guest_phone: Some("0900000001".to_string()),
+        guest_doc_number: Some("079000000001".to_string()),
+        check_in_date: "2026-04-20".to_string(),
+        check_out_date: "2026-04-22".to_string(),
+        nights: 2,
+        deposit_amount: Some(50_000.0),
+        source: Some("phone".to_string()),
+        notes: Some("test reservation".to_string()),
     }
 }
 
@@ -327,6 +460,74 @@ async fn record_payment_tx_can_compose_inside_outer_transaction() {
     assert_eq!(booking.get::<Option<f64>, _>("paid_amount"), Some(12_500.0));
 
     tx.rollback().await.unwrap();
+}
+
+#[tokio::test]
+async fn record_deposit_tx_updates_paid_amount_cache() {
+    let pool = test_pool().await;
+    seed_room(&pool, "R103").await.unwrap();
+    seed_booked_reservation(&pool, "B103", "R103").await.unwrap();
+
+    let mut tx = pool.begin().await.unwrap();
+    record_deposit_tx(&mut tx, "B103", 25_000.0, "extra deposit")
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
+
+    let booking = sqlx::query("SELECT paid_amount FROM bookings WHERE id = ?")
+        .bind("B103")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+
+    assert_eq!(booking.get::<Option<f64>, _>("paid_amount"), Some(75_000.0));
+
+    let txn = sqlx::query(
+        "SELECT type, amount, note FROM transactions WHERE booking_id = ? AND note = ?",
+    )
+    .bind("B103")
+    .bind("extra deposit")
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+
+    assert_eq!(txn.get::<String, _>("type"), "deposit");
+    assert_eq!(txn.get::<f64, _>("amount"), 25_000.0);
+    assert_eq!(txn.get::<String, _>("note"), "extra deposit");
+}
+
+#[tokio::test]
+async fn record_cancellation_fee_tx_does_not_change_paid_amount() {
+    let pool = test_pool().await;
+    seed_room(&pool, "R104").await.unwrap();
+    seed_booked_reservation(&pool, "B104", "R104").await.unwrap();
+
+    let mut tx = pool.begin().await.unwrap();
+    record_cancellation_fee_tx(&mut tx, "B104", 25_000.0, "retained deposit")
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
+
+    let booking = sqlx::query("SELECT paid_amount FROM bookings WHERE id = ?")
+        .bind("B104")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+
+    assert_eq!(booking.get::<Option<f64>, _>("paid_amount"), Some(50_000.0));
+
+    let txn = sqlx::query(
+        "SELECT type, amount, note FROM transactions WHERE booking_id = ? AND note = ?",
+    )
+    .bind("B104")
+    .bind("retained deposit")
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+
+    assert_eq!(txn.get::<String, _>("type"), "cancellation_fee");
+    assert_eq!(txn.get::<f64, _>("amount"), 25_000.0);
+    assert_eq!(txn.get::<String, _>("note"), "retained deposit");
 }
 
 #[tokio::test]
