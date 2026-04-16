@@ -159,3 +159,89 @@ fn extract_field_value(lines: &[String], labels: &[&str]) -> Option<String> {
 /// Thread-safe wrapper for OcrEngine
 #[allow(dead_code)]
 pub struct OcrEngineWrapper(pub Mutex<OcrEngine>);
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_parse_cccd_happy_path_vietnamese_next_line() {
+        let lines = vec![
+            "CỘNG HÒA XÃ HỘI CHỦ NGHĨA VIỆT NAM".to_string(),
+            "Độc lập - Tự do - Hạnh phúc".to_string(),
+            "CĂN CƯỚC CÔNG DÂN".to_string(),
+            "Số/No: 012345678901".to_string(),
+            "Họ và tên".to_string(),
+            "NGUYỄN VĂN A".to_string(),
+            "Ngày sinh: 01/01/1990".to_string(),
+            "Giới tính: Nam".to_string(),
+            "Nơi thường trú".to_string(),
+            "123 Đường ABC, Quận XYZ, TP HCM".to_string(),
+        ];
+
+        let info = parse_cccd(&lines);
+
+        assert_eq!(info.doc_number, "012345678901");
+        assert_eq!(info.full_name, "NGUYỄN VĂN A");
+        assert_eq!(info.dob, "01/01/1990");
+        assert_eq!(info.gender, "Nam");
+        assert_eq!(info.nationality, "Việt Nam"); // default since it's not in the text
+        assert_eq!(info.address, "123 Đường ABC, Quận XYZ, TP HCM");
+    }
+
+    #[test]
+    fn test_parse_cccd_english_labels_same_line() {
+        let lines = vec![
+            "CITIZEN IDENTITY CARD".to_string(),
+            "098765432109".to_string(),
+            "Full name: Jane Doe".to_string(),
+            "Date of birth: 12/12/1985".to_string(),
+            "Sex: Female".to_string(),
+            "Nationality: United States".to_string(),
+            "Place of residence: 456 Elm St, Anytown".to_string(),
+        ];
+
+        let info = parse_cccd(&lines);
+
+        assert_eq!(info.doc_number, "098765432109");
+        assert_eq!(info.full_name, "Jane Doe");
+        assert_eq!(info.dob, "12/12/1985");
+        assert_eq!(info.gender, "Nữ"); // It maps Female to Nữ
+        assert_eq!(info.nationality, "United States");
+        assert_eq!(info.address, "456 Elm St, Anytown");
+    }
+
+    #[test]
+    fn test_parse_cccd_empty_and_missing() {
+        let lines: Vec<String> = vec![];
+        let info = parse_cccd(&lines);
+
+        assert_eq!(info.doc_number, "");
+        assert_eq!(info.full_name, "");
+        assert_eq!(info.dob, "");
+        assert_eq!(info.gender, "");
+        assert_eq!(info.nationality, "Việt Nam");
+        assert_eq!(info.address, "");
+    }
+
+    #[test]
+    fn test_parse_cccd_random_text() {
+        let lines = vec![
+            "Just some random text".to_string(),
+            "123456789".to_string(), // only 9 digits, should not be doc number
+            "Ho va ten".to_string(),
+            "  ".to_string(), // next line is empty, shouldn't panic
+            "Maleish".to_string(), // contains Male, should parse as Nam
+            "11-22-3333".to_string(), // not matching dob regex
+        ];
+
+        let info = parse_cccd(&lines);
+
+        assert_eq!(info.doc_number, "");
+        assert_eq!(info.full_name, "");
+        assert_eq!(info.dob, "");
+        assert_eq!(info.gender, "Nam");
+        assert_eq!(info.nationality, "Việt Nam");
+        assert_eq!(info.address, "");
+    }
+}
