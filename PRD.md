@@ -1,4 +1,4 @@
-# MHM — Mini Hotel Manager
+# CapyInn
 ## Product Requirements Document v1.0
 > Audited: 14/03/2026
 
@@ -6,7 +6,7 @@
 
 ## 1. Tổng quan
 
-**MHM** là desktop app quản lý khách sạn mini 10 phòng, chạy offline hoàn toàn trên macOS.  
+**CapyInn** là desktop app quản lý khách sạn mini 10 phòng, chạy offline hoàn toàn trên macOS.  
 Thay thế toàn bộ quy trình thủ công hiện tại: ghi sổ tay, nhập web lưu trú, tính tiền bằng tay.
 
 **Mục tiêu:** Giảm thời gian xử lý 1 khách từ ~5 phút xuống còn ~60 giây.
@@ -53,7 +53,7 @@ Loại B — Standard: cửa sổ
 ## 4. Quy trình nghiệp vụ (Business Logic)
 
 ### 4.1 Check-in khách trong nước
-1. Khách đưa CCCD → scan bằng Canon LiDE 300 → lưu vào `~/MHM/Scans/`
+1. Khách đưa CCCD → scan bằng Canon LiDE 300 → lưu vào `~/CapyInn/Scans/`
 2. App phát hiện file mới → OCR tự động → extract: **Họ tên, Số CCCD, Ngày sinh, Địa chỉ**
 3. Popup hiện thông tin khách → anh assign vào phòng
 4. App tạo booking, ghi check-in time
@@ -66,7 +66,7 @@ Loại B — Standard: cửa sổ
 4. Nút **"Copy thông tin xuất nhập cảnh"** → format cho web xuất nhập cảnh
 
 ### 4.3 Assign nhiều khách cùng lúc
-- Scan 3 CCCD → 3 file vào `~/MHM/Scans/` → OCR chạy song song
+- Scan 3 CCCD → 3 file vào `~/CapyInn/Scans/` → OCR chạy song song
 - Popup: "Phát hiện 3 khách mới" → anh drag/drop hoặc dropdown assign
 - Linh hoạt: A+B chung phòng, C phòng riêng
 
@@ -100,7 +100,7 @@ Nợ:       Đánh dấu, track riêng
 ## 5. File Watcher
 
 ```
-Thư mục watch: ~/MHM/Scans/   (anh config Canon LiDE 300 output vào đây)
+Thư mục watch: ~/CapyInn/Scans/   (anh config Canon LiDE 300 output vào đây)
 Trigger:        File mới xuất hiện (.jpg, .jpeg, .png, .pdf, .tiff)
 Action:         OCR ngay lập tức → hiện popup assign
 Fallback:       Nếu OCR sai → cho sửa tay trước khi save
@@ -140,7 +140,7 @@ Parse Passport:
 ### Tab 1 — Dashboard
 ```
 ┌─────────────────────────────────────────────┐
-│  MHM                          Hôm nay: 14/3 │
+│  CapyInn                      Hôm nay: 14/3 │
 │  7/10 phòng có khách  |  Doanh thu: 2.1tr   │
 ├─────────────────────────────────────────────┤
 │                                             │
@@ -300,7 +300,7 @@ CREATE TABLE housekeeping (
 
 ### ✅ Có trong MVP
 - Dashboard 10 phòng với màu trạng thái
-- File watcher `~/MHM/Scans/`
+- File watcher `~/CapyInn/Scans/`
 - OCR CCCD (khách trong nước)
 - Assign phòng sau OCR (flexible, nhiều khách cùng lúc)
 - Check-in / Check-out flow
@@ -411,5 +411,5 @@ npm run tauri build
 
 ---
 
-*PRD v1.0 — MHM Mini Hotel Manager*  
+*PRD v1.0 — CapyInn*  
 *Audited & locked: 14/03/2026*

@@ -1,6 +1,6 @@
 <div align="center">
 
-# 🏨 MHM — Mini Hotel Manager
+# 🏨 CapyInn
 
 **Phần mềm quản lý khách sạn mini, miễn phí, chạy offline hoàn toàn**
 
@@ -43,7 +43,9 @@
 
 ## 🎯 Giới thiệu
 
-**MHM (Mini Hotel Manager)** là ứng dụng desktop quản lý khách sạn mini, được thiết kế cho các khách sạn nhỏ tại Việt Nam. Ứng dụng chạy **offline hoàn toàn**, không cần internet, thay thế quy trình quản lý thủ công bằng sổ tay và hỗ trợ **first-run onboarding** để cấu hình khách sạn, loại phòng, và sơ đồ phòng ngay lần mở đầu tiên.
+**CapyInn** là ứng dụng desktop quản lý khách sạn mini, được thiết kế cho các khách sạn nhỏ tại Việt Nam. Ứng dụng chạy **offline hoàn toàn**, không cần internet, thay thế quy trình quản lý thủ công bằng sổ tay và hỗ trợ **first-run onboarding** để cấu hình khách sạn, loại phòng, và sơ đồ phòng ngay lần mở đầu tiên.
+
+> Lưu ý: `CapyInn` là clean-slate rename từ `MHM`. Build hiện tại dùng runtime root mới tại `~/CapyInn` và **không tự động migrate** dữ liệu cũ từ `~/MHM`.
 
 ### Documentation
 
@@ -52,7 +54,7 @@
 
 ### Vấn đề giải quyết
 
-| Trước (thủ công) | Sau (MHM) |
+| Trước (thủ công) | Sau (CapyInn) |
 |---|---|
 | Ghi sổ tay, dễ sai sót | Quản lý số hóa, chính xác |
 | Nhập web lưu trú thủ công | OCR quét CCCD → copy 1 click |
@@ -77,7 +79,7 @@
 
 ### 📷 OCR — Quét CCCD tự động
 - Tích hợp **PaddleOCR v5** (Metal GPU trên macOS)
-- File Watcher: quét ảnh mới trong `~/MHM/Scans/` tự động
+- File Watcher: quét ảnh mới trong `~/CapyInn/Scans/` tự động
 - Nhận diện: Họ tên, Số CCCD, Ngày sinh, Địa chỉ
 - Tốc độ: **~200-300ms / ảnh** trên Apple Silicon
 
@@ -236,7 +238,7 @@ Hotel-Manager/
 ### Check-in khách
 
 ```
-1. Cấu hình máy scan Canon LiDE 300 → output vào ~/MHM/Scans/
+1. Cấu hình máy scan Canon LiDE 300 → output vào `~/CapyInn/Scans/`
 2. Khách đưa CCCD → Scan
 3. App tự động phát hiện file mới → OCR trích xuất thông tin
 4. Popup hiện thông tin khách → Chọn phòng → Confirm
@@ -297,7 +299,7 @@ Hotel-Manager/
 - [x] Onboarding cấu hình khách sạn và sơ đồ phòng
 - [x] Dashboard trạng thái phòng
 - [x] OCR quét CCCD (khách trong nước)
-- [x] File watcher tự động (`~/MHM/Scans/`)
+- [x] File watcher tự động (`~/CapyInn/Scans/`)
 - [x] Check-in / Check-out flow
 - [x] Tính tiền tự động theo đêm
 - [x] Copy thông tin lưu trú

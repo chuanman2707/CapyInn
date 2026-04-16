@@ -1,6 +1,8 @@
-# MHM — Mini Hotel Manager
+# CapyInn
 
 Free, offline-first property management software for small hotels in Vietnam.
+
+> Note: `CapyInn` is a clean-slate rename from `MHM`. Current builds use the new runtime root at `~/CapyInn` and do not auto-migrate legacy local data from `~/MHM`.
 
 ## What It Does
 
