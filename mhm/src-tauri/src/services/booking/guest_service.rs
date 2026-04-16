@@ -135,13 +135,18 @@ pub async fn link_booking_guests(
     booking_id: &str,
     guest_ids: &[String],
 ) -> BookingResult<()> {
-    for guest_id in guest_ids {
-        sqlx::query("INSERT INTO booking_guests (booking_id, guest_id) VALUES (?, ?)")
-            .bind(booking_id)
-            .bind(guest_id)
-            .execute(&mut **tx)
-            .await?;
+    if guest_ids.is_empty() {
+        return Ok(());
     }
+
+    let mut query_builder =
+        sqlx::QueryBuilder::new("INSERT INTO booking_guests (booking_id, guest_id) ");
+
+    query_builder.push_values(guest_ids, |mut b, guest_id| {
+        b.push_bind(booking_id).push_bind(guest_id);
+    });
+
+    query_builder.build().execute(&mut **tx).await?;
 
     Ok(())
 }
