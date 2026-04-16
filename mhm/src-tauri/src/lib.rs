@@ -15,11 +15,55 @@ mod watcher;
 
 use commands::AppState;
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
+
+struct GatewayRuntimeState {
+    runtime: Mutex<Option<tokio::runtime::Runtime>>,
+    shutdown_tx: Mutex<Option<tokio::sync::oneshot::Sender<()>>>,
+    server_task: Mutex<Option<tokio::task::JoinHandle<()>>>,
+}
+
+impl GatewayRuntimeState {
+    fn new(runtime: tokio::runtime::Runtime, gateway: Option<gateway::RunningGateway>) -> Self {
+        let (shutdown_tx, server_task) = match gateway {
+            Some(gateway) => (Some(gateway.shutdown_tx), Some(gateway.server_task)),
+            None => (None, None),
+        };
+
+        Self {
+            runtime: Mutex::new(Some(runtime)),
+            shutdown_tx: Mutex::new(shutdown_tx),
+            server_task: Mutex::new(server_task),
+        }
+    }
+
+    fn shutdown(&self) {
+        let shutdown_tx = self.shutdown_tx.lock().ok().and_then(|mut guard| guard.take());
+        let server_task = self.server_task.lock().ok().and_then(|mut guard| guard.take());
+
+        if let Some(shutdown_tx) = shutdown_tx {
+            let _ = shutdown_tx.send(());
+        }
+
+        gateway::cleanup_lockfile();
+
+        if let Ok(mut runtime_guard) = self.runtime.lock() {
+            if let Some(runtime) = runtime_guard.take() {
+                if let Some(server_task) = server_task {
+                    let _ = runtime.block_on(async move {
+                        tokio::time::timeout(Duration::from_secs(2), server_task).await
+                    });
+                }
+                drop(runtime);
+            }
+        }
+    }
+}
 
 /// Run the Tauri GUI application with MCP Gateway
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    tauri::Builder::default()
+    let app = tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .setup(|app| {
             let rt = tokio::runtime::Runtime::new().expect("Failed to create Tokio runtime");
@@ -30,22 +74,24 @@ pub fn run() {
             // axum server task gets cancelled when the runtime drops.
             let gateway_pool = pool.clone();
             let gateway_handle = app.handle().clone();
-            rt.block_on(async {
+            let gateway_runtime = rt.block_on(async {
                 match gateway::start_gateway(gateway_pool, gateway_handle).await {
-                    Ok(port) => eprintln!("MCP Gateway started on port {}", port),
-                    Err(e) => eprintln!("Failed to start MCP Gateway: {}", e),
+                    Ok(gateway) => {
+                        eprintln!("MCP Gateway started on port {}", gateway.port);
+                        Some(gateway)
+                    }
+                    Err(e) => {
+                        eprintln!("Failed to start MCP Gateway: {}", e);
+                        None
+                    }
                 }
             });
-
-            // Keep the Tokio runtime alive for the entire app lifetime.
-            // This is intentional — the gateway server runs as a spawned task
-            // on this runtime and must not be dropped.
-            std::mem::forget(rt);
 
             app.manage(AppState {
                 db: pool,
                 current_user: Arc::new(Mutex::new(None)),
             });
+            app.manage(GatewayRuntimeState::new(rt, gateway_runtime));
 
             let _ = std::fs::create_dir_all(app_identity::models_dir());
 
@@ -140,8 +186,14 @@ pub fn run() {
             commands::groups::auto_assign_rooms,
             commands::groups::generate_group_invoice,
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .build(tauri::generate_context!())
+        .expect("error while building tauri application");
+
+    app.run(|app_handle, event| {
+        if matches!(event, tauri::RunEvent::Exit | tauri::RunEvent::ExitRequested { .. }) {
+            app_handle.state::<GatewayRuntimeState>().shutdown();
+        }
+    });
 }
 
 /// Run the MCP stdio proxy (Process B)
@@ -166,9 +218,7 @@ async fn gateway_get_status(
     state: tauri::State<'_, AppState>,
 ) -> Result<serde_json::Value, String> {
     let has_keys = gateway::auth::has_api_keys(&state.db).await;
-    let port = app_identity::gateway_lockfile_opt()
-        .and_then(|lockfile| std::fs::read_to_string(lockfile).ok())
-        .and_then(|s| s.trim().parse::<u16>().ok());
+    let port = gateway::live_port_from_lockfile();
 
     Ok(serde_json::json!({
         "running": port.is_some(),

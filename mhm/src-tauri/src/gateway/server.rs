@@ -2,19 +2,30 @@ use axum::Router;
 use rmcp::transport::streamable_http_server::session::local::LocalSessionManager;
 use rmcp::transport::streamable_http_server::{StreamableHttpService, StreamableHttpServerConfig};
 use sqlx::{Pool, Sqlite};
-use tauri::AppHandle;
 use std::net::SocketAddr;
 use std::sync::Arc;
+use tauri::AppHandle;
+use tokio::sync::oneshot;
+use tokio::task::JoinHandle;
 
 use super::tools::HotelTools;
 
 const DEFAULT_PORT: u16 = 61234;
 const PORT_RANGE: std::ops::Range<u16> = 61234..61244;
 
+pub struct RunningGatewayServer {
+    pub port: u16,
+    pub shutdown_tx: oneshot::Sender<()>,
+    pub server_task: JoinHandle<()>,
+}
+
 /// Start the MCP Streamable HTTP server on localhost.
 /// Tries DEFAULT_PORT first, then falls back to next available port in range.
 /// Returns the port it's listening on.
-pub async fn start_server(pool: Pool<Sqlite>, app_handle: AppHandle) -> Result<u16, String> {
+pub async fn start_server(
+    pool: Pool<Sqlite>,
+    app_handle: AppHandle,
+) -> Result<RunningGatewayServer, String> {
     let tools = HotelTools::new(pool, Some(app_handle));
 
     let session_manager = Arc::new(LocalSessionManager::default());
@@ -48,12 +59,22 @@ pub async fn start_server(pool: Pool<Sqlite>, app_handle: AppHandle) -> Result<u
 
     let actual_port = listener.local_addr().map_err(|e| e.to_string())?.port();
 
-    // Spawn the server in a background task
-    tokio::spawn(async move {
-        if let Err(e) = axum::serve(listener, app).await {
+    let (shutdown_tx, shutdown_rx) = oneshot::channel();
+
+    let server_task = tokio::spawn(async move {
+        if let Err(e) = axum::serve(listener, app)
+            .with_graceful_shutdown(async {
+                let _ = shutdown_rx.await;
+            })
+            .await
+        {
             eprintln!("MCP Gateway server error: {}", e);
         }
     });
 
-    Ok(actual_port)
+    Ok(RunningGatewayServer {
+        port: actual_port,
+        shutdown_tx,
+        server_task,
+    })
 }
