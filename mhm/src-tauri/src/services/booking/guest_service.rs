@@ -78,6 +78,38 @@ pub async fn create_reservation_guest_manifest(
     })
 }
 
+pub async fn create_group_guest_manifest(
+    tx: &mut Transaction<'_, Sqlite>,
+    guests: &[CreateGuestRequest],
+    placeholder_name: &str,
+    created_at: &str,
+) -> BookingResult<GuestManifest> {
+    if guests.is_empty() {
+        let guest_id = insert_guest_record(
+            tx,
+            "domestic",
+            placeholder_name,
+            "",
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            created_at,
+        )
+        .await?;
+
+        return Ok(GuestManifest {
+            primary_guest_id: guest_id.clone(),
+            guest_ids: vec![guest_id],
+        });
+    }
+
+    create_guest_manifest(tx, guests, created_at).await
+}
+
 pub async fn link_booking_guests(
     tx: &mut Transaction<'_, Sqlite>,
     booking_id: &str,

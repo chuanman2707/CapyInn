@@ -4,14 +4,17 @@ use sqlx::{sqlite::SqlitePoolOptions, Pool, Row, Sqlite, Transaction};
 use crate::{
     commands::reservations,
     domain::booking::{pricing::calculate_stay_price_tx, BookingResult},
-    models::{CheckInRequest, CheckOutRequest, CreateGuestRequest, CreateReservationRequest},
+    models::{
+        CheckInRequest, CheckOutRequest, CreateGuestRequest, CreateReservationRequest,
+        GroupCheckinRequest, GroupCheckoutRequest,
+    },
 };
 
 use super::{
     billing_service::{
         record_cancellation_fee_tx, record_deposit_tx, record_payment, record_payment_tx,
     },
-    guest_service, reservation_lifecycle, stay_lifecycle,
+    group_lifecycle, guest_service, reservation_lifecycle, stay_lifecycle,
 };
 
 pub async fn test_pool() -> Pool<Sqlite> {
@@ -89,6 +92,8 @@ pub async fn test_pool() -> Pool<Sqlite> {
             guest_phone TEXT,
             scheduled_checkin TEXT,
             scheduled_checkout TEXT,
+            group_id TEXT REFERENCES booking_groups(id),
+            is_master_room INTEGER NOT NULL DEFAULT 0,
             pricing_snapshot TEXT,
             created_at TEXT NOT NULL
         )",
@@ -96,6 +101,24 @@ pub async fn test_pool() -> Pool<Sqlite> {
     .execute(&pool)
     .await
     .expect("failed to create bookings table");
+
+    sqlx::query(
+        "CREATE TABLE booking_groups (
+            id TEXT PRIMARY KEY,
+            group_name TEXT NOT NULL,
+            master_booking_id TEXT,
+            organizer_name TEXT NOT NULL,
+            organizer_phone TEXT,
+            total_rooms INTEGER NOT NULL,
+            status TEXT NOT NULL DEFAULT 'active',
+            notes TEXT,
+            created_by TEXT,
+            created_at TEXT NOT NULL
+        )",
+    )
+    .execute(&pool)
+    .await
+    .expect("failed to create booking_groups table");
 
     sqlx::query(
         "CREATE TABLE booking_guests (
@@ -456,6 +479,44 @@ pub fn minimal_reservation_request(room_id: &str) -> CreateReservationRequest {
     }
 }
 
+pub fn minimal_group_checkin_request(room_ids: &[&str]) -> GroupCheckinRequest {
+    let mut guests_per_room = std::collections::HashMap::new();
+    if let Some(first_room) = room_ids.first() {
+        guests_per_room.insert(
+            (*first_room).to_string(),
+            vec![CreateGuestRequest {
+                guest_type: Some("domestic".to_string()),
+                full_name: "Group Guest 1".to_string(),
+                doc_number: "079111111111".to_string(),
+                dob: None,
+                gender: None,
+                nationality: Some("VN".to_string()),
+                address: None,
+                visa_expiry: None,
+                scan_path: None,
+                phone: Some("0901111111".to_string()),
+            }],
+        );
+    }
+
+    GroupCheckinRequest {
+        group_name: "Test Group".to_string(),
+        organizer_name: "Organizer".to_string(),
+        organizer_phone: Some("0902222222".to_string()),
+        check_in_date: None,
+        room_ids: room_ids
+            .iter()
+            .map(|room_id| (*room_id).to_string())
+            .collect(),
+        master_room_id: room_ids[0].to_string(),
+        guests_per_room,
+        nights: 2,
+        source: Some("walk-in".to_string()),
+        notes: Some("group test".to_string()),
+        paid_amount: Some(100_000.0),
+    }
+}
+
 #[tokio::test]
 async fn create_guest_manifest_persists_primary_and_additional_guests() {
     let pool = test_pool().await;
@@ -535,6 +596,262 @@ async fn create_reservation_guest_manifest_defaults_blank_doc_number() {
         guest.get::<Option<String>, _>("phone"),
         Some("0901234567".to_string())
     );
+}
+
+#[tokio::test]
+async fn group_checkin_creates_active_group_and_placeholder_guest_manifest() {
+    let pool = test_pool().await;
+    seed_room(&pool, "G101").await.unwrap();
+    seed_room(&pool, "G102").await.unwrap();
+    seed_pricing_rule(&pool, "standard", 250_000.0)
+        .await
+        .unwrap();
+
+    let group = group_lifecycle::group_checkin(
+        &pool,
+        Some("seed-user".to_string()),
+        minimal_group_checkin_request(&["G101", "G102"]),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(group.status, "active");
+    assert!(group.master_booking_id.is_some());
+
+    let room_statuses =
+        sqlx::query("SELECT id, status FROM rooms WHERE id IN ('G101', 'G102') ORDER BY id")
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+    assert_eq!(room_statuses[0].get::<String, _>("status"), "occupied");
+    assert_eq!(room_statuses[1].get::<String, _>("status"), "occupied");
+
+    let booking_count: (i64,) =
+        sqlx::query_as("SELECT COUNT(*) FROM bookings WHERE group_id = ? AND status = 'active'")
+            .bind(&group.id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(booking_count.0, 2);
+
+    let paid_amounts = sqlx::query(
+        "SELECT paid_amount, deposit_amount FROM bookings WHERE group_id = ? ORDER BY room_id",
+    )
+    .bind(&group.id)
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    assert_eq!(paid_amounts.len(), 2);
+    assert_eq!(
+        paid_amounts[0].get::<Option<f64>, _>("paid_amount"),
+        Some(50_000.0)
+    );
+    assert_eq!(
+        paid_amounts[1].get::<Option<f64>, _>("paid_amount"),
+        Some(50_000.0)
+    );
+    assert_eq!(
+        paid_amounts[0].get::<Option<f64>, _>("deposit_amount"),
+        Some(0.0)
+    );
+
+    let placeholder = sqlx::query(
+        "SELECT g.full_name, g.doc_number
+         FROM guests g
+         JOIN bookings b ON b.primary_guest_id = g.id
+         WHERE b.group_id = ? AND b.room_id = 'G102'",
+    )
+    .bind(&group.id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        placeholder.get::<String, _>("full_name"),
+        "Khách đoàn Test Group - G102"
+    );
+    assert_eq!(placeholder.get::<String, _>("doc_number"), "");
+}
+
+#[tokio::test]
+async fn group_checkin_reservation_blocks_calendar_and_tracks_deposit() {
+    let pool = test_pool().await;
+    seed_room(&pool, "G201").await.unwrap();
+    seed_room(&pool, "G202").await.unwrap();
+    seed_pricing_rule(&pool, "standard", 300_000.0)
+        .await
+        .unwrap();
+
+    let mut req = minimal_group_checkin_request(&["G201", "G202"]);
+    req.check_in_date = Some("2026-04-20".to_string());
+    req.paid_amount = Some(60_000.0);
+
+    let group = group_lifecycle::group_checkin(&pool, None, req)
+        .await
+        .unwrap();
+
+    assert_eq!(group.status, "booked");
+
+    let room_statuses =
+        sqlx::query("SELECT status FROM rooms WHERE id IN ('G201', 'G202') ORDER BY id")
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+    assert_eq!(room_statuses[0].get::<String, _>("status"), "vacant");
+    assert_eq!(room_statuses[1].get::<String, _>("status"), "vacant");
+
+    let calendar_rows: (i64,) = sqlx::query_as(
+        "SELECT COUNT(*) FROM room_calendar WHERE booking_id IN (SELECT id FROM bookings WHERE group_id = ?) AND status = 'booked'",
+    )
+    .bind(&group.id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(calendar_rows.0, 4);
+
+    let amounts = sqlx::query(
+        "SELECT paid_amount, deposit_amount FROM bookings WHERE group_id = ? ORDER BY room_id",
+    )
+    .bind(&group.id)
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        amounts[0].get::<Option<f64>, _>("paid_amount"),
+        Some(30_000.0)
+    );
+    assert_eq!(
+        amounts[0].get::<Option<f64>, _>("deposit_amount"),
+        Some(30_000.0)
+    );
+}
+
+#[tokio::test]
+async fn group_checkin_rejects_duplicate_room_ids() {
+    let pool = test_pool().await;
+    seed_room(&pool, "G250").await.unwrap();
+    seed_pricing_rule(&pool, "standard", 250_000.0)
+        .await
+        .unwrap();
+
+    let error = group_lifecycle::group_checkin(
+        &pool,
+        None,
+        minimal_group_checkin_request(&["G250", "G250"]),
+    )
+    .await
+    .unwrap_err();
+
+    assert_eq!(error.to_string(), "Phòng không được lặp trong cùng một group");
+}
+
+#[tokio::test]
+async fn group_checkout_reassigns_master_and_updates_group_payment() {
+    let pool = test_pool().await;
+    seed_room(&pool, "G301").await.unwrap();
+    seed_room(&pool, "G302").await.unwrap();
+    seed_pricing_rule(&pool, "standard", 250_000.0)
+        .await
+        .unwrap();
+
+    let group = group_lifecycle::group_checkin(
+        &pool,
+        Some("seed-user".to_string()),
+        minimal_group_checkin_request(&["G301", "G302"]),
+    )
+    .await
+    .unwrap();
+
+    let master_booking_id = group.master_booking_id.clone().unwrap();
+    group_lifecycle::group_checkout(
+        &pool,
+        GroupCheckoutRequest {
+            group_id: group.id.clone(),
+            booking_ids: vec![master_booking_id.clone()],
+            final_paid: Some(40_000.0),
+        },
+    )
+    .await
+    .unwrap();
+
+    let group_row =
+        sqlx::query("SELECT status, master_booking_id FROM booking_groups WHERE id = ?")
+            .bind(&group.id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(group_row.get::<String, _>("status"), "partial_checkout");
+    assert_ne!(
+        group_row.get::<Option<String>, _>("master_booking_id"),
+        Some(master_booking_id.clone())
+    );
+
+    let checked_out = sqlx::query("SELECT status FROM bookings WHERE id = ?")
+        .bind(&master_booking_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(checked_out.get::<String, _>("status"), "checked_out");
+
+    let housekeeping_count: (i64,) =
+        sqlx::query_as("SELECT COUNT(*) FROM housekeeping WHERE room_id = 'G301'")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(housekeeping_count.0, 1);
+
+    let remaining_paid: (f64,) = sqlx::query_as(
+        "SELECT paid_amount FROM bookings WHERE group_id = ? AND status = 'active' LIMIT 1",
+    )
+    .bind(&group.id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(remaining_paid.0, 90_000.0);
+}
+
+#[tokio::test]
+async fn group_checkout_clears_master_flag_when_group_completes() {
+    let pool = test_pool().await;
+    seed_room(&pool, "G401").await.unwrap();
+    seed_pricing_rule(&pool, "standard", 250_000.0)
+        .await
+        .unwrap();
+
+    let group = group_lifecycle::group_checkin(
+        &pool,
+        Some("seed-user".to_string()),
+        minimal_group_checkin_request(&["G401"]),
+    )
+    .await
+    .unwrap();
+
+    let master_booking_id = group.master_booking_id.clone().unwrap();
+    group_lifecycle::group_checkout(
+        &pool,
+        GroupCheckoutRequest {
+            group_id: group.id.clone(),
+            booking_ids: vec![master_booking_id.clone()],
+            final_paid: None,
+        },
+    )
+    .await
+    .unwrap();
+
+    let group_row =
+        sqlx::query("SELECT master_booking_id, status FROM booking_groups WHERE id = ?")
+            .bind(&group.id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(group_row.get::<Option<String>, _>("master_booking_id"), None);
+    assert_eq!(group_row.get::<String, _>("status"), "completed");
+
+    let booking_row = sqlx::query("SELECT is_master_room FROM bookings WHERE id = ?")
+        .bind(&master_booking_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(booking_row.get::<i64, _>("is_master_room"), 0);
 }
 
 #[tokio::test]
