@@ -8,6 +8,7 @@ use crate::{
 
 use super::{
     billing_service::{record_cancellation_fee_tx, record_charge_tx, record_deposit_tx},
+    guest_service::{create_reservation_guest_manifest, link_booking_guests},
     support::begin_tx,
 };
 
@@ -48,17 +49,13 @@ pub async fn create_reservation(
     )
     .await?;
 
-    let guest_id = uuid::Uuid::new_v4().to_string();
-    sqlx::query(
-        "INSERT INTO guests (id, guest_type, full_name, doc_number, phone, created_at)
-         VALUES (?, 'domestic', ?, ?, ?, ?)",
+    let guest_manifest = create_reservation_guest_manifest(
+        &mut tx,
+        &req.guest_name,
+        req.guest_doc_number.as_deref(),
+        req.guest_phone.as_deref(),
+        &now,
     )
-    .bind(&guest_id)
-    .bind(&req.guest_name)
-    .bind(req.guest_doc_number.as_deref().unwrap_or(""))
-    .bind(req.guest_phone.as_deref())
-    .bind(&now)
-    .execute(&mut *tx)
     .await?;
 
     let booking_id = uuid::Uuid::new_v4().to_string();
@@ -72,7 +69,7 @@ pub async fn create_reservation(
     )
     .bind(&booking_id)
     .bind(&req.room_id)
-    .bind(&guest_id)
+    .bind(&guest_manifest.primary_guest_id)
     .bind(&req.check_in_date)
     .bind(&req.check_out_date)
     .bind(derived_nights)
@@ -88,11 +85,7 @@ pub async fn create_reservation(
     .execute(&mut *tx)
     .await?;
 
-    sqlx::query("INSERT INTO booking_guests (booking_id, guest_id) VALUES (?, ?)")
-        .bind(&booking_id)
-        .bind(&guest_id)
-        .execute(&mut *tx)
-        .await?;
+    link_booking_guests(&mut tx, &booking_id, &guest_manifest.guest_ids).await?;
 
     insert_booked_calendar_rows(
         &mut tx,
@@ -264,9 +257,11 @@ pub async fn modify_reservation(
     pool: &Pool<Sqlite>,
     req: ModifyReservationRequest,
 ) -> BookingResult<Booking> {
-    let derived_nights =
-        validate_requested_nights(&req.new_check_in_date, &req.new_check_out_date, req.new_nights)?
-            as i64;
+    let derived_nights = validate_requested_nights(
+        &req.new_check_in_date,
+        &req.new_check_out_date,
+        req.new_nights,
+    )? as i64;
 
     let mut tx = begin_tx(pool).await?;
     let reservation = load_booked_reservation(&mut tx, &req.booking_id).await?;
@@ -431,9 +426,7 @@ async fn load_booked_reservation(
 
     Ok(BookedReservation {
         room_id: row.get("room_id"),
-        paid_amount: row
-            .get::<Option<f64>, _>("paid_amount")
-            .unwrap_or(0.0),
+        paid_amount: row.get::<Option<f64>, _>("paid_amount").unwrap_or(0.0),
         scheduled_checkout,
         pricing_type: row
             .get::<Option<String>, _>("pricing_type")

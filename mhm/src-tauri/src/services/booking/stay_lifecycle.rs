@@ -3,11 +3,12 @@ use sqlx::{Pool, Row, Sqlite, Transaction};
 
 use crate::{
     domain::booking::{pricing::calculate_stay_price_tx, BookingError, BookingResult},
-    models::{status, Booking, CheckInRequest, CheckOutRequest, CreateGuestRequest},
+    models::{status, Booking, CheckInRequest, CheckOutRequest},
 };
 
 use super::{
     billing_service::{record_charge_tx, record_payment_tx},
+    guest_service::{create_guest_manifest, link_booking_guests},
     support::{begin_tx, parse_booking_datetime},
 };
 
@@ -35,7 +36,8 @@ pub async fn check_in(
         .fetch_optional(&mut *tx)
         .await?;
 
-    let room = room.ok_or_else(|| BookingError::not_found(format!("Không tìm thấy phòng {}", req.room_id)))?;
+    let room = room
+        .ok_or_else(|| BookingError::not_found(format!("Không tìm thấy phòng {}", req.room_id)))?;
     let room_status: String = room.get("status");
     if room_status != status::room::VACANT {
         return Err(BookingError::conflict(format!(
@@ -81,7 +83,7 @@ pub async fn check_in(
     .await?;
 
     let booking_id = uuid::Uuid::new_v4().to_string();
-    let primary_guest_id = insert_guest(&mut tx, &req.guests[0], &check_in_at).await?;
+    let guest_manifest = create_guest_manifest(&mut tx, &req.guests, &check_in_at).await?;
 
     sqlx::query(
         "INSERT INTO bookings (
@@ -92,7 +94,7 @@ pub async fn check_in(
     )
     .bind(&booking_id)
     .bind(&req.room_id)
-    .bind(&primary_guest_id)
+    .bind(&guest_manifest.primary_guest_id)
     .bind(&check_in_at)
     .bind(&expected_checkout)
     .bind(req.nights)
@@ -106,23 +108,16 @@ pub async fn check_in(
     .execute(&mut *tx)
     .await?;
 
-    sqlx::query("INSERT INTO booking_guests (booking_id, guest_id) VALUES (?, ?)")
-        .bind(&booking_id)
-        .bind(&primary_guest_id)
-        .execute(&mut *tx)
-        .await?;
+    link_booking_guests(&mut tx, &booking_id, &guest_manifest.guest_ids).await?;
 
-    for guest in req.guests.iter().skip(1) {
-        let guest_id = insert_guest(&mut tx, guest, &check_in_at).await?;
-
-        sqlx::query("INSERT INTO booking_guests (booking_id, guest_id) VALUES (?, ?)")
-            .bind(&booking_id)
-            .bind(&guest_id)
-            .execute(&mut *tx)
-            .await?;
-    }
-
-    record_charge_tx(&mut tx, &booking_id, pricing.total, "Tiền phòng", check_in_at.clone()).await?;
+    record_charge_tx(
+        &mut tx,
+        &booking_id,
+        pricing.total,
+        "Tiền phòng",
+        check_in_at.clone(),
+    )
+    .await?;
 
     if let Some(paid_amount) = req.paid_amount.filter(|amount| *amount > 0.0) {
         record_payment_tx(&mut tx, &booking_id, paid_amount, "Thanh toán khi check-in").await?;
@@ -151,16 +146,18 @@ pub async fn check_in(
 pub async fn check_out(pool: &Pool<Sqlite>, req: CheckOutRequest) -> BookingResult<()> {
     let mut tx = begin_tx(pool).await?;
 
-    let booking = sqlx::query(
-        "SELECT room_id, paid_amount FROM bookings WHERE id = ? AND status = ?",
-    )
-    .bind(&req.booking_id)
-    .bind(status::booking::ACTIVE)
-    .fetch_optional(&mut *tx)
-    .await?;
+    let booking =
+        sqlx::query("SELECT room_id, paid_amount FROM bookings WHERE id = ? AND status = ?")
+            .bind(&req.booking_id)
+            .bind(status::booking::ACTIVE)
+            .fetch_optional(&mut *tx)
+            .await?;
 
     let booking = booking.ok_or_else(|| {
-        BookingError::not_found(format!("Không tìm thấy booking đang active {}", req.booking_id))
+        BookingError::not_found(format!(
+            "Không tìm thấy booking đang active {}",
+            req.booking_id
+        ))
     })?;
 
     let room_id: String = booking.get("room_id");
@@ -221,8 +218,9 @@ pub async fn extend_stay(pool: &Pool<Sqlite>, booking_id: &str) -> BookingResult
     .fetch_optional(&mut *tx)
     .await?;
 
-    let booking = booking
-        .ok_or_else(|| BookingError::not_found(format!("Không tìm thấy booking đang active {}", booking_id)))?;
+    let booking = booking.ok_or_else(|| {
+        BookingError::not_found(format!("Không tìm thấy booking đang active {}", booking_id))
+    })?;
 
     let room_id: String = booking.get("room_id");
     let current_nights: i32 = booking.get("nights");
@@ -241,7 +239,10 @@ pub async fn extend_stay(pool: &Pool<Sqlite>, booking_id: &str) -> BookingResult
         .fetch_optional(&mut *tx)
         .await?;
     if room_exists.is_none() {
-        return Err(BookingError::not_found(format!("Không tìm thấy phòng {}", room_id)));
+        return Err(BookingError::not_found(format!(
+            "Không tìm thấy phòng {}",
+            room_id
+        )));
     }
 
     let conflict = sqlx::query(
@@ -310,7 +311,9 @@ pub async fn extend_stay(pool: &Pool<Sqlite>, booking_id: &str) -> BookingResult
 
 fn validate_check_in_request(req: &CheckInRequest) -> BookingResult<()> {
     if req.guests.is_empty() {
-        return Err(BookingError::validation("Phải có ít nhất 1 khách".to_string()));
+        return Err(BookingError::validation(
+            "Phải có ít nhất 1 khách".to_string(),
+        ));
     }
     if req.nights <= 0 {
         return Err(BookingError::validation(
@@ -319,37 +322,6 @@ fn validate_check_in_request(req: &CheckInRequest) -> BookingResult<()> {
     }
 
     Ok(())
-}
-
-async fn insert_guest(
-    tx: &mut Transaction<'_, Sqlite>,
-    guest: &CreateGuestRequest,
-    created_at: &str,
-) -> BookingResult<String> {
-    let guest_id = uuid::Uuid::new_v4().to_string();
-
-    sqlx::query(
-        "INSERT INTO guests (
-            id, guest_type, full_name, doc_number, dob, gender, nationality,
-            address, visa_expiry, scan_path, phone, created_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-    )
-    .bind(&guest_id)
-    .bind(guest.guest_type.as_deref().unwrap_or("domestic"))
-    .bind(&guest.full_name)
-    .bind(&guest.doc_number)
-    .bind(&guest.dob)
-    .bind(&guest.gender)
-    .bind(&guest.nationality)
-    .bind(&guest.address)
-    .bind(&guest.visa_expiry)
-    .bind(&guest.scan_path)
-    .bind(&guest.phone)
-    .bind(created_at)
-    .execute(&mut **tx)
-    .await?;
-
-    Ok(guest_id)
 }
 
 async fn insert_occupied_calendar_rows(
@@ -388,7 +360,8 @@ async fn fetch_booking(pool: &Pool<Sqlite>, booking_id: &str) -> BookingResult<B
     .fetch_optional(pool)
     .await?;
 
-    let row = row.ok_or_else(|| BookingError::not_found(format!("Không tìm thấy booking {}", booking_id)))?;
+    let row = row
+        .ok_or_else(|| BookingError::not_found(format!("Không tìm thấy booking {}", booking_id)))?;
 
     Ok(Booking {
         id: row.get("id"),
@@ -411,6 +384,11 @@ fn read_f64(row: &sqlx::sqlite::SqliteRow, column: &str) -> f64 {
     row.try_get::<Option<f64>, _>(column)
         .ok()
         .flatten()
-        .or_else(|| row.try_get::<Option<i64>, _>(column).ok().flatten().map(|value| value as f64))
+        .or_else(|| {
+            row.try_get::<Option<i64>, _>(column)
+                .ok()
+                .flatten()
+                .map(|value| value as f64)
+        })
         .unwrap_or(0.0)
 }

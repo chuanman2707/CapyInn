@@ -11,7 +11,7 @@ use super::{
     billing_service::{
         record_cancellation_fee_tx, record_deposit_tx, record_payment, record_payment_tx,
     },
-    reservation_lifecycle, stay_lifecycle,
+    guest_service, reservation_lifecycle, stay_lifecycle,
 };
 
 pub async fn test_pool() -> Pool<Sqlite> {
@@ -255,7 +255,11 @@ pub async fn seed_pricing_rule_tx(
     Ok(())
 }
 
-pub async fn seed_active_booking(pool: &Pool<Sqlite>, booking_id: &str, room_id: &str) -> BookingResult<()> {
+pub async fn seed_active_booking(
+    pool: &Pool<Sqlite>,
+    booking_id: &str,
+    room_id: &str,
+) -> BookingResult<()> {
     let guest_id = format!("guest-{}", booking_id);
     let now = "2026-04-15T10:00:00+07:00";
 
@@ -265,12 +269,12 @@ pub async fn seed_active_booking(pool: &Pool<Sqlite>, booking_id: &str, room_id:
             address, visa_expiry, scan_path, phone, created_at
         ) VALUES (?, 'domestic', ?, ?, NULL, NULL, NULL, NULL, NULL, NULL, NULL, ?)",
     )
-        .bind(&guest_id)
-        .bind(format!("Guest {}", booking_id))
-        .bind(format!("DOC-{}", booking_id))
-        .bind(now)
-        .execute(pool)
-        .await?;
+    .bind(&guest_id)
+    .bind(format!("Guest {}", booking_id))
+    .bind(format!("DOC-{}", booking_id))
+    .bind(now)
+    .execute(pool)
+    .await?;
 
     sqlx::query(
         "INSERT INTO bookings (
@@ -453,6 +457,87 @@ pub fn minimal_reservation_request(room_id: &str) -> CreateReservationRequest {
 }
 
 #[tokio::test]
+async fn create_guest_manifest_persists_primary_and_additional_guests() {
+    let pool = test_pool().await;
+    let mut request = minimal_checkin_request("R201");
+    request.guests.push(CreateGuestRequest {
+        guest_type: Some("foreign".to_string()),
+        full_name: "Jane Doe".to_string(),
+        doc_number: "P1234567".to_string(),
+        dob: None,
+        gender: Some("female".to_string()),
+        nationality: Some("US".to_string()),
+        address: Some("1 Test Street".to_string()),
+        visa_expiry: None,
+        scan_path: None,
+        phone: Some("0909999999".to_string()),
+    });
+
+    let mut tx = pool.begin().await.unwrap();
+    let manifest =
+        guest_service::create_guest_manifest(&mut tx, &request.guests, "2026-04-15T10:00:00+07:00")
+            .await
+            .unwrap();
+
+    assert_eq!(manifest.guest_ids.len(), 2);
+    assert_eq!(manifest.primary_guest_id, manifest.guest_ids[0]);
+
+    let rows = sqlx::query(
+        "SELECT full_name, guest_type, doc_number, phone FROM guests ORDER BY full_name ASC",
+    )
+    .fetch_all(&mut *tx)
+    .await
+    .unwrap();
+
+    assert_eq!(rows.len(), 2);
+    assert_eq!(rows[0].get::<String, _>("full_name"), "Jane Doe");
+    assert_eq!(rows[0].get::<String, _>("guest_type"), "foreign");
+    assert_eq!(rows[1].get::<String, _>("full_name"), "Nguyen Van A");
+}
+
+#[tokio::test]
+async fn create_guest_manifest_rejects_empty_guest_list() {
+    let pool = test_pool().await;
+    let mut tx = pool.begin().await.unwrap();
+
+    let error = guest_service::create_guest_manifest(&mut tx, &[], "2026-04-15T10:00:00+07:00")
+        .await
+        .unwrap_err();
+
+    assert_eq!(error.to_string(), "Phải có ít nhất 1 khách");
+}
+
+#[tokio::test]
+async fn create_reservation_guest_manifest_defaults_blank_doc_number() {
+    let pool = test_pool().await;
+    let mut tx = pool.begin().await.unwrap();
+
+    let manifest = guest_service::create_reservation_guest_manifest(
+        &mut tx,
+        "Reservation Guest",
+        None,
+        Some("0901234567"),
+        "2026-04-15T10:00:00+07:00",
+    )
+    .await
+    .unwrap();
+
+    let guest = sqlx::query("SELECT full_name, doc_number, phone FROM guests WHERE id = ?")
+        .bind(&manifest.primary_guest_id)
+        .fetch_one(&mut *tx)
+        .await
+        .unwrap();
+
+    assert_eq!(manifest.guest_ids, vec![manifest.primary_guest_id.clone()]);
+    assert_eq!(guest.get::<String, _>("full_name"), "Reservation Guest");
+    assert_eq!(guest.get::<String, _>("doc_number"), "");
+    assert_eq!(
+        guest.get::<Option<String>, _>("phone"),
+        Some("0901234567".to_string())
+    );
+}
+
+#[tokio::test]
 async fn record_payment_updates_paid_amount_cache() {
     let pool = test_pool().await;
     seed_room(&pool, "R101").await.unwrap();
@@ -507,7 +592,9 @@ async fn record_payment_tx_can_compose_inside_outer_transaction() {
 async fn record_deposit_tx_updates_paid_amount_cache() {
     let pool = test_pool().await;
     seed_room(&pool, "R103").await.unwrap();
-    seed_booked_reservation(&pool, "B103", "R103").await.unwrap();
+    seed_booked_reservation(&pool, "B103", "R103")
+        .await
+        .unwrap();
 
     let mut tx = pool.begin().await.unwrap();
     record_deposit_tx(&mut tx, "B103", 25_000.0, "extra deposit")
@@ -541,7 +628,9 @@ async fn record_deposit_tx_updates_paid_amount_cache() {
 async fn record_cancellation_fee_tx_does_not_change_paid_amount() {
     let pool = test_pool().await;
     seed_room(&pool, "R104").await.unwrap();
-    seed_booked_reservation(&pool, "B104", "R104").await.unwrap();
+    seed_booked_reservation(&pool, "B104", "R104")
+        .await
+        .unwrap();
 
     let mut tx = pool.begin().await.unwrap();
     record_cancellation_fee_tx(&mut tx, "B104", 25_000.0, "retained deposit")
@@ -737,13 +826,10 @@ async fn do_create_reservation_returns_service_booking_and_leaves_room_vacant() 
         .await
         .unwrap();
 
-    let booking = reservations::do_create_reservation(
-        &pool,
-        None,
-        minimal_reservation_request("R162"),
-    )
-    .await
-    .unwrap();
+    let booking =
+        reservations::do_create_reservation(&pool, None, minimal_reservation_request("R162"))
+            .await
+            .unwrap();
 
     assert_eq!(booking.room_id, "R162");
     assert_eq!(booking.status, "booked");
@@ -771,7 +857,9 @@ async fn do_create_reservation_returns_service_booking_and_leaves_room_vacant() 
 async fn do_cancel_reservation_cleans_legacy_booked_room_state() {
     let pool = test_pool().await;
     seed_room(&pool, "R163").await.unwrap();
-    seed_booked_reservation(&pool, "B163", "R163").await.unwrap();
+    seed_booked_reservation(&pool, "B163", "R163")
+        .await
+        .unwrap();
 
     sqlx::query("UPDATE rooms SET status = 'booked' WHERE id = ?")
         .bind("R163")
@@ -806,7 +894,9 @@ async fn confirm_reservation_reprices_and_marks_room_occupied() {
     seed_pricing_rule(&pool, "standard", 600_000.0)
         .await
         .unwrap();
-    seed_booked_reservation(&pool, "B164", "R164").await.unwrap();
+    seed_booked_reservation(&pool, "B164", "R164")
+        .await
+        .unwrap();
 
     let today = Local::now().date_naive();
     let scheduled_checkin = today + Duration::days(2);
@@ -878,7 +968,11 @@ async fn confirm_reservation_reprices_and_marks_room_occupied() {
     let actual_dates: Vec<String> = calendar_rows.iter().map(|row| row.get("date")).collect();
     let actual_statuses: Vec<String> = calendar_rows.iter().map(|row| row.get("status")).collect();
     let expected_dates: Vec<String> = (0..5)
-        .map(|offset| (today + Duration::days(offset)).format("%Y-%m-%d").to_string())
+        .map(|offset| {
+            (today + Duration::days(offset))
+                .format("%Y-%m-%d")
+                .to_string()
+        })
         .collect();
     assert_eq!(actual_dates, expected_dates);
     assert!(actual_statuses.iter().all(|status| status == "occupied"));
@@ -902,7 +996,9 @@ async fn confirm_reservation_rejects_no_show_calendar_rows() {
     seed_pricing_rule(&pool, "standard", 600_000.0)
         .await
         .unwrap();
-    seed_booked_reservation(&pool, "B165", "R165").await.unwrap();
+    seed_booked_reservation(&pool, "B165", "R165")
+        .await
+        .unwrap();
 
     sqlx::query("UPDATE room_calendar SET status = ? WHERE booking_id = ?")
         .bind("no_show")
@@ -929,7 +1025,9 @@ async fn confirm_reservation_late_arrival_persists_effective_checkout() {
     seed_pricing_rule(&pool, "standard", 600_000.0)
         .await
         .unwrap();
-    seed_booked_reservation(&pool, "B165A", "R165A").await.unwrap();
+    seed_booked_reservation(&pool, "B165A", "R165A")
+        .await
+        .unwrap();
 
     let today = Local::now().date_naive();
     let scheduled_checkin = today - Duration::days(2);
@@ -977,7 +1075,10 @@ async fn confirm_reservation_late_arrival_persists_effective_checkout() {
     .await
     .unwrap();
     assert_eq!(calendar_rows.len(), 1);
-    assert_eq!(calendar_rows[0].get::<String, _>("date"), today.format("%Y-%m-%d").to_string());
+    assert_eq!(
+        calendar_rows[0].get::<String, _>("date"),
+        today.format("%Y-%m-%d").to_string()
+    );
     assert_eq!(calendar_rows[0].get::<String, _>("status"), "occupied");
 }
 
@@ -988,7 +1089,9 @@ async fn confirm_reservation_preserves_extra_precheckin_payment() {
     seed_pricing_rule(&pool, "standard", 600_000.0)
         .await
         .unwrap();
-    seed_booked_reservation(&pool, "B165B", "R165B").await.unwrap();
+    seed_booked_reservation(&pool, "B165B", "R165B")
+        .await
+        .unwrap();
 
     sqlx::query(
         "INSERT INTO transactions (id, booking_id, amount, type, note, created_at)
@@ -1024,7 +1127,9 @@ async fn modify_reservation_rewrites_booked_calendar_range() {
     seed_pricing_rule(&pool, "standard", 600_000.0)
         .await
         .unwrap();
-    seed_booked_reservation(&pool, "B166", "R166").await.unwrap();
+    seed_booked_reservation(&pool, "B166", "R166")
+        .await
+        .unwrap();
 
     let booking = reservation_lifecycle::modify_reservation(
         &pool,
@@ -1044,13 +1149,12 @@ async fn modify_reservation_rewrites_booked_calendar_range() {
     assert_eq!(booking.nights, 3);
     assert_eq!(booking.total_price, 1_800_000.0);
 
-    let booking_row = sqlx::query(
-        "SELECT scheduled_checkin, scheduled_checkout FROM bookings WHERE id = ?",
-    )
-    .bind("B166")
-    .fetch_one(&pool)
-    .await
-    .unwrap();
+    let booking_row =
+        sqlx::query("SELECT scheduled_checkin, scheduled_checkout FROM bookings WHERE id = ?")
+            .bind("B166")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
     assert_eq!(
         booking_row.get::<Option<String>, _>("scheduled_checkin"),
         Some("2026-04-23".to_string())
@@ -1087,7 +1191,9 @@ async fn modify_reservation_rejects_inconsistent_nights_input() {
     seed_pricing_rule(&pool, "standard", 600_000.0)
         .await
         .unwrap();
-    seed_booked_reservation(&pool, "B166A", "R166A").await.unwrap();
+    seed_booked_reservation(&pool, "B166A", "R166A")
+        .await
+        .unwrap();
 
     let error = reservation_lifecycle::modify_reservation(
         &pool,
@@ -1114,7 +1220,9 @@ async fn do_modify_reservation_returns_service_booking_without_app_handle() {
     seed_pricing_rule(&pool, "standard", 600_000.0)
         .await
         .unwrap();
-    seed_booked_reservation(&pool, "B167", "R167").await.unwrap();
+    seed_booked_reservation(&pool, "B167", "R167")
+        .await
+        .unwrap();
 
     let booking = reservations::do_modify_reservation(
         &pool,
@@ -1201,23 +1309,25 @@ async fn check_out_allows_outstanding_balance_if_final_paid_absent() {
     .await
     .unwrap();
 
-    let booking = sqlx::query(
-        "SELECT status, actual_checkout, paid_amount FROM bookings WHERE id = ?",
+    let booking =
+        sqlx::query("SELECT status, actual_checkout, paid_amount FROM bookings WHERE id = ?")
+            .bind("B202")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(booking.get::<String, _>("status"), "checked_out");
+    assert!(booking
+        .get::<Option<String>, _>("actual_checkout")
+        .is_some());
+    assert_eq!(booking.get::<Option<f64>, _>("paid_amount"), None);
+
+    let payment_count: (i64,) = sqlx::query_as(
+        "SELECT COUNT(*) FROM transactions WHERE booking_id = ? AND type = 'payment'",
     )
     .bind("B202")
     .fetch_one(&pool)
     .await
     .unwrap();
-    assert_eq!(booking.get::<String, _>("status"), "checked_out");
-    assert!(booking.get::<Option<String>, _>("actual_checkout").is_some());
-    assert_eq!(booking.get::<Option<f64>, _>("paid_amount"), None);
-
-    let payment_count: (i64,) =
-        sqlx::query_as("SELECT COUNT(*) FROM transactions WHERE booking_id = ? AND type = 'payment'")
-            .bind("B202")
-            .fetch_one(&pool)
-            .await
-            .unwrap();
     assert_eq!(payment_count.0, 0);
 
     let room = sqlx::query("SELECT status FROM rooms WHERE id = ?")
@@ -1235,13 +1345,12 @@ async fn check_out_allows_outstanding_balance_if_final_paid_absent() {
             .unwrap();
     assert_eq!(housekeeping_count.0, 1);
 
-    let calendar_count: (i64,) = sqlx::query_as(
-        "SELECT COUNT(*) FROM room_calendar WHERE booking_id = ?",
-    )
-    .bind("B202")
-    .fetch_one(&pool)
-    .await
-    .unwrap();
+    let calendar_count: (i64,) =
+        sqlx::query_as("SELECT COUNT(*) FROM room_calendar WHERE booking_id = ?")
+            .bind("B202")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
     assert_eq!(calendar_count.0, 0);
 }
 
@@ -1257,13 +1366,12 @@ async fn extend_stay_uses_existing_expected_checkout() {
     assert_eq!(booking.expected_checkout, "2026-04-17T10:00:00+07:00");
     assert_eq!(booking.total_price, 500_000.0);
 
-    let extended_day = sqlx::query(
-        "SELECT status FROM room_calendar WHERE room_id = ? AND date = '2026-04-16'",
-    )
-    .bind("R203")
-    .fetch_one(&pool)
-    .await
-    .unwrap();
+    let extended_day =
+        sqlx::query("SELECT status FROM room_calendar WHERE room_id = ? AND date = '2026-04-16'")
+            .bind("R203")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
     assert_eq!(extended_day.get::<String, _>("status"), "occupied");
 
     let charge = sqlx::query(
