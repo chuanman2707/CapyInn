@@ -287,7 +287,9 @@ pub async fn export_csv(state: State<'_, AppState>) -> Result<String, String> {
 
     let export_dir = app_identity::exports_dir_opt().ok_or("Cannot find home directory")?;
 
-    std::fs::create_dir_all(&export_dir).map_err(|e| e.to_string())?;
+    tokio::fs::create_dir_all(&export_dir)
+        .await
+        .map_err(|e| e.to_string())?;
 
     let now = chrono::Local::now().format("%Y%m%d_%H%M%S").to_string();
 
@@ -312,7 +314,9 @@ pub async fn export_csv(state: State<'_, AppState>) -> Result<String, String> {
             r.get::<Option<String>, _>("source").unwrap_or_default(),
         ));
     }
-    std::fs::write(&bookings_path, csv).map_err(|e| e.to_string())?;
+    tokio::fs::write(&bookings_path, csv)
+        .await
+        .map_err(|e| e.to_string())?;
 
     // Export guests
     let guests = sqlx::query("SELECT id, full_name, doc_number, nationality, created_at FROM guests ORDER BY created_at DESC")
@@ -331,7 +335,9 @@ pub async fn export_csv(state: State<'_, AppState>) -> Result<String, String> {
             r.get::<String, _>("created_at"),
         ));
     }
-    std::fs::write(&guests_path, csv2).map_err(|e| e.to_string())?;
+    tokio::fs::write(&guests_path, csv2)
+        .await
+        .map_err(|e| e.to_string())?;
 
     Ok(export_dir.to_string_lossy().to_string())
 }

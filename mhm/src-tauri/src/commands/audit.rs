@@ -49,12 +49,16 @@ pub async fn backup_database(state: State<'_, AppState>) -> Result<String, Strin
     }
 
     let backup_dir = db_dir.join("backups");
-    std::fs::create_dir_all(&backup_dir).map_err(|e| e.to_string())?;
+    tokio::fs::create_dir_all(&backup_dir)
+        .await
+        .map_err(|e| e.to_string())?;
 
     let timestamp = chrono::Local::now().format("%Y%m%d_%H%M%S").to_string();
     let backup_path = backup_dir.join(format!("capyinn_backup_{}.db", timestamp));
 
-    std::fs::copy(&db_path, &backup_path).map_err(|e| e.to_string())?;
+    tokio::fs::copy(&db_path, &backup_path)
+        .await
+        .map_err(|e| e.to_string())?;
 
     Ok(backup_path.to_string_lossy().to_string())
 }
@@ -104,12 +108,16 @@ pub async fn export_bookings_csv(
 
     // Save to file
     let export_dir = app_identity::exports_dir_opt().ok_or("Cannot find home directory")?;
-    std::fs::create_dir_all(&export_dir).map_err(|e| e.to_string())?;
+    tokio::fs::create_dir_all(&export_dir)
+        .await
+        .map_err(|e| e.to_string())?;
 
     let timestamp = chrono::Local::now().format("%Y%m%d_%H%M%S").to_string();
     let file_path = export_dir.join(format!("bookings_{}.csv", timestamp));
 
-    std::fs::write(&file_path, &csv).map_err(|e| e.to_string())?;
+    tokio::fs::write(&file_path, &csv)
+        .await
+        .map_err(|e| e.to_string())?;
 
     Ok(file_path.to_string_lossy().to_string())
 }

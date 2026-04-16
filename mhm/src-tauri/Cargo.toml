@@ -41,3 +41,7 @@ rand = "0.8"
 tower = "0.5"
 log = "0.4"
 env_logger = "0.10"
+
+[[bin]]
+name = "bench_fs_blocking"
+path = "src/bin/bench_fs_blocking.rs"

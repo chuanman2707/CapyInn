@@ -1,11 +1,14 @@
-use sqlx::{Pool, Sqlite, Row};
-use tauri::State;
+use super::{get_f64, AppState};
 use crate::models::*;
-use super::{AppState, get_f64};
+use sqlx::{Pool, Row, Sqlite};
+use tauri::State;
 
 // ─── A1: Get All Bookings (Reservations) ───
 
-pub async fn do_get_all_bookings(pool: &Pool<Sqlite>, filter: Option<BookingFilter>) -> Result<Vec<BookingWithGuest>, String> {
+pub async fn do_get_all_bookings(
+    pool: &Pool<Sqlite>,
+    filter: Option<BookingFilter>,
+) -> Result<Vec<BookingWithGuest>, String> {
     let mut sql = String::from(
         "SELECT b.id, b.room_id, r.name as room_name, g.full_name as guest_name,
                 b.check_in_at, b.expected_checkout, b.actual_checkout,
@@ -47,28 +50,34 @@ pub async fn do_get_all_bookings(pool: &Pool<Sqlite>, filter: Option<BookingFilt
 
     let rows = query.fetch_all(pool).await.map_err(|e| e.to_string())?;
 
-    Ok(rows.iter().map(|r| BookingWithGuest {
-        id: r.get("id"),
-        room_id: r.get("room_id"),
-        room_name: r.get("room_name"),
-        guest_name: r.get("guest_name"),
-        check_in_at: r.get("check_in_at"),
-        expected_checkout: r.get("expected_checkout"),
-        actual_checkout: r.get("actual_checkout"),
-        nights: r.get("nights"),
-        total_price: get_f64(r, "total_price"),
-        paid_amount: get_f64(r, "paid_amount"),
-        status: r.get("status"),
-        source: r.get("source"),
-        booking_type: r.get("booking_type"),
-        deposit_amount: r.try_get::<f64, _>("deposit_amount").ok(),
-        scheduled_checkin: r.get("scheduled_checkin"),
-        scheduled_checkout: r.get("scheduled_checkout"),
-        guest_phone: r.get("guest_phone"),
-    }).collect())
+    Ok(rows
+        .iter()
+        .map(|r| BookingWithGuest {
+            id: r.get("id"),
+            room_id: r.get("room_id"),
+            room_name: r.get("room_name"),
+            guest_name: r.get("guest_name"),
+            check_in_at: r.get("check_in_at"),
+            expected_checkout: r.get("expected_checkout"),
+            actual_checkout: r.get("actual_checkout"),
+            nights: r.get("nights"),
+            total_price: get_f64(r, "total_price"),
+            paid_amount: get_f64(r, "paid_amount"),
+            status: r.get("status"),
+            source: r.get("source"),
+            booking_type: r.get("booking_type"),
+            deposit_amount: r.try_get::<f64, _>("deposit_amount").ok(),
+            scheduled_checkin: r.get("scheduled_checkin"),
+            scheduled_checkout: r.get("scheduled_checkout"),
+            guest_phone: r.get("guest_phone"),
+        })
+        .collect())
 }
 
 #[tauri::command]
-pub async fn get_all_bookings(state: State<'_, AppState>, filter: Option<BookingFilter>) -> Result<Vec<BookingWithGuest>, String> {
+pub async fn get_all_bookings(
+    state: State<'_, AppState>,
+    filter: Option<BookingFilter>,
+) -> Result<Vec<BookingWithGuest>, String> {
     do_get_all_bookings(&state.db, filter).await
 }
