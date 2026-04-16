@@ -1,6 +1,7 @@
 use tauri::Manager;
 
 mod commands;
+pub mod app_identity;
 mod db;
 mod domain;
 pub mod gateway;
