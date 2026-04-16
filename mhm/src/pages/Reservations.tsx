@@ -48,6 +48,7 @@ function getStatusLabel(status: string): string {
 export default function Reservations() {
     const { rooms, fetchRooms } = useHotelStore();
     const [bookings, setBookings] = useState<BookingWithGuest[]>([]);
+    const [searchQuery, setSearchQuery] = useState("");
     const [dateOffset, setDateOffset] = useState(0);
     const [currentMonth] = useState(new Date().toLocaleDateString("vi-VN", { month: "long", year: "numeric" }));
     const [sheetOpen, setSheetOpen] = useState(false);
@@ -72,13 +73,30 @@ export default function Reservations() {
         { name: "Standard", rooms: rooms.filter((r) => r.type === "standard").map((r) => ({ id: r.id, type: r.type })) },
     ];
 
-    const activeCount = bookings.filter(b => b.status === "active").length;
-    const bookedCount = bookings.filter(b => b.status === "booked").length;
-    const checkedOutCount = bookings.filter(b => b.status === "checked_out").length;
-    const totalCount = bookings.length;
+    const normalizedQuery = searchQuery.trim().toLocaleLowerCase();
+    const visibleBookings = normalizedQuery
+        ? bookings.filter((booking) => {
+            const searchHaystack = [
+                booking.guest_name,
+                booking.room_id,
+                booking.id,
+                booking.source,
+            ]
+                .filter(Boolean)
+                .join(" ")
+                .toLocaleLowerCase();
+
+            return searchHaystack.includes(normalizedQuery);
+        })
+        : bookings;
+
+    const activeCount = visibleBookings.filter(b => b.status === "active").length;
+    const bookedCount = visibleBookings.filter(b => b.status === "booked").length;
+    const checkedOutCount = visibleBookings.filter(b => b.status === "checked_out").length;
+    const totalCount = visibleBookings.length;
 
     function getBookingBars(roomId: string) {
-        return bookings
+        return visibleBookings
             .filter(b => b.room_id === roomId && b.status !== "cancelled")
             .map(b => {
                 const checkIn = parseDate(b.scheduled_checkin || b.check_in_at);
@@ -150,7 +168,12 @@ export default function Reservations() {
                 <div className="flex items-center gap-3">
                     <div className="relative w-56">
                         <Search className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" size={16} />
-                        <Input placeholder="Tìm khách..." className="pl-9 bg-slate-50 border-transparent rounded-xl h-9" />
+                        <Input
+                            placeholder="Tìm khách..."
+                            className="pl-9 bg-slate-50 border-transparent rounded-xl h-9"
+                            value={searchQuery}
+                            onChange={(event) => setSearchQuery(event.target.value)}
+                        />
                     </div>
                     <Button
                         size="sm"
@@ -249,9 +272,11 @@ export default function Reservations() {
                         </div>
                     ))}
 
-                    {bookings.length === 0 && (
+                    {visibleBookings.length === 0 && (
                         <div className="flex items-center justify-center py-20 text-brand-muted">
-                            Chưa có booking nào — Nhấn "+ Đặt phòng" để tạo reservation
+                            {bookings.length === 0
+                                ? 'Chưa có booking nào — Nhấn "+ Đặt phòng" để tạo reservation'
+                                : "Không tìm thấy booking phù hợp"}
                         </div>
                     )}
                 </div>

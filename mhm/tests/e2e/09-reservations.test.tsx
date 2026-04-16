@@ -1,5 +1,6 @@
 import { describe, it, expect, beforeEach } from "vitest";
 import { render, screen, waitFor } from "../helpers/render-app";
+import userEvent from "@testing-library/user-event";
 import Reservations from "@/pages/Reservations";
 import { setMockResponse, clearMockResponses, invoke } from "@test-mocks/tauri-core";
 import { useHotelStore } from "@/stores/useHotelStore";
@@ -96,5 +97,24 @@ describe("09 — Reservations", () => {
         await waitFor(() => {
             expect(invoke).toHaveBeenCalledWith("get_all_bookings", expect.anything());
         });
+    });
+
+    it("filters bookings by the search input", async () => {
+        const user = userEvent.setup();
+
+        render(<Reservations />);
+
+        await waitFor(() => {
+            expect(screen.getByText("Nguyễn Văn A")).toBeInTheDocument();
+        });
+
+        await user.type(screen.getByPlaceholderText("Tìm khách..."), "Trần");
+
+        await waitFor(() => {
+            expect(screen.getByText("Trần Thị B")).toBeInTheDocument();
+        });
+
+        expect(screen.queryByText("Nguyễn Văn A")).not.toBeInTheDocument();
+        expect(screen.queryByText("Lê Văn C")).not.toBeInTheDocument();
     });
 });
