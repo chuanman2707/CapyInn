@@ -1,23 +1,12 @@
-import { describe, expect, it, vi, beforeAll, afterAll } from "vitest";
+import { describe, expect, it } from "vitest";
 import { fmtDate, fmtDateShort, fmtNumber, fmtMoney } from "./format";
 
 describe("format", () => {
-  const originalTz = process.env.TZ;
-
-  beforeAll(() => {
-    // Set consistent timezone for deterministic date testing
-    process.env.TZ = "Asia/Ho_Chi_Minh";
-  });
-
-  afterAll(() => {
-    // Restore original timezone
-    process.env.TZ = originalTz;
-  });
-
   describe("fmtDate", () => {
     it("formats a valid ISO date string correctly", () => {
-      // 12:30:00Z is 19:30:00 in Asia/Ho_Chi_Minh
-      expect(fmtDate("2024-03-15T12:30:00Z")).toBe("19:30 15/03/2024");
+      // By using a local ISO string (no 'Z' suffix), parsing and outputing
+      // relies on the same local timezone, making it stable across CI environments.
+      expect(fmtDate("2024-03-15T19:30:00")).toBe("19:30 15/03/2024");
     });
 
     it("returns the original string if date is invalid", () => {
@@ -31,7 +20,7 @@ describe("format", () => {
 
   describe("fmtDateShort", () => {
     it("formats a valid ISO date string correctly", () => {
-      expect(fmtDateShort("2024-03-15T12:30:00Z")).toBe("15/03/2024");
+      expect(fmtDateShort("2024-03-15T19:30:00")).toBe("15/03/2024");
     });
 
     it("returns the original string if date is invalid", () => {
