@@ -4,9 +4,9 @@
 
 **Goal:** Refresh the public-facing Vietnamese `README.md` for CapyInn before open-source launch by using `readme-ai` as a draft generator, then manually polishing the final README so it reads like a deliberate project document rather than a raw AI template.
 
-**Architecture:** Keep the generator isolated from the main repository. Clone and prepare `readme-ai` in `/Users/binhan/readme-ai`, generate one temporary draft from the local CapyInn repository into `/tmp`, compare the generated structure against the current README, then rewrite only the tracked `README.md` inside the CapyInn repo. Keep `README.en.md` unchanged unless a clearly stale public link must be corrected.
+**Architecture:** Keep the generator isolated from the main repository. Clone and prepare `readme-ai` in `/Users/binhan/readme-ai`, run it from a Python 3.11 virtualenv because the current upstream source does not actually work on Python 3.9, generate one temporary draft from the local CapyInn repository into `/tmp`, compare the generated structure against the current README, then rewrite only the tracked `README.md` inside the CapyInn repo. Keep `README.en.md` unchanged unless a clearly stale public link must be corrected.
 
-**Tech Stack:** Git worktrees, Python 3, `venv`, `pip`, `readme-ai`, Markdown, `rg`, `git diff`
+**Tech Stack:** Git worktrees, Python 3.11, `venv`, `pip`, `readme-ai`, Markdown, `rg`, `git diff`
 
 ---
 
@@ -48,7 +48,7 @@ Expected: this plan file exists in `docs/superpowers/plans/2026-04-16-readme-ref
 
 **Files:**
 - Create outside repo: `/Users/binhan/readme-ai`
-- Create outside repo: `/Users/binhan/readme-ai/.venv` or equivalent local install artifacts
+- Create outside repo: `/Users/binhan/readme-ai/.venv311`
 - Verify only: `/Users/binhan/readme-ai`
 
 - [ ] **Step 1: Clone `eli64s/readme-ai` into `/Users/binhan/readme-ai`**
@@ -61,28 +61,27 @@ git clone https://github.com/eli64s/readme-ai /Users/binhan/readme-ai
 
 Expected: local generator checkout exists outside the CapyInn repo.
 
-- [ ] **Step 2: Create an isolated Python environment for the tool**
+- [ ] **Step 2: Create a Python 3.11 virtualenv for the tool**
 
 Run:
 
 ```bash
 cd /Users/binhan/readme-ai
-python3 -m venv .venv
+/opt/homebrew/bin/python3.11 -m venv .venv311
 ```
 
-Expected: `.venv` exists under `/Users/binhan/readme-ai`.
+Expected: `.venv311` exists under `/Users/binhan/readme-ai`.
 
-- [ ] **Step 3: Install `readme-ai` source dependencies**
+- [ ] **Step 3: Install `readme-ai` from source instead of using the broken requirements file**
 
 Run:
 
 ```bash
 cd /Users/binhan/readme-ai
-. .venv/bin/activate
-pip install -r setup/requirements.txt
+.venv311/bin/pip install -e .
 ```
 
-Expected: dependency install succeeds without touching the CapyInn repo.
+Expected: editable install succeeds without touching the CapyInn repo.
 
 - [ ] **Step 4: Inspect the actual CLI help before generating**
 
@@ -90,8 +89,7 @@ Run:
 
 ```bash
 cd /Users/binhan/readme-ai
-. .venv/bin/activate
-python -m readmeai --help
+.venv311/bin/readmeai --help
 ```
 
 Expected: confirm the repository/path, output, header, navigation, badge, and offline options available in the installed version.
@@ -108,15 +106,15 @@ Run:
 
 ```bash
 cd /Users/binhan/readme-ai
-. .venv/bin/activate
-python -m readmeai \
+.venv311/bin/readmeai \
   --api offline \
   --repository /Users/binhan/HotelManager/.worktrees/readme-refresh \
   --output /tmp/capyinn-readme-generated.vi.md \
   --header-style compact \
   --navigation-style accordion \
   --badge-style for-the-badge \
-  --badge-color 0F766E
+  --badge-color 0F766E \
+  --system-message 'Write the README in Vietnamese for an offline-first mini hotel management desktop app called CapyInn. Keep the tone concrete, honest, and maintainable. Avoid generic AI marketing language.'
 ```
 
 Expected: a generated Markdown draft appears at `/tmp/capyinn-readme-generated.vi.md`.

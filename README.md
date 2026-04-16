@@ -134,7 +134,7 @@ npm run tauri dev
 ### Build release
 
 ```bash
-cd mhm
+cd CapyInn/mhm
 npm run tauri build
 ```
 
@@ -143,7 +143,7 @@ Bundle release sẽ nằm trong `mhm/src-tauri/target/release/bundle/`.
 ## Verification
 
 ```bash
-cd mhm
+cd CapyInn/mhm
 npm test
 npm run build
 cargo check --manifest-path src-tauri/Cargo.toml
@@ -154,7 +154,7 @@ cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings
 Nếu chỉ cần chạy frontend web thay vì full desktop app:
 
 ```bash
-cd mhm
+cd CapyInn/mhm
 npm run dev
 ```
 
