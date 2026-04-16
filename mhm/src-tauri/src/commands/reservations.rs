@@ -170,8 +170,72 @@ pub async fn do_get_rooms_availability(pool: &Pool<Sqlite>) -> Result<Vec<RoomWi
     let room_rows = sqlx::query("SELECT id, name, type, floor, has_balcony, base_price, max_guests, extra_person_fee, status FROM rooms ORDER BY id")
         .fetch_all(pool).await.map_err(|e| e.to_string())?;
 
+    if room_rows.is_empty() {
+        return Ok(Vec::new());
+    }
+
     let today = chrono::Local::now().format("%Y-%m-%d").to_string();
     let mut results = Vec::new();
+
+    let room_ids: Vec<String> = room_rows.iter().map(|rr| rr.get("id")).collect();
+
+    let mut current_bookings_map: std::collections::HashMap<String, Booking> = std::collections::HashMap::new();
+    let mut upcoming_map: std::collections::HashMap<String, Vec<UpcomingReservation>> = std::collections::HashMap::new();
+
+    let mut qb_current = sqlx::QueryBuilder::new("SELECT * FROM bookings WHERE status = 'active' AND room_id IN (");
+    let mut separated = qb_current.separated(", ");
+    for id in &room_ids {
+        separated.push_bind(id);
+    }
+    separated.push_unseparated(")");
+
+    let current_rows = qb_current.build().fetch_all(pool).await.map_err(|e| e.to_string())?;
+    for r in current_rows {
+        let room_id: String = r.get("room_id");
+        current_bookings_map.insert(room_id.clone(), Booking {
+            id: r.get("id"),
+            room_id,
+            primary_guest_id: r.get("primary_guest_id"),
+            check_in_at: r.get("check_in_at"),
+            expected_checkout: r.get("expected_checkout"),
+            actual_checkout: r.get("actual_checkout"),
+            nights: r.get("nights"),
+            total_price: get_f64(&r, "total_price"),
+            paid_amount: get_f64(&r, "paid_amount"),
+            status: r.get("status"),
+            source: r.get("source"),
+            notes: r.get("notes"),
+            created_at: r.get("created_at"),
+        });
+    }
+
+    let mut qb_upcoming = sqlx::QueryBuilder::new(
+        "SELECT b.room_id, b.id, g.full_name, b.scheduled_checkin, b.scheduled_checkout, b.deposit_amount, b.status
+         FROM bookings b
+         JOIN guests g ON g.id = b.primary_guest_id
+         WHERE b.status = 'booked' AND b.scheduled_checkin >= "
+    );
+    qb_upcoming.push_bind(&today);
+    qb_upcoming.push(" AND b.room_id IN (");
+    let mut separated = qb_upcoming.separated(", ");
+    for id in &room_ids {
+        separated.push_bind(id);
+    }
+    separated.push_unseparated(") ORDER BY b.scheduled_checkin ASC");
+
+    let upcoming_rows = qb_upcoming.build().fetch_all(pool).await.map_err(|e| e.to_string())?;
+    for r in upcoming_rows {
+        let room_id: String = r.get("room_id");
+        let res = UpcomingReservation {
+            booking_id: r.get("id"),
+            guest_name: r.get("full_name"),
+            scheduled_checkin: r.get::<Option<String>, _>("scheduled_checkin").unwrap_or_default(),
+            scheduled_checkout: r.get::<Option<String>, _>("scheduled_checkout").unwrap_or_default(),
+            deposit_amount: r.try_get::<f64, _>("deposit_amount").unwrap_or(0.0),
+            status: r.get("status"),
+        };
+        upcoming_map.entry(room_id).or_default().push(res);
+    }
 
     for rr in &room_rows {
         let room = Room {
@@ -186,46 +250,8 @@ pub async fn do_get_rooms_availability(pool: &Pool<Sqlite>) -> Result<Vec<RoomWi
             status: rr.get("status"),
         };
 
-        let current_booking = sqlx::query(
-            "SELECT * FROM bookings WHERE room_id = ? AND status = 'active' LIMIT 1"
-        )
-        .bind(&room.id)
-        .fetch_optional(pool).await.map_err(|e| e.to_string())?
-        .map(|r| Booking {
-            id: r.get("id"),
-            room_id: r.get("room_id"),
-            primary_guest_id: r.get("primary_guest_id"),
-            check_in_at: r.get("check_in_at"),
-            expected_checkout: r.get("expected_checkout"),
-            actual_checkout: r.get("actual_checkout"),
-            nights: r.get("nights"),
-            total_price: get_f64(&r, "total_price"),
-            paid_amount: get_f64(&r, "paid_amount"),
-            status: r.get("status"),
-            source: r.get("source"),
-            notes: r.get("notes"),
-            created_at: r.get("created_at"),
-        });
-
-        let res_rows = sqlx::query(
-            "SELECT b.id, g.full_name, b.scheduled_checkin, b.scheduled_checkout, b.deposit_amount, b.status
-             FROM bookings b
-             JOIN guests g ON g.id = b.primary_guest_id
-             WHERE b.room_id = ? AND b.status = 'booked' AND b.scheduled_checkin >= ?
-             ORDER BY b.scheduled_checkin ASC"
-        )
-        .bind(&room.id).bind(&today)
-        .fetch_all(pool).await.map_err(|e| e.to_string())?;
-
-        let upcoming: Vec<UpcomingReservation> = res_rows.iter().map(|r| UpcomingReservation {
-            booking_id: r.get("id"),
-            guest_name: r.get("full_name"),
-            scheduled_checkin: r.get::<Option<String>, _>("scheduled_checkin").unwrap_or_default(),
-            scheduled_checkout: r.get::<Option<String>, _>("scheduled_checkout").unwrap_or_default(),
-            deposit_amount: r.try_get::<f64, _>("deposit_amount").unwrap_or(0.0),
-            status: r.get("status"),
-        }).collect();
-
+        let current_booking = current_bookings_map.remove(&room.id);
+        let upcoming = upcoming_map.remove(&room.id).unwrap_or_default();
         let next_until = upcoming.first().map(|u| u.scheduled_checkin.clone());
 
         results.push(RoomWithAvailability {
