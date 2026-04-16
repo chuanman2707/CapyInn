@@ -4,8 +4,8 @@
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     if args.contains(&"--mcp-stdio".to_string()) {
-        mhm_lib::run_proxy();
+        capyinn_lib::run_proxy();
     } else {
-        mhm_lib::run()
+        capyinn_lib::run()
     }
 }
