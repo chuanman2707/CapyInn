@@ -98,8 +98,7 @@ export const useHotelStore = create<HotelStore>((set, get) => {
         await invoke("check_in", {
           req: { room_id: roomId, guests, nights, source, notes, paid_amount: paidAmount },
         });
-        await get().fetchRooms();
-        await get().fetchStats();
+        await Promise.all([get().fetchRooms(), get().fetchStats()]);
         set({ activeTab: "dashboard" });
       } catch (err) {
         console.error("check_in error:", err);
@@ -113,8 +112,7 @@ export const useHotelStore = create<HotelStore>((set, get) => {
       beginAction();
       try {
         await invoke("check_out", { req: { booking_id: bookingId, final_paid: finalPaid } });
-        await get().fetchRooms();
-        await get().fetchStats();
+        await Promise.all([get().fetchRooms(), get().fetchStats()]);
         set({ activeTab: "dashboard" });
       } catch (err) {
         console.error("check_out error:", err);
@@ -128,8 +126,7 @@ export const useHotelStore = create<HotelStore>((set, get) => {
       beginAction();
       try {
         await invoke("extend_stay", { bookingId });
-        await get().fetchRooms();
-        await get().fetchStats();
+        await Promise.all([get().fetchRooms(), get().fetchStats()]);
       } catch (err) {
         console.error("extend_stay error:", err);
         throw err;
@@ -145,8 +142,7 @@ export const useHotelStore = create<HotelStore>((set, get) => {
 
     updateHousekeeping: async (taskId, status, note) => {
       await invoke("update_housekeeping", { taskId, newStatus: status, note });
-      await get().fetchHousekeeping();
-      await get().fetchRooms();
+      await Promise.all([get().fetchHousekeeping(), get().fetchRooms()]);
     },
 
     getStayInfoText: async (bookingId: string) => {
@@ -161,9 +157,7 @@ export const useHotelStore = create<HotelStore>((set, get) => {
       beginAction();
       try {
         await invoke("group_checkin", { req });
-        await get().fetchRooms();
-        await get().fetchStats();
-        await get().fetchGroups();
+        await Promise.all([get().fetchRooms(), get().fetchStats(), get().fetchGroups()]);
         set({ isGroupCheckinOpen: false });
       } catch (err) {
         console.error("group_checkin error:", err);
@@ -177,9 +171,7 @@ export const useHotelStore = create<HotelStore>((set, get) => {
       beginAction();
       try {
         await invoke("group_checkout", { req });
-        await get().fetchRooms();
-        await get().fetchStats();
-        await get().fetchGroups();
+        await Promise.all([get().fetchRooms(), get().fetchStats(), get().fetchGroups()]);
       } catch (err) {
         console.error("group_checkout error:", err);
         throw err;
