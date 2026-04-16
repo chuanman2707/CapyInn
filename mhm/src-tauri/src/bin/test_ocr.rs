@@ -7,9 +7,18 @@ fn main() {
         .expect("src-tauri should live inside the app directory");
     let models_dir = app_dir.join("models");
     println!("Models dir: {}", models_dir.display());
-    println!("Det exists: {}", models_dir.join("PP-OCRv5_mobile_det.mnn").exists());
-    println!("Rec exists: {}", models_dir.join("PP-OCRv5_mobile_rec.mnn").exists());
-    println!("Keys exists: {}", models_dir.join("ppocr_keys_v5.txt").exists());
+    println!(
+        "Det exists: {}",
+        models_dir.join("PP-OCRv5_mobile_det.mnn").exists()
+    );
+    println!(
+        "Rec exists: {}",
+        models_dir.join("PP-OCRv5_mobile_rec.mnn").exists()
+    );
+    println!(
+        "Keys exists: {}",
+        models_dir.join("ppocr_keys_v5.txt").exists()
+    );
 
     println!("\nCreating OCR engine...");
     let engine = ocr_rs::OcrEngine::new(
@@ -17,7 +26,8 @@ fn main() {
         models_dir.join("PP-OCRv5_mobile_rec.mnn").to_str().unwrap(),
         models_dir.join("ppocr_keys_v5.txt").to_str().unwrap(),
         None,
-    ).expect("Failed to create OCR engine");
+    )
+    .expect("Failed to create OCR engine");
     println!("OCR engine ready!");
 
     let re_doc = regex::Regex::new(r"\b(\d{12})\b").unwrap();
@@ -32,7 +42,11 @@ fn main() {
     for entry in std::fs::read_dir(scans_dir).expect("Can't read Scans dir") {
         let entry = entry.unwrap();
         let path = entry.path();
-        if path.extension().map(|e| e == "png" || e == "jpg" || e == "jpeg").unwrap_or(false) {
+        if path
+            .extension()
+            .map(|e| e == "png" || e == "jpg" || e == "jpeg")
+            .unwrap_or(false)
+        {
             println!("\n--- OCR on: {} ---", path.display());
             let img = image::open(&path).expect("Failed to open image");
 
@@ -60,8 +74,11 @@ fn main() {
                 println!("Ngày sinh: {}", m.as_str());
             }
 
-            if full_text.contains("Nam") { println!("Giới tính: Nam"); }
-            else if full_text.contains("Nữ") { println!("Giới tính: Nữ"); }
+            if full_text.contains("Nam") {
+                println!("Giới tính: Nam");
+            } else if full_text.contains("Nữ") {
+                println!("Giới tính: Nữ");
+            }
         }
     }
 }

@@ -374,35 +374,62 @@ async fn validate_rooms_for_group(
     checkin_date: &str,
     checkout_date: &str,
 ) -> BookingResult<()> {
-    for room_id in room_ids {
-        let room_status = sqlx::query_scalar::<_, String>("SELECT status FROM rooms WHERE id = ?")
-            .bind(room_id)
-            .fetch_optional(&mut **tx)
-            .await?
-            .ok_or_else(|| BookingError::not_found(format!("Phòng {} không tồn tại", room_id)))?;
+    if room_ids.is_empty() {
+        return Ok(());
+    }
 
+    let mut query_builder: sqlx::QueryBuilder<Sqlite> =
+        sqlx::QueryBuilder::new("SELECT id, status FROM rooms WHERE id IN (");
+    let mut separated = query_builder.separated(", ");
+    for room_id in room_ids.iter() {
+        separated.push_bind(room_id);
+    }
+    separated.push_unseparated(")");
+
+    let rooms: Vec<(String, String)> = query_builder.build_query_as().fetch_all(&mut **tx).await?;
+
+    let mut found_rooms = std::collections::HashSet::new();
+    for (room_id, room_status) in rooms {
+        found_rooms.insert(room_id.clone());
         if !is_reservation && room_status != status::room::VACANT {
             return Err(BookingError::conflict(format!(
                 "Phòng {} không trống (status: {})",
                 room_id, room_status
             )));
         }
+    }
 
-        let conflicts: (i64,) = sqlx::query_as(
-            "SELECT COUNT(*) FROM room_calendar WHERE room_id = ? AND date >= ? AND date < ?",
-        )
-        .bind(room_id)
-        .bind(checkin_date)
-        .bind(checkout_date)
-        .fetch_one(&mut **tx)
-        .await?;
-
-        if conflicts.0 > 0 {
-            return Err(BookingError::conflict(format!(
-                "Phòng {} có lịch trùng trong khoảng ngày đã chọn",
+    for room_id in room_ids {
+        if !found_rooms.contains(room_id) {
+            return Err(BookingError::not_found(format!(
+                "Phòng {} không tồn tại",
                 room_id
             )));
         }
+    }
+
+    let mut conflict_builder: sqlx::QueryBuilder<Sqlite> =
+        sqlx::QueryBuilder::new("SELECT room_id FROM room_calendar WHERE room_id IN (");
+    let mut separated_conflicts = conflict_builder.separated(", ");
+    for room_id in room_ids.iter() {
+        separated_conflicts.push_bind(room_id);
+    }
+    separated_conflicts.push_unseparated(") AND date >= ");
+    conflict_builder.push_bind(checkin_date);
+    conflict_builder.push(" AND date < ");
+    conflict_builder.push_bind(checkout_date);
+    conflict_builder.push(" LIMIT 1");
+
+    let conflict_room = conflict_builder
+        .build_query_scalar::<String>()
+        .fetch_optional(&mut **tx)
+        .await?;
+
+    if let Some(room_id) = conflict_room {
+        return Err(BookingError::conflict(format!(
+            "Phòng {} có lịch trùng trong khoảng ngày đã chọn",
+            room_id
+        )));
     }
 
     Ok(())
