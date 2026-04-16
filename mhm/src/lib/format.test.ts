@@ -3,10 +3,9 @@ import { fmtDateShort } from "./format";
 
 describe("fmtDateShort", () => {
   it("formats valid date string to short date format in vi-VN locale", () => {
-    // Note: since toLocaleDateString behavior might vary slightly depending on the environment/engine,
-    // usually in "vi-VN" it's DD/MM/YYYY.
-    // e.g. "2023-10-15T12:00:00Z" -> "15/10/2023"
-    const result = fmtDateShort("2023-10-15T12:00:00Z");
+    // Note: Use local time string to prevent timezone related flakiness
+    // e.g. "2023-10-15T12:00:00" -> "15/10/2023"
+    const result = fmtDateShort("2023-10-15T12:00:00");
     expect(result).toMatch(/15\/10\/2023/);
   });
 
