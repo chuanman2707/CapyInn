@@ -1,7 +1,13 @@
-use axum::Router;
+use axum::{
+    extract::{Request, State},
+    http::StatusCode,
+    middleware::{self, Next},
+    response::Response,
+    Router,
+};
 use log::error;
 use rmcp::transport::streamable_http_server::session::local::LocalSessionManager;
-use rmcp::transport::streamable_http_server::{StreamableHttpService, StreamableHttpServerConfig};
+use rmcp::transport::streamable_http_server::{StreamableHttpServerConfig, StreamableHttpService};
 use sqlx::{Pool, Sqlite};
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -13,6 +19,32 @@ use super::tools::HotelTools;
 
 const DEFAULT_PORT: u16 = 61234;
 const PORT_RANGE: std::ops::Range<u16> = 61234..61244;
+
+/// API key middleware for MCP routes.
+/// When no keys are configured (initial setup), all requests pass through.
+/// Once keys exist, a valid `Authorization: Bearer <key>` header is required.
+async fn require_api_key(
+    State(pool): State<Pool<Sqlite>>,
+    request: Request,
+    next: Next,
+) -> Result<Response, StatusCode> {
+    if !super::auth::has_api_keys(&pool).await {
+        return Ok(next.run(request).await);
+    }
+
+    let key = request
+        .headers()
+        .get(axum::http::header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.strip_prefix("Bearer "))
+        .unwrap_or("");
+
+    if super::auth::validate_api_key(&pool, key).await {
+        Ok(next.run(request).await)
+    } else {
+        Err(StatusCode::UNAUTHORIZED)
+    }
+}
 
 pub struct RunningGatewayServer {
     pub port: u16,
@@ -27,22 +59,24 @@ pub async fn start_server(
     pool: Pool<Sqlite>,
     app_handle: AppHandle,
 ) -> Result<RunningGatewayServer, String> {
-    let tools = HotelTools::new(pool, Some(app_handle));
+    let tools = HotelTools::new(pool.clone(), Some(app_handle));
 
     let session_manager = Arc::new(LocalSessionManager::default());
     let config = StreamableHttpServerConfig::default();
 
-    let mcp_service = StreamableHttpService::new(
-        move || Ok(tools.clone()),
-        session_manager,
-        config,
-    );
+    let mcp_service =
+        StreamableHttpService::new(move || Ok(tools.clone()), session_manager, config);
 
-    // Build axum router: health at /health, MCP at /mcp
+    // /mcp routes are protected by API key middleware
+    let protected = Router::new()
+        .route_service("/mcp", mcp_service.clone())
+        .route_service("/mcp/{*path}", mcp_service)
+        .route_layer(middleware::from_fn_with_state(pool.clone(), require_api_key));
+
+    // Build axum router: health at /health (public), MCP at /mcp (protected)
     let app = Router::new()
         .route("/health", axum::routing::get(|| async { "OK" }))
-        .route_service("/mcp", mcp_service.clone())
-        .route_service("/mcp/{*path}", mcp_service);
+        .merge(protected);
 
     // Try ports in range
     let mut port = DEFAULT_PORT;
@@ -54,7 +88,12 @@ pub async fn start_server(
                 port += 1;
                 continue;
             }
-            Err(e) => return Err(format!("Failed to bind to any port in range {}-{}: {}", PORT_RANGE.start, PORT_RANGE.end, e)),
+            Err(e) => {
+                return Err(format!(
+                    "Failed to bind to any port in range {}-{}: {}",
+                    PORT_RANGE.start, PORT_RANGE.end, e
+                ))
+            }
         }
     };
 
