@@ -246,53 +246,79 @@ pub async fn group_checkout(pool: &Pool<Sqlite>, req: GroupCheckoutRequest) -> B
     let now = Local::now().to_rfc3339();
     let mut tx = begin_tx(pool).await?;
 
-    for booking_id in &req.booking_ids {
-        let row = sqlx::query(
-            "SELECT room_id FROM bookings WHERE id = ? AND status = ? AND group_id = ?",
-        )
-        .bind(booking_id)
-        .bind(status::booking::ACTIVE)
-        .bind(&req.group_id)
-        .fetch_optional(&mut *tx)
-        .await?;
-
-        let row = row.ok_or_else(|| {
-            BookingError::not_found(format!(
-                "Booking {} không tìm thấy hoặc đã checkout",
-                booking_id
-            ))
-        })?;
-        let room_id: String = row.get("room_id");
-
-        sqlx::query("UPDATE bookings SET status = ?, actual_checkout = ? WHERE id = ?")
-            .bind(status::booking::CHECKED_OUT)
-            .bind(&now)
-            .bind(booking_id)
-            .execute(&mut *tx)
-            .await?;
-
-        sqlx::query("UPDATE rooms SET status = ? WHERE id = ?")
-            .bind(status::room::CLEANING)
-            .bind(&room_id)
-            .execute(&mut *tx)
-            .await?;
-
-        sqlx::query(
-            "INSERT INTO housekeeping (id, room_id, status, triggered_at, created_at)
-             VALUES (?, ?, 'needs_cleaning', ?, ?)",
-        )
-        .bind(uuid::Uuid::new_v4().to_string())
-        .bind(&room_id)
-        .bind(&now)
-        .bind(&now)
-        .execute(&mut *tx)
-        .await?;
-
-        sqlx::query("DELETE FROM room_calendar WHERE booking_id = ?")
-            .bind(booking_id)
-            .execute(&mut *tx)
-            .await?;
+    let mut query_builder: sqlx::QueryBuilder<Sqlite> = sqlx::QueryBuilder::new(
+        "SELECT id, room_id FROM bookings WHERE status = "
+    );
+    query_builder.push_bind(status::booking::ACTIVE);
+    query_builder.push(" AND group_id = ");
+    query_builder.push_bind(&req.group_id);
+    query_builder.push(" AND id IN (");
+    let mut separated = query_builder.separated(", ");
+    for id in &req.booking_ids {
+        separated.push_bind(id);
     }
+    separated.push_unseparated(")");
+
+    let rows = query_builder.build().fetch_all(&mut *tx).await?;
+    let mut booking_room_map = std::collections::HashMap::new();
+    for row in rows {
+        let id: String = row.get("id");
+        let room_id: String = row.get("room_id");
+        booking_room_map.insert(id, room_id);
+    }
+
+    for id in &req.booking_ids {
+        if !booking_room_map.contains_key(id) {
+            return Err(BookingError::not_found(format!(
+                "Booking {} không tìm thấy hoặc đã checkout",
+                id
+            )));
+        }
+    }
+
+    let room_ids: Vec<String> = booking_room_map.values().cloned().collect();
+
+    let mut qb = sqlx::QueryBuilder::new("UPDATE bookings SET status = ");
+    qb.push_bind(status::booking::CHECKED_OUT);
+    qb.push(", actual_checkout = ");
+    qb.push_bind(&now);
+    qb.push(" WHERE id IN (");
+    let mut sep = qb.separated(", ");
+    for id in &req.booking_ids {
+        sep.push_bind(id);
+    }
+    sep.push_unseparated(")");
+    qb.build().execute(&mut *tx).await?;
+
+    let mut qb = sqlx::QueryBuilder::new("UPDATE rooms SET status = ");
+    qb.push_bind(status::room::CLEANING);
+    qb.push(" WHERE id IN (");
+    let mut sep = qb.separated(", ");
+    for rid in &room_ids {
+        sep.push_bind(rid);
+    }
+    sep.push_unseparated(")");
+    qb.build().execute(&mut *tx).await?;
+
+    let mut qb = sqlx::QueryBuilder::new(
+        "INSERT INTO housekeeping (id, room_id, status, triggered_at, created_at) "
+    );
+    qb.push_values(&room_ids, |mut b, rid| {
+        b.push_bind(uuid::Uuid::new_v4().to_string())
+            .push_bind(rid)
+            .push_bind("needs_cleaning")
+            .push_bind(&now)
+            .push_bind(&now);
+    });
+    qb.build().execute(&mut *tx).await?;
+
+    let mut qb = sqlx::QueryBuilder::new("DELETE FROM room_calendar WHERE booking_id IN (");
+    let mut sep = qb.separated(", ");
+    for id in &req.booking_ids {
+        sep.push_bind(id);
+    }
+    sep.push_unseparated(")");
+    qb.build().execute(&mut *tx).await?;
 
     maybe_reassign_master_booking(&mut tx, &req.group_id, &req.booking_ids).await?;
 
