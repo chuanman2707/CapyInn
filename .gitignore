@@ -54,6 +54,10 @@ code2prompt-output.md
 AGENTS.md
 CLAUDE.md
 GEMINI.md
+docs/
+mhm/docs/
+README.en.md
+PRD.md
 
 # === Scans (OCR images, not needed in repo) ===
 mhm/Scans/
