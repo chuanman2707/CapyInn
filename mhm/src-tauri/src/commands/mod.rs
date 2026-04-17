@@ -1,7 +1,7 @@
+use sqlx::{Pool, Sqlite, Row};
+use tauri::{State, Emitter};
 use crate::models::*;
-use sqlx::{Pool, Row, Sqlite};
 use std::sync::{Arc, Mutex};
-use tauri::{Emitter, State};
 
 /// Safely get an f64 from a SQLite row.
 /// SQLite stores round numbers as INTEGER even in REAL columns,
@@ -42,34 +42,31 @@ pub(crate) fn emit_db_update(app: &tauri::AppHandle, entity: &str) {
     let _ = app.emit("db-updated", serde_json::json!({ "entity": entity }));
 }
 
-pub mod analytics;
-pub mod audit;
-pub mod auth;
-pub mod billing;
-pub mod bookings;
-pub mod groups;
-pub mod guests;
-pub mod invoices;
-pub mod onboarding;
-pub mod pricing;
-pub mod reservations;
-pub mod room_management;
 pub mod rooms;
+pub mod bookings;
+pub mod guests;
+pub mod analytics;
+pub mod room_management;
 pub mod settings;
+pub mod auth;
+pub mod pricing;
+pub mod billing;
+pub mod audit;
+pub mod reservations;
+pub mod invoices;
+pub mod groups;
+pub mod onboarding;
 
 // Re-export all Tauri commands for lib.rs registration
 
 // Re-export do_* helpers used by gateway
+pub use rooms::{do_get_rooms, do_get_dashboard_stats, do_get_room_detail};
 pub use bookings::do_get_all_bookings;
-pub use invoices::do_generate_invoice;
-pub use pricing::{do_calculate_price_preview, do_get_pricing_rules};
-pub use reservations::{
-    do_cancel_reservation, do_check_availability, do_create_reservation, do_get_rooms_availability,
-    do_modify_reservation,
-};
-pub use room_management::do_get_room_types;
-pub use rooms::{do_get_dashboard_stats, do_get_room_detail, do_get_rooms};
 pub use settings::do_get_settings;
+pub use room_management::do_get_room_types;
+pub use pricing::{do_get_pricing_rules, do_calculate_price_preview};
+pub use reservations::{do_check_availability, do_create_reservation, do_cancel_reservation, do_modify_reservation, do_get_rooms_availability};
+pub use invoices::do_generate_invoice;
 
 #[cfg(test)]
 mod tests {

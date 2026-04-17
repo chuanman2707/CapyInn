@@ -66,17 +66,14 @@ async fn load_room_type_tx(
 }
 
 #[allow(dead_code)]
-async fn load_pricing_rule(
-    pool: &Pool<Sqlite>,
-    room_type: &str,
-) -> BookingResult<crate::pricing::PricingRule> {
+async fn load_pricing_rule(pool: &Pool<Sqlite>, room_type: &str) -> BookingResult<crate::pricing::PricingRule> {
     let room_type_lower = room_type.to_lowercase();
     let row = sqlx::query(
         "SELECT room_type, hourly_rate, overnight_rate, daily_rate,
                 overnight_start, overnight_end, daily_checkin, daily_checkout,
                 early_checkin_surcharge_pct, late_checkout_surcharge_pct,
                 weekend_uplift_pct
-         FROM pricing_rules WHERE LOWER(room_type) = ?",
+         FROM pricing_rules WHERE LOWER(room_type) = ?"
     )
     .bind(&room_type_lower)
     .fetch_optional(pool)
@@ -99,11 +96,13 @@ async fn load_pricing_rule(
         });
     }
 
-    let fallback_row = sqlx::query("SELECT base_price FROM rooms WHERE LOWER(type) = ? LIMIT 1")
-        .bind(&room_type_lower)
-        .fetch_optional(pool)
-        .await
-        .map_err(|error| BookingError::database(error.to_string()))?;
+    let fallback_row = sqlx::query(
+        "SELECT base_price FROM rooms WHERE LOWER(type) = ? LIMIT 1"
+    )
+    .bind(&room_type_lower)
+    .fetch_optional(pool)
+    .await
+    .map_err(|error| BookingError::database(error.to_string()))?;
 
     let fallback_price = fallback_row
         .as_ref()
@@ -174,17 +173,14 @@ async fn load_pricing_rule_tx(
 
 #[allow(dead_code)]
 async fn load_special_uplift(pool: &Pool<Sqlite>, date_str: &str) -> BookingResult<f64> {
-    let date = if date_str.len() >= 10 {
-        &date_str[..10]
-    } else {
-        date_str
-    };
-    let row: Option<(f64,)> =
-        sqlx::query_as("SELECT CAST(uplift_pct AS REAL) FROM special_dates WHERE date = ?")
-            .bind(date)
-            .fetch_optional(pool)
-            .await
-            .map_err(|error| BookingError::database(error.to_string()))?;
+    let date = if date_str.len() >= 10 { &date_str[..10] } else { date_str };
+    let row: Option<(f64,)> = sqlx::query_as(
+        "SELECT CAST(uplift_pct AS REAL) FROM special_dates WHERE date = ?"
+    )
+    .bind(date)
+    .fetch_optional(pool)
+    .await
+    .map_err(|error| BookingError::database(error.to_string()))?;
 
     Ok(row.map(|value| value.0).unwrap_or(0.0))
 }
@@ -193,11 +189,7 @@ async fn load_special_uplift_tx(
     tx: &mut Transaction<'_, Sqlite>,
     date_str: &str,
 ) -> BookingResult<f64> {
-    let date = if date_str.len() >= 10 {
-        &date_str[..10]
-    } else {
-        date_str
-    };
+    let date = if date_str.len() >= 10 { &date_str[..10] } else { date_str };
     let row: Option<(f64,)> =
         sqlx::query_as("SELECT CAST(uplift_pct AS REAL) FROM special_dates WHERE date = ?")
             .bind(date)

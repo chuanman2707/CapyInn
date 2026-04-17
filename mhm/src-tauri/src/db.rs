@@ -268,11 +268,8 @@ pub(crate) async fn run_migrations(pool: &Pool<Sqlite>) -> Result<(), sqlx::Erro
             "ALTER TABLE transactions ADD COLUMN payment_method TEXT DEFAULT 'cash'",
         )
         .await?;
-        execute_compat_alter(
-            &mut tx,
-            "ALTER TABLE transactions ADD COLUMN created_by TEXT",
-        )
-        .await?;
+        execute_compat_alter(&mut tx, "ALTER TABLE transactions ADD COLUMN created_by TEXT")
+            .await?;
 
         // Add created_by to bookings
         execute_compat_alter(&mut tx, "ALTER TABLE bookings ADD COLUMN created_by TEXT").await?;
@@ -323,11 +320,8 @@ pub(crate) async fn run_migrations(pool: &Pool<Sqlite>) -> Result<(), sqlx::Erro
         .await?;
 
         // Add pricing_snapshot to bookings (JSON)
-        execute_compat_alter(
-            &mut tx,
-            "ALTER TABLE bookings ADD COLUMN pricing_snapshot TEXT",
-        )
-        .await?;
+        execute_compat_alter(&mut tx, "ALTER TABLE bookings ADD COLUMN pricing_snapshot TEXT")
+            .await?;
 
         // Add pricing_type to bookings
         execute_compat_alter(
@@ -381,11 +375,8 @@ pub(crate) async fn run_migrations(pool: &Pool<Sqlite>) -> Result<(), sqlx::Erro
         .await?;
 
         // Add is_audited flag to bookings
-        execute_compat_alter(
-            &mut tx,
-            "ALTER TABLE bookings ADD COLUMN is_audited INTEGER DEFAULT 0",
-        )
-        .await?;
+        execute_compat_alter(&mut tx, "ALTER TABLE bookings ADD COLUMN is_audited INTEGER DEFAULT 0")
+            .await?;
 
         set_schema_version(&mut tx, 4).await?;
         tx.commit().await?;
@@ -598,8 +589,8 @@ pub(crate) async fn run_migrations(pool: &Pool<Sqlite>) -> Result<(), sqlx::Erro
 
         // Indexes
         sqlx::query("CREATE INDEX IF NOT EXISTS idx_bookings_group ON bookings(group_id)")
-            .execute(&mut *tx)
-            .await?;
+        .execute(&mut *tx)
+        .await?;
         sqlx::query(
             "CREATE INDEX IF NOT EXISTS idx_group_services_group ON group_services(group_id)",
         )

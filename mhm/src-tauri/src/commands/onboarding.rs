@@ -1,6 +1,6 @@
-use sqlx::{Pool, Row, Sqlite, Transaction};
-use std::sync::{Arc, Mutex};
+use sqlx::{Pool, Sqlite, Transaction, Row};
 use tauri::State;
+use std::sync::{Arc, Mutex};
 
 use crate::models::*;
 
@@ -42,13 +42,12 @@ fn sync_bootstrap_session(current_user: &Arc<Mutex<Option<User>>>, status: &Boot
 }
 
 async fn load_default_user(pool: &Pool<Sqlite>) -> Result<Option<User>, String> {
-    let Some(user_id) = crate::commands::settings::do_get_settings(pool, "default_user_id").await?
-    else {
+    let Some(user_id) = crate::commands::settings::do_get_settings(pool, "default_user_id").await? else {
         return Ok(None);
     };
 
     let row = sqlx::query(
-        "SELECT id, name, role, active, created_at FROM users WHERE id = ? AND active = 1",
+        "SELECT id, name, role, active, created_at FROM users WHERE id = ? AND active = 1"
     )
     .bind(&user_id)
     .fetch_optional(pool)
@@ -90,14 +89,8 @@ fn validate_onboarding_request(req: &OnboardingCompleteRequest) -> Result<(), St
         if trimmed.is_empty() {
             return Err("Tên loại phòng là bắt buộc".to_string());
         }
-        if room_type.base_price < 0.0
-            || room_type.extra_person_fee < 0.0
-            || room_type.max_guests < 1
-        {
-            return Err(format!(
-                "Loại phòng '{}' có giá trị không hợp lệ",
-                room_type.name
-            ));
+        if room_type.base_price < 0.0 || room_type.extra_person_fee < 0.0 || room_type.max_guests < 1 {
+            return Err(format!("Loại phòng '{}' có giá trị không hợp lệ", room_type.name));
         }
         let normalized = trimmed.to_lowercase();
         if !room_type_names.insert(normalized) {
@@ -105,31 +98,21 @@ fn validate_onboarding_request(req: &OnboardingCompleteRequest) -> Result<(), St
         }
     }
 
-    let valid_room_types: std::collections::HashSet<String> = req
-        .room_types
-        .iter()
-        .map(|room_type| room_type.name.trim().to_lowercase())
-        .collect();
+    let valid_room_types: std::collections::HashSet<String> =
+        req.room_types.iter().map(|room_type| room_type.name.trim().to_lowercase()).collect();
     let mut room_ids = std::collections::HashSet::new();
     for room in &req.rooms {
         if room.id.trim().is_empty() || room.name.trim().is_empty() {
             return Err("Mỗi phòng phải có mã và tên".to_string());
         }
-        if room.floor < 1
-            || room.base_price < 0.0
-            || room.extra_person_fee < 0.0
-            || room.max_guests < 1
-        {
+        if room.floor < 1 || room.base_price < 0.0 || room.extra_person_fee < 0.0 || room.max_guests < 1 {
             return Err(format!("Phòng '{}' có dữ liệu không hợp lệ", room.id));
         }
         if !room_ids.insert(room.id.trim().to_string()) {
             return Err(format!("Mã phòng '{}' bị trùng", room.id));
         }
         if !valid_room_types.contains(&room.room_type_name.trim().to_lowercase()) {
-            return Err(format!(
-                "Phòng '{}' tham chiếu loại phòng không tồn tại",
-                room.id
-            ));
+            return Err(format!("Phòng '{}' tham chiếu loại phòng không tồn tại", room.id));
         }
     }
 
@@ -151,14 +134,10 @@ fn is_hhmm(value: &str) -> bool {
     chrono::NaiveTime::parse_from_str(value, "%H:%M").is_ok()
 }
 
-async fn save_string_setting(
-    tx: &mut Transaction<'_, Sqlite>,
-    key: &str,
-    value: &str,
-) -> Result<(), String> {
+async fn save_string_setting(tx: &mut Transaction<'_, Sqlite>, key: &str, value: &str) -> Result<(), String> {
     sqlx::query(
         "INSERT INTO settings (key, value) VALUES (?, ?)
-         ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+         ON CONFLICT(key) DO UPDATE SET value = excluded.value"
     )
     .bind(key)
     .bind(value)
@@ -201,7 +180,7 @@ async fn insert_initial_admin(
 
     sqlx::query(
         "INSERT INTO users (id, name, pin_hash, role, active, created_at)
-         VALUES (?, ?, ?, 'admin', 1, ?)",
+         VALUES (?, ?, ?, 'admin', 1, ?)"
     )
     .bind(&id)
     .bind(&name)
@@ -282,7 +261,7 @@ async fn insert_pricing_rules(
               overnight_start, overnight_end, daily_checkin, daily_checkout,
               early_checkin_surcharge_pct, late_checkout_surcharge_pct,
               weekend_uplift_pct, created_at, updated_at)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
         )
         .bind(uuid::Uuid::new_v4().to_string())
         .bind(room_type.name.trim())
@@ -372,11 +351,7 @@ pub async fn do_complete_onboarding(
     Ok(BootstrapStatus {
         setup_completed: true,
         app_lock_enabled: req.app_lock.enabled,
-        current_user: if req.app_lock.enabled {
-            None
-        } else {
-            Some(owner)
-        },
+        current_user: if req.app_lock.enabled { None } else { Some(owner) },
     })
 }
 
@@ -401,8 +376,8 @@ pub async fn complete_onboarding(
 mod tests {
     use super::{do_complete_onboarding, do_get_bootstrap_status, sync_bootstrap_session};
     use crate::models::{
-        BootstrapStatus, OnboardingAppLockInput, OnboardingCompleteRequest,
-        OnboardingHotelInfoInput, OnboardingRoomInput, OnboardingRoomTypeInput,
+        BootstrapStatus, OnboardingAppLockInput, OnboardingCompleteRequest, OnboardingHotelInfoInput,
+        OnboardingRoomInput, OnboardingRoomTypeInput,
     };
     use sqlx::{sqlite::SqlitePoolOptions, Pool, Sqlite};
     use std::sync::{Arc, Mutex};
@@ -496,16 +471,8 @@ mod tests {
             ],
             app_lock: OnboardingAppLockInput {
                 enabled: with_pin,
-                admin_name: if with_pin {
-                    Some("Owner".to_string())
-                } else {
-                    None
-                },
-                pin: if with_pin {
-                    Some("1234".to_string())
-                } else {
-                    None
-                },
+                admin_name: if with_pin { Some("Owner".to_string()) } else { None },
+                pin: if with_pin { Some("1234".to_string()) } else { None },
             },
         }
     }
@@ -568,10 +535,7 @@ mod tests {
         sync_bootstrap_session(&current_user, &status);
 
         let hydrated = current_user.lock().unwrap().clone();
-        assert_eq!(
-            hydrated.as_ref().map(|user| user.id.as_str()),
-            Some("owner")
-        );
+        assert_eq!(hydrated.as_ref().map(|user| user.id.as_str()), Some("owner"));
     }
 
     #[test]
