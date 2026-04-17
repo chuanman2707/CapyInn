@@ -50,6 +50,17 @@ interface HotelStore {
   generateGroupInvoice: (groupId: string) => Promise<GroupInvoiceData>;
 }
 
+// Helper for safe, parallel background refreshes that won't fail the primary action
+const safeRefresh = async (...promises: Promise<void>[]) => {
+  const results = await Promise.allSettled(promises);
+  const errors = results
+    .filter((r): r is PromiseRejectedResult => r.status === "rejected")
+    .map((r) => r.reason);
+  if (errors.length > 0) {
+    console.error("Store refresh encountered errors:", errors);
+  }
+};
+
 export const useHotelStore = create<HotelStore>((set, get) => {
   let pendingActions = 0;
 
@@ -98,8 +109,7 @@ export const useHotelStore = create<HotelStore>((set, get) => {
         await invoke("check_in", {
           req: { room_id: roomId, guests, nights, source, notes, paid_amount: paidAmount },
         });
-        await get().fetchRooms();
-        await get().fetchStats();
+        await safeRefresh(get().fetchRooms(), get().fetchStats());
         set({ activeTab: "dashboard" });
       } catch (err) {
         console.error("check_in error:", err);
@@ -113,8 +123,7 @@ export const useHotelStore = create<HotelStore>((set, get) => {
       beginAction();
       try {
         await invoke("check_out", { req: { booking_id: bookingId, final_paid: finalPaid } });
-        await get().fetchRooms();
-        await get().fetchStats();
+        await safeRefresh(get().fetchRooms(), get().fetchStats());
         set({ activeTab: "dashboard" });
       } catch (err) {
         console.error("check_out error:", err);
@@ -128,8 +137,7 @@ export const useHotelStore = create<HotelStore>((set, get) => {
       beginAction();
       try {
         await invoke("extend_stay", { bookingId });
-        await get().fetchRooms();
-        await get().fetchStats();
+        await safeRefresh(get().fetchRooms(), get().fetchStats());
       } catch (err) {
         console.error("extend_stay error:", err);
         throw err;
@@ -145,8 +153,7 @@ export const useHotelStore = create<HotelStore>((set, get) => {
 
     updateHousekeeping: async (taskId, status, note) => {
       await invoke("update_housekeeping", { taskId, newStatus: status, note });
-      await get().fetchHousekeeping();
-      await get().fetchRooms();
+      await safeRefresh(get().fetchHousekeeping(), get().fetchRooms());
     },
 
     getStayInfoText: async (bookingId: string) => {
@@ -161,9 +168,7 @@ export const useHotelStore = create<HotelStore>((set, get) => {
       beginAction();
       try {
         await invoke("group_checkin", { req });
-        await get().fetchRooms();
-        await get().fetchStats();
-        await get().fetchGroups();
+        await safeRefresh(get().fetchRooms(), get().fetchStats(), get().fetchGroups());
         set({ isGroupCheckinOpen: false });
       } catch (err) {
         console.error("group_checkin error:", err);
@@ -177,9 +182,7 @@ export const useHotelStore = create<HotelStore>((set, get) => {
       beginAction();
       try {
         await invoke("group_checkout", { req });
-        await get().fetchRooms();
-        await get().fetchStats();
-        await get().fetchGroups();
+        await safeRefresh(get().fetchRooms(), get().fetchStats(), get().fetchGroups());
       } catch (err) {
         console.error("group_checkout error:", err);
         throw err;
