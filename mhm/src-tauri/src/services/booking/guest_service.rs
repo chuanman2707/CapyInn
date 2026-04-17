@@ -135,12 +135,24 @@ pub async fn link_booking_guests(
     booking_id: &str,
     guest_ids: &[String],
 ) -> BookingResult<()> {
-    for guest_id in guest_ids {
-        sqlx::query("INSERT INTO booking_guests (booking_id, guest_id) VALUES (?, ?)")
-            .bind(booking_id)
-            .bind(guest_id)
-            .execute(&mut **tx)
-            .await?;
+    if guest_ids.is_empty() {
+        return Ok(());
+    }
+
+    // Default max variables in modern sqlite is 32766.
+    // Each insert takes 2 variables, so we can insert at most 16383 rows at once.
+    // Given the hotel size, we should never reach this. But batching into chunks makes it safe.
+    let chunks = guest_ids.chunks(16000);
+
+    for chunk in chunks {
+        let mut query_builder =
+            sqlx::QueryBuilder::new("INSERT INTO booking_guests (booking_id, guest_id) ");
+
+        query_builder.push_values(chunk, |mut b, guest_id| {
+            b.push_bind(booking_id).push_bind(guest_id);
+        });
+
+        query_builder.build().execute(&mut **tx).await?;
     }
 
     Ok(())
