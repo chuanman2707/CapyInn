@@ -168,13 +168,7 @@ pub async fn do_calculate_price_preview(
 
     let special_uplift = do_get_special_uplift(pool, check_in).await;
 
-    Ok(crate::pricing::calculate_price(
-        &rule,
-        check_in,
-        check_out,
-        pricing_type,
-        special_uplift,
-    ))
+    crate::pricing::calculate_price(&rule, check_in, check_out, pricing_type, special_uplift)
 }
 
 #[tauri::command]
