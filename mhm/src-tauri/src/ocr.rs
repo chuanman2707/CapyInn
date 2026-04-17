@@ -105,9 +105,9 @@ pub fn parse_cccd(lines: &[String]) -> CccdInfo {
         .and_then(|re| re.find(&full_text).map(|m| m.as_str().to_string()))
         .unwrap_or_default();
 
-    let gender = if full_text.contains("Nam") || full_text.contains("Male") {
+    let gender = if Regex::new(r"\b(Nam|Male)\b").unwrap().is_match(&full_text) {
         "Nam".to_string()
-    } else if full_text.contains("Nữ") || full_text.contains("Female") {
+    } else if Regex::new(r"\b(Nữ|Female)\b").unwrap().is_match(&full_text) {
         "Nữ".to_string()
     } else {
         String::new()
@@ -231,7 +231,7 @@ mod tests {
             "123456789".to_string(), // only 9 digits, should not be doc number
             "Ho va ten".to_string(),
             "  ".to_string(), // next line is empty, shouldn't panic
-            "Maleish".to_string(), // contains Male, should parse as Nam
+            "Maleish".to_string(), // contains Male but not as a word boundary, should not parse as Nam
             "11-22-3333".to_string(), // not matching dob regex
         ];
 
@@ -240,7 +240,7 @@ mod tests {
         assert_eq!(info.doc_number, "");
         assert_eq!(info.full_name, "");
         assert_eq!(info.dob, "");
-        assert_eq!(info.gender, "Nam");
+        assert_eq!(info.gender, "");
         assert_eq!(info.nationality, "Việt Nam");
         assert_eq!(info.address, "");
     }
