@@ -1,5 +1,5 @@
-use rmcp::schemars::{self, JsonSchema};
 use serde::Deserialize;
+use rmcp::schemars::{self, JsonSchema};
 
 // ─── MCP Tool Input Schemas ───
 

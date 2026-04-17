@@ -1,7 +1,7 @@
 use axum::Router;
 use log::error;
 use rmcp::transport::streamable_http_server::session::local::LocalSessionManager;
-use rmcp::transport::streamable_http_server::{StreamableHttpServerConfig, StreamableHttpService};
+use rmcp::transport::streamable_http_server::{StreamableHttpService, StreamableHttpServerConfig};
 use sqlx::{Pool, Sqlite};
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -32,8 +32,11 @@ pub async fn start_server(
     let session_manager = Arc::new(LocalSessionManager::default());
     let config = StreamableHttpServerConfig::default();
 
-    let mcp_service =
-        StreamableHttpService::new(move || Ok(tools.clone()), session_manager, config);
+    let mcp_service = StreamableHttpService::new(
+        move || Ok(tools.clone()),
+        session_manager,
+        config,
+    );
 
     // Build axum router: health at /health, MCP at /mcp
     let app = Router::new()
@@ -51,12 +54,7 @@ pub async fn start_server(
                 port += 1;
                 continue;
             }
-            Err(e) => {
-                return Err(format!(
-                    "Failed to bind to any port in range {}-{}: {}",
-                    PORT_RANGE.start, PORT_RANGE.end, e
-                ))
-            }
+            Err(e) => return Err(format!("Failed to bind to any port in range {}-{}: {}", PORT_RANGE.start, PORT_RANGE.end, e)),
         }
     };
 
