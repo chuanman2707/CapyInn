@@ -297,7 +297,7 @@ pub async fn auto_assign_rooms(
     }
 
     let mut floors_sorted: Vec<(i32, Vec<&Room>)> = floor_groups.into_iter().collect();
-    floors_sorted.sort_by_key(|b| std::cmp::Reverse(b.1.len()));
+    floors_sorted.sort_by(|a, b| b.1.len().cmp(&a.1.len()));
 
     let mut assignments = Vec::new();
     let needed = req.room_count as usize;
