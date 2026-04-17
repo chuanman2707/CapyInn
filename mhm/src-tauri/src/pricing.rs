@@ -566,4 +566,3 @@ mod tests {
         assert!(r.weekend_amount > 0.0);
     }
 }
-
