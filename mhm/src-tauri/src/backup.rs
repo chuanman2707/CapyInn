@@ -4,10 +4,7 @@ use std::{
     fs,
     io,
     path::{Path, PathBuf},
-    sync::OnceLock,
 };
-
-static BACKUP_RUN_LOCK: OnceLock<tokio::sync::Mutex<()>> = OnceLock::new();
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum BackupReason {
@@ -93,11 +90,6 @@ async fn run_backup_once_at(
     timestamp: NaiveDateTime,
     hold_for: Option<std::time::Duration>,
 ) -> Result<BackupOutcome, BackupError> {
-    let _guard = BACKUP_RUN_LOCK
-        .get_or_init(|| tokio::sync::Mutex::new(()))
-        .lock()
-        .await;
-
     fs::create_dir_all(runtime_root.join("backups"))?;
     let backup_dir = runtime_root.join("backups");
 
