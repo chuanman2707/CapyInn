@@ -54,10 +54,11 @@ pub fn is_managed_backup_file(name: &str) -> bool {
         "settings" | "checkout" | "group_checkout" | "night_audit" | "app_exit" | "manual"
     );
 
-    let valid_timestamp = date.len() == 8
-        && date.chars().all(|ch| ch.is_ascii_digit())
-        && time.len() == 6
-        && time.chars().all(|ch| ch.is_ascii_digit());
+    let valid_timestamp = NaiveDateTime::parse_from_str(
+        &format!("{}_{}", date, time),
+        "%Y%m%d_%H%M%S",
+    )
+    .is_ok();
 
     valid_reason && valid_timestamp
 }
@@ -85,6 +86,7 @@ mod tests {
         assert!(is_managed_backup_file("capyinn_backup_settings_20260418_231500.db"));
         assert!(is_managed_backup_file("capyinn_backup_app_exit_20260419_000102.db"));
         assert!(!is_managed_backup_file("capyinn_backup_unknown_20260418_231500.db"));
+        assert!(!is_managed_backup_file("capyinn_backup_manual_20261340_999999.db"));
         assert!(!is_managed_backup_file("capyinn_backup_checkout_20260418_231500.db.tmp"));
         assert!(!is_managed_backup_file("notes.db"));
     }
