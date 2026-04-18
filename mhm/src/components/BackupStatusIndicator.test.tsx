@@ -2,6 +2,7 @@ import { render, screen } from "@testing-library/react";
 import { describe, expect, it } from "vitest";
 
 import { BackupStatusIndicator } from "./BackupStatusIndicator";
+import type { BackupStatusPayload } from "@/types";
 
 describe("BackupStatusIndicator", () => {
   it("returns nothing when hidden", () => {
@@ -51,5 +52,16 @@ describe("BackupStatusIndicator", () => {
     );
 
     expect(container.firstChild).toHaveClass("fixed", "right-4");
+  });
+
+  it("accepts backend backup event states", () => {
+    const payload = {
+      job_id: "job-1",
+      state: "started",
+      reason: "manual",
+      pending_jobs: 0,
+    } satisfies BackupStatusPayload;
+
+    expect(payload.state).toBe("started");
   });
 });

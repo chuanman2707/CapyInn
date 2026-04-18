@@ -195,9 +195,11 @@ export type BackupReason =
   | "app_exit"
   | "manual";
 
+export type BackupStatusState = "started" | "completed" | "failed";
+
 export interface BackupStatusPayload {
   job_id: string;
-  state: BackupIndicatorPhase;
+  state: BackupStatusState;
   reason: BackupReason;
   pending_jobs: number;
   path?: string;
