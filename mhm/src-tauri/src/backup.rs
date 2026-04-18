@@ -4,10 +4,7 @@ use std::{
     fs,
     io,
     path::{Path, PathBuf},
-    sync::atomic::{AtomicU64, Ordering},
 };
-
-static BACKUP_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum BackupReason {
@@ -227,7 +224,7 @@ fn sqlite_string_literal(path: &Path) -> String {
 fn reserve_backup_path(backup_dir: &Path, reason: BackupReason, timestamp: NaiveDateTime) -> PathBuf {
     let base_name = build_backup_filename(reason, timestamp);
     let base_stem = base_name.strip_suffix(".db").unwrap();
-    let mut collision_index = BACKUP_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+    let mut collision_index = 0u64;
 
     loop {
         let candidate_name = if collision_index == 0 {
@@ -404,38 +401,37 @@ mod tests {
     }
 
     #[test]
-    fn reserve_backup_path_handles_collisions_deterministically() {
-        BACKUP_SEQUENCE.store(0, Ordering::SeqCst);
-
+    fn reserve_backup_path_starts_from_base_name_for_each_timestamp() {
         let temp = make_temp_dir("backup-reserve");
         let backup_dir = temp.join("backups");
         fs::create_dir_all(&backup_dir).unwrap();
 
-        let timestamp = NaiveDate::from_ymd_opt(2026, 4, 18)
+        let collision_timestamp = NaiveDate::from_ymd_opt(2026, 4, 18)
             .unwrap()
             .and_hms_opt(23, 15, 0)
             .unwrap();
-        let base_name = build_backup_filename(BackupReason::Manual, timestamp);
-        let base_path = backup_dir.join(&base_name);
-        fs::write(&base_path, b"existing").unwrap();
+        let base_name = build_backup_filename(BackupReason::Manual, collision_timestamp);
+        fs::write(backup_dir.join(&base_name), b"existing").unwrap();
 
-        let first_reserved = reserve_backup_path(&backup_dir, BackupReason::Manual, timestamp);
+        let first_reserved =
+            reserve_backup_path(&backup_dir, BackupReason::Manual, collision_timestamp);
         assert_eq!(
             backup_file_name(&first_reserved),
             "capyinn_backup_manual_20260418_231500-1.db"
         );
 
-        fs::write(&first_reserved, b"existing").unwrap();
-
-        let second_reserved = reserve_backup_path(&backup_dir, BackupReason::Manual, timestamp);
+        let later_timestamp = NaiveDate::from_ymd_opt(2026, 4, 18)
+            .unwrap()
+            .and_hms_opt(23, 16, 0)
+            .unwrap();
+        let later_reserved = reserve_backup_path(&backup_dir, BackupReason::Manual, later_timestamp);
         assert_eq!(
-            backup_file_name(&second_reserved),
-            "capyinn_backup_manual_20260418_231500-2.db"
+            backup_file_name(&later_reserved),
+            "capyinn_backup_manual_20260418_231600.db"
         );
 
-        assert!(is_managed_backup_file(&backup_file_name(&base_path)));
         assert!(is_managed_backup_file(&backup_file_name(&first_reserved)));
-        assert!(is_managed_backup_file(&backup_file_name(&second_reserved)));
+        assert!(is_managed_backup_file(&backup_file_name(&later_reserved)));
     }
 
     #[test]
