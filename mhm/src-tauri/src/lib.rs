@@ -1,6 +1,7 @@
 use tauri::Manager;
 use log::{error, info};
 
+mod backup;
 pub mod app_identity;
 mod commands;
 mod db;
