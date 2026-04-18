@@ -14,68 +14,50 @@ pub async fn update_room(
 ) -> Result<Room, String> {
     require_admin(&state)?;
 
-    if let Some(ref name) = req.name {
-        sqlx::query("UPDATE rooms SET name = ? WHERE id = ?")
-            .bind(name)
-            .bind(&req.room_id)
-            .execute(&state.db)
-            .await
-            .map_err(|e| e.to_string())?;
-    }
-    if let Some(ref room_type) = req.room_type {
-        sqlx::query("UPDATE rooms SET type = ? WHERE id = ?")
-            .bind(room_type)
-            .bind(&req.room_id)
-            .execute(&state.db)
-            .await
-            .map_err(|e| e.to_string())?;
-    }
-    if let Some(floor) = req.floor {
-        sqlx::query("UPDATE rooms SET floor = ? WHERE id = ?")
-            .bind(floor)
-            .bind(&req.room_id)
-            .execute(&state.db)
-            .await
-            .map_err(|e| e.to_string())?;
-    }
-    if let Some(has_balcony) = req.has_balcony {
-        sqlx::query("UPDATE rooms SET has_balcony = ? WHERE id = ?")
-            .bind(has_balcony as i32)
-            .bind(&req.room_id)
-            .execute(&state.db)
-            .await
-            .map_err(|e| e.to_string())?;
-    }
-    if let Some(price) = req.base_price {
-        sqlx::query("UPDATE rooms SET base_price = ? WHERE id = ?")
-            .bind(price)
-            .bind(&req.room_id)
-            .execute(&state.db)
-            .await
-            .map_err(|e| e.to_string())?;
-    }
-    if let Some(max_guests) = req.max_guests {
-        sqlx::query("UPDATE rooms SET max_guests = ? WHERE id = ?")
-            .bind(max_guests)
-            .bind(&req.room_id)
-            .execute(&state.db)
-            .await
-            .map_err(|e| e.to_string())?;
-    }
-    if let Some(extra_fee) = req.extra_person_fee {
-        sqlx::query("UPDATE rooms SET extra_person_fee = ? WHERE id = ?")
-            .bind(extra_fee)
-            .bind(&req.room_id)
-            .execute(&state.db)
-            .await
-            .map_err(|e| e.to_string())?;
-    }
+    let r = do_update_room(&state.db, req).await?;
+    emit_db_update(&app, "rooms");
+
+    Ok(r)
+}
+
+async fn do_update_room(pool: &Pool<Sqlite>, req: UpdateRoomRequest) -> Result<Room, String> {
+    let UpdateRoomRequest {
+        room_id,
+        name,
+        room_type,
+        floor,
+        has_balcony,
+        base_price,
+        max_guests,
+        extra_person_fee,
+    } = req;
+
+    sqlx::query(
+        "UPDATE rooms
+         SET name = COALESCE(?, name),
+             type = COALESCE(?, type),
+             floor = COALESCE(?, floor),
+             has_balcony = COALESCE(?, has_balcony),
+             base_price = COALESCE(?, base_price),
+             max_guests = COALESCE(?, max_guests),
+             extra_person_fee = COALESCE(?, extra_person_fee)
+         WHERE id = ?",
+    )
+    .bind(name)
+    .bind(room_type)
+    .bind(floor)
+    .bind(has_balcony.map(|value| value as i32))
+    .bind(base_price)
+    .bind(max_guests)
+    .bind(extra_person_fee)
+    .bind(&room_id)
+    .execute(pool)
+    .await
+    .map_err(|e| e.to_string())?;
 
     let r = sqlx::query("SELECT id, name, type, floor, has_balcony, base_price, max_guests, extra_person_fee, status FROM rooms WHERE id = ?")
-        .bind(&req.room_id)
-        .fetch_one(&state.db).await.map_err(|e| e.to_string())?;
-
-    emit_db_update(&app, "rooms");
+        .bind(&room_id)
+        .fetch_one(pool).await.map_err(|e| e.to_string())?;
 
     Ok(Room {
         id: r.get("id"),
@@ -334,4 +316,160 @@ pub async fn export_csv(state: State<'_, AppState>) -> Result<String, String> {
     std::fs::write(&guests_path, csv2).map_err(|e| e.to_string())?;
 
     Ok(export_dir.to_string_lossy().to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::do_update_room;
+    use crate::models::UpdateRoomRequest;
+    use sqlx::{sqlite::SqlitePoolOptions, Pool, Row, Sqlite};
+
+    async fn test_pool() -> Pool<Sqlite> {
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .expect("in-memory sqlite pool");
+
+        sqlx::query(
+            "CREATE TABLE rooms (
+                id TEXT PRIMARY KEY,
+                name TEXT NOT NULL,
+                type TEXT NOT NULL,
+                floor INTEGER NOT NULL,
+                has_balcony INTEGER NOT NULL,
+                base_price REAL NOT NULL,
+                max_guests INTEGER NOT NULL,
+                extra_person_fee REAL NOT NULL,
+                status TEXT NOT NULL
+            )",
+        )
+        .execute(&pool)
+        .await
+        .expect("create rooms table");
+
+        pool
+    }
+
+    async fn seed_room(pool: &Pool<Sqlite>, room_id: &str) {
+        sqlx::query(
+            "INSERT INTO rooms (
+                id, name, type, floor, has_balcony, base_price, max_guests, extra_person_fee, status
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        )
+        .bind(room_id)
+        .bind("Room 101")
+        .bind("standard")
+        .bind(1)
+        .bind(1)
+        .bind(300_000.0)
+        .bind(2)
+        .bind(100_000.0)
+        .bind("vacant")
+        .execute(pool)
+        .await
+        .expect("seed room");
+    }
+
+    #[tokio::test]
+    async fn update_room_leaves_unspecified_fields_unchanged() {
+        let pool = test_pool().await;
+        seed_room(&pool, "R101").await;
+
+        let updated = do_update_room(
+            &pool,
+            UpdateRoomRequest {
+                room_id: "R101".to_string(),
+                name: Some("Renamed Room".to_string()),
+                room_type: None,
+                floor: None,
+                has_balcony: None,
+                base_price: None,
+                max_guests: None,
+                extra_person_fee: None,
+            },
+        )
+        .await
+        .expect("update room name");
+
+        assert_eq!(updated.name, "Renamed Room");
+        assert_eq!(updated.room_type, "standard");
+        assert_eq!(updated.floor, 1);
+        assert!(updated.has_balcony);
+        assert_eq!(updated.base_price, 300_000.0);
+        assert_eq!(updated.max_guests, 2);
+        assert_eq!(updated.extra_person_fee, 100_000.0);
+    }
+
+    #[tokio::test]
+    async fn update_room_updates_multiple_fields_in_one_call() {
+        let pool = test_pool().await;
+        seed_room(&pool, "R102").await;
+
+        let updated = do_update_room(
+            &pool,
+            UpdateRoomRequest {
+                room_id: "R102".to_string(),
+                name: None,
+                room_type: Some("suite".to_string()),
+                floor: Some(5),
+                has_balcony: Some(false),
+                base_price: Some(450_000.0),
+                max_guests: Some(4),
+                extra_person_fee: Some(150_000.0),
+            },
+        )
+        .await
+        .expect("update multiple fields");
+
+        assert_eq!(updated.room_type, "suite");
+        assert_eq!(updated.floor, 5);
+        assert!(!updated.has_balcony);
+        assert_eq!(updated.base_price, 450_000.0);
+        assert_eq!(updated.max_guests, 4);
+        assert_eq!(updated.extra_person_fee, 150_000.0);
+
+        let row = sqlx::query(
+            "SELECT type, floor, has_balcony, base_price, max_guests, extra_person_fee
+             FROM rooms
+             WHERE id = ?",
+        )
+        .bind("R102")
+        .fetch_one(&pool)
+        .await
+        .expect("fetch updated room");
+
+        assert_eq!(row.get::<String, _>("type"), "suite");
+        assert_eq!(row.get::<i32, _>("floor"), 5);
+        assert_eq!(row.get::<i32, _>("has_balcony"), 0);
+        assert_eq!(row.get::<f64, _>("base_price"), 450_000.0);
+        assert_eq!(row.get::<i32, _>("max_guests"), 4);
+        assert_eq!(row.get::<f64, _>("extra_person_fee"), 150_000.0);
+    }
+
+    #[tokio::test]
+    async fn update_room_returns_not_found_error_for_missing_room() {
+        let pool = test_pool().await;
+
+        let error = do_update_room(
+            &pool,
+            UpdateRoomRequest {
+                room_id: "missing-room".to_string(),
+                name: Some("Ghost".to_string()),
+                room_type: None,
+                floor: None,
+                has_balcony: None,
+                base_price: None,
+                max_guests: None,
+                extra_person_fee: None,
+            },
+        )
+        .await
+        .expect_err("missing room must return an error");
+
+        assert!(
+            error.contains("no rows returned"),
+            "expected fetch_one not-found error, got: {error}"
+        );
+    }
 }

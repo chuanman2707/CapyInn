@@ -1,5 +1,5 @@
 import { BedDouble, CalendarClock, LogIn, Sparkles, User, Eye } from "lucide-react";
-import { ROOM_STATUS_CARD_BG, ROOM_STATUS_TEXT, ROOM_TYPE_LABELS, STATUS_DOT_COLORS, STATUS_LABELS } from "@/lib/constants";
+import { ROOM_STATUS_CARD_BG, ROOM_STATUS_TEXT, STATUS_DOT_COLORS, STATUS_LABELS, getRoomTypeLabel } from "@/lib/constants";
 import { fmtMoney, fmtDateShort } from "@/lib/format";
 import type { Room, BookingWithGuest } from "@/types";
 
@@ -96,7 +96,7 @@ export default function UnifiedRoomCard({
             <div className="flex items-center gap-1.5 mb-1.5">
                 <BedDouble size={12} className="text-text-muted shrink-0" />
                 <span className="text-[11px] text-text-secondary font-medium">
-                    {ROOM_TYPE_LABELS[room.type] ?? room.type}
+                    {getRoomTypeLabel(room.type)}
                 </span>
             </div>
 

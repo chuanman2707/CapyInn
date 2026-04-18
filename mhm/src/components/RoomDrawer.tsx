@@ -14,7 +14,6 @@ import {
 import { toast } from "sonner";
 
 import InvoiceDialog from "@/components/InvoiceDialog";
-import type { InvoiceData } from "@/components/InvoicePDF";
 import InfoItem from "@/components/shared/InfoItem";
 import ActionBtn from "@/components/shared/ActionBtn";
 import RoomGuestsSection from "@/components/shared/RoomGuestsSection";
@@ -22,8 +21,9 @@ import Section from "@/components/shared/Section";
 import StatusBadge from "@/components/shared/StatusBadge";
 import SlideDrawer from "@/components/shared/SlideDrawer";
 import { Button } from "@/components/ui/button";
+import { useInvoiceDialog } from "@/hooks/useInvoiceDialog";
 import Modal from "@/components/ui/Modal";
-import { ROOM_TYPE_LABELS } from "@/lib/constants";
+import { getRoomTypeLabel } from "@/lib/constants";
 import { fmtDateShort, fmtMoney } from "@/lib/format";
 import { useHotelStore } from "@/stores/useHotelStore";
 import type { RoomWithBooking, HousekeepingTask } from "@/types";
@@ -49,10 +49,8 @@ export default function RoomDrawer({ open, onClose, roomId }: RoomDrawerProps) {
     const [showCheckout, setShowCheckout] = useState(false);
     const [finalPaid, setFinalPaid] = useState(0);
     const [copied, setCopied] = useState(false);
-    const [invoiceOpen, setInvoiceOpen] = useState(false);
-    const [invoiceData, setInvoiceData] = useState<InvoiceData | null>(null);
-    const [invoiceLoading, setInvoiceLoading] = useState(false);
     const [fetching, setFetching] = useState(false);
+    const { invoiceOpen, invoiceData, invoiceLoading, openInvoice, closeInvoice } = useInvoiceDialog();
 
     useEffect(() => {
         if (!open || !roomId) {
@@ -94,7 +92,7 @@ export default function RoomDrawer({ open, onClose, roomId }: RoomDrawerProps) {
     }
 
     const { room, booking, guests } = roomDetail;
-    const roomTypeLabel = ROOM_TYPE_LABELS[room.type] ?? room.type;
+    const roomTypeLabel = getRoomTypeLabel(room.type);
 
     const handleCopyStayInfo = async () => {
         if (!booking) return;
@@ -130,16 +128,7 @@ export default function RoomDrawer({ open, onClose, roomId }: RoomDrawerProps) {
 
     const handleInvoice = async () => {
         if (!booking) return;
-        setInvoiceLoading(true);
-        try {
-            const data = await invoke<InvoiceData>("generate_invoice", { bookingId: booking.id });
-            setInvoiceData(data);
-            setInvoiceOpen(true);
-        } catch (err) {
-            toast.error("Lỗi tạo invoice: " + err);
-        } finally {
-            setInvoiceLoading(false);
-        }
+        await openInvoice(booking.id);
     };
 
     const handleHousekeepingUpdate = async (newStatus: string) => {
@@ -359,7 +348,13 @@ export default function RoomDrawer({ open, onClose, roomId }: RoomDrawerProps) {
                 </Modal>
             )}
 
-            <InvoiceDialog open={invoiceOpen} onOpenChange={setInvoiceOpen} data={invoiceData} />
+            <InvoiceDialog
+                open={invoiceOpen}
+                onOpenChange={(nextOpen) => {
+                    if (!nextOpen) closeInvoice();
+                }}
+                data={invoiceData}
+            />
         </>
     );
 }

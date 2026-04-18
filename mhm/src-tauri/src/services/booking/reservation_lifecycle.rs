@@ -9,7 +9,9 @@ use crate::{
 use super::{
     billing_service::{record_cancellation_fee_tx, record_charge_tx, record_deposit_tx},
     guest_service::{create_reservation_guest_manifest, link_booking_guests},
-    support::begin_tx,
+    support::{
+        begin_tx, fetch_booking, insert_room_calendar_rows, read_f64_strict, CalendarInsertMode,
+    },
 };
 
 pub async fn create_reservation(
@@ -102,7 +104,13 @@ pub async fn create_reservation(
 
     tx.commit().await.map_err(BookingError::from)?;
 
-    fetch_booking(pool, &booking_id).await
+    fetch_booking(
+        pool,
+        &booking_id,
+        format!("Booking not found: {}", booking_id),
+        read_f64_strict,
+    )
+    .await
 }
 
 pub async fn cancel_reservation(pool: &Pool<Sqlite>, booking_id: &str) -> BookingResult<()> {
@@ -250,7 +258,13 @@ pub async fn confirm_reservation(pool: &Pool<Sqlite>, booking_id: &str) -> Booki
 
     tx.commit().await.map_err(BookingError::from)?;
 
-    fetch_booking(pool, booking_id).await
+    fetch_booking(
+        pool,
+        booking_id,
+        format!("Booking not found: {}", booking_id),
+        read_f64_strict,
+    )
+    .await
 }
 
 pub async fn modify_reservation(
@@ -324,7 +338,13 @@ pub async fn modify_reservation(
 
     tx.commit().await.map_err(BookingError::from)?;
 
-    fetch_booking(pool, &req.booking_id).await
+    fetch_booking(
+        pool,
+        &req.booking_id,
+        format!("Booking not found: {}", req.booking_id),
+        read_f64_strict,
+    )
+    .await
 }
 
 fn validate_requested_nights(
@@ -376,23 +396,16 @@ async fn insert_calendar_rows(
     to: NaiveDate,
     calendar_status: &str,
 ) -> BookingResult<()> {
-    let mut date = from;
-
-    while date < to {
-        sqlx::query(
-            "INSERT INTO room_calendar (room_id, date, booking_id, status) VALUES (?, ?, ?, ?)",
-        )
-        .bind(room_id)
-        .bind(date.format("%Y-%m-%d").to_string())
-        .bind(booking_id)
-        .bind(calendar_status)
-        .execute(&mut **tx)
-        .await?;
-
-        date += chrono::Duration::days(1);
-    }
-
-    Ok(())
+    insert_room_calendar_rows(
+        tx,
+        room_id,
+        booking_id,
+        from,
+        to,
+        calendar_status,
+        CalendarInsertMode::Insert,
+    )
+    .await
 }
 
 async fn load_booked_reservation(
@@ -463,43 +476,7 @@ struct BookedReservation {
     pricing_type: String,
 }
 
-async fn fetch_booking(pool: &Pool<Sqlite>, booking_id: &str) -> BookingResult<Booking> {
-    let row = sqlx::query(
-        "SELECT id, room_id, primary_guest_id, check_in_at, expected_checkout, actual_checkout,
-                nights, total_price, paid_amount, status, source, notes, created_at
-         FROM bookings
-         WHERE id = ?",
-    )
-    .bind(booking_id)
-    .fetch_optional(pool)
-    .await?;
-
-    let row =
-        row.ok_or_else(|| BookingError::not_found(format!("Booking not found: {}", booking_id)))?;
-
-    Ok(Booking {
-        id: row.get("id"),
-        room_id: row.get("room_id"),
-        primary_guest_id: row.get("primary_guest_id"),
-        check_in_at: row.get("check_in_at"),
-        expected_checkout: row.get("expected_checkout"),
-        actual_checkout: row.get("actual_checkout"),
-        nights: row.get("nights"),
-        total_price: read_f64(&row, "total_price"),
-        paid_amount: read_f64(&row, "paid_amount"),
-        status: row.get("status"),
-        source: row.get("source"),
-        notes: row.get("notes"),
-        created_at: row.get("created_at"),
-    })
-}
-
 fn parse_date(value: &str) -> BookingResult<NaiveDate> {
     NaiveDate::parse_from_str(value, "%Y-%m-%d")
         .map_err(|error| BookingError::datetime_parse(error.to_string()))
-}
-
-fn read_f64(row: &sqlx::sqlite::SqliteRow, column: &str) -> f64 {
-    row.try_get::<f64, _>(column)
-        .unwrap_or_else(|_| row.get::<i64, _>(column) as f64)
 }

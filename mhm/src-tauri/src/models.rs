@@ -152,18 +152,6 @@ pub struct Booking {
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
-#[allow(dead_code)]
-pub struct Transaction {
-    pub id: String,
-    pub booking_id: String,
-    pub amount: f64,
-    #[serde(rename = "type")]
-    pub txn_type: String,
-    pub note: Option<String>,
-    pub created_at: String,
-}
-
-#[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct Expense {
     pub id: String,
     pub category: String,
@@ -472,14 +460,6 @@ pub struct ModifyReservationRequest {
     pub new_check_in_date: String,
     pub new_check_out_date: String,
     pub new_nights: i32,
-}
-
-#[derive(Debug, Deserialize)]
-#[allow(dead_code)]
-pub struct ChangeRoomRequest {
-    pub booking_id: String,
-    pub new_room_id: String,
-    pub note: Option<String>,
 }
 
 #[derive(Debug, Serialize)]

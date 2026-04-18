@@ -39,3 +39,16 @@ export const ROOM_TYPE_LABELS: Record<string, string> = {
   deluxe: "Deluxe",
   standard: "Standard",
 };
+
+export function getRoomTypeLabel(roomType: string): string {
+  const override = ROOM_TYPE_LABELS[roomType];
+  if (override) return override;
+
+  return roomType
+    .replace(/[_-]+/g, " ")
+    .trim()
+    .split(/\s+/)
+    .filter(Boolean)
+    .map((word) => word.charAt(0).toUpperCase() + word.slice(1))
+    .join(" ");
+}

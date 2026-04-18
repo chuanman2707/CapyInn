@@ -1,13 +1,15 @@
-<div align="center">
+<div id="top" align="center">
+
+<img src="mhm/public/app-logo.png" alt="CapyInn logo" width="120">
 
 # CapyInn
 
 **Offline-first property management software for mini hotels**
 
-*A free desktop PMS for small hotels and guesthouses in Vietnam.*
+*A desktop PMS for small hotels and guesthouses in Vietnam.*
 
-[![CI](https://github.com/chuanman2707/CapyInn/actions/workflows/ci.yml/badge.svg)](https://github.com/chuanman2707/CapyInn/actions/workflows/ci.yml)
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+[![CI](https://img.shields.io/github/actions/workflow/status/chuanman2707/CapyInn/ci.yml?style=for-the-badge&label=CI)](https://github.com/chuanman2707/CapyInn/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow?style=for-the-badge)](LICENSE)
 [![Tauri](https://img.shields.io/badge/Tauri_2-FFC131?style=for-the-badge&logo=tauri&logoColor=white)](https://tauri.app)
 [![Rust](https://img.shields.io/badge/Rust-000000?style=for-the-badge&logo=rust&logoColor=white)](https://www.rust-lang.org)
 [![React](https://img.shields.io/badge/React_19-61DAFB?style=for-the-badge&logo=react&logoColor=black)](https://react.dev)
@@ -16,7 +18,26 @@
 
 **Property onboarding · Vietnamese ID OCR · Check-in/check-out · Reservations · Night audit**
 
+<p>
+  <a href="#what-capyinn-solves"><strong>Why CapyInn</strong></a> ·
+  <a href="#product-demo"><strong>Demo</strong></a> ·
+  <a href="#key-features"><strong>Features</strong></a> ·
+  <a href="#local-development"><strong>Local development</strong></a> ·
+  <a href="#verification"><strong>Verification</strong></a>
+</p>
+
 </div>
+
+![CapyInn dashboard hero](Public/dashboard.png)
+
+> Built for mini hotels that need one local app for room status, guest intake, nightly billing, housekeeping, and end-of-day reconciliation.
+
+<p align="center">
+  <img src="https://img.shields.io/badge/Offline--first-0F172A?style=flat-square" alt="Offline-first">
+  <img src="https://img.shields.io/badge/Vietnamese%20ID-OCR-0F766E?style=flat-square" alt="Vietnamese ID OCR">
+  <img src="https://img.shields.io/badge/Desktop-Tauri%202-C2410C?style=flat-square" alt="Desktop app">
+  <img src="https://img.shields.io/badge/Storage-Local%20SQLite-1D4ED8?style=flat-square" alt="Local SQLite">
+</p>
 
 CapyInn is a desktop app for mini hotels and guesthouses that need a local-first operating tool without relying on a remote backend. The project focuses on real front-desk workflows: room layout setup, faster guest intake, Vietnamese ID OCR, nightly pricing, housekeeping, revenue reporting, and end-of-day reconciliation.
 
@@ -26,6 +47,7 @@ CapyInn is a desktop app for mini hotels and guesthouses that need a local-first
 <summary>Table of contents</summary>
 
 - [What CapyInn solves](#what-capyinn-solves)
+- [Product demo](#product-demo)
 - [Key features](#key-features)
 - [Tech stack](#tech-stack)
 - [System requirements](#system-requirements)
@@ -50,6 +72,37 @@ CapyInn is built for a narrow but practical use case: small hotels that need a s
 | Nightly pricing calculated by hand | Check-in, extend-stay, check-out, and folio flows are automated |
 | End-of-day reporting done manually | Dashboard, analytics, expenses, and night audit are built in |
 | Initial setup takes too much time | Onboarding generates room types, layouts, and operating defaults |
+
+## Product demo
+
+### Dashboard
+
+![CapyInn dashboard](Public/dashboard.png)
+
+### Guest check-in and booking flow
+
+<p align="center">
+  <img src="Public/Group-Check-In.png" alt="Group check-in flow" width="48%">
+  <img src="Public/Group-Booking.png" alt="Group booking flow" width="48%">
+</p>
+
+### Guest profile and operations
+
+<p align="center">
+  <img src="Public/Guest.png" alt="Guest profile view" width="48%">
+  <img src="Public/Night-Audit.png" alt="Night audit flow" width="48%">
+</p>
+
+### Analytics and settings
+
+<p align="center">
+  <img src="Public/Analytics.png" alt="Analytics dashboard" width="48%">
+  <img src="Public/Settings.png" alt="Settings screen" width="48%">
+</p>
+
+<p align="center">
+  <img src="Public/Settings2.png" alt="Advanced settings screen" width="48%">
+</p>
 
 ## Key features
 
@@ -166,13 +219,13 @@ npm run dev
 
 ```text
 CapyInn/
+├── Public/                 # README demo screenshots
 ├── mhm/
 │   ├── src/                # React UI, stores, pages, components
 │   ├── src-tauri/          # Rust backend, IPC commands, DB, gateway, OCR
 │   ├── tests/              # Vitest suites and mocked desktop flows
 │   ├── public/             # Static assets
 │   └── models/             # OCR models
-├── docs/plans/             # Product plans and higher-level refactor notes
 ├── PRD.md                  # Product requirements
 ├── CONTRIBUTING.md
 ├── SECURITY.md
@@ -188,7 +241,6 @@ CapyInn/
 ## Additional docs
 
 - [PRD](PRD.md)
-- [Implementation plans](docs/plans)
 - [Contributing guide](CONTRIBUTING.md)
 - [Security policy](SECURITY.md)
 - [Changelog](CHANGELOG.md)

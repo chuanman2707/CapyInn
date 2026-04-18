@@ -67,6 +67,8 @@ pub async fn load_analytics(
     let room_revenue = load_room_revenue(pool, from, to).await?;
     let rooms_sold = load_rooms_sold(pool, from, to).await?;
     let room_nights_sold = load_room_nights_sold(pool, from, to).await?;
+    let recognized_room_revenue_amount = recognized_room_revenue_amount_sql("b.");
+    let recognized_room_revenue_filter = recognized_room_revenue_filter_sql("b.");
 
     let total_rooms: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM rooms")
         .fetch_one(pool)
@@ -89,24 +91,13 @@ pub async fn load_analytics(
         0.0
     };
 
-    let source_rows = sqlx::query(
+    let source_rows_sql = format!(
         "SELECT source, CAST(COALESCE(SUM(amount), 0) AS REAL) AS value
          FROM (
              SELECT COALESCE(b.source, 'walk-in') AS source,
-                    CASE
-                        WHEN b.nights > 0 THEN b.total_price * (
-                            MAX(
-                                0,
-                                JULIANDAY(MIN(DATE(COALESCE(b.actual_checkout, b.expected_checkout)), DATE(?1, '+1 day'))) -
-                                JULIANDAY(MAX(DATE(b.check_in_at), DATE(?2)))
-                            )
-                        ) / b.nights
-                        ELSE 0
-                    END AS amount
+                    {recognized_room_revenue_amount} AS amount
              FROM bookings b
-             WHERE b.status IN ('active', 'checked_out')
-               AND DATE(b.check_in_at) < DATE(?1, '+1 day')
-               AND DATE(COALESCE(b.actual_checkout, b.expected_checkout)) > DATE(?2)
+             WHERE {recognized_room_revenue_filter}
              UNION ALL
              SELECT COALESCE(b.source, 'walk-in') AS source, fl.amount AS amount
              FROM folio_lines fl
@@ -120,12 +111,13 @@ pub async fn load_analytics(
                AND DATE(t.created_at) BETWEEN DATE(?2) AND DATE(?1)
          ) revenue_items
          GROUP BY source
-         ORDER BY value DESC",
-    )
-    .bind(to)
-    .bind(from)
-    .fetch_all(pool)
-    .await?;
+         ORDER BY value DESC"
+    );
+    let source_rows = sqlx::query(&source_rows_sql)
+        .bind(to)
+        .bind(from)
+        .fetch_all(pool)
+        .await?;
 
     let revenue_by_source = source_rows
         .iter()
@@ -155,24 +147,13 @@ pub async fn load_analytics(
         })
         .collect();
 
-    let room_rows = sqlx::query(
+    let room_rows_sql = format!(
         "SELECT room_id, CAST(COALESCE(SUM(amount), 0) AS REAL) AS value
          FROM (
              SELECT b.room_id AS room_id,
-                    CASE
-                        WHEN b.nights > 0 THEN b.total_price * (
-                            MAX(
-                                0,
-                                JULIANDAY(MIN(DATE(COALESCE(b.actual_checkout, b.expected_checkout)), DATE(?1, '+1 day'))) -
-                                JULIANDAY(MAX(DATE(b.check_in_at), DATE(?2)))
-                            )
-                        ) / b.nights
-                        ELSE 0
-                    END AS amount
+                    {recognized_room_revenue_amount} AS amount
              FROM bookings b
-             WHERE b.status IN ('active', 'checked_out')
-               AND DATE(b.check_in_at) < DATE(?1, '+1 day')
-               AND DATE(COALESCE(b.actual_checkout, b.expected_checkout)) > DATE(?2)
+             WHERE {recognized_room_revenue_filter}
              UNION ALL
              SELECT b.room_id AS room_id, fl.amount AS amount
              FROM folio_lines fl
@@ -187,12 +168,13 @@ pub async fn load_analytics(
          ) revenue_items
          GROUP BY room_id
          ORDER BY value DESC
-         LIMIT 5",
-    )
-    .bind(to)
-    .bind(from)
-    .fetch_all(pool)
-    .await?;
+         LIMIT 5"
+    );
+    let room_rows = sqlx::query(&room_rows_sql)
+        .bind(to)
+        .bind(from)
+        .fetch_all(pool)
+        .await?;
 
     let top_rooms = room_rows
         .iter()
@@ -219,28 +201,20 @@ pub async fn load_room_revenue(
     from: &str,
     to: &str,
 ) -> Result<f64, sqlx::Error> {
-    let row: (f64,) = sqlx::query_as(
+    let room_revenue_sql = format!(
         "SELECT CAST(COALESCE(SUM(
-            CASE
-                WHEN nights > 0 THEN total_price * (
-                    MAX(
-                        0,
-                        JULIANDAY(MIN(DATE(COALESCE(actual_checkout, expected_checkout)), DATE(?1, '+1 day'))) -
-                        JULIANDAY(MAX(DATE(check_in_at), DATE(?2)))
-                    )
-                ) / nights
-                ELSE 0
-            END
+            {}
          ), 0) AS REAL)
          FROM bookings
-         WHERE status IN ('active', 'checked_out')
-           AND DATE(check_in_at) < DATE(?1, '+1 day')
-           AND DATE(COALESCE(actual_checkout, expected_checkout)) > DATE(?2)",
-    )
-    .bind(to)
-    .bind(from)
-    .fetch_one(pool)
-    .await?;
+         WHERE {}",
+        recognized_room_revenue_amount_sql(""),
+        recognized_room_revenue_filter_sql(""),
+    );
+    let row: (f64,) = sqlx::query_as(&room_revenue_sql)
+        .bind(to)
+        .bind(from)
+        .fetch_one(pool)
+        .await?;
 
     Ok(row.0)
 }
@@ -360,4 +334,27 @@ fn normalize_date(value: &str) -> NaiveDate {
     let normalized = value.get(..10).unwrap_or(value);
     NaiveDate::parse_from_str(normalized, "%Y-%m-%d")
         .expect("revenue query dates should always be normalized")
+}
+
+fn recognized_room_revenue_amount_sql(column_prefix: &str) -> String {
+    format!(
+        "CASE
+            WHEN {column_prefix}nights > 0 THEN {column_prefix}total_price * (
+                MAX(
+                    0,
+                    JULIANDAY(MIN(DATE(COALESCE({column_prefix}actual_checkout, {column_prefix}expected_checkout)), DATE(?1, '+1 day'))) -
+                    JULIANDAY(MAX(DATE({column_prefix}check_in_at), DATE(?2)))
+                )
+            ) / {column_prefix}nights
+            ELSE 0
+        END"
+    )
+}
+
+fn recognized_room_revenue_filter_sql(column_prefix: &str) -> String {
+    format!(
+        "{column_prefix}status IN ('active', 'checked_out')
+         AND DATE({column_prefix}check_in_at) < DATE(?1, '+1 day')
+         AND DATE(COALESCE({column_prefix}actual_checkout, {column_prefix}expected_checkout)) > DATE(?2)"
+    )
 }

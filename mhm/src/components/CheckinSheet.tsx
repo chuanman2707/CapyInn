@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef } from "react";
+import { useState, useEffect, useMemo, useRef } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { invoke } from "@tauri-apps/api/core";
 import { useHotelStore } from "../stores/useHotelStore";
@@ -6,10 +6,12 @@ import { UserPlus, Trash2, Scan, CheckCircle2, AlertTriangle } from "lucide-reac
 import { Sheet, SheetContent, SheetHeader, SheetTitle } from "@/components/ui/sheet";
 import { Button } from "@/components/ui/button";
 import { FormField, FormFieldSelect } from "@/components/shared/FormField";
+import { useAvailability } from "@/hooks/useAvailability";
+import { getRoomTypeLabel } from "@/lib/constants";
 import { fmtMoney } from "@/lib/format";
 import { createDeferredCleanup } from "@/lib/deferredCleanup";
 import { toast } from "sonner";
-import type { CccdInfo, GuestInput, GuestSuggestion } from "@/types";
+import type { CccdInfo, GuestInput, GuestSummary } from "@/types";
 
 const emptyGuest = (): GuestInput => ({
     full_name: "",
@@ -33,13 +35,9 @@ export default function CheckinSheet({ preSelectedRoomId }: { preSelectedRoomId?
     const [submitting, setSubmitting] = useState(false);
     const [ocrFlash, setOcrFlash] = useState(false);
     const [quickMode, setQuickMode] = useState(true);
-    const [suggestions, setSuggestions] = useState<GuestSuggestion[]>([]);
+    const [suggestions, setSuggestions] = useState<GuestSummary[]>([]);
     const [showSuggestions, setShowSuggestions] = useState(false);
     const formRef = useRef<HTMLDivElement>(null);
-
-    // Availability check state
-    const [availWarning, setAvailWarning] = useState<string | null>(null);
-    const [maxNights, setMaxNights] = useState<number | null>(null);
 
     // Auto-select room when pre-selected
     useEffect(() => {
@@ -125,32 +123,27 @@ export default function CheckinSheet({ preSelectedRoomId }: { preSelectedRoomId?
         ? selectedRoomData.base_price * nights
         : 0;
 
-    // Check availability when room + nights change
-    useEffect(() => {
-        if (!selectedRoom || nights <= 0) {
-            setAvailWarning(null);
-            setMaxNights(null);
-            return;
-        }
+    const { fromDate, toDate } = useMemo(() => {
         const now = new Date();
-        const fromDate = now.toISOString().split("T")[0];
-        const toDate = new Date(now.getTime() + nights * 86400000).toISOString().split("T")[0];
-        invoke<{ available: boolean; conflicts: { date: string; guest_name: string }[]; max_nights: number | null }>("check_availability", {
-            roomId: selectedRoom, fromDate, toDate,
-        }).then((result) => {
-            if (!result.available && result.conflicts.length > 0) {
-                const first = result.conflicts[0];
-                setAvailWarning(`Phòng ${selectedRoom} đã có đặt phòng từ ${first.date} (${first.guest_name || "Đã đặt"}).`);
-                setMaxNights(result.max_nights);
-            } else {
-                setAvailWarning(null);
-                setMaxNights(null);
-            }
-        }).catch(() => {
-            setAvailWarning(null);
-            setMaxNights(null);
-        });
-    }, [selectedRoom, nights]);
+        const next = new Date(now.getTime() + Math.max(nights, 0) * 86400000);
+
+        return {
+            fromDate: now.toISOString().split("T")[0],
+            toDate: next.toISOString().split("T")[0],
+        };
+    }, [nights]);
+
+    const { availability } = useAvailability({
+        roomId: selectedRoom,
+        fromDate,
+        toDate,
+        disabled: !selectedRoom || nights <= 0,
+    });
+
+    const availWarning = availability && !availability.available && availability.conflicts.length > 0
+        ? `Phòng ${selectedRoom} đã có đặt phòng từ ${availability.conflicts[0].date} (${availability.conflicts[0].guest_name || "Đã đặt"}).`
+        : null;
+    const maxNights = availability?.available ? null : availability?.max_nights ?? null;
 
     const updateGuest = (idx: number, field: keyof GuestInput, val: string) => {
         setGuests((prev) =>
@@ -198,7 +191,7 @@ export default function CheckinSheet({ preSelectedRoomId }: { preSelectedRoomId?
         updateGuest(idx, "phone", phone);
         if (idx === 0 && phone.length >= 3) {
             try {
-                const results = await invoke<GuestSuggestion[]>("search_guest_by_phone", { phone });
+                const results = await invoke<GuestSummary[]>("search_guest_by_phone", { phone });
                 setSuggestions(results);
                 setShowSuggestions(results.length > 0);
             } catch {
@@ -210,7 +203,7 @@ export default function CheckinSheet({ preSelectedRoomId }: { preSelectedRoomId?
         }
     };
 
-    const applySuggestion = (s: GuestSuggestion) => {
+    const applySuggestion = (s: GuestSummary) => {
         setGuests((prev) =>
             prev.map((g, i) =>
                 i === 0
@@ -398,8 +391,8 @@ export default function CheckinSheet({ preSelectedRoomId }: { preSelectedRoomId?
                             >
                                 <option value="">Chọn phòng...</option>
                                 {vacantRooms.map((r) => (
-                                    <option key={r.id} value={r.id}>
-                                        {r.id} — {r.type === "deluxe" ? "Deluxe" : "Standard"} (
+                                <option key={r.id} value={r.id}>
+                                        {r.id} — {getRoomTypeLabel(r.type)} (
                                         {fmtMoney(r.base_price)})
                                     </option>
                                 ))}

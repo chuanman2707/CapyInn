@@ -4,11 +4,12 @@ import { useHotelStore } from "../stores/useHotelStore";
 import { CalendarDays, User, Phone, CreditCard, AlertTriangle, FileText } from "lucide-react";
 import { Sheet, SheetContent, SheetHeader, SheetTitle } from "@/components/ui/sheet";
 import { Button } from "@/components/ui/button";
+import { useAvailability } from "@/hooks/useAvailability";
+import { useInvoiceDialog } from "@/hooks/useInvoiceDialog";
 import { fmtNumber } from "@/lib/format";
 import { toast } from "sonner";
 import InvoiceDialog from "./InvoiceDialog";
-import type { InvoiceData } from "./InvoicePDF";
-import type { AvailabilityResult, EditableBooking } from "@/types";
+import type { EditableBooking } from "@/types";
 
 interface Props {
     open: boolean;
@@ -30,26 +31,21 @@ export default function ReservationSheet({ open, onOpenChange, preSelectedRoomId
     const [source, setSource] = useState("phone");
     const [notes, setNotes] = useState("");
     const [loading, setLoading] = useState(false);
-    const [availability, setAvailability] = useState<AvailabilityResult | null>(null);
-    const [checkingAvail, setCheckingAvail] = useState(false);
-    const [invoiceOpen, setInvoiceOpen] = useState(false);
-    const [invoiceData, setInvoiceData] = useState<InvoiceData | null>(null);
-    const [invoiceLoading, setInvoiceLoading] = useState(false);
+    const { invoiceOpen, invoiceData, invoiceLoading, openInvoice, closeInvoice } = useInvoiceDialog();
 
     const handleInvoice = async () => {
         if (!editBooking) return;
-        setInvoiceLoading(true);
-        try {
-            const data = await invoke<InvoiceData>("generate_invoice", { bookingId: editBooking.id });
-            setInvoiceData(data);
-            setInvoiceOpen(true);
-        } catch (err) {
-            toast.error("Lỗi tạo invoice: " + err);
-        }
-        setInvoiceLoading(false);
+        await openInvoice(editBooking.id);
     };
 
     const isEditMode = !!editBooking;
+    const { availability, loading: checkingAvail, reset: resetAvailability } = useAvailability({
+        roomId,
+        fromDate: checkInDate,
+        toDate: checkOutDate,
+        disabled: isEditMode,
+        debounceMs: 300,
+    });
 
     useEffect(() => {
         if (open) {
@@ -86,31 +82,6 @@ export default function ReservationSheet({ open, onOpenChange, preSelectedRoomId
         d.setDate(d.getDate() + n);
         setCheckOutDate(d.toISOString().split("T")[0]);
     }
-
-    // Check availability when room + dates change (skip in edit mode — backend handles it)
-    useEffect(() => {
-        if (isEditMode) {
-            setAvailability(null);
-            return;
-        }
-        if (!roomId || !checkInDate || !checkOutDate) {
-            setAvailability(null);
-            return;
-        }
-        const timer = setTimeout(async () => {
-            setCheckingAvail(true);
-            try {
-                const result = await invoke<AvailabilityResult>("check_availability", {
-                    roomId, fromDate: checkInDate, toDate: checkOutDate,
-                });
-                setAvailability(result);
-            } catch {
-                setAvailability(null);
-            }
-            setCheckingAvail(false);
-        }, 300);
-        return () => clearTimeout(timer);
-    }, [roomId, checkInDate, checkOutDate]);
 
     async function handleSubmit() {
         if (!roomId || !checkInDate || !checkOutDate) {
@@ -172,7 +143,7 @@ export default function ReservationSheet({ open, onOpenChange, preSelectedRoomId
         setSource("phone");
         setNotes("");
         setNights(1);
-        setAvailability(null);
+        resetAvailability();
     }
 
     const vacantRooms = rooms.filter((r) => r.status === "vacant" || r.status === "booked");
@@ -402,7 +373,9 @@ export default function ReservationSheet({ open, onOpenChange, preSelectedRoomId
             {/* Invoice Dialog */}
             <InvoiceDialog
                 open={invoiceOpen}
-                onOpenChange={setInvoiceOpen}
+                onOpenChange={(nextOpen) => {
+                    if (!nextOpen) closeInvoice();
+                }}
                 data={invoiceData}
             />
         </Sheet>

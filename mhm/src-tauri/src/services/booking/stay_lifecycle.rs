@@ -9,7 +9,10 @@ use crate::{
 use super::{
     billing_service::{record_charge_tx, record_payment_tx},
     guest_service::{create_guest_manifest, link_booking_guests},
-    support::{begin_tx, parse_booking_datetime},
+    support::{
+        begin_tx, fetch_booking, insert_room_calendar_rows, parse_booking_datetime,
+        read_f64_or_zero, CalendarInsertMode,
+    },
 };
 
 pub async fn check_in(
@@ -140,7 +143,13 @@ pub async fn check_in(
 
     tx.commit().await.map_err(BookingError::from)?;
 
-    fetch_booking(pool, &booking_id).await
+    fetch_booking(
+        pool,
+        &booking_id,
+        format!("Không tìm thấy booking {}", booking_id),
+        read_f64_or_zero,
+    )
+    .await
 }
 
 pub async fn check_out(pool: &Pool<Sqlite>, req: CheckOutRequest) -> BookingResult<()> {
@@ -161,7 +170,7 @@ pub async fn check_out(pool: &Pool<Sqlite>, req: CheckOutRequest) -> BookingResu
     })?;
 
     let room_id: String = booking.get("room_id");
-    let already_paid = read_f64(&booking, "paid_amount");
+    let already_paid = read_f64_or_zero(&booking, "paid_amount");
 
     if let Some(final_paid) = req.final_paid {
         let delta = final_paid - already_paid;
@@ -224,7 +233,7 @@ pub async fn extend_stay(pool: &Pool<Sqlite>, booking_id: &str) -> BookingResult
 
     let room_id: String = booking.get("room_id");
     let current_nights: i32 = booking.get("nights");
-    let current_total = read_f64(&booking, "total_price");
+    let current_total = read_f64_or_zero(&booking, "total_price");
     let old_expected_checkout: String = booking.get("expected_checkout");
     let pricing_type = booking
         .get::<Option<String>, _>("pricing_type")
@@ -306,7 +315,13 @@ pub async fn extend_stay(pool: &Pool<Sqlite>, booking_id: &str) -> BookingResult
 
     tx.commit().await.map_err(BookingError::from)?;
 
-    fetch_booking(pool, booking_id).await
+    fetch_booking(
+        pool,
+        booking_id,
+        format!("Không tìm thấy booking {}", booking_id),
+        read_f64_or_zero,
+    )
+    .await
 }
 
 fn validate_check_in_request(req: &CheckInRequest) -> BookingResult<()> {
@@ -331,64 +346,14 @@ async fn insert_occupied_calendar_rows(
     start_date: NaiveDate,
     end_date: NaiveDate,
 ) -> BookingResult<()> {
-    let mut date = start_date;
-    while date < end_date {
-        sqlx::query(
-            "INSERT OR REPLACE INTO room_calendar (room_id, date, booking_id, status)
-             VALUES (?, ?, ?, ?)",
-        )
-        .bind(room_id)
-        .bind(date.format("%Y-%m-%d").to_string())
-        .bind(booking_id)
-        .bind(status::calendar::OCCUPIED)
-        .execute(&mut **tx)
-        .await?;
-        date += Duration::days(1);
-    }
-
-    Ok(())
-}
-
-async fn fetch_booking(pool: &Pool<Sqlite>, booking_id: &str) -> BookingResult<Booking> {
-    let row = sqlx::query(
-        "SELECT id, room_id, primary_guest_id, check_in_at, expected_checkout,
-                actual_checkout, nights, total_price, paid_amount, status,
-                source, notes, created_at
-         FROM bookings WHERE id = ?",
+    insert_room_calendar_rows(
+        tx,
+        room_id,
+        booking_id,
+        start_date,
+        end_date,
+        status::calendar::OCCUPIED,
+        CalendarInsertMode::InsertOrReplace,
     )
-    .bind(booking_id)
-    .fetch_optional(pool)
-    .await?;
-
-    let row = row
-        .ok_or_else(|| BookingError::not_found(format!("Không tìm thấy booking {}", booking_id)))?;
-
-    Ok(Booking {
-        id: row.get("id"),
-        room_id: row.get("room_id"),
-        primary_guest_id: row.get("primary_guest_id"),
-        check_in_at: row.get("check_in_at"),
-        expected_checkout: row.get("expected_checkout"),
-        actual_checkout: row.get("actual_checkout"),
-        nights: row.get("nights"),
-        total_price: read_f64(&row, "total_price"),
-        paid_amount: read_f64(&row, "paid_amount"),
-        status: row.get("status"),
-        source: row.get("source"),
-        notes: row.get("notes"),
-        created_at: row.get("created_at"),
-    })
-}
-
-fn read_f64(row: &sqlx::sqlite::SqliteRow, column: &str) -> f64 {
-    row.try_get::<Option<f64>, _>(column)
-        .ok()
-        .flatten()
-        .or_else(|| {
-            row.try_get::<Option<i64>, _>(column)
-                .ok()
-                .flatten()
-                .map(|value| value as f64)
-        })
-        .unwrap_or(0.0)
+    .await
 }

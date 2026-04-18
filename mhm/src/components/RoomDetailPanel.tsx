@@ -1,5 +1,4 @@
 import { useState } from "react";
-import { invoke } from "@tauri-apps/api/core";
 import {
   ArrowLeft,
   Building2,
@@ -14,7 +13,6 @@ import {
 import { toast } from "sonner";
 
 import InvoiceDialog from "@/components/InvoiceDialog";
-import type { InvoiceData } from "@/components/InvoicePDF";
 import InfoItem from "@/components/shared/InfoItem";
 import ActionBtn from "@/components/shared/ActionBtn";
 import PaymentBlock from "@/components/shared/PaymentBlock";
@@ -23,7 +21,8 @@ import Section from "@/components/shared/Section";
 import StatusBadge from "@/components/shared/StatusBadge";
 import SlideDrawer from "@/components/shared/SlideDrawer";
 import { Button } from "@/components/ui/button";
-import { ROOM_TYPE_LABELS } from "@/lib/constants";
+import { useInvoiceDialog } from "@/hooks/useInvoiceDialog";
+import { getRoomTypeLabel } from "@/lib/constants";
 import { fmtDate, fmtDateShort, fmtMoney } from "@/lib/format";
 import Modal from "@/components/ui/Modal";
 import { useHotelStore } from "@/stores/useHotelStore";
@@ -53,9 +52,7 @@ export default function RoomDetailPanel({
   const [showCheckout, setShowCheckout] = useState(false);
   const [finalPaid, setFinalPaid] = useState(0);
   const [copied, setCopied] = useState(false);
-  const [invoiceOpen, setInvoiceOpen] = useState(false);
-  const [invoiceData, setInvoiceData] = useState<InvoiceData | null>(null);
-  const [invoiceLoading, setInvoiceLoading] = useState(false);
+  const { invoiceOpen, invoiceData, invoiceLoading, openInvoice, closeInvoice } = useInvoiceDialog();
 
   const resolvedRoomDetail = roomDetailProp ?? null;
   const isLoading = !roomDetailProp && loading;
@@ -116,19 +113,10 @@ export default function RoomDetailPanel({
 
   const handleInvoice = async () => {
     if (!booking) return;
-    setInvoiceLoading(true);
-    try {
-      const data = await invoke<InvoiceData>("generate_invoice", { bookingId: booking.id });
-      setInvoiceData(data);
-      setInvoiceOpen(true);
-    } catch (err) {
-      toast.error("Lỗi tạo invoice: " + err);
-    } finally {
-      setInvoiceLoading(false);
-    }
+    await openInvoice(booking.id);
   };
 
-  const roomTypeLabel = ROOM_TYPE_LABELS[room.type] ?? room.type;
+  const roomTypeLabel = getRoomTypeLabel(room.type);
   const outstandingAmount = booking ? booking.total_price - booking.paid_amount : 0;
 
   const guestSection = <RoomGuestsSection guests={guests} mode={mode} />;
@@ -310,7 +298,13 @@ export default function RoomDetailPanel({
         </Modal>
       )}
 
-      <InvoiceDialog open={invoiceOpen} onOpenChange={setInvoiceOpen} data={invoiceData} />
+      <InvoiceDialog
+        open={invoiceOpen}
+        onOpenChange={(nextOpen) => {
+          if (!nextOpen) closeInvoice();
+        }}
+        data={invoiceData}
+      />
     </>
   );
 }

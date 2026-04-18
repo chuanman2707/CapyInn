@@ -5,11 +5,20 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { useHotelStore } from "@/stores/useHotelStore";
 import { invoke } from "@tauri-apps/api/core";
+import { getRoomTypeLabel } from "@/lib/constants";
 import { fmtNumber } from "@/lib/format";
 import { toast } from "sonner";
 import ReservationSheet from "@/components/ReservationSheet";
 import RoomDrawer from "@/components/RoomDrawer";
-import type { BookingWithGuest } from "@/types";
+import type { BookingStatus, BookingWithGuest } from "@/types";
+
+type BookingBar = BookingWithGuest & {
+    startCol: number;
+    length: number;
+    color: string;
+    statusLabel: string;
+    isBooked: boolean;
+};
 
 function getDateRange(offset: number) {
     return Array.from({ length: 16 }, (_, i) => {
@@ -31,14 +40,14 @@ function parseDate(s: string): Date {
     return new Date(s + "T12:00:00");
 }
 
-function getBookingBarColor(status: string): string {
+function getBookingBarColor(status: BookingStatus): string {
     if (status === "booked") return "bg-blue-100 text-blue-700 border-blue-300";
     if (status === "active") return "bg-emerald-100 text-emerald-700 border-emerald-300";
     if (status === "checked_out") return "bg-slate-100 text-slate-500 border-slate-200";
     return "bg-orange-100 text-orange-700 border-orange-200";
 }
 
-function getStatusLabel(status: string): string {
+function getStatusLabel(status: BookingStatus): string {
     if (status === "booked") return "Đặt trước";
     if (status === "active") return "Đang ở";
     if (status === "checked_out") return "Đã trả";
@@ -68,10 +77,18 @@ export default function Reservations() {
 
     useEffect(() => { loadBookings(); }, []);
 
-    const roomGroups = [
-        { name: "Deluxe", rooms: rooms.filter((r) => r.type === "deluxe").map((r) => ({ id: r.id, type: r.type })) },
-        { name: "Standard", rooms: rooms.filter((r) => r.type === "standard").map((r) => ({ id: r.id, type: r.type })) },
-    ];
+    const roomGroups = Object.values(
+        rooms.reduce<Record<string, { name: string; rooms: { id: string; type: string }[] }>>((groups, room) => {
+            const existing = groups[room.type] ?? {
+                name: getRoomTypeLabel(room.type),
+                rooms: [],
+            };
+
+            existing.rooms.push({ id: room.id, type: room.type });
+            groups[room.type] = existing;
+            return groups;
+        }, {}),
+    ).sort((left, right) => left.name.localeCompare(right.name, "vi"));
 
     const normalizedQuery = searchQuery.trim().toLocaleLowerCase();
     const visibleBookings = normalizedQuery
@@ -95,10 +112,10 @@ export default function Reservations() {
     const checkedOutCount = visibleBookings.filter(b => b.status === "checked_out").length;
     const totalCount = visibleBookings.length;
 
-    function getBookingBars(roomId: string) {
+    function getBookingBars(roomId: string): BookingBar[] {
         return visibleBookings
             .filter(b => b.room_id === roomId && b.status !== "cancelled")
-            .map(b => {
+            .flatMap((b): BookingBar[] => {
                 const checkIn = parseDate(b.scheduled_checkin || b.check_in_at);
                 const checkOut = parseDate(b.scheduled_checkout || b.expected_checkout);
                 const startDay = DAYS[0].dateObj;
@@ -107,7 +124,7 @@ export default function Reservations() {
                 const endCol = Math.max(startCol + 1, Math.ceil((checkOut.getTime() - startDay.getTime()) / (1000 * 60 * 60 * 24)));
                 const length = endCol - startCol;
 
-                if (startCol >= 16 || endCol <= 0) return null;
+                if (startCol >= 16 || endCol <= 0) return [];
 
                 const clampedStart = Math.max(0, startCol);
                 const clampedLength = Math.min(length, 16 - clampedStart);
@@ -116,9 +133,8 @@ export default function Reservations() {
                 const color = getBookingBarColor(b.status);
                 const statusLabel = getStatusLabel(b.status);
 
-                return { ...b, startCol: clampedStart, length: clampedLength, color, statusLabel, isBooked };
+                return [{ ...b, startCol: clampedStart, length: clampedLength, color, statusLabel, isBooked }];
             })
-            .filter(Boolean);
     }
 
     async function handleConfirmReservation(bookingId: string) {
@@ -239,7 +255,7 @@ export default function Reservations() {
                                                 <div className="absolute top-0 bottom-0 w-[2px] bg-brand-primary/60 z-20" style={{ left: `${DAYS.findIndex(d => d.isToday) * 80 + 40}px` }} />
                                             )}
 
-                                            {bars.map((bar: any) => (
+                                            {bars.map((bar) => (
                                                 <div
                                                     key={bar.id}
                                                     className="absolute top-1/2 -translate-y-1/2 px-0.5 z-10 cursor-pointer"

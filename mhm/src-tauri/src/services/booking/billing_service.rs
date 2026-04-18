@@ -33,21 +33,6 @@ pub async fn add_folio_line(
 }
 
 #[allow(dead_code)]
-pub async fn record_charge(
-    pool: &Pool<Sqlite>,
-    booking_id: &str,
-    amount: f64,
-    note: impl Into<String>,
-    created_at: impl Into<String>,
-) -> BookingResult<()> {
-    let mut tx = begin_tx(pool).await?;
-    record_charge_tx(&mut tx, booking_id, amount, note, created_at).await?;
-
-    tx.commit().await.map_err(BookingError::from)?;
-    Ok(())
-}
-
-#[allow(dead_code)]
 pub async fn record_payment(
     pool: &Pool<Sqlite>,
     booking_id: &str,

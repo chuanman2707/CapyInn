@@ -1,4 +1,17 @@
 export type RoomStatus = "vacant" | "occupied" | "cleaning" | "booked";
+export type BookingStatus =
+  | "active"
+  | "checked_out"
+  | "booked"
+  | "cancelled"
+  | "no_show";
+export type BookingSource =
+  | "walk-in"
+  | "phone"
+  | "agoda"
+  | "booking.com"
+  | "online"
+  | "ai-agent";
 
 export interface Room {
   id: string;
@@ -36,8 +49,8 @@ export interface Booking {
   nights: number;
   total_price: number;
   paid_amount: number;
-  status: string;
-  source?: string;
+  status: BookingStatus;
+  source?: BookingSource | null;
   notes?: string;
   created_at: string;
 }
@@ -126,7 +139,7 @@ export interface GuestInput {
   address: string;
 }
 
-export interface GuestSuggestion {
+export interface GuestSummary {
   id: string;
   full_name: string;
   doc_number: string;
@@ -135,6 +148,8 @@ export interface GuestSuggestion {
   total_spent: number;
   last_visit: string | null;
 }
+
+export type GuestSuggestion = GuestSummary;
 
 export interface AvailabilityResult {
   available: boolean;
@@ -223,8 +238,8 @@ export interface BookingWithGuest {
   nights: number;
   total_price: number;
   paid_amount: number;
-  status: string;
-  source: string | null;
+  status: BookingStatus;
+  source: BookingSource | null;
   booking_type: string | null;
   deposit_amount: number | null;
   scheduled_checkin: string | null;
@@ -253,16 +268,6 @@ export interface RoomAvailability {
   room: { id: string };
   upcoming_reservations: { scheduled_checkin: string }[];
   next_available_until: string | null;
-}
-
-export interface GuestSummary {
-  id: string;
-  full_name: string;
-  doc_number: string;
-  nationality: string | null;
-  total_stays: number;
-  total_spent: number;
-  last_visit: string | null;
 }
 
 export interface AuditLog {

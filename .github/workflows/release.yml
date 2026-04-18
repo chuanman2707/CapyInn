@@ -1,0 +1,183 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  NODE_VERSION: "20"
+  PROJECT_PATH: mhm
+  RELEASE_CONFIG_PATH: src-tauri/tauri.release.conf.json
+
+jobs:
+  publish-tauri:
+    permissions:
+      contents: write
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: ubuntu-22.04
+            args: ""
+          - platform: windows-latest
+            args: ""
+
+    runs-on: ${{ matrix.platform }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: mhm/package-lock.json
+
+      - name: Verify release version and derive metadata
+        shell: bash
+        working-directory: mhm
+        run: |
+          app_version="$(node -p "require('./src-tauri/tauri.conf.json').version")"
+          expected_tag="v${app_version}"
+
+          echo "APP_VERSION=${app_version}" >> "$GITHUB_ENV"
+
+          if [[ "${app_version}" == *-* ]] || [[ "${GITHUB_REF_NAME}" == *-* ]]; then
+            echo "IS_PRERELEASE=true" >> "$GITHUB_ENV"
+          else
+            echo "IS_PRERELEASE=false" >> "$GITHUB_ENV"
+          fi
+
+          if [ "${GITHUB_REF_TYPE}" = "tag" ] && [ "${GITHUB_REF_NAME}" != "${expected_tag}" ]; then
+            echo "Expected tag ${expected_tag}, got ${GITHUB_REF_NAME}"
+            exit 1
+          fi
+
+      - name: Compute Tauri build arguments
+        shell: bash
+        run: |
+          config_arg="--config ${{ env.RELEASE_CONFIG_PATH }}"
+          if [ -n "${{ matrix.args }}" ]; then
+            echo "TAURI_BUILD_ARGS=${{ matrix.args }} ${config_arg}" >> "$GITHUB_ENV"
+          else
+            echo "TAURI_BUILD_ARGS=${config_arg}" >> "$GITHUB_ENV"
+          fi
+
+      - name: Install Linux dependencies
+        if: matrix.platform == 'ubuntu-22.04'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf
+
+      - name: Setup Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            mhm/src-tauri -> target
+
+      - name: Install frontend dependencies
+        working-directory: mhm
+        run: npm ci
+
+      - name: Validate Windows signing secrets
+        if: matrix.platform == 'windows-latest'
+        shell: pwsh
+        env:
+          WINDOWS_CERTIFICATE: ${{ secrets.WINDOWS_CERTIFICATE }}
+          WINDOWS_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
+        run: |
+          if ([string]::IsNullOrWhiteSpace($env:WINDOWS_CERTIFICATE) -and -not [string]::IsNullOrWhiteSpace($env:WINDOWS_CERTIFICATE_PASSWORD)) {
+            Write-Error "WINDOWS_CERTIFICATE_PASSWORD is set but WINDOWS_CERTIFICATE is missing"
+            exit 1
+          }
+
+          if (-not [string]::IsNullOrWhiteSpace($env:WINDOWS_CERTIFICATE) -and [string]::IsNullOrWhiteSpace($env:WINDOWS_CERTIFICATE_PASSWORD)) {
+            Write-Error "WINDOWS_CERTIFICATE is set but WINDOWS_CERTIFICATE_PASSWORD is missing"
+            exit 1
+          }
+
+      - name: Import Windows signing certificate
+        if: matrix.platform == 'windows-latest'
+        shell: pwsh
+        env:
+          WINDOWS_CERTIFICATE: ${{ secrets.WINDOWS_CERTIFICATE }}
+          WINDOWS_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
+        run: |
+          if ([string]::IsNullOrWhiteSpace($env:WINDOWS_CERTIFICATE)) {
+            Write-Host "No Windows signing certificate configured, continuing with unsigned Windows build."
+            exit 0
+          }
+
+          New-Item -ItemType Directory -Force -Path certificate | Out-Null
+          Set-Content -Path certificate/tempCert.txt -Value $env:WINDOWS_CERTIFICATE
+          certutil -decode certificate/tempCert.txt certificate/certificate.pfx | Out-Null
+          Remove-Item certificate/tempCert.txt
+          $cert = Import-PfxCertificate -FilePath certificate/certificate.pfx -CertStoreLocation Cert:\CurrentUser\My -Password (ConvertTo-SecureString -String $env:WINDOWS_CERTIFICATE_PASSWORD -Force -AsPlainText)
+          if (-not $cert) {
+            Write-Error "Failed to import Windows signing certificate"
+            exit 1
+          }
+
+          $thumbprint = ($cert | Select-Object -First 1).Thumbprint
+          "WINDOWS_CERTIFICATE_THUMBPRINT=$thumbprint" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+
+      - name: Prepare release config
+        shell: bash
+        working-directory: mhm
+        env:
+          WINDOWS_CERTIFICATE_THUMBPRINT: ${{ env.WINDOWS_CERTIFICATE_THUMBPRINT }}
+          WINDOWS_TIMESTAMP_URL: ${{ vars.WINDOWS_TIMESTAMP_URL }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+        run: |
+          node <<'NODE'
+          const fs = require("fs");
+          const path = require("path");
+
+          const configPath = path.join("src-tauri", "tauri.conf.json");
+          const releaseConfigPath = path.join("src-tauri", "tauri.release.conf.json");
+          const config = JSON.parse(fs.readFileSync(configPath, "utf8"));
+
+          config.bundle = config.bundle || {};
+
+          if (process.env.TAURI_SIGNING_PRIVATE_KEY) {
+            config.bundle.createUpdaterArtifacts = true;
+          }
+
+          if (process.env.RUNNER_OS === "Windows" && process.env.WINDOWS_CERTIFICATE_THUMBPRINT) {
+            config.bundle.windows = {
+              ...(config.bundle.windows || {}),
+              certificateThumbprint: process.env.WINDOWS_CERTIFICATE_THUMBPRINT,
+              digestAlgorithm: "sha256",
+              timestampUrl: process.env.WINDOWS_TIMESTAMP_URL || "http://timestamp.digicert.com"
+            };
+          }
+
+          fs.writeFileSync(releaseConfigPath, `${JSON.stringify(config, null, 2)}\n`);
+          NODE
+
+      - name: Build and publish release assets
+        uses: tauri-apps/tauri-action@action-v0.6.2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        with:
+          projectPath: ${{ env.PROJECT_PATH }}
+          tagName: v__VERSION__
+          releaseName: CapyInn v__VERSION__
+          releaseBody: Signed release build for CapyInn. Download the installer that matches your platform from the assets below.
+          releaseDraft: false
+          prerelease: ${{ env.IS_PRERELEASE == 'true' }}
+          uploadWorkflowArtifacts: true
+          args: ${{ env.TAURI_BUILD_ARGS }}

@@ -21,14 +21,30 @@ const DEFAULT_PORT: u16 = 61234;
 const PORT_RANGE: std::ops::Range<u16> = 61234..61244;
 
 /// API key middleware for MCP routes.
-/// When no keys are configured (initial setup), all requests pass through.
-/// Once keys exist, a valid `Authorization: Bearer <key>` header is required.
+/// Before setup completes, requests may pass through for bootstrap flows.
+/// After setup completes, a valid `Authorization: Bearer <key>` header is required,
+/// even if no API key has been generated yet.
+async fn should_enforce_api_key(pool: &Pool<Sqlite>) -> bool {
+    if super::auth::has_api_keys(pool).await {
+        return true;
+    }
+
+    match sqlx::query_scalar::<_, String>("SELECT value FROM settings WHERE key = ? LIMIT 1")
+        .bind("setup_completed")
+        .fetch_optional(pool)
+        .await
+    {
+        Ok(value) => matches!(value.as_deref(), Some("true")),
+        Err(_) => true,
+    }
+}
+
 async fn require_api_key(
     State(pool): State<Pool<Sqlite>>,
     request: Request,
     next: Next,
 ) -> Result<Response, StatusCode> {
-    if !super::auth::has_api_keys(&pool).await {
+    if !should_enforce_api_key(&pool).await {
         return Ok(next.run(request).await);
     }
 
@@ -117,4 +133,76 @@ pub async fn start_server(
         shutdown_tx,
         server_task,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::require_api_key;
+    use axum::{
+        body::Body,
+        http::{Request, StatusCode},
+        middleware,
+        routing::get,
+        Router,
+    };
+    use sqlx::{sqlite::SqlitePoolOptions, Pool, Sqlite};
+    use tower::util::ServiceExt;
+
+    async fn test_pool() -> Pool<Sqlite> {
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+        crate::db::run_migrations(&pool).await.unwrap();
+        sqlx::query("INSERT INTO settings (key, value) VALUES ('setup_completed', 'false')")
+            .execute(&pool)
+            .await
+            .unwrap();
+        pool
+    }
+
+    fn test_router(pool: Pool<Sqlite>) -> Router {
+        Router::new()
+            .route("/mcp", get(|| async { StatusCode::OK }))
+            .route_layer(middleware::from_fn_with_state(pool, require_api_key))
+    }
+
+    #[tokio::test]
+    async fn mcp_allows_requests_before_setup_when_no_api_keys_exist() {
+        let pool = test_pool().await;
+
+        let response = test_router(pool)
+            .oneshot(
+                Request::builder()
+                    .uri("/mcp")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn mcp_requires_auth_after_setup_even_without_api_keys() {
+        let pool = test_pool().await;
+        sqlx::query("UPDATE settings SET value = 'true' WHERE key = 'setup_completed'")
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        let response = test_router(pool)
+            .oneshot(
+                Request::builder()
+                    .uri("/mcp")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
 }
