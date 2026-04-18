@@ -248,10 +248,34 @@ impl BackupCoordinator {
         Run: FnOnce() -> RunFuture,
         RunFuture: std::future::Future<Output = Result<BackupOutcome, BackupRequestError>>,
     {
+        self.request_backup_with_before_enqueue(reason, emit, || async {}, run_backup)
+            .await
+    }
+
+    async fn request_backup_with_before_enqueue<Emit, BeforeEnqueue, BeforeEnqueueFuture, Run, RunFuture>(
+        &self,
+        reason: BackupReason,
+        emit: Emit,
+        before_enqueue: BeforeEnqueue,
+        run_backup: Run,
+    ) -> Result<BackupOutcome, BackupRequestError>
+    where
+        Emit: Fn(BackupStatusPayload),
+        BeforeEnqueue: FnOnce() -> BeforeEnqueueFuture,
+        BeforeEnqueueFuture: std::future::Future<Output = ()>,
+        Run: FnOnce() -> RunFuture,
+        RunFuture: std::future::Future<Output = Result<BackupOutcome, BackupRequestError>>,
+    {
         self.ensure_request_allowed(reason)?;
+        before_enqueue().await;
+        self.pending_jobs.fetch_add(1, Ordering::SeqCst);
+
+        if let Err(error) = self.ensure_request_allowed(reason) {
+            self.pending_jobs.fetch_sub(1, Ordering::SeqCst);
+            return Err(error);
+        }
 
         let job_id = self.next_job_id.fetch_add(1, Ordering::SeqCst) + 1;
-        self.pending_jobs.fetch_add(1, Ordering::SeqCst);
         let _guard = self.gate.lock().await;
 
         let started_pending_jobs = self.pending_jobs.load(Ordering::SeqCst);
@@ -1111,5 +1135,49 @@ mod tests {
         ];
 
         assert_eq!(actual, expected);
+    }
+
+    #[tokio::test]
+    async fn request_backup_rejects_job_that_loses_admission_race_to_shutdown() {
+        let coordinator = Arc::new(BackupCoordinator::new());
+        let before_enqueue_reached = Arc::new(Notify::new());
+        let release_before_enqueue = Arc::new(Notify::new());
+        let ran_backup = Arc::new(AtomicBool::new(false));
+
+        let request = {
+            let coordinator = coordinator.clone();
+            let before_enqueue_reached = before_enqueue_reached.clone();
+            let release_before_enqueue = release_before_enqueue.clone();
+            let ran_backup = ran_backup.clone();
+            tokio::spawn(async move {
+                coordinator
+                    .request_backup_with_before_enqueue(
+                        BackupReason::Settings,
+                        |_| panic!("rejected requests must not emit backup status"),
+                        move || async move {
+                            before_enqueue_reached.notify_one();
+                            release_before_enqueue.notified().await;
+                        },
+                        move || async move {
+                            ran_backup.store(true, Ordering::SeqCst);
+                            Ok(fake_backup_outcome("should-not-run.db"))
+                        },
+                    )
+                    .await
+            })
+        };
+
+        before_enqueue_reached.notified().await;
+        coordinator.mark_shutdown_started();
+        release_before_enqueue.notify_one();
+
+        let result = request.await.unwrap();
+
+        assert!(matches!(
+            result,
+            Err(BackupRequestError::ShutdownInProgress)
+        ));
+        assert_eq!(coordinator.pending_jobs.load(Ordering::SeqCst), 0);
+        assert!(!ran_backup.load(Ordering::SeqCst));
     }
 }
