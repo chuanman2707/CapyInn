@@ -66,6 +66,12 @@ pub enum BackupError {
     Sqlx(sqlx::Error),
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum BackupRequestErrorKind {
+    ShutdownSkip,
+    Failure,
+}
+
 impl fmt::Display for BackupError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -86,6 +92,25 @@ impl From<io::Error> for BackupError {
 impl From<sqlx::Error> for BackupError {
     fn from(error: sqlx::Error) -> Self {
         Self::Sqlx(error)
+    }
+}
+
+pub fn classify_backup_request_error(message: &str) -> BackupRequestErrorKind {
+    if message == "backup skipped because shutdown is in progress" {
+        BackupRequestErrorKind::ShutdownSkip
+    } else {
+        BackupRequestErrorKind::Failure
+    }
+}
+
+pub fn log_backup_request_error(context: &str, message: &str) {
+    match classify_backup_request_error(message) {
+        BackupRequestErrorKind::ShutdownSkip => {
+            log::warn!("autobackup skipped after {context}: {message}");
+        }
+        BackupRequestErrorKind::Failure => {
+            log::error!("autobackup failed after {context}: {message}");
+        }
     }
 }
 
@@ -793,5 +818,19 @@ mod tests {
             result.unwrap_err(),
             "backup skipped because shutdown is in progress"
         );
+    }
+
+    #[test]
+    fn classifies_shutdown_skip_errors_for_logging() {
+        let shutdown_skip = classify_backup_request_error(
+            "backup skipped because shutdown is in progress",
+        );
+        assert!(matches!(
+            shutdown_skip,
+            BackupRequestErrorKind::ShutdownSkip
+        ));
+
+        let actual_failure = classify_backup_request_error("disk full");
+        assert!(matches!(actual_failure, BackupRequestErrorKind::Failure));
     }
 }

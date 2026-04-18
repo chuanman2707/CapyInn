@@ -25,7 +25,7 @@ pub async fn save_settings(
     if let Err(error) =
         crate::backup::request_backup(&app, crate::backup::BackupReason::Settings).await
     {
-        log::error!("autobackup failed after save_settings: {}", error);
+        crate::backup::log_backup_request_error("save_settings", &error);
     }
 
     Ok(())

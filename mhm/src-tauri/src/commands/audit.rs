@@ -24,7 +24,7 @@ pub async fn run_night_audit(
     if let Err(error) =
         crate::backup::request_backup(&app, crate::backup::BackupReason::NightAudit).await
     {
-        log::error!("autobackup failed after night audit: {}", error);
+        crate::backup::log_backup_request_error("night audit", &error);
     }
 
     Ok(log)
@@ -49,7 +49,12 @@ pub async fn backup_database(
     app: tauri::AppHandle,
 ) -> Result<String, String> {
     require_admin(&state)?;
-    let outcome = crate::backup::request_backup(&app, crate::backup::BackupReason::Manual).await?;
+    let outcome = crate::backup::request_backup(&app, crate::backup::BackupReason::Manual)
+        .await
+        .map_err(|error| {
+            crate::backup::log_backup_request_error("manual backup", &error);
+            error
+        })?;
     Ok(outcome.path.to_string_lossy().to_string())
 }
 

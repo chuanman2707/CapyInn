@@ -172,7 +172,7 @@ pub async fn check_out(
     if let Err(error) =
         crate::backup::request_backup(&app, crate::backup::BackupReason::Checkout).await
     {
-        log::error!("autobackup failed after check_out: {}", error);
+        crate::backup::log_backup_request_error("check_out", &error);
     }
 
     Ok(())

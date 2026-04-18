@@ -37,7 +37,7 @@ pub async fn group_checkout(
     if let Err(error) =
         crate::backup::request_backup(&app, crate::backup::BackupReason::GroupCheckout).await
     {
-        log::error!("autobackup failed after group_checkout: {}", error);
+        crate::backup::log_backup_request_error("group_checkout", &error);
     }
 
     Ok(())
