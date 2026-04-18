@@ -71,3 +71,6 @@ coverage/
 *.tar.gz
 .gitnexus/
 .worktrees/
+
+# Private docs / planning notes
+/docs/
