@@ -302,12 +302,12 @@ export default function GroupManagement() {
 
                             {detail.group.status !== "completed" && (
                                 <div className="bg-slate-50 rounded-xl p-3 space-y-2">
-                                    <div className="grid grid-cols-2 gap-2">
+                                    <div className="grid grid-cols-[1fr_100px] gap-2">
                                         <Input value={svcName} onChange={(e) => setSvcName(e.target.value)} placeholder="Tên dịch vụ" className="text-sm" />
-                                        <Input type="number" value={svcPrice} onChange={(e) => setSvcPrice(+e.target.value)} placeholder="Đơn giá" className="text-sm" />
+                                        <Input type="number" value={svcPrice} onChange={(e) => setSvcPrice(+e.target.value)} placeholder="Đơn giá" className="text-sm text-right" />
                                     </div>
-                                    <div className="grid grid-cols-2 gap-2">
-                                        <Input type="number" value={svcQty} onChange={(e) => setSvcQty(+e.target.value)} min={1} placeholder="SL" className="text-sm" />
+                                    <div className="grid grid-cols-[80px_1fr] gap-2">
+                                        <Input type="number" value={svcQty} onChange={(e) => setSvcQty(+e.target.value)} min={1} placeholder="SL" className="text-sm text-center" />
                                         <Input value={svcNote} onChange={(e) => setSvcNote(e.target.value)} placeholder="Ghi chú" className="text-sm" />
                                     </div>
                                     <Button onClick={handleAddService} className="w-full rounded-lg text-sm" disabled={!svcName.trim() || svcPrice <= 0}>

@@ -3,8 +3,6 @@
 Thumbs.db
 
 # === Editor / IDE ===
-.vscode/*
-!.vscode/extensions.json
 .idea/
 *.suo
 *.ntvs*
@@ -66,8 +64,6 @@ mhm/Scans/
 coverage/
 
 # === Environment variables ===
-.env
-.env.local
 .env.*.local
 
 # === Misc ===
@@ -75,3 +71,8 @@ coverage/
 *.tar.gz
 .gitnexus/
 .worktrees/
+temp_auto_push.bat
+temp_interactive_push.bat
+.gitignore
+config.bat
+branch_structure.json
