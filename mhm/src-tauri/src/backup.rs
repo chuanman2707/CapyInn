@@ -1,19 +1,20 @@
-use chrono::NaiveDateTime;
-use chrono::Utc;
 use serde::Serialize;
 use std::{
-    fs,
-    path::{Path, PathBuf},
+    path::PathBuf,
     sync::atomic::{AtomicBool, AtomicUsize, Ordering},
     time::Duration,
 };
 use tauri::{AppHandle, Emitter, Manager};
 
+mod runner;
 mod storage;
+#[cfg(test)]
+mod test_support;
 mod types;
 
 #[allow(unused_imports)]
 pub use storage::{build_backup_filename, is_managed_backup_file, prune_old_backups};
+pub use runner::run_backup_once;
 #[allow(unused_imports)]
 pub use types::BackupRequestErrorKind;
 #[allow(unused_imports)]
@@ -21,8 +22,6 @@ pub use types::{
     log_backup_request_error, BackupError, BackupOutcome, BackupPruneOutcome, BackupReason,
     BackupRequestError,
 };
-
-use storage::{sqlite_string_literal, sync_directory, BackupReservation};
 
 #[derive(Debug, Clone, Serialize)]
 pub struct BackupStatusPayload {
@@ -257,58 +256,6 @@ pub async fn drain_and_backup_on_exit(app: &AppHandle) -> Result<(), BackupReque
     coordinator.drain_and_backup_on_exit(app).await
 }
 
-pub async fn run_backup_once(
-    db_path: &Path,
-    runtime_root: &Path,
-    reason: BackupReason,
-) -> Result<BackupOutcome, BackupError> {
-    run_backup_once_at(db_path, runtime_root, reason, Utc::now().naive_utc(), None).await
-}
-
-async fn run_backup_once_at(
-    db_path: &Path,
-    runtime_root: &Path,
-    reason: BackupReason,
-    timestamp: NaiveDateTime,
-    hold_for: Option<std::time::Duration>,
-) -> Result<BackupOutcome, BackupError> {
-    fs::create_dir_all(runtime_root.join("backups"))?;
-    let backup_dir = runtime_root.join("backups");
-
-    let reservation = BackupReservation::acquire(&backup_dir, reason, timestamp)?;
-    let final_path = reservation.final_path.clone();
-    let temp_path = reservation.temp_path.clone();
-
-    if let Some(duration) = hold_for {
-        tokio::time::sleep(duration).await;
-    }
-
-    let options = sqlx::sqlite::SqliteConnectOptions::new()
-        .filename(db_path)
-        .create_if_missing(false);
-    let pool = sqlx::sqlite::SqlitePoolOptions::new()
-        .max_connections(1)
-        .connect_with(options)
-        .await?;
-
-    let vacuum_target = sqlite_string_literal(&temp_path);
-    sqlx::query(&format!("VACUUM INTO {}", vacuum_target))
-        .execute(&pool)
-        .await?;
-
-    fs::File::open(&temp_path)?.sync_all()?;
-    fs::rename(&temp_path, &final_path)?;
-    sync_directory(&backup_dir)?;
-    drop(reservation);
-
-    let prune = prune_old_backups(&backup_dir, 30);
-
-    Ok(BackupOutcome {
-        path: final_path,
-        prune,
-    })
-}
-
 fn emit_backup_status(app: &AppHandle, payload: BackupStatusPayload) {
     let _ = app.emit("backup-status", payload);
 }
@@ -316,97 +263,10 @@ fn emit_backup_status(app: &AppHandle, payload: BackupStatusPayload) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::backup::test_support::fake_backup_outcome;
     use chrono::NaiveDate;
-    use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
-    use std::{
-        env,
-        sync::{Arc, Mutex},
-        time::{SystemTime, UNIX_EPOCH},
-    };
+    use std::sync::{Arc, Mutex};
     use tokio::sync::Notify;
-
-    struct BackupFixture {
-        db_path: PathBuf,
-        runtime_root: PathBuf,
-        _guard: TempDirGuard,
-    }
-
-    struct TempDirGuard {
-        path: PathBuf,
-    }
-
-    impl Drop for TempDirGuard {
-        fn drop(&mut self) {
-            let _ = fs::remove_dir_all(&self.path);
-        }
-    }
-
-    impl BackupFixture {
-        async fn new() -> Self {
-            let root = make_temp_dir("backup-fixture");
-            let db_path = root.join("capyinn.db");
-
-            let options = SqliteConnectOptions::new()
-                .filename(&db_path)
-                .create_if_missing(true);
-            let pool = SqlitePoolOptions::new()
-                .max_connections(1)
-                .connect_with(options)
-                .await
-                .unwrap();
-
-            sqlx::query(
-                "CREATE TABLE IF NOT EXISTS demo (id INTEGER PRIMARY KEY AUTOINCREMENT, code TEXT NOT NULL)",
-            )
-            .execute(&pool)
-            .await
-            .unwrap();
-
-            Self {
-                db_path,
-                runtime_root: root.clone(),
-                _guard: TempDirGuard { path: root },
-            }
-        }
-
-        async fn insert_demo_row(&self, code: &str) {
-            let options = SqliteConnectOptions::new()
-                .filename(&self.db_path)
-                .create_if_missing(false);
-            let pool = SqlitePoolOptions::new()
-                .max_connections(1)
-                .connect_with(options)
-                .await
-                .unwrap();
-
-            sqlx::query("INSERT INTO demo (code) VALUES (?)")
-                .bind(code)
-                .execute(&pool)
-                .await
-                .unwrap();
-        }
-    }
-
-    fn make_temp_dir(prefix: &str) -> PathBuf {
-        let now = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_nanos();
-        let path = env::temp_dir().join(format!("{}_{}_{}", prefix, std::process::id(), now));
-        fs::create_dir_all(&path).unwrap();
-        path
-    }
-
-    fn backup_file_name(path: &Path) -> String {
-        path.file_name().unwrap().to_string_lossy().into_owned()
-    }
-
-    fn fake_backup_outcome(file_name: &str) -> BackupOutcome {
-        BackupOutcome {
-            path: PathBuf::from(format!("/tmp/{file_name}")),
-            prune: BackupPruneOutcome::default(),
-        }
-    }
 
     #[test]
     fn builds_reason_tagged_backup_filename() {
@@ -419,89 +279,6 @@ mod tests {
             build_backup_filename(BackupReason::Checkout, timestamp),
             "capyinn_backup_checkout_20260418_231500.db"
         );
-    }
-
-    #[tokio::test]
-    async fn run_backup_once_creates_standalone_snapshot_db() {
-        let fixture = BackupFixture::new().await;
-        fixture.insert_demo_row("guest-001").await;
-
-        let outcome = run_backup_once(
-            &fixture.db_path,
-            &fixture.runtime_root,
-            BackupReason::Manual,
-        )
-        .await
-        .expect("backup should succeed");
-
-        assert!(outcome.path.exists());
-
-        let options = SqliteConnectOptions::new()
-            .filename(&outcome.path)
-            .create_if_missing(false);
-        let pool = SqlitePoolOptions::new()
-            .max_connections(1)
-            .connect_with(options)
-            .await
-            .unwrap();
-
-        let copied: (String,) = sqlx::query_as("SELECT code FROM demo LIMIT 1")
-            .fetch_one(&pool)
-            .await
-            .unwrap();
-
-        assert_eq!(copied.0, "guest-001");
-    }
-
-    #[tokio::test]
-    async fn run_backup_once_serializes_concurrent_backups() {
-        let fixture = BackupFixture::new().await;
-        fixture.insert_demo_row("guest-001").await;
-
-        let timestamp = NaiveDate::from_ymd_opt(2026, 4, 18)
-            .unwrap()
-            .and_hms_opt(23, 15, 0)
-            .unwrap();
-
-        let first = run_backup_once_at(
-            &fixture.db_path,
-            &fixture.runtime_root,
-            BackupReason::Manual,
-            timestamp,
-            Some(std::time::Duration::from_millis(50)),
-        );
-        let second = run_backup_once_at(
-            &fixture.db_path,
-            &fixture.runtime_root,
-            BackupReason::Manual,
-            timestamp,
-            None,
-        );
-
-        let (first, second) = tokio::join!(first, second);
-        let first = first.expect("first backup should succeed");
-        let second = second.expect("second backup should succeed");
-
-        let mut managed_files = fs::read_dir(fixture.runtime_root.join("backups"))
-            .unwrap()
-            .map(|entry| backup_file_name(&entry.unwrap().path()))
-            .filter(|name| is_managed_backup_file(name))
-            .collect::<Vec<_>>();
-        managed_files.sort();
-
-        let mut expected = vec![
-            backup_file_name(&first.path),
-            backup_file_name(&second.path),
-        ];
-        expected.sort();
-
-        assert_eq!(managed_files, expected);
-        assert_ne!(
-            backup_file_name(&first.path),
-            backup_file_name(&second.path)
-        );
-        assert!(backup_file_name(&first.path).starts_with("capyinn_backup_manual_20260418_231500"));
-        assert!(backup_file_name(&second.path).starts_with("capyinn_backup_manual_20260418_231500"));
     }
 
     #[tokio::test]
