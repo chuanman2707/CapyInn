@@ -8,7 +8,12 @@ import { vi } from "vitest";
 
 type MockHandler = (args?: Record<string, unknown>) => unknown;
 
-const mockResponses: Record<string, MockHandler> = {};
+const globalState = globalThis as typeof globalThis & {
+    __tauriCoreMockResponses__?: Record<string, MockHandler>;
+};
+
+const mockResponses =
+    globalState.__tauriCoreMockResponses__ ?? (globalState.__tauriCoreMockResponses__ = {});
 
 /** Set a mock response for a specific Tauri command */
 export function setMockResponse(command: string, handler: MockHandler) {
