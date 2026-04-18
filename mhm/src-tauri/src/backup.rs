@@ -4,7 +4,10 @@ use std::{
     fs,
     io,
     path::{Path, PathBuf},
+    sync::atomic::{AtomicU64, Ordering},
 };
+
+static BACKUP_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum BackupReason {
@@ -45,7 +48,15 @@ pub fn is_managed_backup_file(name: &str) -> bool {
 #[derive(Debug)]
 pub struct BackupOutcome {
     pub path: PathBuf,
-    pub pruned_count: usize,
+    pub prune: BackupPruneOutcome,
+}
+
+#[allow(dead_code)]
+#[derive(Debug, Default)]
+pub struct BackupPruneOutcome {
+    pub kept_files: Vec<PathBuf>,
+    pub removed_files: Vec<PathBuf>,
+    pub error: Option<BackupError>,
 }
 
 #[allow(dead_code)]
@@ -75,9 +86,8 @@ pub async fn run_backup_once(
     fs::create_dir_all(runtime_root.join("backups"))?;
     let backup_dir = runtime_root.join("backups");
     let timestamp = Utc::now().naive_utc();
-    let final_name = build_backup_filename(reason, timestamp);
-    let final_path = backup_dir.join(&final_name);
-    let temp_path = backup_dir.join(format!("{final_name}.tmp"));
+    let final_path = reserve_backup_path(&backup_dir, reason, timestamp);
+    let temp_path = final_path.with_extension("db.tmp");
 
     if temp_path.exists() {
         fs::remove_file(&temp_path)?;
@@ -100,61 +110,105 @@ pub async fn run_backup_once(
     fs::rename(&temp_path, &final_path)?;
     sync_directory(&backup_dir)?;
 
-    let pruned_count = prune_old_backups(&backup_dir, 30)?;
+    let prune = prune_old_backups(&backup_dir, 30);
 
     Ok(BackupOutcome {
         path: final_path,
-        pruned_count,
+        prune,
     })
 }
 
-pub fn prune_old_backups(backup_dir: &Path, keep: usize) -> Result<usize, BackupError> {
+pub fn prune_old_backups(backup_dir: &Path, keep: usize) -> BackupPruneOutcome {
+    let mut outcome = BackupPruneOutcome::default();
     if !backup_dir.exists() {
-        return Ok(0);
+        return outcome;
     }
 
     let mut backups = Vec::new();
-    for entry in fs::read_dir(backup_dir)? {
-        let entry = entry?;
+    let entries = match fs::read_dir(backup_dir) {
+        Ok(entries) => entries,
+        Err(error) => {
+            outcome.error = Some(error.into());
+            return outcome;
+        }
+    };
+
+    for entry in entries {
+        let entry = match entry {
+            Ok(entry) => entry,
+            Err(error) => {
+                outcome.error = Some(error.into());
+                return outcome;
+            }
+        };
         let file_name = entry.file_name();
         let file_name = file_name.to_string_lossy().into_owned();
         if !is_managed_backup_file(&file_name) {
             continue;
         }
 
-        let Some((timestamp, _reason)) = parse_backup_filename(&file_name) else {
+        let Some(metadata) = parse_backup_filename(&file_name) else {
             continue;
         };
 
-        backups.push((timestamp, file_name, entry.path()));
+        backups.push((metadata, file_name, entry.path()));
     }
 
-    backups.sort_by(|left, right| right.0.cmp(&left.0).then_with(|| right.1.cmp(&left.1)));
+    backups.sort_by(|left, right| {
+        right
+            .0
+            .timestamp
+            .cmp(&left.0.timestamp)
+            .then_with(|| right.0.collision_index.cmp(&left.0.collision_index))
+            .then_with(|| right.1.cmp(&left.1))
+    });
 
-    let mut removed = 0;
-    for (_, _, path) in backups.into_iter().skip(keep) {
-        fs::remove_file(path)?;
-        removed += 1;
+    outcome.kept_files = backups
+        .iter()
+        .take(keep)
+        .map(|(_, _, path)| path.clone())
+        .collect();
+    outcome.removed_files = backups
+        .iter()
+        .skip(keep)
+        .map(|(_, _, path)| path.clone())
+        .collect();
+
+    for path in outcome.removed_files.clone() {
+        if let Err(error) = fs::remove_file(&path) {
+            outcome.error = Some(error.into());
+            break;
+        }
     }
 
-    Ok(removed)
+    outcome
 }
 
-fn parse_backup_filename(name: &str) -> Option<(NaiveDateTime, BackupReason)> {
+#[derive(Clone, Debug)]
+struct BackupMetadata {
+    timestamp: NaiveDateTime,
+    collision_index: u64,
+}
+
+fn parse_backup_filename(name: &str) -> Option<BackupMetadata> {
     let stem = name.strip_suffix(".db")?;
     let rest = stem.strip_prefix("capyinn_backup_")?;
-    let parts = rest.split('_').collect::<Vec<_>>();
-    if parts.len() < 3 {
-        return None;
-    }
-
-    let reason = parse_backup_reason(&parts[..parts.len() - 2].join("_"))?;
-    let date = parts[parts.len() - 2];
-    let time = parts[parts.len() - 1];
+    let mut parts = rest.rsplitn(3, '_');
+    let time_or_suffix = parts.next()?;
+    let date = parts.next()?;
+    let reason = parts.next()?;
+    let (time, collision_index) = match time_or_suffix.split_once('-') {
+        Some((time, suffix)) => (time, suffix.parse().ok()?),
+        None => (time_or_suffix, 0),
+    };
+    parse_backup_reason(reason)?;
     let timestamp = NaiveDateTime::parse_from_str(&format!("{}_{}", date, time), "%Y%m%d_%H%M%S")
         .ok()?;
 
-    Some((timestamp, reason))
+    Some(BackupMetadata {
+        timestamp,
+        collision_index,
+    })
 }
 
 fn parse_backup_reason(reason: &str) -> Option<BackupReason> {
@@ -172,6 +226,25 @@ fn parse_backup_reason(reason: &str) -> Option<BackupReason> {
 fn sqlite_string_literal(path: &Path) -> String {
     let escaped = path.to_string_lossy().replace('\'', "''");
     format!("'{}'", escaped)
+}
+
+fn reserve_backup_path(backup_dir: &Path, reason: BackupReason, timestamp: NaiveDateTime) -> PathBuf {
+    let base_name = build_backup_filename(reason, timestamp);
+    let base_stem = base_name.strip_suffix(".db").unwrap();
+    let mut collision_index = BACKUP_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+
+    loop {
+        let candidate_name = if collision_index == 0 {
+            base_name.clone()
+        } else {
+            format!("{base_stem}-{collision_index}.db")
+        };
+        let candidate = backup_dir.join(candidate_name);
+        if !candidate.exists() {
+            return candidate;
+        }
+        collision_index += 1;
+    }
 }
 
 #[cfg(unix)]
@@ -266,6 +339,13 @@ mod tests {
         path
     }
 
+    fn backup_file_name(path: &Path) -> String {
+        path.file_name()
+            .unwrap()
+            .to_string_lossy()
+            .into_owned()
+    }
+
     #[test]
     fn builds_reason_tagged_backup_filename() {
         let timestamp = NaiveDate::from_ymd_opt(2026, 4, 18)
@@ -290,9 +370,11 @@ mod tests {
 
         assert!(is_managed_backup_file("capyinn_backup_settings_20260418_231500.db"));
         assert!(is_managed_backup_file("capyinn_backup_app_exit_20260419_000102.db"));
+        assert!(is_managed_backup_file("capyinn_backup_checkout_20260418_231500-1.db"));
         assert!(!is_managed_backup_file("capyinn_backup_unknown_20260418_231500.db"));
         assert!(!is_managed_backup_file("capyinn_backup_manual_20261340_999999.db"));
         assert!(!is_managed_backup_file("capyinn_backup_checkout_20260418_231500.db.tmp"));
+        assert!(!is_managed_backup_file("capyinn_backup_checkout_20260418_231500-abc.db"));
         assert!(!is_managed_backup_file("notes.db"));
     }
 
@@ -325,6 +407,40 @@ mod tests {
         assert_eq!(copied.0, "guest-001");
     }
 
+    #[tokio::test]
+    async fn run_backup_once_uses_distinct_paths_for_back_to_back_backups() {
+        let fixture = BackupFixture::new().await;
+        fixture.insert_demo_row("guest-001").await;
+
+        let first = run_backup_once(&fixture.db_path, &fixture.runtime_root, BackupReason::Manual)
+            .await
+            .expect("first backup should succeed");
+        let second =
+            run_backup_once(&fixture.db_path, &fixture.runtime_root, BackupReason::Manual)
+                .await
+                .expect("second backup should succeed");
+
+        assert_ne!(first.path, second.path);
+        assert!(is_managed_backup_file(&backup_file_name(&first.path)));
+        assert!(is_managed_backup_file(&backup_file_name(&second.path)));
+
+        let backup_dir = fixture.runtime_root.join("backups");
+        let mut managed_files = fs::read_dir(&backup_dir)
+            .unwrap()
+            .map(|entry| backup_file_name(&entry.unwrap().path()))
+            .filter(|name| is_managed_backup_file(name))
+            .collect::<Vec<_>>();
+        managed_files.sort();
+
+        let mut expected = vec![
+            backup_file_name(&first.path),
+            backup_file_name(&second.path),
+        ];
+        expected.sort();
+
+        assert_eq!(managed_files, expected);
+    }
+
     #[test]
     fn prune_old_backups_keeps_newest_thirty_files() {
         let temp = make_temp_dir("backup-prune");
@@ -337,9 +453,31 @@ mod tests {
         }
         fs::write(backup_dir.join("notes.db"), b"keep").unwrap();
 
-        let removed = prune_old_backups(&backup_dir, 30).unwrap();
+        let outcome = prune_old_backups(&backup_dir, 30);
 
-        assert_eq!(removed, 2);
+        let expected_kept = (2..32)
+            .rev()
+            .map(|index| format!("capyinn_backup_manual_20260418_{index:06}.db"))
+            .collect::<Vec<_>>();
+        let expected_removed = vec![
+            "capyinn_backup_manual_20260418_000001.db".to_string(),
+            "capyinn_backup_manual_20260418_000000.db".to_string(),
+        ];
+
+        let kept = outcome
+            .kept_files
+            .iter()
+            .map(|path| backup_file_name(path))
+            .collect::<Vec<_>>();
+        let removed = outcome
+            .removed_files
+            .iter()
+            .map(|path| backup_file_name(path))
+            .collect::<Vec<_>>();
+
+        assert_eq!(kept, expected_kept);
+        assert_eq!(removed, expected_removed);
+        assert!(outcome.error.is_none());
         assert!(backup_dir.join("notes.db").exists());
     }
 }
