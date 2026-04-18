@@ -34,6 +34,12 @@ pub async fn group_checkout(
     emit_db_update(&app, "rooms");
     emit_db_update(&app, "groups");
 
+    if let Err(error) =
+        crate::backup::request_backup(&app, crate::backup::BackupReason::GroupCheckout).await
+    {
+        log::error!("autobackup failed after group_checkout: {}", error);
+    }
+
     Ok(())
 }
 

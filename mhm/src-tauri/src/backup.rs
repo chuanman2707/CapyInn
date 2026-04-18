@@ -1,10 +1,13 @@
 use chrono::NaiveDateTime;
 use chrono::Utc;
+use serde::Serialize;
 use std::{
-    fs,
-    io,
+    fmt, fs, io,
     path::{Path, PathBuf},
+    sync::atomic::{AtomicBool, AtomicUsize, Ordering},
+    time::Duration,
 };
+use tauri::{AppHandle, Emitter, Manager};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum BackupReason {
@@ -63,6 +66,17 @@ pub enum BackupError {
     Sqlx(sqlx::Error),
 }
 
+impl fmt::Display for BackupError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Io(error) => write!(formatter, "{error}"),
+            Self::Sqlx(error) => write!(formatter, "{error}"),
+        }
+    }
+}
+
+impl std::error::Error for BackupError {}
+
 impl From<io::Error> for BackupError {
     fn from(error: io::Error) -> Self {
         Self::Io(error)
@@ -73,6 +87,153 @@ impl From<sqlx::Error> for BackupError {
     fn from(error: sqlx::Error) -> Self {
         Self::Sqlx(error)
     }
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct BackupStatusPayload {
+    pub job_id: String,
+    pub state: &'static str,
+    pub reason: &'static str,
+    pub pending_jobs: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
+}
+
+impl BackupStatusPayload {
+    fn started(job_id: usize, reason: BackupReason, pending_jobs: usize) -> Self {
+        Self {
+            job_id: format!("job-{job_id}"),
+            state: "started",
+            reason: reason.as_str(),
+            pending_jobs,
+            path: None,
+            message: None,
+        }
+    }
+
+    fn completed(job_id: usize, reason: BackupReason, pending_jobs: usize, path: PathBuf) -> Self {
+        Self {
+            job_id: format!("job-{job_id}"),
+            state: "completed",
+            reason: reason.as_str(),
+            pending_jobs,
+            path: Some(path.to_string_lossy().to_string()),
+            message: None,
+        }
+    }
+
+    fn failed(job_id: usize, reason: BackupReason, pending_jobs: usize, message: String) -> Self {
+        Self {
+            job_id: format!("job-{job_id}"),
+            state: "failed",
+            reason: reason.as_str(),
+            pending_jobs,
+            path: None,
+            message: Some(message),
+        }
+    }
+}
+
+#[derive(Default)]
+pub struct BackupCoordinator {
+    gate: tokio::sync::Mutex<()>,
+    pending_jobs: AtomicUsize,
+    shutdown_started: AtomicBool,
+    exit_drain_started: AtomicBool,
+    next_job_id: AtomicUsize,
+}
+
+impl BackupCoordinator {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn mark_shutdown_started(&self) {
+        self.shutdown_started.store(true, Ordering::SeqCst);
+    }
+
+    pub fn begin_exit_drain(&self) -> bool {
+        self.mark_shutdown_started();
+        self.exit_drain_started
+            .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+            .is_ok()
+    }
+
+    pub fn ensure_request_allowed(&self, reason: BackupReason) -> Result<(), String> {
+        if self.shutdown_started.load(Ordering::SeqCst) && reason != BackupReason::AppExit {
+            return Err("backup skipped because shutdown is in progress".to_string());
+        }
+        Ok(())
+    }
+
+    pub async fn request_backup(
+        &self,
+        app: &AppHandle,
+        reason: BackupReason,
+    ) -> Result<BackupOutcome, String> {
+        self.ensure_request_allowed(reason)?;
+
+        let job_id = self.next_job_id.fetch_add(1, Ordering::SeqCst) + 1;
+        let queued = self.pending_jobs.fetch_add(1, Ordering::SeqCst) + 1;
+        let _guard = self.gate.lock().await;
+
+        emit_backup_status(app, BackupStatusPayload::started(job_id, reason, queued));
+
+        let result = async {
+            let db_path =
+                crate::app_identity::database_path_opt().ok_or("Cannot find home directory")?;
+            let runtime_root =
+                crate::app_identity::runtime_root_opt().ok_or("Cannot find home directory")?;
+
+            run_backup_once(&db_path, &runtime_root, reason)
+                .await
+                .map_err(|error| error.to_string())
+        }
+        .await;
+
+        let remaining = self.pending_jobs.fetch_sub(1, Ordering::SeqCst) - 1;
+        match &result {
+            Ok(outcome) => emit_backup_status(
+                app,
+                BackupStatusPayload::completed(job_id, reason, remaining, outcome.path.clone()),
+            ),
+            Err(message) => emit_backup_status(
+                app,
+                BackupStatusPayload::failed(job_id, reason, remaining, message.clone()),
+            ),
+        }
+
+        result
+    }
+
+    pub async fn drain_and_backup_on_exit(&self, app: &AppHandle) -> Result<(), String> {
+        self.mark_shutdown_started();
+
+        tokio::time::timeout(Duration::from_secs(10), async {
+            let _guard = self.gate.lock().await;
+            drop(_guard);
+            self.request_backup(app, BackupReason::AppExit)
+                .await
+                .map(|_| ())
+        })
+        .await
+        .map_err(|_| "backup timed out during app shutdown".to_string())?
+    }
+}
+
+pub async fn request_backup(
+    app: &AppHandle,
+    reason: BackupReason,
+) -> Result<BackupOutcome, String> {
+    let coordinator = app.state::<BackupCoordinator>();
+    coordinator.request_backup(app, reason).await
+}
+
+pub async fn drain_and_backup_on_exit(app: &AppHandle) -> Result<(), String> {
+    let coordinator = app.state::<BackupCoordinator>();
+    coordinator.drain_and_backup_on_exit(app).await
 }
 
 pub async fn run_backup_once(
@@ -270,8 +431,8 @@ fn parse_backup_filename(name: &str) -> Option<BackupMetadata> {
         None => (time_or_suffix, 0),
     };
     parse_backup_reason(reason)?;
-    let timestamp = NaiveDateTime::parse_from_str(&format!("{}_{}", date, time), "%Y%m%d_%H%M%S")
-        .ok()?;
+    let timestamp =
+        NaiveDateTime::parse_from_str(&format!("{}_{}", date, time), "%Y%m%d_%H%M%S").ok()?;
 
     Some(BackupMetadata {
         timestamp,
@@ -298,6 +459,10 @@ fn sqlite_string_literal(path: &Path) -> String {
 
 fn reservation_lock_path(final_path: &Path) -> PathBuf {
     final_path.with_extension("db.lock")
+}
+
+fn emit_backup_status(app: &AppHandle, payload: BackupStatusPayload) {
+    let _ = app.emit("backup-status", payload);
 }
 
 #[cfg(unix)]
@@ -393,10 +558,7 @@ mod tests {
     }
 
     fn backup_file_name(path: &Path) -> String {
-        path.file_name()
-            .unwrap()
-            .to_string_lossy()
-            .into_owned()
+        path.file_name().unwrap().to_string_lossy().into_owned()
     }
 
     #[test]
@@ -421,13 +583,27 @@ mod tests {
         assert_eq!(BackupReason::AppExit.as_str(), "app_exit");
         assert_eq!(BackupReason::Manual.as_str(), "manual");
 
-        assert!(is_managed_backup_file("capyinn_backup_settings_20260418_231500.db"));
-        assert!(is_managed_backup_file("capyinn_backup_app_exit_20260419_000102.db"));
-        assert!(is_managed_backup_file("capyinn_backup_checkout_20260418_231500-1.db"));
-        assert!(!is_managed_backup_file("capyinn_backup_unknown_20260418_231500.db"));
-        assert!(!is_managed_backup_file("capyinn_backup_manual_20261340_999999.db"));
-        assert!(!is_managed_backup_file("capyinn_backup_checkout_20260418_231500.db.tmp"));
-        assert!(!is_managed_backup_file("capyinn_backup_checkout_20260418_231500-abc.db"));
+        assert!(is_managed_backup_file(
+            "capyinn_backup_settings_20260418_231500.db"
+        ));
+        assert!(is_managed_backup_file(
+            "capyinn_backup_app_exit_20260419_000102.db"
+        ));
+        assert!(is_managed_backup_file(
+            "capyinn_backup_checkout_20260418_231500-1.db"
+        ));
+        assert!(!is_managed_backup_file(
+            "capyinn_backup_unknown_20260418_231500.db"
+        ));
+        assert!(!is_managed_backup_file(
+            "capyinn_backup_manual_20261340_999999.db"
+        ));
+        assert!(!is_managed_backup_file(
+            "capyinn_backup_checkout_20260418_231500.db.tmp"
+        ));
+        assert!(!is_managed_backup_file(
+            "capyinn_backup_checkout_20260418_231500-abc.db"
+        ));
         assert!(!is_managed_backup_file("notes.db"));
     }
 
@@ -436,10 +612,13 @@ mod tests {
         let fixture = BackupFixture::new().await;
         fixture.insert_demo_row("guest-001").await;
 
-        let outcome =
-            run_backup_once(&fixture.db_path, &fixture.runtime_root, BackupReason::Manual)
-                .await
-                .expect("backup should succeed");
+        let outcome = run_backup_once(
+            &fixture.db_path,
+            &fixture.runtime_root,
+            BackupReason::Manual,
+        )
+        .await
+        .expect("backup should succeed");
 
         assert!(outcome.path.exists());
 
@@ -477,7 +656,9 @@ mod tests {
             backup_file_name(&first_reservation.final_path),
             "capyinn_backup_manual_20260418_231500.db"
         );
-        assert!(backup_dir.join("capyinn_backup_manual_20260418_231500.db.lock").exists());
+        assert!(backup_dir
+            .join("capyinn_backup_manual_20260418_231500.db.lock")
+            .exists());
 
         fs::write(&first_reservation.final_path, b"completed").unwrap();
         drop(first_reservation);
@@ -495,15 +676,18 @@ mod tests {
             .and_hms_opt(23, 16, 0)
             .unwrap();
         let later_reserved =
-            BackupReservation::acquire(&backup_dir, BackupReason::Manual, later_timestamp)
-                .unwrap();
+            BackupReservation::acquire(&backup_dir, BackupReason::Manual, later_timestamp).unwrap();
         assert_eq!(
             backup_file_name(&later_reserved.final_path),
             "capyinn_backup_manual_20260418_231600.db"
         );
 
-        assert!(is_managed_backup_file(&backup_file_name(&second_reservation.final_path)));
-        assert!(is_managed_backup_file(&backup_file_name(&later_reserved.final_path)));
+        assert!(is_managed_backup_file(&backup_file_name(
+            &second_reservation.final_path
+        )));
+        assert!(is_managed_backup_file(&backup_file_name(
+            &later_reserved.final_path
+        )));
     }
 
     #[tokio::test]
@@ -542,11 +726,17 @@ mod tests {
             .collect::<Vec<_>>();
         managed_files.sort();
 
-        let mut expected = vec![backup_file_name(&first.path), backup_file_name(&second.path)];
+        let mut expected = vec![
+            backup_file_name(&first.path),
+            backup_file_name(&second.path),
+        ];
         expected.sort();
 
         assert_eq!(managed_files, expected);
-        assert_ne!(backup_file_name(&first.path), backup_file_name(&second.path));
+        assert_ne!(
+            backup_file_name(&first.path),
+            backup_file_name(&second.path)
+        );
         assert!(backup_file_name(&first.path).starts_with("capyinn_backup_manual_20260418_231500"));
         assert!(backup_file_name(&second.path).starts_with("capyinn_backup_manual_20260418_231500"));
     }
@@ -589,5 +779,19 @@ mod tests {
         assert_eq!(removed, expected_removed);
         assert!(outcome.error.is_none());
         assert!(backup_dir.join("notes.db").exists());
+    }
+
+    #[tokio::test]
+    async fn rejects_non_exit_requests_after_shutdown_starts() {
+        let coordinator = BackupCoordinator::new();
+        coordinator.mark_shutdown_started();
+
+        let result = coordinator.ensure_request_allowed(BackupReason::Settings);
+
+        assert!(result.is_err());
+        assert_eq!(
+            result.unwrap_err(),
+            "backup skipped because shutdown is in progress"
+        );
     }
 }

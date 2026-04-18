@@ -1,9 +1,8 @@
-use tauri::Manager;
 use log::{error, info};
+use tauri::Manager;
 
-#[cfg(test)]
-mod backup;
 pub mod app_identity;
+mod backup;
 mod commands;
 mod db;
 mod domain;
@@ -43,8 +42,16 @@ impl GatewayRuntimeState {
     }
 
     fn shutdown(&self) {
-        let shutdown_tx = self.shutdown_tx.lock().ok().and_then(|mut guard| guard.take());
-        let server_task = self.server_task.lock().ok().and_then(|mut guard| guard.take());
+        let shutdown_tx = self
+            .shutdown_tx
+            .lock()
+            .ok()
+            .and_then(|mut guard| guard.take());
+        let server_task = self
+            .server_task
+            .lock()
+            .ok()
+            .and_then(|mut guard| guard.take());
 
         if let Some(shutdown_tx) = shutdown_tx {
             let _ = shutdown_tx.send(());
@@ -106,6 +113,7 @@ pub fn run() {
                 db: pool,
                 current_user: Arc::new(Mutex::new(None)),
             });
+            app.manage(backup::BackupCoordinator::new());
             app.manage(GatewayRuntimeState::new(rt, gateway_runtime));
 
             let _ = std::fs::create_dir_all(app_identity::models_dir());
@@ -204,10 +212,27 @@ pub fn run() {
         .build(tauri::generate_context!())
         .expect("error while building tauri application");
 
-    app.run(|app_handle, event| {
-        if matches!(event, tauri::RunEvent::Exit | tauri::RunEvent::ExitRequested { .. }) {
+    app.run(|app_handle, event| match event {
+        tauri::RunEvent::ExitRequested { api, .. } => {
+            api.prevent_exit();
+            if !app_handle
+                .state::<backup::BackupCoordinator>()
+                .begin_exit_drain()
+            {
+                return;
+            }
+            let handle = app_handle.clone();
+            tauri::async_runtime::spawn(async move {
+                if let Err(error) = backup::drain_and_backup_on_exit(&handle).await {
+                    error!("exit backup failed: {}", error);
+                }
+                handle.exit(0);
+            });
+        }
+        tauri::RunEvent::Exit => {
             app_handle.state::<GatewayRuntimeState>().shutdown();
         }
+        _ => {}
     });
 }
 
