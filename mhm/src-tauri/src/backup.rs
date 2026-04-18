@@ -83,6 +83,13 @@ mod tests {
 
     #[test]
     fn matches_only_managed_backup_files() {
+        assert_eq!(BackupReason::Settings.as_str(), "settings");
+        assert_eq!(BackupReason::Checkout.as_str(), "checkout");
+        assert_eq!(BackupReason::GroupCheckout.as_str(), "group_checkout");
+        assert_eq!(BackupReason::NightAudit.as_str(), "night_audit");
+        assert_eq!(BackupReason::AppExit.as_str(), "app_exit");
+        assert_eq!(BackupReason::Manual.as_str(), "manual");
+
         assert!(is_managed_backup_file("capyinn_backup_settings_20260418_231500.db"));
         assert!(is_managed_backup_file("capyinn_backup_app_exit_20260419_000102.db"));
         assert!(!is_managed_backup_file("capyinn_backup_unknown_20260418_231500.db"));
