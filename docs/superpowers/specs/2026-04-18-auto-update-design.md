@@ -43,6 +43,13 @@ The following product decisions were explicitly chosen during brainstorming and 
 - CapyInn is a Tauri 2 desktop app with a React frontend and Rust backend
 - the repo currently has a CI workflow in `.github/workflows/ci.yml` but no active published release workflow in the checked-in tree
 - `mhm/src-tauri/tauri.conf.json` does not yet enable updater configuration
+- `mhm/package.json` does not yet include:
+  - `@tauri-apps/plugin-updater`
+  - `@tauri-apps/plugin-process`
+- `mhm/src-tauri/Cargo.toml` does not yet include:
+  - `tauri-plugin-updater`
+  - `tauri-plugin-process`
+- `mhm/src-tauri/capabilities/default.json` currently grants only `core:default` and `opener:default`, so updater and relaunch permissions are absent
 - the frontend already has an app-shell header in `mhm/src/App.tsx` that is a natural home for a compact update badge
 - the app already uses Sonner toasts, but the chosen update UX avoids toast noise during normal download and install
 - the project does not have Apple Developer credentials, so notarized macOS distribution is not available in v1
@@ -80,12 +87,42 @@ Today CapyInn already has:
 
 - a Tauri app shell in `mhm/src/App.tsx` with a header badge cluster
 - Sonner integrated in the root app for lightweight notifications
-- versions aligned at `0.1.0` in both `mhm/package.json` and `mhm/src-tauri/tauri.conf.json`
+- versions aligned at `0.1.0` in:
+  - `mhm/package.json`
+  - `mhm/src-tauri/tauri.conf.json`
+  - `mhm/src-tauri/Cargo.toml`
 - a release-signing guidance document in `docs/release-signing.md`
 
 The current gap is that the checked-in project state does not yet include an updater-enabled Tauri config, an updater-aware frontend state machine, or a release workflow that publishes Windows and macOS updater artifacts plus a stable manifest.
 
 There is also a documentation mismatch today: `docs/release-signing.md` describes a release workflow and notes that macOS binaries are not officially published, while the repository tree currently exposes only `ci.yml`. This implementation must resolve that drift.
+
+## Concrete Integration Points
+
+This spec intentionally changes more than UI. The implementation is expected to touch these integration points directly:
+
+- `mhm/package.json`
+  - add `@tauri-apps/plugin-updater`
+  - add `@tauri-apps/plugin-process`
+- `mhm/src-tauri/Cargo.toml`
+  - add `tauri-plugin-updater`
+  - add `tauri-plugin-process`
+- `mhm/src-tauri/src/lib.rs`
+  - register the updater and process plugins in the Tauri builder
+- `mhm/src-tauri/tauri.conf.json`
+  - add updater configuration
+  - decide the Windows updater artifact source explicitly
+- `mhm/src-tauri/capabilities/default.json`
+  - add `updater:default`
+  - add `process:allow-relaunch`
+- `mhm/src/App.tsx`
+  - create the root-level update lifecycle and the header badge entrypoint
+- `mhm/src/pages/settings/*`
+  - add a `Software Update` section that reflects the same root state
+- `.github/workflows/release.yml`
+  - add the publish flow triggered by version tags
+- a dedicated workflow helper script, for example `scripts/generate-latest-json.mjs`
+  - generate the canonical multi-platform `latest.json`
 
 ## Architecture
 
@@ -98,9 +135,11 @@ Required policy:
 - `main` remains the integration branch
 - a production update becomes visible to users only after a tagged workflow completes successfully
 - the workflow must fail early if the pushed tag version does not match the checked-in app version
-- the workflow should verify both:
+- the workflow should verify all version declarations:
   - `mhm/package.json`
   - `mhm/src-tauri/tauri.conf.json`
+  - `mhm/src-tauri/Cargo.toml`
+- this is an intentional tightening of current release behavior, which historically only validated the Tauri app version
 
 Recommended tag example:
 
@@ -114,8 +153,10 @@ Add a dedicated publish workflow, for example `.github/workflows/release.yml`, t
 
 Required jobs:
 
-- `windows-latest`
-- `macos-latest`
+- `windows-latest` for the Windows production updater artifact
+- `macos-latest` targeting:
+  - `darwin-aarch64`
+  - `darwin-x86_64`
 
 Required responsibilities:
 
@@ -127,6 +168,11 @@ Required responsibilities:
 - publish a GitHub Release automatically for the tag
 - attach all required updater assets plus `latest.json`
 
+Windows packaging policy:
+
+- the updater contract should use the NSIS installer artifact for `windows-x86_64`
+- MSI may still be attached as an optional direct-download asset if the project keeps `bundle.targets: "all"`, but the updater manifest must not be ambiguous about which Windows artifact it points to
+
 Workflow policy:
 
 - release publication is automatic, not draft-only
@@ -137,23 +183,47 @@ Workflow policy:
 
 ### 3. Updater artifact and manifest strategy
 
-The app will use a GitHub Releases static manifest endpoint.
+The app will use a GitHub Releases static manifest endpoint with one canonical multi-platform `latest.json`.
 
 Required output per production release:
 
-- Windows installer and updater signature files
-- macOS updater bundle and updater signature files
+- Windows NSIS updater artifact and signature
+- macOS `darwin-aarch64` updater artifact and signature
+- macOS `darwin-x86_64` updater artifact and signature
 - a canonical `latest.json` manifest describing the newest stable release
 
 The app should query a stable URL equivalent to:
 
 - `https://github.com/<owner>/<repo>/releases/latest/download/latest.json`
 
+Manifest contract:
+
+- this design does not use per-request endpoint templating such as `{{target}}/{{arch}}/{{current_version}}`
+- instead, the endpoint always returns one static manifest whose `platforms` object contains every supported production updater target
+- required platform keys are:
+  - `windows-x86_64`
+  - `darwin-aarch64`
+  - `darwin-x86_64`
+
 Manifest policy:
 
 - it must represent the newest published stable production release
 - it must include both Windows and macOS platform entries used by Tauri updater
 - release publication should update this manifest as part of the same workflow so users do not see mismatched assets and metadata
+- the URLs embedded inside `latest.json` must be immutable versioned asset URLs for the specific tag release, not `releases/latest/download/...` links
+
+Manifest generation mechanism:
+
+- add a dedicated workflow step or script that builds `latest.json` after all updater artifacts exist
+- the generator must read:
+  - the resolved app version
+  - the release publication date
+  - the final versioned asset URLs for each updater artifact
+  - the raw contents of each `.sig` file
+- the generator must inline the signature strings into `latest.json`
+- the workflow must upload the generated `latest.json` as an asset on the same release
+
+Using GitHub Releases alone is not enough here. The manifest generation step is a required part of the implementation, not an optional convenience.
 
 ### 4. Signing strategy
 
@@ -188,6 +258,27 @@ macOS:
 - implementation should prefer ad-hoc signing for the macOS app bundle when feasible, rather than a completely unsigned bundle, because it gives the app a consistent local code signature without needing Apple-issued certificates
 - no notarization is available in v1
 - the spec must continue to treat macOS approval friction as expected behavior, not as a release failure
+
+### 4.1 Plugin and capability prerequisites
+
+The updater flow is not only a workflow concern. The runtime must explicitly enable the required plugins and permissions.
+
+Required Rust plugins:
+
+- `tauri-plugin-updater`
+- `tauri-plugin-process`
+
+Required frontend packages:
+
+- `@tauri-apps/plugin-updater`
+- `@tauri-apps/plugin-process`
+
+Required default capability permissions:
+
+- `updater:default`
+- `process:allow-relaunch`
+
+If any of these are missing, the updater flow should be considered incomplete even if the release pipeline publishes valid artifacts.
 
 ### 5. App-side update lifecycle
 
@@ -227,10 +318,24 @@ Required behavior:
 
 - do not check while the onboarding wizard is still active
 - do not check on the locked login screen before authentication completes
-- after bootstrap completes and the main shell renders, trigger one background update check
+- only trigger after all three current `App.tsx` shell gates have been passed:
+  - `bootstrapLoading` is false
+  - setup is complete
+  - if app lock is enabled, the user is authenticated
+- in the current app structure, that means the check starts only after the final early-return guard for onboarding/login has been crossed in `mhm/src/App.tsx`
+- after the main shell renders, trigger one background update check
 - if that check fails due to network or manifest issues, fail silently in the auto-check path
 
 This avoids noisy failures during startup while still satisfying the product expectation that opening the app reveals newly published releases.
+
+Long-running-session policy:
+
+- the chosen v1 design does not include periodic background recheck
+- an app session that stays open for many hours may not discover a newly released update until either:
+  - the user manually checks from Settings
+  - the app restarts
+
+This is an intentional tradeoff locked in during brainstorming in favor of the simpler `once per launch + manual check` model.
 
 ### 7. Header badge UX
 
@@ -289,10 +394,24 @@ Required rules:
 
 Recommended badge fallback:
 
-- if metadata about the available version is still valid, return to `UPDATE`
-- if the failure invalidates the available release information, return to `idle` and require a fresh check
+- network failure during install or check timeout: keep the known release metadata and return to `UPDATE`
+- download timeout during install: keep the known release metadata and return to `UPDATE`
+- signature verification failure: return to `idle`, discard the cached available release state, and require a fresh check
+- manifest schema error: return to `idle`, discard the cached available release state, and require a fresh check
+- updater artifact `404` or missing asset: return to `idle`, discard the cached available release state, and require a fresh check
 
 The app should never get stuck permanently on `UPDATING...` after an error path.
+
+Install timeout policy:
+
+- the install path must have a bounded timeout so `UPDATING...` cannot last forever on a weak or broken network
+- the exact number can be finalized during implementation, but the spec requires a real timeout, not an infinite wait
+
+Crash and restart recovery:
+
+- UI update state does not need to persist across crashes or forced app exits in v1
+- on the next launch, the app should reset to `idle` and run the normal update check again
+- if the updater plugin reuses any partial cached download internally, that is acceptable, but the CapyInn UI state machine should still treat the new launch as a fresh check
 
 ### 10. Platform behavior expectations
 
@@ -322,6 +441,10 @@ Minimum verification for implementation:
 - release workflow dry-run validation on a test tag
 - one real Windows update path test from an older installed version to a newer tagged release
 - one real macOS update path test from an older installed version to a newer tagged release on a machine that has already approved the app once
+- negative security test: a tampered or unsigned artifact referenced by `latest.json` must be rejected by the updater flow and surfaced as an error state
+- negative manifest test: malformed `latest.json` must not leave the badge stuck in `UPDATING...`
+- negative asset test: manifest points to a missing asset URL and the app returns cleanly to a retryable or fresh-check state
+- permission regression test: build or runtime verification should confirm the default capability includes both updater and relaunch permissions before claiming the feature works
 
 Operational verification should confirm:
 

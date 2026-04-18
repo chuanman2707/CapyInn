@@ -3,12 +3,17 @@ import react from "@vitejs/plugin-react";
 import path from "path";
 
 export default defineConfig({
+    define: {
+        __APP_VERSION__: JSON.stringify("0.1.0"),
+    },
     plugins: [react()],
     resolve: {
         alias: {
             "@": path.resolve(__dirname, "./src"),
             "@tauri-apps/api/core": path.resolve(__dirname, "./src/__mocks__/tauri-core.ts"),
             "@tauri-apps/api/event": path.resolve(__dirname, "./src/__mocks__/tauri-event.ts"),
+            "@tauri-apps/plugin-updater": path.resolve(__dirname, "./src/__mocks__/tauri-updater.ts"),
+            "@tauri-apps/plugin-process": path.resolve(__dirname, "./src/__mocks__/tauri-process.ts"),
             "@test-mocks": path.resolve(__dirname, "./src/__mocks__"),
         },
     },

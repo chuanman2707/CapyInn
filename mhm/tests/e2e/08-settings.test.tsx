@@ -1,8 +1,10 @@
 import { describe, it, expect, beforeEach } from "vitest";
 import { render, screen, waitFor } from "../helpers/render-app";
 import userEvent from "@testing-library/user-event";
+import App from "@/App";
 import Settings from "@/pages/settings";
 import { setMockResponse, clearMockResponses, invoke } from "@test-mocks/tauri-core";
+import { clearMockUpdate, setMockAvailableUpdate } from "@/__mocks__/tauri-updater";
 import { useAuthStore } from "@/stores/useAuthStore";
 
 describe("08 — Settings", () => {
@@ -17,6 +19,7 @@ describe("08 — Settings", () => {
 
     beforeEach(() => {
         clearMockResponses();
+        clearMockUpdate();
         invoke.mockClear();
 
         setAuthenticatedUser();
@@ -152,5 +155,60 @@ describe("08 — Settings", () => {
         expect(
             screen.getByText(/Chỉ admin mới có thể tạo API key mới/i),
         ).toBeInTheDocument();
+    });
+
+    it("shows the Software Update section and triggers a manual update check", async () => {
+        const user = userEvent.setup();
+        setMockAvailableUpdate({ version: "0.2.0" });
+        setMockResponse("get_bootstrap_status", () => ({
+            setup_completed: true,
+            app_lock_enabled: false,
+            current_user: {
+                id: "u1",
+                name: "Admin",
+                role: "admin",
+                active: true,
+                created_at: new Date().toISOString(),
+            },
+        }));
+
+        render(<App />);
+
+        await user.click(await screen.findByTitle("Settings"));
+        await user.click(screen.getByText("Software Update"));
+
+        expect(screen.getByText(/Current version/i)).toBeInTheDocument();
+        expect(screen.getByText("0.2.0")).toBeInTheDocument();
+
+        await user.click(screen.getByRole("button", { name: "Check for updates" }));
+
+        await waitFor(() => {
+            expect(screen.getByRole("button", { name: "Update" })).toBeInTheDocument();
+        });
+    });
+
+    it("shows a confirmation when there is no newer version", async () => {
+        const user = userEvent.setup();
+        setMockResponse("get_bootstrap_status", () => ({
+            setup_completed: true,
+            app_lock_enabled: false,
+            current_user: {
+                id: "u1",
+                name: "Admin",
+                role: "admin",
+                active: true,
+                created_at: new Date().toISOString(),
+            },
+        }));
+
+        render(<App />);
+
+        await user.click(await screen.findByTitle("Settings"));
+        await user.click(screen.getByText("Software Update"));
+        await user.click(screen.getByRole("button", { name: "Check for updates" }));
+
+        await waitFor(() => {
+            expect(screen.getByText(/latest version/i)).toBeInTheDocument();
+        });
     });
 });
