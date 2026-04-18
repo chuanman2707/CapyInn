@@ -229,6 +229,11 @@ impl BackupReservation {
             let final_path = backup_dir.join(candidate_name);
             let lock_path = reservation_lock_path(&final_path);
 
+            if final_path.exists() {
+                collision_index += 1;
+                continue;
+            }
+
             match fs::OpenOptions::new()
                 .write(true)
                 .create_new(true)
@@ -482,6 +487,9 @@ mod tests {
         );
         assert!(backup_dir.join("capyinn_backup_manual_20260418_231500.db.lock").exists());
 
+        fs::write(&first_reservation.final_path, b"completed").unwrap();
+        drop(first_reservation);
+
         let second_reservation =
             BackupReservation::acquire(&backup_dir, BackupReason::Manual, collision_timestamp)
                 .unwrap();
@@ -502,7 +510,6 @@ mod tests {
             "capyinn_backup_manual_20260418_231600.db"
         );
 
-        assert!(is_managed_backup_file(&backup_file_name(&first_reservation.final_path)));
         assert!(is_managed_backup_file(&backup_file_name(&second_reservation.final_path)));
         assert!(is_managed_backup_file(&backup_file_name(&later_reserved.final_path)));
     }
