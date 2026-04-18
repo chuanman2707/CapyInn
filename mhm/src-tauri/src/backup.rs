@@ -168,17 +168,13 @@ pub fn prune_old_backups(backup_dir: &Path, keep: usize) -> BackupPruneOutcome {
         .take(keep)
         .map(|(_, _, path)| path.clone())
         .collect();
-    outcome.removed_files = backups
-        .iter()
-        .skip(keep)
-        .map(|(_, _, path)| path.clone())
-        .collect();
 
-    for path in outcome.removed_files.clone() {
+    for (_, _, path) in backups.into_iter().skip(keep) {
         if let Err(error) = fs::remove_file(&path) {
             outcome.error = Some(error.into());
             break;
         }
+        outcome.removed_files.push(path);
     }
 
     outcome
@@ -407,38 +403,39 @@ mod tests {
         assert_eq!(copied.0, "guest-001");
     }
 
-    #[tokio::test]
-    async fn run_backup_once_uses_distinct_paths_for_back_to_back_backups() {
-        let fixture = BackupFixture::new().await;
-        fixture.insert_demo_row("guest-001").await;
+    #[test]
+    fn reserve_backup_path_handles_collisions_deterministically() {
+        BACKUP_SEQUENCE.store(0, Ordering::SeqCst);
 
-        let first = run_backup_once(&fixture.db_path, &fixture.runtime_root, BackupReason::Manual)
-            .await
-            .expect("first backup should succeed");
-        let second =
-            run_backup_once(&fixture.db_path, &fixture.runtime_root, BackupReason::Manual)
-                .await
-                .expect("second backup should succeed");
+        let temp = make_temp_dir("backup-reserve");
+        let backup_dir = temp.join("backups");
+        fs::create_dir_all(&backup_dir).unwrap();
 
-        assert_ne!(first.path, second.path);
-        assert!(is_managed_backup_file(&backup_file_name(&first.path)));
-        assert!(is_managed_backup_file(&backup_file_name(&second.path)));
-
-        let backup_dir = fixture.runtime_root.join("backups");
-        let mut managed_files = fs::read_dir(&backup_dir)
+        let timestamp = NaiveDate::from_ymd_opt(2026, 4, 18)
             .unwrap()
-            .map(|entry| backup_file_name(&entry.unwrap().path()))
-            .filter(|name| is_managed_backup_file(name))
-            .collect::<Vec<_>>();
-        managed_files.sort();
+            .and_hms_opt(23, 15, 0)
+            .unwrap();
+        let base_name = build_backup_filename(BackupReason::Manual, timestamp);
+        let base_path = backup_dir.join(&base_name);
+        fs::write(&base_path, b"existing").unwrap();
 
-        let mut expected = vec![
-            backup_file_name(&first.path),
-            backup_file_name(&second.path),
-        ];
-        expected.sort();
+        let first_reserved = reserve_backup_path(&backup_dir, BackupReason::Manual, timestamp);
+        assert_eq!(
+            backup_file_name(&first_reserved),
+            "capyinn_backup_manual_20260418_231500-1.db"
+        );
 
-        assert_eq!(managed_files, expected);
+        fs::write(&first_reserved, b"existing").unwrap();
+
+        let second_reserved = reserve_backup_path(&backup_dir, BackupReason::Manual, timestamp);
+        assert_eq!(
+            backup_file_name(&second_reserved),
+            "capyinn_backup_manual_20260418_231500-2.db"
+        );
+
+        assert!(is_managed_backup_file(&backup_file_name(&base_path)));
+        assert!(is_managed_backup_file(&backup_file_name(&first_reserved)));
+        assert!(is_managed_backup_file(&backup_file_name(&second_reserved)));
     }
 
     #[test]
