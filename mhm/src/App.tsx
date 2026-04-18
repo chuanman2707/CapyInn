@@ -1,4 +1,4 @@
-import { useState, useEffect, type ComponentType } from "react";
+import { useState, useEffect, useRef, type ComponentType } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { useHotelStore } from "./stores/useHotelStore";
 import { useAuthStore } from "./stores/useAuthStore";
@@ -16,6 +16,7 @@ import CheckinSheet from "./components/CheckinSheet";
 import GroupCheckinSheet from "./components/GroupCheckinSheet";
 import GroupManagement from "./pages/GroupManagement";
 import AppLogo from "./components/AppLogo";
+import { BackupStatusIndicator } from "./components/BackupStatusIndicator";
 import { Home, Calendar, BedDouble, Users, Sparkles, BarChart3, Settings as SettingsIcon, ChevronsLeft, ChevronsRight, LogOut, Moon, UsersRound } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -23,7 +24,7 @@ import { APP_NAME } from "@/lib/appIdentity";
 import { createDeferredCleanup } from "@/lib/deferredCleanup";
 import { Toaster, toast } from "sonner";
 import { invoke } from "@tauri-apps/api/core";
-import type { BootstrapStatus } from "@/types";
+import type { BackupIndicatorPhase, BackupStatusPayload, BootstrapStatus } from "@/types";
 
 const NAV_MAIN = [
   { key: "dashboard" as const, label: "Dashboard", icon: Home },
@@ -55,6 +56,20 @@ const PAGE_TITLES: Record<string, string> = {
   audit: "Night Audit",
 };
 
+type BackupUiState = {
+  visible: boolean;
+  phase: BackupIndicatorPhase;
+  message: string;
+  pendingJobs: number;
+};
+
+const INITIAL_BACKUP_UI: BackupUiState = {
+  visible: false,
+  phase: "saved",
+  message: "",
+  pendingJobs: 0,
+};
+
 export default function App() {
   const { activeTab, setTab, setCheckinOpen, setGroupCheckinOpen, checkinRoomId, fetchRooms, fetchStats } = useHotelStore();
   const { user, isAuthenticated, checkSession, logout, hydrateFromBootstrap } = useAuthStore();
@@ -64,6 +79,8 @@ export default function App() {
   const [gatewayRunning, setGatewayRunning] = useState(false);
   const [bootstrap, setBootstrap] = useState<BootstrapStatus | null>(null);
   const [bootstrapLoading, setBootstrapLoading] = useState(true);
+  const [backupUi, setBackupUi] = useState<BackupUiState>(INITIAL_BACKUP_UI);
+  const hideBackupRef = useRef<number | null>(null);
 
   useEffect(() => {
     invoke<BootstrapStatus>("get_bootstrap_status")
@@ -114,6 +131,68 @@ export default function App() {
     }));
     return cleanup;
   }, [isAuthenticated]);
+
+  useEffect(() => {
+    const cleanup = createDeferredCleanup(
+      listen<BackupStatusPayload>("backup-status", ({ payload }) => {
+        if (hideBackupRef.current !== null) {
+          window.clearTimeout(hideBackupRef.current);
+          hideBackupRef.current = null;
+        }
+
+        if (payload.state === "started") {
+          setBackupUi({
+            visible: true,
+            phase: "saving",
+            message: "Đang sao lưu dữ liệu...",
+            pendingJobs: payload.pending_jobs,
+          });
+          return;
+        }
+
+        if (payload.state === "failed") {
+          toast.error(payload.message ?? "Sao lưu dữ liệu thất bại");
+          setBackupUi({
+            visible: true,
+            phase: "failed",
+            message: "Sao lưu thất bại",
+            pendingJobs: payload.pending_jobs,
+          });
+          return;
+        }
+
+        if (payload.pending_jobs > 0) {
+          setBackupUi({
+            visible: true,
+            phase: "saving",
+            message: "Đang sao lưu dữ liệu...",
+            pendingJobs: payload.pending_jobs,
+          });
+          return;
+        }
+
+        setBackupUi({
+          visible: true,
+          phase: "saved",
+          message: "Đã sao lưu",
+          pendingJobs: 0,
+        });
+
+        hideBackupRef.current = window.setTimeout(() => {
+          setBackupUi(INITIAL_BACKUP_UI);
+          hideBackupRef.current = null;
+        }, 1800);
+      }),
+    );
+
+    return () => {
+      if (hideBackupRef.current !== null) {
+        window.clearTimeout(hideBackupRef.current);
+        hideBackupRef.current = null;
+      }
+      cleanup();
+    };
+  }, []);
 
   // Responsive: auto-collapse sidebar when window is narrow
   useEffect(() => {
@@ -191,6 +270,11 @@ export default function App() {
 
   return (
     <div className="flex h-screen w-screen bg-brand-bg font-sans text-brand-text overflow-hidden select-none">
+      <BackupStatusIndicator
+        visible={backupUi.visible}
+        phase={backupUi.phase}
+        message={backupUi.message}
+      />
 
       {/* SIDEBAR */}
       <aside className={`${collapsed ? "w-[72px]" : "w-[260px]"} bg-white border-r border-slate-100 flex flex-col z-20 shrink-0 transition-all duration-300`}>

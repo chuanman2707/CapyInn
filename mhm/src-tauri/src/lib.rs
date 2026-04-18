@@ -2,6 +2,7 @@ use log::{error, info};
 use tauri::Manager;
 
 pub mod app_identity;
+mod backup;
 mod commands;
 mod db;
 mod domain;
@@ -112,6 +113,7 @@ pub fn run() {
                 db: pool,
                 current_user: Arc::new(Mutex::new(None)),
             });
+            app.manage(backup::BackupCoordinator::new());
             app.manage(GatewayRuntimeState::new(rt, gateway_runtime));
 
             let _ = std::fs::create_dir_all(app_identity::models_dir());
@@ -173,6 +175,7 @@ pub fn run() {
             commands::pricing::save_pricing_rule,
             commands::pricing::calculate_price_preview,
             commands::pricing::get_special_dates,
+            commands::pricing::save_special_date,
             // Folio/Billing
             commands::billing::add_folio_line,
             commands::billing::get_folio_lines,
@@ -209,13 +212,27 @@ pub fn run() {
         .build(tauri::generate_context!())
         .expect("error while building tauri application");
 
-    app.run(|app_handle, event| {
-        if matches!(
-            event,
-            tauri::RunEvent::Exit | tauri::RunEvent::ExitRequested { .. }
-        ) {
+    app.run(|app_handle, event| match event {
+        tauri::RunEvent::ExitRequested { api, .. } => {
+            api.prevent_exit();
+            if !app_handle
+                .state::<backup::BackupCoordinator>()
+                .begin_exit_drain()
+            {
+                return;
+            }
+            let handle = app_handle.clone();
+            tauri::async_runtime::spawn(async move {
+                if let Err(error) = backup::drain_and_backup_on_exit(&handle).await {
+                    error!("exit backup failed: {}", error);
+                }
+                handle.exit(0);
+            });
+        }
+        tauri::RunEvent::Exit => {
             app_handle.state::<GatewayRuntimeState>().shutdown();
         }
+        _ => {}
     });
 }
 

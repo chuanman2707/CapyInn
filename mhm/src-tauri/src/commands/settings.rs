@@ -7,6 +7,7 @@ use tauri::State;
 #[tauri::command]
 pub async fn save_settings(
     state: State<'_, AppState>,
+    app: tauri::AppHandle,
     key: String,
     value: String,
 ) -> Result<(), String> {
@@ -20,6 +21,13 @@ pub async fn save_settings(
     .execute(&state.db)
     .await
     .map_err(|e| e.to_string())?;
+
+    if let Err(error) =
+        crate::backup::request_backup(&app, crate::backup::BackupReason::Settings).await
+    {
+        crate::backup::log_backup_request_error("save_settings", &error);
+    }
+
     Ok(())
 }
 

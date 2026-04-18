@@ -219,3 +219,34 @@ pub async fn get_special_dates(
         })
         .collect())
 }
+
+#[tauri::command]
+pub async fn save_special_date(
+    state: State<'_, AppState>,
+    date: String,
+    label: String,
+    uplift_pct: f64,
+) -> Result<(), String> {
+    require_admin(&state)?;
+
+    let id = uuid::Uuid::new_v4().to_string();
+    let now = chrono::Local::now().to_rfc3339();
+
+    sqlx::query(
+        "INSERT INTO special_dates (id, date, label, uplift_pct, created_at)
+         VALUES (?, ?, ?, ?, ?)
+         ON CONFLICT(date) DO UPDATE SET
+            label = excluded.label,
+            uplift_pct = excluded.uplift_pct",
+    )
+    .bind(&id)
+    .bind(&date)
+    .bind(&label)
+    .bind(uplift_pct)
+    .bind(&now)
+    .execute(&state.db)
+    .await
+    .map_err(|e| e.to_string())?;
+
+    Ok(())
+}

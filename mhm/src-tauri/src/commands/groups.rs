@@ -34,6 +34,12 @@ pub async fn group_checkout(
     emit_db_update(&app, "rooms");
     emit_db_update(&app, "groups");
 
+    if let Err(error) =
+        crate::backup::request_backup(&app, crate::backup::BackupReason::GroupCheckout).await
+    {
+        crate::backup::log_backup_request_error("group_checkout", &error);
+    }
+
     Ok(())
 }
 
@@ -297,7 +303,7 @@ pub async fn auto_assign_rooms(
     }
 
     let mut floors_sorted: Vec<(i32, Vec<&Room>)> = floor_groups.into_iter().collect();
-    floors_sorted.sort_by_key(|floor| std::cmp::Reverse(floor.1.len()));
+    floors_sorted.sort_by_key(|(_, rooms)| std::cmp::Reverse(rooms.len()));
 
     let mut assignments = Vec::new();
     let needed = req.room_count as usize;

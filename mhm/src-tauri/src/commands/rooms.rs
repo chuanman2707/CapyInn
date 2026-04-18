@@ -169,6 +169,12 @@ pub async fn check_out(
 
     emit_db_update(&app, "rooms");
 
+    if let Err(error) =
+        crate::backup::request_backup(&app, crate::backup::BackupReason::Checkout).await
+    {
+        crate::backup::log_backup_request_error("check_out", &error);
+    }
+
     Ok(())
 }
 

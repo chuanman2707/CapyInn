@@ -200,6 +200,27 @@ export interface GatewayStatus {
   has_api_keys: boolean;
 }
 
+export type BackupIndicatorPhase = "saving" | "saved" | "failed";
+
+export type BackupReason =
+  | "settings"
+  | "checkout"
+  | "group_checkout"
+  | "night_audit"
+  | "app_exit"
+  | "manual";
+
+export type BackupStatusState = "started" | "completed" | "failed";
+
+export interface BackupStatusPayload {
+  job_id: string;
+  state: BackupStatusState;
+  reason: BackupReason;
+  pending_jobs: number;
+  path?: string;
+  message?: string;
+}
+
 export interface BootstrapStatus {
   setup_completed: boolean;
   app_lock_enabled: boolean;

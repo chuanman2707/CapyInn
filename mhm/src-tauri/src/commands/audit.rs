@@ -21,6 +21,12 @@ pub async fn run_night_audit(
 
     emit_db_update(&app, "audit");
 
+    if let Err(error) =
+        crate::backup::request_backup(&app, crate::backup::BackupReason::NightAudit).await
+    {
+        crate::backup::log_backup_request_error("night audit", &error);
+    }
+
     Ok(log)
 }
 
@@ -38,25 +44,18 @@ pub async fn get_audit_logs(
 // ═══════════════════════════════════════════════
 
 #[tauri::command]
-pub async fn backup_database(state: State<'_, AppState>) -> Result<String, String> {
+pub async fn backup_database(
+    state: State<'_, AppState>,
+    app: tauri::AppHandle,
+) -> Result<String, String> {
     require_admin(&state)?;
-
-    let db_dir = app_identity::runtime_root_opt().ok_or("Cannot find home directory")?;
-
-    let db_path = app_identity::database_path_opt().ok_or("Cannot find home directory")?;
-    if !db_path.exists() {
-        return Err("Database file not found".to_string());
-    }
-
-    let backup_dir = db_dir.join("backups");
-    std::fs::create_dir_all(&backup_dir).map_err(|e| e.to_string())?;
-
-    let timestamp = chrono::Local::now().format("%Y%m%d_%H%M%S").to_string();
-    let backup_path = backup_dir.join(format!("capyinn_backup_{}.db", timestamp));
-
-    std::fs::copy(&db_path, &backup_path).map_err(|e| e.to_string())?;
-
-    Ok(backup_path.to_string_lossy().to_string())
+    let outcome = crate::backup::request_backup(&app, crate::backup::BackupReason::Manual)
+        .await
+        .map_err(|error| {
+            crate::backup::log_backup_request_error("manual backup", &error);
+            error.to_string()
+        })?;
+    Ok(outcome.path.to_string_lossy().to_string())
 }
 
 #[tauri::command]
