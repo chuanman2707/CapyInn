@@ -7,6 +7,7 @@ import {
   Database,
   DollarSign,
   Palette,
+  RefreshCcw,
   Users,
   Wifi,
 } from "lucide-react";
@@ -22,6 +23,7 @@ import HotelInfoSection from "./HotelInfoSection";
 import OcrConfigSection from "./OcrConfigSection";
 import PricingSection from "./PricingSection";
 import RoomConfigSection from "./RoomConfigSection";
+import SoftwareUpdateSection from "./SoftwareUpdateSection";
 import UserManagement from "./UserManagement";
 
 type SettingsSectionKey =
@@ -32,6 +34,7 @@ type SettingsSectionKey =
   | "appearance"
   | "data"
   | "gateway"
+  | "updates"
   | "pricing"
   | "users";
 
@@ -47,6 +50,7 @@ export default function SettingsPage() {
     { key: "appearance" as const, label: "Appearance", icon: Palette },
     { key: "data" as const, label: "Data & Backup", icon: Database },
     { key: "gateway" as const, label: "MCP Gateway", icon: Wifi },
+    { key: "updates" as const, label: "Software Update", icon: RefreshCcw },
     ...(isAdmin()
       ? [
         { key: "pricing" as const, label: "Pricing", icon: DollarSign },
@@ -85,6 +89,7 @@ export default function SettingsPage() {
         {activeSection === "appearance" && <AppearanceSection />}
         {activeSection === "data" && <DataSection />}
         {activeSection === "gateway" && <GatewaySection />}
+        {activeSection === "updates" && <SoftwareUpdateSection />}
         {activeSection === "pricing" && isAdmin() && <PricingSection />}
         {activeSection === "users" && isAdmin() && <UserManagement />}
       </Card>

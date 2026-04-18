@@ -16,12 +16,16 @@ import CheckinSheet from "./components/CheckinSheet";
 import GroupCheckinSheet from "./components/GroupCheckinSheet";
 import GroupManagement from "./pages/GroupManagement";
 import AppLogo from "./components/AppLogo";
+import AppUpdateBadge from "./components/AppUpdateBadge";
+import AppUpdateRestartModal from "./components/AppUpdateRestartModal";
 import { BackupStatusIndicator } from "./components/BackupStatusIndicator";
 import { Home, Calendar, BedDouble, Users, Sparkles, BarChart3, Settings as SettingsIcon, ChevronsLeft, ChevronsRight, LogOut, Moon, UsersRound } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import { AppUpdateProvider } from "@/contexts/AppUpdateContext";
 import { APP_NAME } from "@/lib/appIdentity";
 import { createDeferredCleanup } from "@/lib/deferredCleanup";
+import { useAppUpdateController } from "@/hooks/useAppUpdateController";
 import { Toaster, toast } from "sonner";
 import { invoke } from "@tauri-apps/api/core";
 import type { BackupIndicatorPhase, BackupStatusPayload, BootstrapStatus } from "@/types";
@@ -80,7 +84,16 @@ export default function App() {
   const [bootstrap, setBootstrap] = useState<BootstrapStatus | null>(null);
   const [bootstrapLoading, setBootstrapLoading] = useState(true);
   const [backupUi, setBackupUi] = useState<BackupUiState>(INITIAL_BACKUP_UI);
+  const didAutoCheckRef = useRef(false);
   const hideBackupRef = useRef<number | null>(null);
+  const shellReady =
+    !bootstrapLoading &&
+    Boolean(bootstrap?.setup_completed) &&
+    (!bootstrap?.app_lock_enabled || isAuthenticated);
+  const appUpdate = useAppUpdateController({
+    enabled: shellReady,
+    currentVersion: __APP_VERSION__,
+  });
 
   useEffect(() => {
     invoke<BootstrapStatus>("get_bootstrap_status")
@@ -194,6 +207,15 @@ export default function App() {
     };
   }, []);
 
+  useEffect(() => {
+    if (!shellReady || didAutoCheckRef.current) {
+      return;
+    }
+
+    didAutoCheckRef.current = true;
+    void appUpdate.checkForUpdates({ silent: true });
+  }, [appUpdate, shellReady]);
+
   // Responsive: auto-collapse sidebar when window is narrow
   useEffect(() => {
     const handleResize = () => {
@@ -268,16 +290,29 @@ export default function App() {
     );
   };
 
-  return (
-    <div className="flex h-screen w-screen bg-brand-bg font-sans text-brand-text overflow-hidden select-none">
-      <BackupStatusIndicator
-        visible={backupUi.visible}
-        phase={backupUi.phase}
-        message={backupUi.message}
-      />
+  const handleUpdateBadgeClick = async () => {
+    if (appUpdate.phase === "available") {
+      await appUpdate.downloadUpdate();
+    }
+  };
 
-      {/* SIDEBAR */}
-      <aside className={`${collapsed ? "w-[72px]" : "w-[260px]"} bg-white border-r border-slate-100 flex flex-col z-20 shrink-0 transition-all duration-300`}>
+  return (
+    <AppUpdateProvider value={appUpdate}>
+      <div className="flex h-screen w-screen bg-brand-bg font-sans text-brand-text overflow-hidden select-none">
+        <BackupStatusIndicator
+          visible={backupUi.visible}
+          phase={backupUi.phase}
+          message={backupUi.message}
+        />
+        <AppUpdateRestartModal
+          open={appUpdate.restartPromptOpen}
+          version={appUpdate.availableVersion ?? appUpdate.currentVersion}
+          onConfirm={appUpdate.confirmInstall}
+          onLater={appUpdate.dismissRestartPrompt}
+        />
+
+        {/* SIDEBAR */}
+        <aside className={`${collapsed ? "w-[72px]" : "w-[260px]"} bg-white border-r border-slate-100 flex flex-col z-20 shrink-0 transition-all duration-300`}>
 
         {/* Logo */}
         <div className={`${collapsed ? "px-4 py-6" : "p-6"} mb-4 flex justify-center`}>
@@ -340,10 +375,10 @@ export default function App() {
             {collapsed ? <ChevronsRight size={16} /> : <><ChevronsLeft size={16} className="mr-2" /> Thu gọn</>}
           </Button>
         </div>
-      </aside>
+        </aside>
 
-      {/* MAIN CONTENT */}
-      <main className="flex-1 flex flex-col h-full relative min-w-0">
+        {/* MAIN CONTENT */}
+        <main className="flex-1 flex flex-col h-full relative min-w-0">
 
         {/* HEADER */}
         <header className="h-[88px] flex items-center justify-between px-10 bg-brand-bg/80 backdrop-blur-md sticky top-0 z-10 data-tauri-drag-region shrink-0">
@@ -355,6 +390,11 @@ export default function App() {
           </div>
 
           <div className="flex items-center gap-4 pointer-events-auto">
+            <AppUpdateBadge
+              phase={appUpdate.phase}
+              onCheckOrDownload={handleUpdateBadgeClick}
+              onRestart={appUpdate.openRestartPrompt}
+            />
             {user && (
               <Badge className={`${user.role === 'admin' ? 'bg-amber-50 text-amber-700' : 'bg-blue-50 text-blue-700'} border-0 rounded-full py-1.5 px-3 uppercase tracking-wider text-[10px] font-bold`}>
                 {user.role === 'admin' ? '👑 Admin' : '🏨 Lễ tân'}
@@ -390,11 +430,12 @@ export default function App() {
           </div>
         </div>
 
-      </main>
+        </main>
 
-      <CheckinSheet preSelectedRoomId={checkinRoomId ?? undefined} />
-      <GroupCheckinSheet />
-      <Toaster position="bottom-right" toastOptions={{ className: "rounded-xl shadow-float font-sans" }} />
-    </div>
+        <CheckinSheet preSelectedRoomId={checkinRoomId ?? undefined} />
+        <GroupCheckinSheet />
+        <Toaster position="bottom-right" toastOptions={{ className: "rounded-xl shadow-float font-sans" }} />
+      </div>
+    </AppUpdateProvider>
   );
 }

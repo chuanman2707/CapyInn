@@ -15,21 +15,12 @@ env:
   RELEASE_CONFIG_PATH: src-tauri/tauri.release.conf.json
 
 jobs:
-  publish-tauri:
-    permissions:
-      contents: write
-
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - platform: ubuntu-22.04
-            args: ""
-          - platform: windows-latest
-            args: ""
-
-    runs-on: ${{ matrix.platform }}
-
+  verify-version:
+    runs-on: ubuntu-22.04
+    outputs:
+      app_version: ${{ steps.meta.outputs.app_version }}
+      tag_name: ${{ steps.meta.outputs.tag_name }}
+      is_prerelease: ${{ steps.meta.outputs.is_prerelease }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -41,41 +32,102 @@ jobs:
           cache: npm
           cache-dependency-path: mhm/package-lock.json
 
-      - name: Verify release version and derive metadata
+      - name: Verify release versions and tag
+        id: meta
         shell: bash
         working-directory: mhm
         run: |
-          app_version="$(node -p "require('./src-tauri/tauri.conf.json').version")"
-          expected_tag="v${app_version}"
+          package_version="$(node -p "require('./package.json').version")"
+          tauri_version="$(node -p "require('./src-tauri/tauri.conf.json').version")"
+          cargo_version="$(node <<'NODE'
+          const fs = require("fs");
+          const cargo = fs.readFileSync("./src-tauri/Cargo.toml", "utf8");
+          const packageSection = cargo.match(/\[package\][\s\S]*?^version = "([^"]+)"/m);
+          if (!packageSection) {
+            throw new Error("Cargo package version not found");
+          }
+          process.stdout.write(packageSection[1]);
+          NODE
+          )"
+          expected_tag="v${package_version}"
 
-          echo "APP_VERSION=${app_version}" >> "$GITHUB_ENV"
-
-          if [[ "${app_version}" == *-* ]] || [[ "${GITHUB_REF_NAME}" == *-* ]]; then
-            echo "IS_PRERELEASE=true" >> "$GITHUB_ENV"
-          else
-            echo "IS_PRERELEASE=false" >> "$GITHUB_ENV"
+          if [ "$package_version" != "$tauri_version" ] || [ "$package_version" != "$cargo_version" ]; then
+            echo "Version mismatch: package=${package_version}, tauri=${tauri_version}, cargo=${cargo_version}"
+            exit 1
           fi
 
-          if [ "${GITHUB_REF_TYPE}" = "tag" ] && [ "${GITHUB_REF_NAME}" != "${expected_tag}" ]; then
+          if [ "${GITHUB_REF_NAME}" != "${expected_tag}" ]; then
             echo "Expected tag ${expected_tag}, got ${GITHUB_REF_NAME}"
             exit 1
           fi
 
-      - name: Compute Tauri build arguments
-        shell: bash
-        run: |
-          config_arg="--config ${{ env.RELEASE_CONFIG_PATH }}"
-          if [ -n "${{ matrix.args }}" ]; then
-            echo "TAURI_BUILD_ARGS=${{ matrix.args }} ${config_arg}" >> "$GITHUB_ENV"
+          if [[ "${package_version}" == *-* ]] || [[ "${GITHUB_REF_NAME}" == *-* ]]; then
+            echo "is_prerelease=true" >> "$GITHUB_OUTPUT"
           else
-            echo "TAURI_BUILD_ARGS=${config_arg}" >> "$GITHUB_ENV"
+            echo "is_prerelease=false" >> "$GITHUB_OUTPUT"
           fi
 
+          echo "app_version=${package_version}" >> "$GITHUB_OUTPUT"
+          echo "tag_name=${GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT"
+
+  verify-app:
+    needs: verify-version
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: mhm/package-lock.json
+
+      - name: Setup Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            mhm/src-tauri -> target
+
       - name: Install Linux dependencies
-        if: matrix.platform == 'ubuntu-22.04'
         run: |
           sudo apt-get update
           sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf
+
+      - name: Install frontend dependencies
+        working-directory: mhm
+        run: npm ci
+
+      - name: Run frontend tests
+        working-directory: mhm
+        run: npm test
+
+      - name: Build frontend
+        working-directory: mhm
+        run: npm run build
+
+      - name: Check Rust crate
+        run: cargo check --manifest-path mhm/src-tauri/Cargo.toml
+
+  build-windows:
+    needs:
+      - verify-version
+      - verify-app
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: mhm/package-lock.json
 
       - name: Setup Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -90,8 +142,22 @@ jobs:
         working-directory: mhm
         run: npm ci
 
+      - name: Validate updater configuration
+        shell: pwsh
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_UPDATER_PUBLIC_KEY: ${{ vars.TAURI_UPDATER_PUBLIC_KEY }}
+        run: |
+          if ([string]::IsNullOrWhiteSpace($env:TAURI_SIGNING_PRIVATE_KEY)) {
+            Write-Error "TAURI_SIGNING_PRIVATE_KEY is required for release builds"
+            exit 1
+          }
+          if ([string]::IsNullOrWhiteSpace($env:TAURI_UPDATER_PUBLIC_KEY)) {
+            Write-Error "TAURI_UPDATER_PUBLIC_KEY is required for generated updater config"
+            exit 1
+          }
+
       - name: Validate Windows signing secrets
-        if: matrix.platform == 'windows-latest'
         shell: pwsh
         env:
           WINDOWS_CERTIFICATE: ${{ secrets.WINDOWS_CERTIFICATE }}
@@ -108,14 +174,13 @@ jobs:
           }
 
       - name: Import Windows signing certificate
-        if: matrix.platform == 'windows-latest'
         shell: pwsh
         env:
           WINDOWS_CERTIFICATE: ${{ secrets.WINDOWS_CERTIFICATE }}
           WINDOWS_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
         run: |
           if ([string]::IsNullOrWhiteSpace($env:WINDOWS_CERTIFICATE)) {
-            Write-Host "No Windows signing certificate configured, continuing with unsigned Windows build."
+            Write-Host "No Windows signing certificate configured, continuing with unsigned Windows bundle."
             exit 0
           }
 
@@ -136,9 +201,9 @@ jobs:
         shell: bash
         working-directory: mhm
         env:
+          TAURI_UPDATER_PUBLIC_KEY: ${{ vars.TAURI_UPDATER_PUBLIC_KEY }}
           WINDOWS_CERTIFICATE_THUMBPRINT: ${{ env.WINDOWS_CERTIFICATE_THUMBPRINT }}
           WINDOWS_TIMESTAMP_URL: ${{ vars.WINDOWS_TIMESTAMP_URL }}
-          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
         run: |
           node <<'NODE'
           const fs = require("fs");
@@ -148,36 +213,391 @@ jobs:
           const releaseConfigPath = path.join("src-tauri", "tauri.release.conf.json");
           const config = JSON.parse(fs.readFileSync(configPath, "utf8"));
 
-          config.bundle = config.bundle || {};
+          config.bundle = {
+            ...(config.bundle || {}),
+            createUpdaterArtifacts: true,
+          };
 
-          if (process.env.TAURI_SIGNING_PRIVATE_KEY) {
-            config.bundle.createUpdaterArtifacts = true;
-          }
+          config.plugins = {
+            ...(config.plugins || {}),
+            updater: {
+              ...(config.plugins?.updater || {}),
+              pubkey: process.env.TAURI_UPDATER_PUBLIC_KEY,
+            },
+          };
 
-          if (process.env.RUNNER_OS === "Windows" && process.env.WINDOWS_CERTIFICATE_THUMBPRINT) {
+          if (process.env.WINDOWS_CERTIFICATE_THUMBPRINT) {
             config.bundle.windows = {
               ...(config.bundle.windows || {}),
               certificateThumbprint: process.env.WINDOWS_CERTIFICATE_THUMBPRINT,
               digestAlgorithm: "sha256",
-              timestampUrl: process.env.WINDOWS_TIMESTAMP_URL || "http://timestamp.digicert.com"
+              timestampUrl: process.env.WINDOWS_TIMESTAMP_URL || "http://timestamp.digicert.com",
             };
           }
 
           fs.writeFileSync(releaseConfigPath, `${JSON.stringify(config, null, 2)}\n`);
           NODE
 
-      - name: Build and publish release assets
+      - name: Build Windows updater artifacts
         uses: tauri-apps/tauri-action@action-v0.6.2
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         with:
           projectPath: ${{ env.PROJECT_PATH }}
-          tagName: v__VERSION__
-          releaseName: CapyInn v__VERSION__
-          releaseBody: Signed release build for CapyInn. Download the installer that matches your platform from the assets below.
-          releaseDraft: false
-          prerelease: ${{ env.IS_PRERELEASE == 'true' }}
-          uploadWorkflowArtifacts: true
-          args: ${{ env.TAURI_BUILD_ARGS }}
+          args: --bundles nsis --config ${{ env.RELEASE_CONFIG_PATH }}
+
+      - name: Collect Windows asset metadata
+        shell: bash
+        run: |
+          mkdir -p release-assets/windows release-meta
+          asset_file="$(find mhm/src-tauri/target/release/bundle/nsis -maxdepth 1 -name '*.exe' | head -n 1)"
+          sig_file="$(find mhm/src-tauri/target/release/bundle/nsis -maxdepth 1 -name '*.sig' | head -n 1)"
+
+          [ -n "$asset_file" ] && [ -n "$sig_file" ]
+
+          cp "$asset_file" release-assets/windows/
+          cp "$sig_file" release-assets/windows/
+
+          cat > release-meta/windows-x86_64.json <<JSON
+          {
+            "platformKey": "windows-x86_64",
+            "assetName": "$(basename "$asset_file")",
+            "signature": "$(tr -d '\r\n' < "$sig_file")"
+          }
+          JSON
+
+      - name: Upload Windows release assets
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-windows
+          path: release-assets/windows/*
+
+      - name: Upload Windows release metadata
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-meta-windows
+          path: release-meta/windows-x86_64.json
+
+  build-macos-aarch64:
+    needs:
+      - verify-version
+      - verify-app
+    runs-on: macos-14
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: mhm/package-lock.json
+
+      - name: Setup Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            mhm/src-tauri -> target
+
+      - name: Install frontend dependencies
+        working-directory: mhm
+        run: npm ci
+
+      - name: Validate updater configuration
+        shell: bash
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_UPDATER_PUBLIC_KEY: ${{ vars.TAURI_UPDATER_PUBLIC_KEY }}
+        run: |
+          [ -n "${TAURI_SIGNING_PRIVATE_KEY}" ] || { echo "TAURI_SIGNING_PRIVATE_KEY is required for release builds"; exit 1; }
+          [ -n "${TAURI_UPDATER_PUBLIC_KEY}" ] || { echo "TAURI_UPDATER_PUBLIC_KEY is required for generated updater config"; exit 1; }
+
+      - name: Prepare release config
+        shell: bash
+        working-directory: mhm
+        env:
+          TAURI_UPDATER_PUBLIC_KEY: ${{ vars.TAURI_UPDATER_PUBLIC_KEY }}
+        run: |
+          node <<'NODE'
+          const fs = require("fs");
+          const path = require("path");
+
+          const configPath = path.join("src-tauri", "tauri.conf.json");
+          const releaseConfigPath = path.join("src-tauri", "tauri.release.conf.json");
+          const config = JSON.parse(fs.readFileSync(configPath, "utf8"));
+
+          config.bundle = {
+            ...(config.bundle || {}),
+            createUpdaterArtifacts: true,
+          };
+
+          config.plugins = {
+            ...(config.plugins || {}),
+            updater: {
+              ...(config.plugins?.updater || {}),
+              pubkey: process.env.TAURI_UPDATER_PUBLIC_KEY,
+            },
+          };
+
+          fs.writeFileSync(releaseConfigPath, `${JSON.stringify(config, null, 2)}\n`);
+          NODE
+
+      - name: Build macOS Apple Silicon updater artifacts
+        uses: tauri-apps/tauri-action@action-v0.6.2
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        with:
+          projectPath: ${{ env.PROJECT_PATH }}
+          args: --config ${{ env.RELEASE_CONFIG_PATH }}
+
+      - name: Collect macOS Apple Silicon asset metadata
+        shell: bash
+        run: |
+          mkdir -p release-assets/macos-aarch64 release-meta
+          asset_file="$(find mhm/src-tauri/target/release/bundle/macos -maxdepth 1 -name '*.app.tar.gz' | head -n 1)"
+          sig_file="$(find mhm/src-tauri/target/release/bundle/macos -maxdepth 1 -name '*.sig' | head -n 1)"
+
+          [ -n "$asset_file" ] && [ -n "$sig_file" ]
+
+          cp "$asset_file" release-assets/macos-aarch64/
+          cp "$sig_file" release-assets/macos-aarch64/
+
+          cat > release-meta/darwin-aarch64.json <<JSON
+          {
+            "platformKey": "darwin-aarch64",
+            "assetName": "$(basename "$asset_file")",
+            "signature": "$(tr -d '\r\n' < "$sig_file")"
+          }
+          JSON
+
+      - name: Upload macOS Apple Silicon release assets
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-macos-aarch64
+          path: release-assets/macos-aarch64/*
+
+      - name: Upload macOS Apple Silicon release metadata
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-meta-macos-aarch64
+          path: release-meta/darwin-aarch64.json
+
+  build-macos-x86_64:
+    needs:
+      - verify-version
+      - verify-app
+    runs-on: macos-13
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: mhm/package-lock.json
+
+      - name: Setup Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            mhm/src-tauri -> target
+
+      - name: Install frontend dependencies
+        working-directory: mhm
+        run: npm ci
+
+      - name: Validate updater configuration
+        shell: bash
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_UPDATER_PUBLIC_KEY: ${{ vars.TAURI_UPDATER_PUBLIC_KEY }}
+        run: |
+          [ -n "${TAURI_SIGNING_PRIVATE_KEY}" ] || { echo "TAURI_SIGNING_PRIVATE_KEY is required for release builds"; exit 1; }
+          [ -n "${TAURI_UPDATER_PUBLIC_KEY}" ] || { echo "TAURI_UPDATER_PUBLIC_KEY is required for generated updater config"; exit 1; }
+
+      - name: Prepare release config
+        shell: bash
+        working-directory: mhm
+        env:
+          TAURI_UPDATER_PUBLIC_KEY: ${{ vars.TAURI_UPDATER_PUBLIC_KEY }}
+        run: |
+          node <<'NODE'
+          const fs = require("fs");
+          const path = require("path");
+
+          const configPath = path.join("src-tauri", "tauri.conf.json");
+          const releaseConfigPath = path.join("src-tauri", "tauri.release.conf.json");
+          const config = JSON.parse(fs.readFileSync(configPath, "utf8"));
+
+          config.bundle = {
+            ...(config.bundle || {}),
+            createUpdaterArtifacts: true,
+          };
+
+          config.plugins = {
+            ...(config.plugins || {}),
+            updater: {
+              ...(config.plugins?.updater || {}),
+              pubkey: process.env.TAURI_UPDATER_PUBLIC_KEY,
+            },
+          };
+
+          fs.writeFileSync(releaseConfigPath, `${JSON.stringify(config, null, 2)}\n`);
+          NODE
+
+      - name: Build macOS Intel updater artifacts
+        uses: tauri-apps/tauri-action@action-v0.6.2
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        with:
+          projectPath: ${{ env.PROJECT_PATH }}
+          args: --config ${{ env.RELEASE_CONFIG_PATH }}
+
+      - name: Collect macOS Intel asset metadata
+        shell: bash
+        run: |
+          mkdir -p release-assets/macos-x86_64 release-meta
+          asset_file="$(find mhm/src-tauri/target/release/bundle/macos -maxdepth 1 -name '*.app.tar.gz' | head -n 1)"
+          sig_file="$(find mhm/src-tauri/target/release/bundle/macos -maxdepth 1 -name '*.sig' | head -n 1)"
+
+          [ -n "$asset_file" ] && [ -n "$sig_file" ]
+
+          cp "$asset_file" release-assets/macos-x86_64/
+          cp "$sig_file" release-assets/macos-x86_64/
+
+          cat > release-meta/darwin-x86_64.json <<JSON
+          {
+            "platformKey": "darwin-x86_64",
+            "assetName": "$(basename "$asset_file")",
+            "signature": "$(tr -d '\r\n' < "$sig_file")"
+          }
+          JSON
+
+      - name: Upload macOS Intel release assets
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-macos-x86_64
+          path: release-assets/macos-x86_64/*
+
+      - name: Upload macOS Intel release metadata
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-meta-macos-x86_64
+          path: release-meta/darwin-x86_64.json
+
+  publish-release:
+    needs:
+      - verify-version
+      - verify-app
+      - build-windows
+      - build-macos-aarch64
+      - build-macos-x86_64
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: mhm/package-lock.json
+
+      - name: Install frontend dependencies
+        working-directory: mhm
+        run: npm ci
+
+      - name: Download release assets
+        uses: actions/download-artifact@v4
+        with:
+          pattern: release-*
+          path: release-downloads
+
+      - name: Build manifest input from per-platform metadata
+        shell: bash
+        env:
+          APP_VERSION: ${{ needs.verify-version.outputs.app_version }}
+          TAG_NAME: ${{ needs.verify-version.outputs.tag_name }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+        run: |
+          node <<'NODE'
+          const fs = require("fs");
+          const path = require("path");
+
+          const tagName = process.env.TAG_NAME;
+          const version = process.env.APP_VERSION;
+          const releaseBase = `https://github.com/${process.env.GITHUB_REPOSITORY}/releases/download/${tagName}`;
+          const metaFiles = [
+            path.join("release-downloads", "release-meta-windows", "windows-x86_64.json"),
+            path.join("release-downloads", "release-meta-macos-aarch64", "darwin-aarch64.json"),
+            path.join("release-downloads", "release-meta-macos-x86_64", "darwin-x86_64.json"),
+          ];
+
+          const platforms = {};
+
+          for (const filePath of metaFiles) {
+            const payload = JSON.parse(fs.readFileSync(filePath, "utf8"));
+            platforms[payload.platformKey] = {
+              signature: payload.signature,
+              url: `${releaseBase}/${payload.assetName}`,
+            };
+          }
+
+          fs.writeFileSync(
+            path.join("release-downloads", "latest-input.json"),
+            `${JSON.stringify(
+              {
+                version,
+                notes: `CapyInn v${version}`,
+                pubDate: new Date().toISOString(),
+                platforms,
+              },
+              null,
+              2,
+            )}\n`,
+          );
+          NODE
+
+      - name: Generate canonical latest.json
+        run: node mhm/scripts/generate-latest-json.mjs release-downloads/latest-input.json release-downloads/latest.json
+
+      - name: Verify release payload exists before publish
+        shell: bash
+        run: |
+          test -f release-downloads/latest.json
+          ls release-downloads/release-windows/*.exe
+          ls release-downloads/release-windows/*.sig
+          ls release-downloads/release-macos-aarch64/*.app.tar.gz
+          ls release-downloads/release-macos-aarch64/*.sig
+          ls release-downloads/release-macos-x86_64/*.app.tar.gz
+          ls release-downloads/release-macos-x86_64/*.sig
+
+      - name: Publish GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ needs.verify-version.outputs.tag_name }}
+          name: CapyInn v${{ needs.verify-version.outputs.app_version }}
+          prerelease: ${{ needs.verify-version.outputs.is_prerelease == 'true' }}
+          files: |
+            release-downloads/release-windows/*.exe
+            release-downloads/release-windows/*.sig
+            release-downloads/release-macos-aarch64/*.app.tar.gz
+            release-downloads/release-macos-aarch64/*.sig
+            release-downloads/release-macos-x86_64/*.app.tar.gz
+            release-downloads/release-macos-x86_64/*.sig
+            release-downloads/latest.json

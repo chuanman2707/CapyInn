@@ -202,6 +202,23 @@ export interface GatewayStatus {
 
 export type BackupIndicatorPhase = "saving" | "saved" | "failed";
 
+export type AppUpdatePhase =
+  | "idle"
+  | "checking"
+  | "available"
+  | "downloading"
+  | "downloaded"
+  | "installing"
+  | "error";
+
+export interface AppUpdateState {
+  phase: AppUpdatePhase;
+  currentVersion: string;
+  availableVersion: string | null;
+  restartPromptOpen: boolean;
+  errorMessage: string | null;
+}
+
 export type BackupReason =
   | "settings"
   | "checkout"

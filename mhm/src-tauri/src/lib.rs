@@ -87,7 +87,15 @@ pub fn run() {
 
     let app = tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_process::init())
         .setup(|app| {
+            #[cfg(desktop)]
+            {
+                app.handle()
+                    .plugin(tauri_plugin_updater::Builder::new().build())
+                    .expect("failed to register updater plugin");
+            }
+
             let rt = tokio::runtime::Runtime::new().expect("Failed to create Tokio runtime");
             let pool = rt.block_on(db::init_db()).expect("Failed to init database");
 
