@@ -1,4 +1,4 @@
-import { AlertCircle, CheckCircle2, Loader2 } from "lucide-react";
+import { CloudAlert, CloudCheck, CloudCog } from "lucide-react";
 
 import type { BackupIndicatorPhase } from "@/types";
 import { cn } from "@/lib/utils";
@@ -12,24 +12,28 @@ type BackupStatusIndicatorProps = {
 const PHASE_CONFIG: Record<
   BackupIndicatorPhase,
   {
-    icon: typeof Loader2;
+    iconName: string;
+    icon: typeof CloudCog;
     iconClassName: string;
     toneClassName: string;
   }
 > = {
   saving: {
-    icon: Loader2,
-    iconClassName: "",
-    toneClassName: "animate-spin bg-brand-primary/10 text-brand-primary",
+    iconName: "cloud-cog",
+    icon: CloudCog,
+    iconClassName: "animate-spin",
+    toneClassName: "bg-brand-primary/10 text-brand-primary",
   },
   saved: {
-    icon: CheckCircle2,
-    iconClassName: "text-emerald-600",
+    iconName: "cloud-check",
+    icon: CloudCheck,
+    iconClassName: "",
     toneClassName: "bg-emerald-50 text-emerald-600",
   },
   failed: {
-    icon: AlertCircle,
-    iconClassName: "text-rose-600",
+    iconName: "cloud-alert",
+    icon: CloudAlert,
+    iconClassName: "",
     toneClassName: "bg-rose-50 text-rose-600",
   },
 };
@@ -55,12 +59,13 @@ export function BackupStatusIndicator({ visible, phase, message }: BackupStatusI
       >
         <span
           data-testid="backup-status-icon"
+          data-icon={config.iconName}
           className={cn(
             "inline-flex h-8 w-8 items-center justify-center rounded-full",
             config.toneClassName,
           )}
         >
-          <Icon aria-hidden="true" size={16} className={config.iconClassName} />
+          <Icon aria-hidden="true" size={16} className={cn("shrink-0", config.iconClassName)} />
         </span>
         <span className="max-w-[22rem] truncate">{message}</span>
       </div>
