@@ -101,15 +101,12 @@ async fn run_backup_once_at(
     fs::create_dir_all(runtime_root.join("backups"))?;
     let backup_dir = runtime_root.join("backups");
 
+    let reservation = BackupReservation::acquire(&backup_dir, reason, timestamp)?;
+    let final_path = reservation.final_path.clone();
+    let temp_path = reservation.temp_path.clone();
+
     if let Some(duration) = hold_for {
         tokio::time::sleep(duration).await;
-    }
-
-    let final_path = reserve_backup_path(&backup_dir, reason, timestamp);
-    let temp_path = final_path.with_extension("db.tmp");
-
-    if temp_path.exists() {
-        fs::remove_file(&temp_path)?;
     }
 
     let options = sqlx::sqlite::SqliteConnectOptions::new()
@@ -128,6 +125,7 @@ async fn run_backup_once_at(
     fs::File::open(&temp_path)?.sync_all()?;
     fs::rename(&temp_path, &final_path)?;
     sync_directory(&backup_dir)?;
+    drop(reservation);
 
     let prune = prune_old_backups(&backup_dir, 30);
 
@@ -205,6 +203,64 @@ struct BackupMetadata {
     collision_index: u64,
 }
 
+struct BackupReservation {
+    final_path: PathBuf,
+    temp_path: PathBuf,
+    lock_path: PathBuf,
+    lock_file: Option<fs::File>,
+}
+
+impl BackupReservation {
+    fn acquire(
+        backup_dir: &Path,
+        reason: BackupReason,
+        timestamp: NaiveDateTime,
+    ) -> Result<Self, BackupError> {
+        let base_name = build_backup_filename(reason, timestamp);
+        let base_stem = base_name.strip_suffix(".db").unwrap();
+        let mut collision_index = 0u64;
+
+        loop {
+            let candidate_name = if collision_index == 0 {
+                base_name.clone()
+            } else {
+                format!("{base_stem}-{collision_index}.db")
+            };
+            let final_path = backup_dir.join(candidate_name);
+            let lock_path = reservation_lock_path(&final_path);
+
+            match fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&lock_path)
+            {
+                Ok(lock_file) => {
+                    return Ok(Self {
+                        temp_path: final_path.with_extension("db.tmp"),
+                        final_path,
+                        lock_path,
+                        lock_file: Some(lock_file),
+                    });
+                }
+                Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
+                    collision_index += 1;
+                }
+                Err(error) => return Err(error.into()),
+            }
+        }
+    }
+}
+
+impl Drop for BackupReservation {
+    fn drop(&mut self) {
+        if let Some(lock_file) = self.lock_file.take() {
+            drop(lock_file);
+        }
+        let _ = fs::remove_file(&self.temp_path);
+        let _ = fs::remove_file(&self.lock_path);
+    }
+}
+
 fn parse_backup_filename(name: &str) -> Option<BackupMetadata> {
     let stem = name.strip_suffix(".db")?;
     let rest = stem.strip_prefix("capyinn_backup_")?;
@@ -243,23 +299,8 @@ fn sqlite_string_literal(path: &Path) -> String {
     format!("'{}'", escaped)
 }
 
-fn reserve_backup_path(backup_dir: &Path, reason: BackupReason, timestamp: NaiveDateTime) -> PathBuf {
-    let base_name = build_backup_filename(reason, timestamp);
-    let base_stem = base_name.strip_suffix(".db").unwrap();
-    let mut collision_index = 0u64;
-
-    loop {
-        let candidate_name = if collision_index == 0 {
-            base_name.clone()
-        } else {
-            format!("{base_stem}-{collision_index}.db")
-        };
-        let candidate = backup_dir.join(candidate_name);
-        if !candidate.exists() {
-            return candidate;
-        }
-        collision_index += 1;
-    }
+fn reservation_lock_path(final_path: &Path) -> PathBuf {
+    final_path.with_extension("db.lock")
 }
 
 #[cfg(unix)]
@@ -423,7 +464,7 @@ mod tests {
     }
 
     #[test]
-    fn reserve_backup_path_starts_from_base_name_for_each_timestamp() {
+    fn reserve_backup_path_uses_atomic_lock_files_for_collisions() {
         let temp = make_temp_dir("backup-reserve");
         let backup_dir = temp.join("backups");
         fs::create_dir_all(&backup_dir).unwrap();
@@ -432,13 +473,20 @@ mod tests {
             .unwrap()
             .and_hms_opt(23, 15, 0)
             .unwrap();
-        let base_name = build_backup_filename(BackupReason::Manual, collision_timestamp);
-        fs::write(backup_dir.join(&base_name), b"existing").unwrap();
-
-        let first_reserved =
-            reserve_backup_path(&backup_dir, BackupReason::Manual, collision_timestamp);
+        let first_reservation =
+            BackupReservation::acquire(&backup_dir, BackupReason::Manual, collision_timestamp)
+                .unwrap();
         assert_eq!(
-            backup_file_name(&first_reserved),
+            backup_file_name(&first_reservation.final_path),
+            "capyinn_backup_manual_20260418_231500.db"
+        );
+        assert!(backup_dir.join("capyinn_backup_manual_20260418_231500.db.lock").exists());
+
+        let second_reservation =
+            BackupReservation::acquire(&backup_dir, BackupReason::Manual, collision_timestamp)
+                .unwrap();
+        assert_eq!(
+            backup_file_name(&second_reservation.final_path),
             "capyinn_backup_manual_20260418_231500-1.db"
         );
 
@@ -446,14 +494,17 @@ mod tests {
             .unwrap()
             .and_hms_opt(23, 16, 0)
             .unwrap();
-        let later_reserved = reserve_backup_path(&backup_dir, BackupReason::Manual, later_timestamp);
+        let later_reserved =
+            BackupReservation::acquire(&backup_dir, BackupReason::Manual, later_timestamp)
+                .unwrap();
         assert_eq!(
-            backup_file_name(&later_reserved),
+            backup_file_name(&later_reserved.final_path),
             "capyinn_backup_manual_20260418_231600.db"
         );
 
-        assert!(is_managed_backup_file(&backup_file_name(&first_reserved)));
-        assert!(is_managed_backup_file(&backup_file_name(&later_reserved)));
+        assert!(is_managed_backup_file(&backup_file_name(&first_reservation.final_path)));
+        assert!(is_managed_backup_file(&backup_file_name(&second_reservation.final_path)));
+        assert!(is_managed_backup_file(&backup_file_name(&later_reserved.final_path)));
     }
 
     #[tokio::test]
