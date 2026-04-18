@@ -72,6 +72,14 @@ pub enum BackupRequestErrorKind {
     Failure,
 }
 
+#[derive(Debug)]
+pub enum BackupRequestError {
+    ShutdownInProgress,
+    MissingHomeDirectory,
+    BackupFailed(BackupError),
+    ShutdownTimedOut,
+}
+
 impl fmt::Display for BackupError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -95,21 +103,39 @@ impl From<sqlx::Error> for BackupError {
     }
 }
 
-pub fn classify_backup_request_error(message: &str) -> BackupRequestErrorKind {
-    if message == "backup skipped because shutdown is in progress" {
-        BackupRequestErrorKind::ShutdownSkip
-    } else {
-        BackupRequestErrorKind::Failure
+impl BackupRequestError {
+    pub fn kind(&self) -> BackupRequestErrorKind {
+        match self {
+            Self::ShutdownInProgress => BackupRequestErrorKind::ShutdownSkip,
+            Self::MissingHomeDirectory
+            | Self::BackupFailed(_)
+            | Self::ShutdownTimedOut => BackupRequestErrorKind::Failure,
+        }
     }
 }
 
-pub fn log_backup_request_error(context: &str, message: &str) {
-    match classify_backup_request_error(message) {
+impl fmt::Display for BackupRequestError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::ShutdownInProgress => {
+                write!(formatter, "backup skipped because shutdown is in progress")
+            }
+            Self::MissingHomeDirectory => write!(formatter, "Cannot find home directory"),
+            Self::BackupFailed(error) => write!(formatter, "{error}"),
+            Self::ShutdownTimedOut => write!(formatter, "backup timed out during app shutdown"),
+        }
+    }
+}
+
+impl std::error::Error for BackupRequestError {}
+
+pub fn log_backup_request_error(context: &str, error: &BackupRequestError) {
+    match error.kind() {
         BackupRequestErrorKind::ShutdownSkip => {
-            log::warn!("autobackup skipped after {context}: {message}");
+            log::warn!("autobackup skipped after {context}: {error}");
         }
         BackupRequestErrorKind::Failure => {
-            log::error!("autobackup failed after {context}: {message}");
+            log::error!("autobackup failed after {context}: {error}");
         }
     }
 }
@@ -186,9 +212,9 @@ impl BackupCoordinator {
             .is_ok()
     }
 
-    pub fn ensure_request_allowed(&self, reason: BackupReason) -> Result<(), String> {
+    pub fn ensure_request_allowed(&self, reason: BackupReason) -> Result<(), BackupRequestError> {
         if self.shutdown_started.load(Ordering::SeqCst) && reason != BackupReason::AppExit {
-            return Err("backup skipped because shutdown is in progress".to_string());
+            return Err(BackupRequestError::ShutdownInProgress);
         }
         Ok(())
     }
@@ -197,66 +223,115 @@ impl BackupCoordinator {
         &self,
         app: &AppHandle,
         reason: BackupReason,
-    ) -> Result<BackupOutcome, String> {
-        self.ensure_request_allowed(reason)?;
-
-        let job_id = self.next_job_id.fetch_add(1, Ordering::SeqCst) + 1;
-        let queued = self.pending_jobs.fetch_add(1, Ordering::SeqCst) + 1;
-        let _guard = self.gate.lock().await;
-
-        emit_backup_status(app, BackupStatusPayload::started(job_id, reason, queued));
-
-        let result = async {
+    ) -> Result<BackupOutcome, BackupRequestError> {
+        self.request_backup_with(reason, |payload| emit_backup_status(app, payload), || async {
             let db_path =
-                crate::app_identity::database_path_opt().ok_or("Cannot find home directory")?;
+                crate::app_identity::database_path_opt().ok_or(BackupRequestError::MissingHomeDirectory)?;
             let runtime_root =
-                crate::app_identity::runtime_root_opt().ok_or("Cannot find home directory")?;
+                crate::app_identity::runtime_root_opt().ok_or(BackupRequestError::MissingHomeDirectory)?;
 
             run_backup_once(&db_path, &runtime_root, reason)
                 .await
-                .map_err(|error| error.to_string())
-        }
-        .await;
+                .map_err(BackupRequestError::BackupFailed)
+        })
+        .await
+    }
+
+    async fn request_backup_with<Emit, Run, RunFuture>(
+        &self,
+        reason: BackupReason,
+        emit: Emit,
+        run_backup: Run,
+    ) -> Result<BackupOutcome, BackupRequestError>
+    where
+        Emit: Fn(BackupStatusPayload),
+        Run: FnOnce() -> RunFuture,
+        RunFuture: std::future::Future<Output = Result<BackupOutcome, BackupRequestError>>,
+    {
+        self.ensure_request_allowed(reason)?;
+
+        let job_id = self.next_job_id.fetch_add(1, Ordering::SeqCst) + 1;
+        self.pending_jobs.fetch_add(1, Ordering::SeqCst);
+        let _guard = self.gate.lock().await;
+
+        let started_pending_jobs = self.pending_jobs.load(Ordering::SeqCst);
+        emit(BackupStatusPayload::started(
+            job_id,
+            reason,
+            started_pending_jobs,
+        ));
+
+        let result = run_backup().await;
 
         let remaining = self.pending_jobs.fetch_sub(1, Ordering::SeqCst) - 1;
         match &result {
-            Ok(outcome) => emit_backup_status(
-                app,
-                BackupStatusPayload::completed(job_id, reason, remaining, outcome.path.clone()),
-            ),
-            Err(message) => emit_backup_status(
-                app,
-                BackupStatusPayload::failed(job_id, reason, remaining, message.clone()),
-            ),
+            Ok(outcome) => emit(BackupStatusPayload::completed(
+                job_id,
+                reason,
+                remaining,
+                outcome.path.clone(),
+            )),
+            Err(error) => emit(BackupStatusPayload::failed(
+                job_id,
+                reason,
+                remaining,
+                error.to_string(),
+            )),
         }
 
         result
     }
 
-    pub async fn drain_and_backup_on_exit(&self, app: &AppHandle) -> Result<(), String> {
+    pub async fn drain_and_backup_on_exit(
+        &self,
+        app: &AppHandle,
+    ) -> Result<(), BackupRequestError> {
+        self.drain_and_backup_with(|payload| emit_backup_status(app, payload), || async {
+            let db_path =
+                crate::app_identity::database_path_opt().ok_or(BackupRequestError::MissingHomeDirectory)?;
+            let runtime_root =
+                crate::app_identity::runtime_root_opt().ok_or(BackupRequestError::MissingHomeDirectory)?;
+
+            run_backup_once(&db_path, &runtime_root, BackupReason::AppExit)
+                .await
+                .map_err(BackupRequestError::BackupFailed)
+        })
+        .await
+    }
+
+    async fn drain_and_backup_with<Emit, Run, RunFuture>(
+        &self,
+        emit: Emit,
+        run_backup: Run,
+    ) -> Result<(), BackupRequestError>
+    where
+        Emit: Fn(BackupStatusPayload),
+        Run: FnOnce() -> RunFuture,
+        RunFuture: std::future::Future<Output = Result<BackupOutcome, BackupRequestError>>,
+    {
         self.mark_shutdown_started();
 
         tokio::time::timeout(Duration::from_secs(10), async {
             let _guard = self.gate.lock().await;
             drop(_guard);
-            self.request_backup(app, BackupReason::AppExit)
+            self.request_backup_with(BackupReason::AppExit, emit, run_backup)
                 .await
                 .map(|_| ())
         })
         .await
-        .map_err(|_| "backup timed out during app shutdown".to_string())?
+        .map_err(|_| BackupRequestError::ShutdownTimedOut)?
     }
 }
 
 pub async fn request_backup(
     app: &AppHandle,
     reason: BackupReason,
-) -> Result<BackupOutcome, String> {
+) -> Result<BackupOutcome, BackupRequestError> {
     let coordinator = app.state::<BackupCoordinator>();
     coordinator.request_backup(app, reason).await
 }
 
-pub async fn drain_and_backup_on_exit(app: &AppHandle) -> Result<(), String> {
+pub async fn drain_and_backup_on_exit(app: &AppHandle) -> Result<(), BackupRequestError> {
     let coordinator = app.state::<BackupCoordinator>();
     coordinator.drain_and_backup_on_exit(app).await
 }
@@ -507,8 +582,10 @@ mod tests {
     use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
     use std::{
         env,
+        sync::{Arc, Mutex},
         time::{SystemTime, UNIX_EPOCH},
     };
+    use tokio::sync::Notify;
 
     struct BackupFixture {
         db_path: PathBuf,
@@ -584,6 +661,13 @@ mod tests {
 
     fn backup_file_name(path: &Path) -> String {
         path.file_name().unwrap().to_string_lossy().into_owned()
+    }
+
+    fn fake_backup_outcome(file_name: &str) -> BackupOutcome {
+        BackupOutcome {
+            path: PathBuf::from(format!("/tmp/{file_name}")),
+            prune: BackupPruneOutcome::default(),
+        }
     }
 
     #[test]
@@ -813,24 +897,219 @@ mod tests {
 
         let result = coordinator.ensure_request_allowed(BackupReason::Settings);
 
-        assert!(result.is_err());
-        assert_eq!(
-            result.unwrap_err(),
-            "backup skipped because shutdown is in progress"
-        );
+        assert!(matches!(
+            result,
+            Err(BackupRequestError::ShutdownInProgress)
+        ));
     }
 
     #[test]
-    fn classifies_shutdown_skip_errors_for_logging() {
-        let shutdown_skip = classify_backup_request_error(
-            "backup skipped because shutdown is in progress",
-        );
-        assert!(matches!(
-            shutdown_skip,
+    fn typed_request_errors_drive_skip_vs_failure_logging() {
+        assert_eq!(
+            BackupRequestError::ShutdownInProgress.kind(),
             BackupRequestErrorKind::ShutdownSkip
+        );
+        assert_eq!(
+            BackupRequestError::MissingHomeDirectory.kind(),
+            BackupRequestErrorKind::Failure
+        );
+    }
+
+    #[tokio::test]
+    async fn request_backup_serializes_jobs_and_emits_live_pending_counts() {
+        let coordinator = Arc::new(BackupCoordinator::new());
+        let events = Arc::new(Mutex::new(Vec::<BackupStatusPayload>::new()));
+        let first_entered = Arc::new(Notify::new());
+        let release_first = Arc::new(Notify::new());
+
+        let first = {
+            let coordinator = coordinator.clone();
+            let events = events.clone();
+            let first_entered = first_entered.clone();
+            let release_first = release_first.clone();
+            tokio::spawn(async move {
+                coordinator
+                    .request_backup_with(
+                        BackupReason::Manual,
+                        move |payload| events.lock().unwrap().push(payload),
+                        || async move {
+                            first_entered.notify_one();
+                            release_first.notified().await;
+                            Ok(fake_backup_outcome("first.db"))
+                        },
+                    )
+                    .await
+            })
+        };
+
+        first_entered.notified().await;
+
+        let second = {
+            let coordinator = coordinator.clone();
+            let events = events.clone();
+            tokio::spawn(async move {
+                coordinator
+                    .request_backup_with(
+                        BackupReason::Manual,
+                        move |payload| events.lock().unwrap().push(payload),
+                        || async { Ok(fake_backup_outcome("second.db")) },
+                    )
+                    .await
+            })
+        };
+
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while coordinator.pending_jobs.load(Ordering::SeqCst) != 2 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("second job should queue");
+
+        release_first.notify_one();
+
+        let first = first.await.unwrap().unwrap();
+        let second = second.await.unwrap().unwrap();
+        assert_eq!(first.path, PathBuf::from("/tmp/first.db"));
+        assert_eq!(second.path, PathBuf::from("/tmp/second.db"));
+
+        let events = events.lock().unwrap().clone();
+        let actual = events
+            .iter()
+            .map(|payload| {
+                (
+                    payload.state,
+                    payload.reason,
+                    payload.pending_jobs,
+                    payload.path.clone(),
+                )
+            })
+            .collect::<Vec<_>>();
+
+        let expected = vec![
+            ("started", "manual", 1, None),
+            (
+                "completed",
+                "manual",
+                1,
+                Some("/tmp/first.db".to_string()),
+            ),
+            ("started", "manual", 1, None),
+            (
+                "completed",
+                "manual",
+                0,
+                Some("/tmp/second.db".to_string()),
+            ),
+        ];
+
+        assert_eq!(actual, expected);
+    }
+
+    #[tokio::test]
+    async fn begin_exit_drain_blocks_new_jobs_and_drains_with_app_exit_backup() {
+        let coordinator = Arc::new(BackupCoordinator::new());
+        let events = Arc::new(Mutex::new(Vec::<BackupStatusPayload>::new()));
+        let first_entered = Arc::new(Notify::new());
+        let release_first = Arc::new(Notify::new());
+        let exit_started = Arc::new(Notify::new());
+
+        let first = {
+            let coordinator = coordinator.clone();
+            let events = events.clone();
+            let first_entered = first_entered.clone();
+            let release_first = release_first.clone();
+            tokio::spawn(async move {
+                coordinator
+                    .request_backup_with(
+                        BackupReason::Manual,
+                        move |payload| events.lock().unwrap().push(payload),
+                        || async move {
+                            first_entered.notify_one();
+                            release_first.notified().await;
+                            Ok(fake_backup_outcome("manual.db"))
+                        },
+                    )
+                    .await
+            })
+        };
+
+        first_entered.notified().await;
+
+        assert!(coordinator.begin_exit_drain());
+        assert!(!coordinator.begin_exit_drain());
+
+        let skipped = coordinator
+            .request_backup_with(
+                BackupReason::Settings,
+                |_| panic!("shutdown-skipped requests must not emit backup status"),
+                || async { Ok(fake_backup_outcome("skipped.db")) },
+            )
+            .await;
+        assert!(matches!(
+            skipped,
+            Err(BackupRequestError::ShutdownInProgress)
         ));
 
-        let actual_failure = classify_backup_request_error("disk full");
-        assert!(matches!(actual_failure, BackupRequestErrorKind::Failure));
+        let drain = {
+            let coordinator = coordinator.clone();
+            let events = events.clone();
+            let exit_started = exit_started.clone();
+            tokio::spawn(async move {
+                coordinator
+                    .drain_and_backup_with(
+                        move |payload| events.lock().unwrap().push(payload),
+                        || async move {
+                            exit_started.notify_one();
+                            Ok(fake_backup_outcome("app-exit.db"))
+                        },
+                    )
+                    .await
+            })
+        };
+
+        assert!(
+            tokio::time::timeout(Duration::from_millis(50), exit_started.notified())
+                .await
+                .is_err(),
+            "exit backup should wait for the in-flight job to finish"
+        );
+
+        release_first.notify_one();
+
+        first.await.unwrap().unwrap();
+        drain.await.unwrap().unwrap();
+
+        let events = events.lock().unwrap().clone();
+        let actual = events
+            .iter()
+            .map(|payload| {
+                (
+                    payload.state,
+                    payload.reason,
+                    payload.pending_jobs,
+                    payload.path.clone(),
+                )
+            })
+            .collect::<Vec<_>>();
+
+        let expected = vec![
+            ("started", "manual", 1, None),
+            (
+                "completed",
+                "manual",
+                0,
+                Some("/tmp/manual.db".to_string()),
+            ),
+            ("started", "app_exit", 1, None),
+            (
+                "completed",
+                "app_exit",
+                0,
+                Some("/tmp/app-exit.db".to_string()),
+            ),
+        ];
+
+        assert_eq!(actual, expected);
     }
 }

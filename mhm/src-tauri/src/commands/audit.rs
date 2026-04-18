@@ -53,7 +53,7 @@ pub async fn backup_database(
         .await
         .map_err(|error| {
             crate::backup::log_backup_request_error("manual backup", &error);
-            error
+            error.to_string()
         })?;
     Ok(outcome.path.to_string_lossy().to_string())
 }
