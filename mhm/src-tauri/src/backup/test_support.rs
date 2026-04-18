@@ -5,8 +5,11 @@ use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
 use std::{
     env, fs,
     path::{Path, PathBuf},
+    sync::atomic::{AtomicU64, Ordering},
     time::{SystemTime, UNIX_EPOCH},
 };
+
+static TEMP_DIR_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 pub(crate) struct BackupFixture {
     pub(crate) db_path: PathBuf,
@@ -75,7 +78,14 @@ pub(crate) fn make_temp_dir(prefix: &str) -> PathBuf {
         .duration_since(UNIX_EPOCH)
         .unwrap()
         .as_nanos();
-    let path = env::temp_dir().join(format!("{}_{}_{}", prefix, std::process::id(), now));
+    let unique = TEMP_DIR_COUNTER.fetch_add(1, Ordering::Relaxed);
+    let path = env::temp_dir().join(format!(
+        "{}_{}_{}_{}",
+        prefix,
+        std::process::id(),
+        now,
+        unique
+    ));
     fs::create_dir_all(&path).unwrap();
     path
 }
