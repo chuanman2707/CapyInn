@@ -9,6 +9,7 @@ use super::models::*;
 use crate::app_identity;
 use crate::commands;
 use crate::models::{BookingFilter, CreateReservationRequest};
+use crate::services::settings_store::get_setting;
 
 /// MCP Tool handler — exposes hotel business logic as MCP tools.
 /// Each tool delegates to the shared `do_*` functions in `commands.rs`.
@@ -40,28 +41,26 @@ impl HotelTools {
     async fn get_hotel_context(&self) -> String {
         let now = chrono::Local::now();
 
-        let (hotel_name, hotel_address) = match commands::do_get_settings(&self.pool, "hotel_info")
-            .await
-            .unwrap_or(None)
-        {
-            Some(json_str) => {
-                if let Ok(v) = serde_json::from_str::<serde_json::Value>(&json_str) {
-                    (
-                        v.get("name")
-                            .and_then(|s| s.as_str())
-                            .unwrap_or(app_identity::APP_NAME)
-                            .to_string(),
-                        v.get("address")
-                            .and_then(|s| s.as_str())
-                            .unwrap_or("")
-                            .to_string(),
-                    )
-                } else {
-                    (app_identity::APP_NAME.to_string(), String::new())
+        let (hotel_name, hotel_address) =
+            match get_setting(&self.pool, "hotel_info").await.unwrap_or(None) {
+                Some(json_str) => {
+                    if let Ok(v) = serde_json::from_str::<serde_json::Value>(&json_str) {
+                        (
+                            v.get("name")
+                                .and_then(|s| s.as_str())
+                                .unwrap_or(app_identity::APP_NAME)
+                                .to_string(),
+                            v.get("address")
+                                .and_then(|s| s.as_str())
+                                .unwrap_or("")
+                                .to_string(),
+                        )
+                    } else {
+                        (app_identity::APP_NAME.to_string(), String::new())
+                    }
                 }
-            }
-            None => (app_identity::APP_NAME.to_string(), String::new()),
-        };
+                None => (app_identity::APP_NAME.to_string(), String::new()),
+            };
 
         let context = serde_json::json!({
             "current_datetime": now.to_rfc3339(),
@@ -175,7 +174,7 @@ impl HotelTools {
         description = "Get a hotel setting by key. Common keys: hotel_name, hotel_address, hotel_phone, hotel_rules."
     )]
     async fn get_hotel_info(&self, Parameters(input): Parameters<GetSettingsInput>) -> String {
-        match commands::do_get_settings(&self.pool, &input.key).await {
+        match get_setting(&self.pool, &input.key).await {
             Ok(Some(value)) => value,
             Ok(None) => format!("Setting '{}' not found", input.key),
             Err(e) => format!("Error: {}", e),
