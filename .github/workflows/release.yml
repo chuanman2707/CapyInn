@@ -279,6 +279,120 @@ jobs:
           name: release-meta-windows
           path: release-meta/windows-x86_64.json
 
+  build-linux-x86_64:
+    needs:
+      - verify-version
+      - verify-app
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: mhm/package-lock.json
+
+      - name: Setup Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            mhm/src-tauri -> target
+
+      - name: Install Linux dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf
+
+      - name: Install frontend dependencies
+        working-directory: mhm
+        run: npm ci
+
+      - name: Validate updater configuration
+        shell: bash
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_UPDATER_PUBLIC_KEY: ${{ vars.TAURI_UPDATER_PUBLIC_KEY }}
+        run: |
+          [ -n "${TAURI_SIGNING_PRIVATE_KEY}" ] || { echo "TAURI_SIGNING_PRIVATE_KEY is required for release builds"; exit 1; }
+          [ -n "${TAURI_UPDATER_PUBLIC_KEY}" ] || { echo "TAURI_UPDATER_PUBLIC_KEY is required for generated updater config"; exit 1; }
+
+      - name: Prepare release config
+        shell: bash
+        working-directory: mhm
+        env:
+          TAURI_UPDATER_PUBLIC_KEY: ${{ vars.TAURI_UPDATER_PUBLIC_KEY }}
+        run: |
+          node <<'NODE'
+          const fs = require("fs");
+          const path = require("path");
+
+          const configPath = path.join("src-tauri", "tauri.conf.json");
+          const releaseConfigPath = path.join("src-tauri", "tauri.release.conf.json");
+          const config = JSON.parse(fs.readFileSync(configPath, "utf8"));
+
+          config.bundle = {
+            ...(config.bundle || {}),
+            createUpdaterArtifacts: true,
+          };
+
+          config.plugins = {
+            ...(config.plugins || {}),
+            updater: {
+              ...(config.plugins?.updater || {}),
+              pubkey: process.env.TAURI_UPDATER_PUBLIC_KEY,
+            },
+          };
+
+          fs.writeFileSync(releaseConfigPath, `${JSON.stringify(config, null, 2)}\n`);
+          NODE
+
+      - name: Build Linux updater artifacts
+        uses: tauri-apps/tauri-action@action-v0.6.2
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        with:
+          projectPath: ${{ env.PROJECT_PATH }}
+          args: --bundles appimage --config ${{ env.RELEASE_CONFIG_PATH }}
+
+      - name: Collect Linux asset metadata
+        shell: bash
+        run: |
+          mkdir -p release-assets/linux release-meta
+          asset_file="$(find mhm/src-tauri/target/release/bundle/appimage -maxdepth 1 -name '*.AppImage' | head -n 1)"
+          sig_file="$(find mhm/src-tauri/target/release/bundle/appimage -maxdepth 1 -name '*.AppImage.sig' | head -n 1)"
+
+          [ -n "$asset_file" ] && [ -n "$sig_file" ]
+
+          cp "$asset_file" release-assets/linux/
+          cp "$sig_file" release-assets/linux/
+
+          cat > release-meta/linux-x86_64.json <<JSON
+          {
+            "platformKey": "linux-x86_64",
+            "assetName": "$(basename "$asset_file")",
+            "signature": "$(tr -d '\r\n' < "$sig_file")"
+          }
+          JSON
+
+      - name: Upload Linux release assets
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-linux
+          path: release-assets/linux/*
+
+      - name: Upload Linux release metadata
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-meta-linux
+          path: release-meta/linux-x86_64.json
+
   build-macos-aarch64:
     needs:
       - verify-version
@@ -354,24 +468,32 @@ jobs:
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         with:
           projectPath: ${{ env.PROJECT_PATH }}
-          args: --config ${{ env.RELEASE_CONFIG_PATH }}
+          args: --bundles app,dmg --config ${{ env.RELEASE_CONFIG_PATH }}
 
       - name: Collect macOS Apple Silicon asset metadata
         shell: bash
+        env:
+          APP_VERSION: ${{ needs.verify-version.outputs.app_version }}
         run: |
           mkdir -p release-assets/macos-aarch64 release-meta
           asset_file="$(find mhm/src-tauri/target/release/bundle/macos -maxdepth 1 -name '*.app.tar.gz' | head -n 1)"
-          sig_file="$(find mhm/src-tauri/target/release/bundle/macos -maxdepth 1 -name '*.sig' | head -n 1)"
+          sig_file="$(find mhm/src-tauri/target/release/bundle/macos -maxdepth 1 -name '*.app.tar.gz.sig' | head -n 1)"
+          dmg_file="$(find mhm/src-tauri/target/release/bundle/dmg -maxdepth 1 -name '*.dmg' | head -n 1)"
 
-          [ -n "$asset_file" ] && [ -n "$sig_file" ]
+          [ -n "$asset_file" ] && [ -n "$sig_file" ] && [ -n "$dmg_file" ]
 
-          cp "$asset_file" release-assets/macos-aarch64/
-          cp "$sig_file" release-assets/macos-aarch64/
+          updater_name="CapyInn_${APP_VERSION}_aarch64.app.tar.gz"
+          updater_sig_name="${updater_name}.sig"
+          dmg_name="CapyInn_${APP_VERSION}_aarch64.dmg"
+
+          cp "$asset_file" "release-assets/macos-aarch64/${updater_name}"
+          cp "$sig_file" "release-assets/macos-aarch64/${updater_sig_name}"
+          cp "$dmg_file" "release-assets/macos-aarch64/${dmg_name}"
 
           cat > release-meta/darwin-aarch64.json <<JSON
           {
             "platformKey": "darwin-aarch64",
-            "assetName": "$(basename "$asset_file")",
+            "assetName": "${updater_name}",
             "signature": "$(tr -d '\r\n' < "$sig_file")"
           }
           JSON
@@ -463,24 +585,32 @@ jobs:
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         with:
           projectPath: ${{ env.PROJECT_PATH }}
-          args: --config ${{ env.RELEASE_CONFIG_PATH }}
+          args: --bundles app,dmg --config ${{ env.RELEASE_CONFIG_PATH }}
 
       - name: Collect macOS Intel asset metadata
         shell: bash
+        env:
+          APP_VERSION: ${{ needs.verify-version.outputs.app_version }}
         run: |
           mkdir -p release-assets/macos-x86_64 release-meta
           asset_file="$(find mhm/src-tauri/target/release/bundle/macos -maxdepth 1 -name '*.app.tar.gz' | head -n 1)"
-          sig_file="$(find mhm/src-tauri/target/release/bundle/macos -maxdepth 1 -name '*.sig' | head -n 1)"
+          sig_file="$(find mhm/src-tauri/target/release/bundle/macos -maxdepth 1 -name '*.app.tar.gz.sig' | head -n 1)"
+          dmg_file="$(find mhm/src-tauri/target/release/bundle/dmg -maxdepth 1 -name '*.dmg' | head -n 1)"
 
-          [ -n "$asset_file" ] && [ -n "$sig_file" ]
+          [ -n "$asset_file" ] && [ -n "$sig_file" ] && [ -n "$dmg_file" ]
 
-          cp "$asset_file" release-assets/macos-x86_64/
-          cp "$sig_file" release-assets/macos-x86_64/
+          updater_name="CapyInn_${APP_VERSION}_x64.app.tar.gz"
+          updater_sig_name="${updater_name}.sig"
+          dmg_name="CapyInn_${APP_VERSION}_x64.dmg"
+
+          cp "$asset_file" "release-assets/macos-x86_64/${updater_name}"
+          cp "$sig_file" "release-assets/macos-x86_64/${updater_sig_name}"
+          cp "$dmg_file" "release-assets/macos-x86_64/${dmg_name}"
 
           cat > release-meta/darwin-x86_64.json <<JSON
           {
             "platformKey": "darwin-x86_64",
-            "assetName": "$(basename "$asset_file")",
+            "assetName": "${updater_name}",
             "signature": "$(tr -d '\r\n' < "$sig_file")"
           }
           JSON
@@ -502,6 +632,7 @@ jobs:
       - verify-version
       - verify-app
       - build-windows
+      - build-linux-x86_64
       - build-macos-aarch64
       - build-macos-x86_64
     runs-on: ubuntu-22.04
@@ -543,6 +674,7 @@ jobs:
           const version = process.env.APP_VERSION;
           const releaseBase = `https://github.com/${process.env.GITHUB_REPOSITORY}/releases/download/${tagName}`;
           const metaFiles = [
+            path.join("release-downloads", "release-meta-linux", "linux-x86_64.json"),
             path.join("release-downloads", "release-meta-windows", "windows-x86_64.json"),
             path.join("release-downloads", "release-meta-macos-aarch64", "darwin-aarch64.json"),
             path.join("release-downloads", "release-meta-macos-x86_64", "darwin-x86_64.json"),
@@ -576,16 +708,39 @@ jobs:
       - name: Generate canonical latest.json
         run: node mhm/scripts/generate-latest-json.mjs release-downloads/latest-input.json release-downloads/latest.json
 
+      - name: Verify release asset names are unique
+        shell: bash
+        run: |
+          asset_names="$(
+            find \
+              release-downloads/release-linux \
+              release-downloads/release-windows \
+              release-downloads/release-macos-aarch64 \
+              release-downloads/release-macos-x86_64 \
+              -maxdepth 1 -type f -printf '%f\n' | sort
+          )"
+          duplicate_names="$(printf '%s\n' "$asset_names" | uniq -d)"
+
+          if [ -n "$duplicate_names" ]; then
+            echo "Duplicate release asset names detected:"
+            printf '%s\n' "$duplicate_names"
+            exit 1
+          fi
+
       - name: Verify release payload exists before publish
         shell: bash
         run: |
           test -f release-downloads/latest.json
+          ls release-downloads/release-linux/*.AppImage
+          ls release-downloads/release-linux/*.sig
           ls release-downloads/release-windows/*.exe
           ls release-downloads/release-windows/*.sig
           ls release-downloads/release-macos-aarch64/*.app.tar.gz
           ls release-downloads/release-macos-aarch64/*.sig
+          ls release-downloads/release-macos-aarch64/*.dmg
           ls release-downloads/release-macos-x86_64/*.app.tar.gz
           ls release-downloads/release-macos-x86_64/*.sig
+          ls release-downloads/release-macos-x86_64/*.dmg
 
       - name: Publish GitHub release
         uses: softprops/action-gh-release@v2
@@ -594,10 +749,14 @@ jobs:
           name: CapyInn v${{ needs.verify-version.outputs.app_version }}
           prerelease: ${{ needs.verify-version.outputs.is_prerelease == 'true' }}
           files: |
+            release-downloads/release-linux/*.AppImage
+            release-downloads/release-linux/*.sig
             release-downloads/release-windows/*.exe
             release-downloads/release-windows/*.sig
             release-downloads/release-macos-aarch64/*.app.tar.gz
             release-downloads/release-macos-aarch64/*.sig
+            release-downloads/release-macos-aarch64/*.dmg
             release-downloads/release-macos-x86_64/*.app.tar.gz
             release-downloads/release-macos-x86_64/*.sig
+            release-downloads/release-macos-x86_64/*.dmg
             release-downloads/latest.json

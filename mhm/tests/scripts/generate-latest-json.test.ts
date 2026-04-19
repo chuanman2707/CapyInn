@@ -9,6 +9,10 @@ describe("buildLatestManifest", () => {
       notes: "Release body",
       pubDate: "2026-04-18T12:00:00Z",
       platforms: {
+        "linux-x86_64": {
+          signature: "linux-sig",
+          url: "https://github.com/chuanman2707/CapyInn/releases/download/v0.2.0/CapyInn_0.2.0_amd64.AppImage",
+        },
         "darwin-x86_64": {
           signature: "mac-intel-sig",
           url: "https://github.com/chuanman2707/CapyInn/releases/download/v0.2.0/CapyInn-x64.app.tar.gz",
@@ -29,6 +33,10 @@ describe("buildLatestManifest", () => {
       notes: "Release body",
       pub_date: "2026-04-18T12:00:00Z",
       platforms: {
+        "linux-x86_64": {
+          signature: "linux-sig",
+          url: "https://github.com/chuanman2707/CapyInn/releases/download/v0.2.0/CapyInn_0.2.0_amd64.AppImage",
+        },
         "windows-x86_64": {
           signature: "windows-sig",
           url: "https://github.com/chuanman2707/CapyInn/releases/download/v0.2.0/capyinn-0.2.0-x64-setup.exe",
@@ -44,6 +52,7 @@ describe("buildLatestManifest", () => {
       },
     });
     expect(Object.keys(manifest.platforms)).toEqual([
+      "linux-x86_64",
       "windows-x86_64",
       "darwin-aarch64",
       "darwin-x86_64",
@@ -57,6 +66,10 @@ describe("buildLatestManifest", () => {
         notes: "",
         pubDate: "2026-04-18T12:00:00Z",
         platforms: {
+          "linux-x86_64": {
+            signature: "sig",
+            url: "https://github.com/chuanman2707/CapyInn/releases/download/v0.2.0/CapyInn_0.2.0_amd64.AppImage",
+          },
           "windows-x86_64": {
             signature: "sig",
             url: "https://github.com/chuanman2707/CapyInn/releases/latest/download/app.exe",
@@ -81,17 +94,21 @@ describe("buildLatestManifest", () => {
         notes: "",
         pubDate: "2026-04-18T12:00:00Z",
         platforms: {
-          "windows-x86_64": {
+          "linux-x86_64": {
             signature: "sig",
-            url: "https://github.com/chuanman2707/CapyInn/releases/download/v0.2.0/app.exe",
+            url: "https://github.com/chuanman2707/CapyInn/releases/download/v0.2.0/CapyInn_0.2.0_amd64.AppImage",
           },
           "darwin-aarch64": {
             signature: "sig",
             url: "https://github.com/chuanman2707/CapyInn/releases/download/v0.2.0/CapyInn.app.tar.gz",
           },
+          "windows-x86_64": {
+            signature: "sig",
+            url: "https://github.com/chuanman2707/CapyInn/releases/download/v0.2.0/app.exe",
+          },
         },
       }),
-    ).toThrow(/darwin-x86_64/i);
+    ).toThrow(/missing required platform key: darwin-x86_64/i);
   });
 
   it("rejects malformed manifests with empty signatures", () => {
@@ -101,6 +118,10 @@ describe("buildLatestManifest", () => {
         notes: "",
         pubDate: "2026-04-18T12:00:00Z",
         platforms: {
+          "linux-x86_64": {
+            signature: "sig",
+            url: "https://github.com/chuanman2707/CapyInn/releases/download/v0.2.0/CapyInn_0.2.0_amd64.AppImage",
+          },
           "windows-x86_64": {
             signature: " ",
             url: "https://github.com/chuanman2707/CapyInn/releases/download/v0.2.0/app.exe",
@@ -116,5 +137,33 @@ describe("buildLatestManifest", () => {
         },
       }),
     ).toThrow(/signature/i);
+  });
+
+  it("rejects manifests that reuse the same asset URL across platforms", () => {
+    expect(() =>
+      buildLatestManifest({
+        version: "0.2.0",
+        notes: "",
+        pubDate: "2026-04-18T12:00:00Z",
+        platforms: {
+          "linux-x86_64": {
+            signature: "linux-sig",
+            url: "https://github.com/chuanman2707/CapyInn/releases/download/v0.2.0/CapyInn_0.2.0_amd64.AppImage",
+          },
+          "windows-x86_64": {
+            signature: "windows-sig",
+            url: "https://github.com/chuanman2707/CapyInn/releases/download/v0.2.0/capyinn-0.2.0-x64-setup.exe",
+          },
+          "darwin-aarch64": {
+            signature: "mac-arm-sig",
+            url: "https://github.com/chuanman2707/CapyInn/releases/download/v0.2.0/CapyInn.app.tar.gz",
+          },
+          "darwin-x86_64": {
+            signature: "mac-intel-sig",
+            url: "https://github.com/chuanman2707/CapyInn/releases/download/v0.2.0/CapyInn.app.tar.gz",
+          },
+        },
+      }),
+    ).toThrow(/duplicate asset url/i);
   });
 });

@@ -6,7 +6,7 @@ The workflow now runs in four stages:
 
 1. `verify-version` checks that the tag matches the version in `mhm/package.json`, `mhm/src-tauri/tauri.conf.json`, and `mhm/src-tauri/Cargo.toml`.
 2. `verify-app` runs the shared validation pass before any release artifacts are built.
-3. `build-windows`, `build-macos-aarch64`, and `build-macos-x86_64` each build one platform and emit per-platform metadata with the asset name and embedded updater signature.
+3. `build-linux-x86_64`, `build-windows`, `build-macos-aarch64`, and `build-macos-x86_64` each build one platform and emit per-platform metadata with the asset name and embedded updater signature.
 4. `publish-release` downloads every build artifact, generates the canonical `latest.json`, verifies the full release payload exists, and only then creates the GitHub Release.
 
 ## Release trigger
@@ -82,18 +82,20 @@ Set the printed public key value as `TAURI_UPDATER_PUBLIC_KEY`.
 
 Pushing `vX.Y.Z` produces a single GitHub Release containing:
 
-- a Windows NSIS updater package and its `.sig`
-- a macOS Apple Silicon `.app.tar.gz` updater package and its `.sig`
-- a macOS Intel `.app.tar.gz` updater package and its `.sig`
+- a Linux `.AppImage` and its `.sig`
+- a Windows NSIS installer and its `.sig`
+- a macOS Apple Silicon `.app.tar.gz` updater package, its `.sig`, and a manual-install `.dmg`
+- a macOS Intel `.app.tar.gz` updater package, its `.sig`, and a manual-install `.dmg`
 - one canonical `latest.json`
 
 The generated `latest.json` keeps an explicit platform contract:
 
+- `linux-x86_64`
 - `windows-x86_64`
 - `darwin-aarch64`
 - `darwin-x86_64`
 
-Each manifest entry uses an immutable asset URL in the form `https://github.com/<owner>/<repo>/releases/download/vX.Y.Z/<asset-name>`. Mutable `releases/latest/...` URLs are intentionally rejected by the generator.
+Each manifest entry uses an immutable asset URL in the form `https://github.com/<owner>/<repo>/releases/download/vX.Y.Z/<asset-name>`. Mutable `releases/latest/...` URLs are intentionally rejected by the generator, and duplicate asset URLs across platform keys are rejected as invalid.
 
 ## Generated release config
 
@@ -114,7 +116,8 @@ Nothing in the checked-in Tauri config needs to carry release-only signing state
 
 1. Verifies version alignment across package, Tauri, Cargo, and tag metadata.
 2. Runs the shared verification pass before any release build starts.
-3. Builds Windows, macOS Apple Silicon, and macOS Intel updater artifacts in isolated jobs.
+3. Builds Linux, Windows, macOS Apple Silicon, and macOS Intel artifacts in isolated jobs.
 4. Collects per-platform metadata so the final publish job can assemble immutable manifest URLs.
-5. Generates `latest.json` with `mhm/scripts/generate-latest-json.mjs`.
-6. Creates the GitHub Release only after every asset and `latest.json` are present.
+5. Renames macOS updater assets per architecture before upload so GitHub Release asset URLs stay unique.
+6. Generates `latest.json` with `mhm/scripts/generate-latest-json.mjs`.
+7. Creates the GitHub Release only after every asset and `latest.json` are present.

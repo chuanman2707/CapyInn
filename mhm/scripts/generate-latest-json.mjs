@@ -3,6 +3,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 const REQUIRED_PLATFORM_KEYS = [
+  "linux-x86_64",
   "windows-x86_64",
   "darwin-aarch64",
   "darwin-x86_64",
@@ -72,6 +73,7 @@ export function buildLatestManifest(input) {
   }
 
   const orderedPlatforms = {};
+  const seenUrls = new Map();
 
   for (const key of REQUIRED_PLATFORM_KEYS) {
     const platform = platforms[key];
@@ -79,9 +81,17 @@ export function buildLatestManifest(input) {
     assertNonEmptyString(platform.signature, `platforms.${key}.signature`);
     assertNonEmptyString(platform.url, `platforms.${key}.url`);
     validateImmutableAssetUrl(platform, key);
+    const normalizedUrl = platform.url.trim();
+    const existingPlatformForUrl = seenUrls.get(normalizedUrl);
+    if (existingPlatformForUrl) {
+      throw new Error(
+        `duplicate asset URL for ${key}: already used by ${existingPlatformForUrl}`,
+      );
+    }
+    seenUrls.set(normalizedUrl, key);
     orderedPlatforms[key] = {
       signature: platform.signature.trim(),
-      url: platform.url.trim(),
+      url: normalizedUrl,
     };
   }
 
