@@ -1,6 +1,6 @@
 [package]
 name = "capyinn"
-version = "0.1.1"
+version = "0.1.2"
 description = "Offline-first desktop hotel manager for small properties"
 authors = ["CapyInn contributors"]
 edition = "2021"
