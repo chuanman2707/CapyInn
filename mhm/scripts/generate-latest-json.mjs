@@ -6,7 +6,6 @@ const REQUIRED_PLATFORM_KEYS = [
   "linux-x86_64",
   "windows-x86_64",
   "darwin-aarch64",
-  "darwin-x86_64",
 ];
 
 function assertNonEmptyString(value, fieldName) {
