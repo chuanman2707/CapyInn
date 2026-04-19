@@ -4,11 +4,15 @@ import tailwindcss from "@tailwindcss/vite";
 import path from "path";
 
 const host = process.env.TAURI_DEV_HOST;
+const updaterEnabled = ["1", "true", "yes", "on"].includes(
+  (process.env.CAPYINN_ENABLE_UPDATER ?? "").toLowerCase(),
+);
 
 // https://vite.dev/config/
 export default defineConfig(async () => ({
   define: {
     __APP_VERSION__: JSON.stringify(process.env.npm_package_version ?? "0.0.0"),
+    __UPDATER_ENABLED__: JSON.stringify(updaterEnabled),
   },
   plugins: [react(), tailwindcss()],
   resolve: {

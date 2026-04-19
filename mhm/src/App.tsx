@@ -92,6 +92,7 @@ export default function App() {
     (!bootstrap?.app_lock_enabled || isAuthenticated);
   const appUpdate = useAppUpdateController({
     enabled: shellReady,
+    supported: __UPDATER_ENABLED__,
     currentVersion: __APP_VERSION__,
   });
 

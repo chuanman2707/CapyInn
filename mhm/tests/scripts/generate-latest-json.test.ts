@@ -3,7 +3,7 @@ import { describe, expect, it } from "vitest";
 import { buildLatestManifest } from "../../scripts/generate-latest-json.mjs";
 
 describe("buildLatestManifest", () => {
-  it("builds a single manifest with all required production targets", () => {
+  it("builds a single manifest with the supported production updater targets", () => {
     const manifest = buildLatestManifest({
       version: "0.2.0",
       notes: "Release body",
@@ -12,10 +12,6 @@ describe("buildLatestManifest", () => {
         "linux-x86_64": {
           signature: "linux-sig",
           url: "https://github.com/chuanman2707/CapyInn/releases/download/v0.2.0/CapyInn_0.2.0_amd64.AppImage",
-        },
-        "darwin-x86_64": {
-          signature: "mac-intel-sig",
-          url: "https://github.com/chuanman2707/CapyInn/releases/download/v0.2.0/CapyInn-x64.app.tar.gz",
         },
         "windows-x86_64": {
           signature: "windows-sig",
@@ -45,17 +41,12 @@ describe("buildLatestManifest", () => {
           signature: "mac-arm-sig",
           url: "https://github.com/chuanman2707/CapyInn/releases/download/v0.2.0/CapyInn.app.tar.gz",
         },
-        "darwin-x86_64": {
-          signature: "mac-intel-sig",
-          url: "https://github.com/chuanman2707/CapyInn/releases/download/v0.2.0/CapyInn-x64.app.tar.gz",
-        },
       },
     });
     expect(Object.keys(manifest.platforms)).toEqual([
       "linux-x86_64",
       "windows-x86_64",
       "darwin-aarch64",
-      "darwin-x86_64",
     ]);
   });
 
@@ -78,10 +69,6 @@ describe("buildLatestManifest", () => {
             signature: "sig",
             url: "https://github.com/chuanman2707/CapyInn/releases/download/v0.2.0/CapyInn.app.tar.gz",
           },
-          "darwin-x86_64": {
-            signature: "sig",
-            url: "https://github.com/chuanman2707/CapyInn/releases/download/v0.2.0/CapyInn-x64.app.tar.gz",
-          },
         },
       }),
     ).toThrow(/immutable/i);
@@ -98,17 +85,13 @@ describe("buildLatestManifest", () => {
             signature: "sig",
             url: "https://github.com/chuanman2707/CapyInn/releases/download/v0.2.0/CapyInn_0.2.0_amd64.AppImage",
           },
-          "darwin-aarch64": {
-            signature: "sig",
-            url: "https://github.com/chuanman2707/CapyInn/releases/download/v0.2.0/CapyInn.app.tar.gz",
-          },
           "windows-x86_64": {
             signature: "sig",
             url: "https://github.com/chuanman2707/CapyInn/releases/download/v0.2.0/app.exe",
           },
         },
       }),
-    ).toThrow(/missing required platform key: darwin-x86_64/i);
+    ).toThrow(/missing required platform key: darwin-aarch64/i);
   });
 
   it("rejects malformed manifests with empty signatures", () => {
@@ -130,16 +113,12 @@ describe("buildLatestManifest", () => {
             signature: "sig",
             url: "https://github.com/chuanman2707/CapyInn/releases/download/v0.2.0/CapyInn.app.tar.gz",
           },
-          "darwin-x86_64": {
-            signature: "sig",
-            url: "https://github.com/chuanman2707/CapyInn/releases/download/v0.2.0/CapyInn-x64.app.tar.gz",
-          },
         },
       }),
     ).toThrow(/signature/i);
   });
 
-  it("rejects manifests that reuse the same asset URL across platforms", () => {
+  it("rejects manifests that still include the retired Intel macOS updater target", () => {
     expect(() =>
       buildLatestManifest({
         version: "0.2.0",
@@ -164,6 +143,6 @@ describe("buildLatestManifest", () => {
           },
         },
       }),
-    ).toThrow(/duplicate asset url/i);
+    ).toThrow(/unexpected platform key: darwin-x86_64/i);
   });
 });
