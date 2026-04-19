@@ -246,7 +246,7 @@ pub async fn get_invoice(
 
 #[cfg(test)]
 mod tests {
-    use super::do_generate_invoice;
+    use super::{do_generate_invoice, do_get_invoice};
     use crate::app_identity;
     use sqlx::{sqlite::SqlitePoolOptions, Pool, Sqlite};
 
@@ -356,5 +356,34 @@ mod tests {
         assert_eq!(invoice.hotel_name, app_identity::APP_NAME);
         assert_eq!(invoice.hotel_address, "");
         assert_eq!(invoice.hotel_phone, "");
+    }
+
+    #[tokio::test]
+    async fn get_invoice_returns_none_when_no_invoice_exists() {
+        let pool = test_pool().await;
+        seed_invoice_booking(&pool, "booking-2").await;
+
+        let invoice = do_get_invoice(&pool, "booking-2")
+            .await
+            .expect("lookup should succeed");
+
+        assert!(invoice.is_none());
+    }
+
+    #[tokio::test]
+    async fn get_invoice_returns_existing_invoice() {
+        let pool = test_pool().await;
+        seed_invoice_booking(&pool, "booking-3").await;
+        let generated = do_generate_invoice(&pool, "booking-3")
+            .await
+            .expect("invoice should be generated");
+
+        let invoice = do_get_invoice(&pool, "booking-3")
+            .await
+            .expect("lookup should succeed")
+            .expect("invoice should exist");
+
+        assert_eq!(invoice.invoice_number, generated.invoice_number);
+        assert_eq!(invoice.booking_id, "booking-3");
     }
 }

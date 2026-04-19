@@ -9,6 +9,50 @@ import { APP_API_KEY_PREFIX, APP_NAME } from "@/lib/appIdentity";
 import { useAuthStore } from "@/stores/useAuthStore";
 import type { GatewayStatus } from "@/types";
 
+type GatewayTool = {
+  name: string;
+  writable: boolean;
+};
+
+export const MCP_TOOLS: GatewayTool[] = [
+  { name: "get_hotel_context", writable: false },
+  { name: "check_availability", writable: false },
+  { name: "get_rooms", writable: false },
+  { name: "get_room_detail", writable: false },
+  { name: "get_room_types", writable: false },
+  { name: "get_dashboard_stats", writable: false },
+  { name: "get_all_bookings", writable: false },
+  { name: "get_rooms_availability", writable: false },
+  { name: "get_pricing_rules", writable: false },
+  { name: "get_hotel_info", writable: false },
+  { name: "calculate_price", writable: false },
+  { name: "get_invoice", writable: false },
+  { name: "create_reservation", writable: true },
+  { name: "modify_reservation", writable: true },
+  { name: "cancel_reservation", writable: true },
+];
+
+export function buildHttpMcpConfig(status: GatewayStatus | null, apiKey: string | null) {
+  const port = status?.port ?? "<gateway-port>";
+  const key = apiKey || `${APP_API_KEY_PREFIX}...`;
+
+  return JSON.stringify(
+    {
+      mcpServers: {
+        capyinn: {
+          transport: "streamable-http",
+          url: `http://127.0.0.1:${port}/mcp`,
+          headers: {
+            Authorization: `Bearer ${key}`,
+          },
+        },
+      },
+    },
+    null,
+    2,
+  );
+}
+
 export default function GatewaySection() {
   const canManageGateway = useAuthStore((state) => state.user?.role === "admin");
   const [status, setStatus] = useState<GatewayStatus | null>(null);
@@ -43,19 +87,7 @@ export default function GatewaySection() {
   };
 
   const copyMcpConfig = () => {
-    const config = JSON.stringify(
-      {
-        mcpServers: {
-          capyinn: {
-            command: "/path/to/capyinn",
-            args: ["--mcp-stdio"],
-            env: { CAPYINN_API_KEY: apiKey || `${APP_API_KEY_PREFIX}...` },
-          },
-        },
-      },
-      null,
-      2,
-    );
+    const config = buildHttpMcpConfig(status, apiKey);
 
     void navigator.clipboard.writeText(config);
     toast.success("Đã copy MCP Config! Dán vào AI agent config.");
@@ -76,7 +108,7 @@ export default function GatewaySection() {
           <Wifi size={20} className="text-brand-primary" />
           MCP Gateway
         </h3>
-        <p className="text-sm text-brand-muted">Cho phép AI agents (ZeroClaw, Claude Desktop...) kết nối và quản lý {APP_NAME}</p>
+        <p className="text-sm text-brand-muted">Cho phép AI agents (OpenClaw, n8n, Claude Code...) kết nối qua HTTP và quản lý {APP_NAME}</p>
       </div>
 
       <div className="flex items-center justify-between p-4 bg-slate-50 rounded-xl">
@@ -153,7 +185,7 @@ export default function GatewaySection() {
       <div className="flex items-center justify-between p-4 bg-slate-50 rounded-xl">
         <div>
           <p className="font-medium text-sm">📋 Copy MCP Config</p>
-          <p className="text-xs text-brand-muted">Dán vào Claude Desktop, ZeroClaw, Cursor... để kết nối</p>
+          <p className="text-xs text-brand-muted">Dán vào OpenClaw hoặc MCP client hỗ trợ HTTP để kết nối</p>
         </div>
         <Button variant="outline" className="rounded-xl" onClick={copyMcpConfig}>
           <Copy size={14} className="mr-1.5" /> Copy Config
@@ -161,22 +193,14 @@ export default function GatewaySection() {
       </div>
 
       <div className="p-4 bg-blue-50/50 rounded-xl">
-        <p className="text-sm font-medium text-blue-900 mb-2">📡 14 MCP Tools available</p>
+        <p className="text-sm font-medium text-blue-900 mb-2">📡 {MCP_TOOLS.length} MCP Tools available</p>
         <div className="grid grid-cols-2 gap-1 text-xs text-blue-700">
-          <span>• get_hotel_context</span>
-          <span>• check_availability</span>
-          <span>• get_rooms</span>
-          <span>• get_room_detail</span>
-          <span>• get_room_types</span>
-          <span>• get_dashboard_stats</span>
-          <span>• get_all_bookings</span>
-          <span>• get_rooms_availability</span>
-          <span>• get_pricing_rules</span>
-          <span>• get_hotel_info</span>
-          <span>• calculate_price</span>
-          <span className="text-emerald-700 font-medium">• create_reservation ✏️</span>
-          <span className="text-emerald-700 font-medium">• cancel_reservation ✏️</span>
-          <span className="text-emerald-700 font-medium">• modify_reservation ✏️</span>
+          {MCP_TOOLS.map((tool) => (
+            <span key={tool.name} className={tool.writable ? "text-emerald-700 font-medium" : undefined}>
+              • {tool.name}
+              {tool.writable ? " ✏️" : ""}
+            </span>
+          ))}
         </div>
       </div>
     </div>

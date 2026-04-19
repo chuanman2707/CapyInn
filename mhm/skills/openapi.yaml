@@ -9,8 +9,12 @@ info:
   contact:
     name: CapyInn
 servers:
-  - url: http://127.0.0.1:61234
-    description: Local MCP Gateway (default port)
+  - url: http://127.0.0.1:{port}
+    description: Local MCP Gateway (runtime port)
+    variables:
+      port:
+        default: '61234'
+        description: Gateway port shown in the CapyInn settings UI
 
 paths:
   /mcp:
@@ -137,6 +141,13 @@ components:
         pricing_type:
           type: string
           enum: [nightly, hourly, overnight, daily]
+
+    GetInvoiceInput:
+      type: object
+      required: [booking_id]
+      properties:
+        booking_id:
+          type: string
 
     CreateReservationInput:
       type: object

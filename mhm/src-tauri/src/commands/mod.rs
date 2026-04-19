@@ -61,7 +61,7 @@ pub mod settings;
 
 // Re-export do_* helpers used by gateway
 pub use bookings::do_get_all_bookings;
-pub use invoices::do_generate_invoice;
+pub use invoices::do_get_invoice;
 pub use pricing::{do_calculate_price_preview, do_get_pricing_rules};
 pub use reservations::{
     do_cancel_reservation, do_check_availability, do_create_reservation, do_get_rooms_availability,
