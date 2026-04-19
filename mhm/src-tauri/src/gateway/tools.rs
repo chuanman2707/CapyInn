@@ -12,13 +12,94 @@ use crate::models::{BookingFilter, CreateReservationRequest};
 use crate::services::settings_store::get_setting;
 
 /// MCP Tool handler — exposes hotel business logic as MCP tools.
-/// Each tool delegates to the shared `do_*` functions in `commands.rs`.
+/// Each tool delegates to the appropriate shared helper for its data path.
 #[derive(Clone)]
 pub struct HotelTools {
     pub pool: Pool<Sqlite>,
     pub app_handle: Option<AppHandle>,
     #[allow(dead_code)]
     tool_router: ToolRouter<Self>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{GetSettingsInput, HotelTools};
+    use crate::app_identity;
+    use rmcp::handler::server::wrapper::Parameters;
+    use serde_json::Value;
+    use sqlx::{sqlite::SqlitePoolOptions, Pool, Sqlite};
+
+    async fn test_pool() -> Pool<Sqlite> {
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .expect("failed to open sqlite test pool");
+        crate::db::run_migrations(&pool)
+            .await
+            .expect("run migrations");
+        pool
+    }
+
+    #[tokio::test]
+    async fn get_hotel_context_falls_back_when_hotel_info_is_missing() {
+        let pool = test_pool().await;
+        let tools = HotelTools::new(pool, None);
+
+        let context: Value = serde_json::from_str(&tools.get_hotel_context().await)
+            .expect("context should be valid json");
+
+        assert_eq!(context["hotel_name"].as_str(), Some(app_identity::APP_NAME));
+        assert_eq!(context["hotel_address"].as_str(), Some(""));
+    }
+
+    #[tokio::test]
+    async fn get_hotel_context_falls_back_when_hotel_info_is_malformed() {
+        let pool = test_pool().await;
+        sqlx::query("INSERT INTO settings (key, value) VALUES ('hotel_info', '{not-json')")
+            .execute(&pool)
+            .await
+            .expect("seed malformed setting");
+
+        let tools = HotelTools::new(pool, None);
+        let context: Value = serde_json::from_str(&tools.get_hotel_context().await)
+            .expect("context should be valid json");
+
+        assert_eq!(context["hotel_name"].as_str(), Some(app_identity::APP_NAME));
+        assert_eq!(context["hotel_address"].as_str(), Some(""));
+    }
+
+    #[tokio::test]
+    async fn get_hotel_info_returns_missing_setting_message_when_absent() {
+        let pool = test_pool().await;
+        let tools = HotelTools::new(pool, None);
+
+        let output = tools
+            .get_hotel_info(Parameters(GetSettingsInput {
+                key: "missing_key".to_string(),
+            }))
+            .await;
+
+        assert_eq!(output, "Setting 'missing_key' not found");
+    }
+
+    #[tokio::test]
+    async fn get_hotel_info_returns_error_string_when_settings_table_is_missing() {
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .expect("failed to open sqlite test pool");
+        let tools = HotelTools::new(pool, None);
+
+        let output = tools
+            .get_hotel_info(Parameters(GetSettingsInput {
+                key: "hotel_info".to_string(),
+            }))
+            .await;
+
+        assert!(output.starts_with("Error: "));
+    }
 }
 
 impl HotelTools {
