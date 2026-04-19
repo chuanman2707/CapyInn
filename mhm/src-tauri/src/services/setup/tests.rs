@@ -203,6 +203,45 @@ async fn complete_setup_persists_canonical_settings_contract() {
 }
 
 #[tokio::test]
+async fn complete_setup_returns_locked_status_when_app_lock_is_enabled() {
+    let pool = test_pool().await;
+
+    let status = complete_setup(&pool, sample_onboarding_request(true))
+        .await
+        .expect("complete_setup should succeed when app lock is enabled");
+
+    assert!(status.setup_completed);
+    assert!(status.app_lock_enabled);
+    assert!(status.current_user.is_none());
+
+    let default_user_id = crate::services::settings_store::get_setting(&pool, "default_user_id")
+        .await
+        .expect("default_user_id should load");
+    let default_user_id = default_user_id.expect("default_user_id should be stored");
+
+    let owner: (String, String) =
+        sqlx::query_as("SELECT id, name FROM users WHERE role = 'admin' LIMIT 1")
+            .fetch_one(&pool)
+            .await
+            .expect("admin user should be created");
+    assert_eq!(owner.0, default_user_id);
+    assert_eq!(owner.1, "Owner");
+
+    let app_lock = crate::services::settings_store::get_setting(&pool, "app_lock")
+        .await
+        .expect("app_lock should load");
+    let app_lock: serde_json::Value =
+        serde_json::from_str(&app_lock.expect("app_lock should be stored after successful setup"))
+            .expect("app_lock should be valid json");
+    assert_eq!(
+        app_lock,
+        serde_json::json!({
+            "enabled": true,
+        })
+    );
+}
+
+#[tokio::test]
 async fn complete_setup_rejects_duplicate_room_ids() {
     let pool = test_pool().await;
     let mut req = sample_onboarding_request(false);
