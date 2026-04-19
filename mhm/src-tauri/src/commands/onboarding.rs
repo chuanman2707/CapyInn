@@ -1,35 +1,11 @@
-use sqlx::{Pool, Row, Sqlite, Transaction};
+use sqlx::{Pool, Sqlite, Transaction};
 use std::sync::{Arc, Mutex};
 use tauri::State;
 
 use crate::models::*;
+use crate::services::setup::read_bootstrap_status;
 
 use super::AppState;
-
-pub async fn do_get_bootstrap_status(pool: &Pool<Sqlite>) -> Result<BootstrapStatus, String> {
-    let setup_completed = matches!(
-        crate::commands::settings::do_get_settings(pool, "setup_completed").await?,
-        Some(ref value) if value == "true"
-    );
-
-    let app_lock_enabled = crate::commands::settings::do_get_settings(pool, "app_lock")
-        .await?
-        .and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).ok())
-        .and_then(|json| json.get("enabled").and_then(|v| v.as_bool()))
-        .unwrap_or(false);
-
-    let current_user = if setup_completed && !app_lock_enabled {
-        load_default_user(pool).await?
-    } else {
-        None
-    };
-
-    Ok(BootstrapStatus {
-        setup_completed,
-        app_lock_enabled,
-        current_user,
-    })
-}
 
 fn sync_bootstrap_session(current_user: &Arc<Mutex<Option<User>>>, status: &BootstrapStatus) {
     if let Ok(mut session_user) = current_user.lock() {
@@ -39,29 +15,6 @@ fn sync_bootstrap_session(current_user: &Arc<Mutex<Option<User>>>, status: &Boot
             None
         };
     }
-}
-
-async fn load_default_user(pool: &Pool<Sqlite>) -> Result<Option<User>, String> {
-    let Some(user_id) = crate::commands::settings::do_get_settings(pool, "default_user_id").await?
-    else {
-        return Ok(None);
-    };
-
-    let row = sqlx::query(
-        "SELECT id, name, role, active, created_at FROM users WHERE id = ? AND active = 1",
-    )
-    .bind(&user_id)
-    .fetch_optional(pool)
-    .await
-    .map_err(|e| e.to_string())?;
-
-    Ok(row.map(|row| User {
-        id: row.get("id"),
-        name: row.get("name"),
-        role: row.get("role"),
-        active: row.get::<i32, _>("active") == 1,
-        created_at: row.get("created_at"),
-    }))
 }
 
 fn validate_onboarding_request(req: &OnboardingCompleteRequest) -> Result<(), String> {
@@ -310,7 +263,8 @@ pub async fn do_complete_onboarding(
     pool: &Pool<Sqlite>,
     req: OnboardingCompleteRequest,
 ) -> Result<BootstrapStatus, String> {
-    if let Some(ref v) = crate::commands::settings::do_get_settings(pool, "setup_completed").await? {
+    if let Some(ref v) = crate::commands::settings::do_get_settings(pool, "setup_completed").await?
+    {
         if v == "true" {
             return Err("Setup đã hoàn thành, không thể thực hiện lại.".to_string());
         }
@@ -388,7 +342,7 @@ pub async fn do_complete_onboarding(
 
 #[tauri::command]
 pub async fn get_bootstrap_status(state: State<'_, AppState>) -> Result<BootstrapStatus, String> {
-    let status = do_get_bootstrap_status(&state.db).await?;
+    let status = read_bootstrap_status(&state.db).await?;
     sync_bootstrap_session(&state.current_user, &status);
     Ok(status)
 }
@@ -405,7 +359,7 @@ pub async fn complete_onboarding(
 
 #[cfg(test)]
 mod tests {
-    use super::{do_complete_onboarding, do_get_bootstrap_status, sync_bootstrap_session};
+    use super::{do_complete_onboarding, sync_bootstrap_session};
     use crate::models::{
         BootstrapStatus, OnboardingAppLockInput, OnboardingCompleteRequest,
         OnboardingHotelInfoInput, OnboardingRoomInput, OnboardingRoomTypeInput,
@@ -421,16 +375,6 @@ mod tests {
             .unwrap();
         crate::db::run_migrations(&pool).await.unwrap();
         pool
-    }
-
-    #[tokio::test]
-    async fn bootstrap_requires_onboarding_when_setup_completed_missing() {
-        let pool = test_pool().await;
-        let status = do_get_bootstrap_status(&pool).await.unwrap();
-
-        assert!(!status.setup_completed);
-        assert!(!status.app_lock_enabled);
-        assert!(status.current_user.is_none());
     }
 
     #[tokio::test]
