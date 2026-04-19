@@ -1,6 +1,5 @@
 use super::{require_admin, AppState};
 use crate::services::settings_store;
-use sqlx::{Pool, Sqlite};
 use tauri::State;
 
 // ─── Settings Commands ───
@@ -22,10 +21,6 @@ pub async fn save_settings(
     }
 
     Ok(())
-}
-
-pub async fn do_get_settings(pool: &Pool<Sqlite>, key: &str) -> Result<Option<String>, String> {
-    settings_store::get_setting(pool, key).await
 }
 
 #[tauri::command]
