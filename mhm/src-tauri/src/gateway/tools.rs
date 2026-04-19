@@ -9,9 +9,10 @@ use super::models::*;
 use crate::app_identity;
 use crate::commands;
 use crate::models::{BookingFilter, CreateReservationRequest};
+use crate::services::settings_store::get_setting;
 
 /// MCP Tool handler — exposes hotel business logic as MCP tools.
-/// Each tool delegates to the shared `do_*` functions in `commands.rs`.
+/// Each tool delegates to the appropriate shared helper for its data path.
 #[derive(Clone)]
 pub struct HotelTools {
     pub pool: Pool<Sqlite>,
@@ -40,28 +41,26 @@ impl HotelTools {
     async fn get_hotel_context(&self) -> String {
         let now = chrono::Local::now();
 
-        let (hotel_name, hotel_address) = match commands::do_get_settings(&self.pool, "hotel_info")
-            .await
-            .unwrap_or(None)
-        {
-            Some(json_str) => {
-                if let Ok(v) = serde_json::from_str::<serde_json::Value>(&json_str) {
-                    (
-                        v.get("name")
-                            .and_then(|s| s.as_str())
-                            .unwrap_or(app_identity::APP_NAME)
-                            .to_string(),
-                        v.get("address")
-                            .and_then(|s| s.as_str())
-                            .unwrap_or("")
-                            .to_string(),
-                    )
-                } else {
-                    (app_identity::APP_NAME.to_string(), String::new())
+        let (hotel_name, hotel_address) =
+            match get_setting(&self.pool, "hotel_info").await.unwrap_or(None) {
+                Some(json_str) => {
+                    if let Ok(v) = serde_json::from_str::<serde_json::Value>(&json_str) {
+                        (
+                            v.get("name")
+                                .and_then(|s| s.as_str())
+                                .unwrap_or(app_identity::APP_NAME)
+                                .to_string(),
+                            v.get("address")
+                                .and_then(|s| s.as_str())
+                                .unwrap_or("")
+                                .to_string(),
+                        )
+                    } else {
+                        (app_identity::APP_NAME.to_string(), String::new())
+                    }
                 }
-            }
-            None => (app_identity::APP_NAME.to_string(), String::new()),
-        };
+                None => (app_identity::APP_NAME.to_string(), String::new()),
+            };
 
         let context = serde_json::json!({
             "current_datetime": now.to_rfc3339(),
@@ -175,7 +174,7 @@ impl HotelTools {
         description = "Get a hotel setting by key. Common keys: hotel_name, hotel_address, hotel_phone, hotel_rules."
     )]
     async fn get_hotel_info(&self, Parameters(input): Parameters<GetSettingsInput>) -> String {
-        match commands::do_get_settings(&self.pool, &input.key).await {
+        match get_setting(&self.pool, &input.key).await {
             Ok(Some(value)) => value,
             Ok(None) => format!("Setting '{}' not found", input.key),
             Err(e) => format!("Error: {}", e),
@@ -338,5 +337,86 @@ impl ServerHandler for HotelTools {
                  pricing, bookings, and create/modify/cancel reservations. \
                  ALWAYS call get_hotel_context first to get the current date/time.",
             )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{GetSettingsInput, HotelTools};
+    use crate::app_identity;
+    use rmcp::handler::server::wrapper::Parameters;
+    use serde_json::Value;
+    use sqlx::{sqlite::SqlitePoolOptions, Pool, Sqlite};
+
+    async fn test_pool() -> Pool<Sqlite> {
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .expect("failed to open sqlite test pool");
+        crate::db::run_migrations(&pool)
+            .await
+            .expect("run migrations");
+        pool
+    }
+
+    #[tokio::test]
+    async fn get_hotel_context_falls_back_when_hotel_info_is_missing() {
+        let pool = test_pool().await;
+        let tools = HotelTools::new(pool, None);
+
+        let context: Value = serde_json::from_str(&tools.get_hotel_context().await)
+            .expect("context should be valid json");
+
+        assert_eq!(context["hotel_name"].as_str(), Some(app_identity::APP_NAME));
+        assert_eq!(context["hotel_address"].as_str(), Some(""));
+    }
+
+    #[tokio::test]
+    async fn get_hotel_context_falls_back_when_hotel_info_is_malformed() {
+        let pool = test_pool().await;
+        sqlx::query("INSERT INTO settings (key, value) VALUES ('hotel_info', '{not-json')")
+            .execute(&pool)
+            .await
+            .expect("seed malformed setting");
+
+        let tools = HotelTools::new(pool, None);
+        let context: Value = serde_json::from_str(&tools.get_hotel_context().await)
+            .expect("context should be valid json");
+
+        assert_eq!(context["hotel_name"].as_str(), Some(app_identity::APP_NAME));
+        assert_eq!(context["hotel_address"].as_str(), Some(""));
+    }
+
+    #[tokio::test]
+    async fn get_hotel_info_returns_missing_setting_message_when_absent() {
+        let pool = test_pool().await;
+        let tools = HotelTools::new(pool, None);
+
+        let output = tools
+            .get_hotel_info(Parameters(GetSettingsInput {
+                key: "missing_key".to_string(),
+            }))
+            .await;
+
+        assert_eq!(output, "Setting 'missing_key' not found");
+    }
+
+    #[tokio::test]
+    async fn get_hotel_info_returns_error_string_when_settings_table_is_missing() {
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .expect("failed to open sqlite test pool");
+        let tools = HotelTools::new(pool, None);
+
+        let output = tools
+            .get_hotel_info(Parameters(GetSettingsInput {
+                key: "hotel_info".to_string(),
+            }))
+            .await;
+
+        assert!(output.starts_with("Error: "));
     }
 }

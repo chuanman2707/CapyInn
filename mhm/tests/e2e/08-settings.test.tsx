@@ -30,7 +30,7 @@ describe("08 — Settings", () => {
                 return JSON.stringify({ name: "Grand Hotel", address: "123 Main St", phone: "0901234567" });
             }
             if (key === "checkin_rules") {
-                return JSON.stringify({ checkin_time: "14:00", checkout_time: "12:00" });
+                return JSON.stringify({ checkin: "15:30", checkout: "11:15" });
             }
             return null;
         });
@@ -69,6 +69,41 @@ describe("08 — Settings", () => {
 
         await waitFor(() => {
             expect(invoke).toHaveBeenCalledWith("get_settings", { key: "checkin_rules" });
+        });
+
+        await waitFor(() => {
+            expect(screen.getByDisplayValue("15:30")).toBeInTheDocument();
+            expect(screen.getByDisplayValue("11:15")).toBeInTheDocument();
+        });
+    });
+
+    it("hydrates checkin rules from the legacy onboarding payload shape", async () => {
+        setMockResponse("get_settings", (args: unknown) => {
+            const key = (args as { key: string }).key;
+            if (key === "hotel_info") {
+                return JSON.stringify({ name: "Grand Hotel", address: "123 Main St", phone: "0901234567" });
+            }
+            if (key === "checkin_rules") {
+                return JSON.stringify({
+                    default_checkin_time: "15:45",
+                    default_checkout_time: "10:30",
+                });
+            }
+            return null;
+        });
+
+        const user = userEvent.setup();
+        render(<Settings />);
+
+        await user.click(screen.getByText("Check-in Rules"));
+
+        await waitFor(() => {
+            expect(invoke).toHaveBeenCalledWith("get_settings", { key: "checkin_rules" });
+        });
+
+        await waitFor(() => {
+            expect(screen.getByDisplayValue("15:45")).toBeInTheDocument();
+            expect(screen.getByDisplayValue("10:30")).toBeInTheDocument();
         });
     });
 

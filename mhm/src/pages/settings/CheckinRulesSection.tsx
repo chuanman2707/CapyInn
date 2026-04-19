@@ -6,6 +6,25 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 
+function readSavedTime(
+  value: Record<string, unknown>,
+  key: string,
+  legacyKey: string,
+  fallback: string,
+) {
+  const current = value[key];
+  if (typeof current === "string" && current.length > 0) {
+    return current;
+  }
+
+  const legacy = value[legacyKey];
+  if (typeof legacy === "string" && legacy.length > 0) {
+    return legacy;
+  }
+
+  return fallback;
+}
+
 export default function CheckinRulesSection() {
   const [checkinTime, setCheckinTime] = useState("14:00");
   const [checkoutTime, setCheckoutTime] = useState("12:00");
@@ -16,8 +35,17 @@ export default function CheckinRulesSection() {
         if (!value) return;
         try {
           const data = JSON.parse(value);
-          setCheckinTime(data.checkin || "14:00");
-          setCheckoutTime(data.checkout || "12:00");
+          if (!data || typeof data !== "object") {
+            return;
+          }
+
+          const savedRules = data as Record<string, unknown>;
+          setCheckinTime(
+            readSavedTime(savedRules, "checkin", "default_checkin_time", "14:00"),
+          );
+          setCheckoutTime(
+            readSavedTime(savedRules, "checkout", "default_checkout_time", "12:00"),
+          );
         } catch {
           // Ignore invalid saved settings and keep defaults.
         }
