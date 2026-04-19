@@ -4,17 +4,11 @@
     "description": "CapyInn MCP Server — manage rooms, bookings, pricing, and reservations for a hotel.",
     "protocol": "mcp",
     "transport": {
-        "stdio": {
-            "command": "capyinn",
-            "args": [
-                "--mcp-stdio"
-            ],
-            "env": {
-                "CAPYINN_API_KEY": "<your-api-key>"
-            }
-        },
         "streamable-http": {
-            "url": "http://127.0.0.1:61234/mcp"
+            "url": "http://127.0.0.1:<gateway-port>/mcp",
+            "headers": {
+                "Authorization": "Bearer <your-api-key>"
+            }
         }
     },
     "tools": [
@@ -178,6 +172,21 @@
                             "overnight",
                             "daily"
                         ]
+                    }
+                }
+            }
+        },
+        {
+            "name": "get_invoice",
+            "description": "Get the most recently issued invoice for a booking. Returns a human-readable invoice summary if one already exists.",
+            "inputSchema": {
+                "type": "object",
+                "required": [
+                    "booking_id"
+                ],
+                "properties": {
+                    "booking_id": {
+                        "type": "string"
                     }
                 }
             }

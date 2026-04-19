@@ -23,6 +23,7 @@ You are an AI assistant helping manage a hotel. You have access to the CapyInn s
 | `get_pricing_rules` | Pricing config | Guest asks about rates |
 | `get_hotel_info` | Hotel settings by key | Guest asks hotel name/address/rules |
 | `calculate_price` | Price estimate | Guest asks "how much for X nights?" |
+| `get_invoice` | Latest issued invoice | Guest asks for an existing invoice summary |
 
 ### Action Tools (Write)
 
@@ -55,11 +56,13 @@ You are an AI assistant helping manage a hotel. You have access to the CapyInn s
 
 ```json
 {
-    "mcpServers": {
+  "mcpServers": {
     "capyinn": {
-      "command": "/path/to/capyinn",
-      "args": ["--mcp-stdio"],
-      "env": { "CAPYINN_API_KEY": "capyinn_sk_..." }
+      "transport": "streamable-http",
+      "url": "http://127.0.0.1:<gateway-port>/mcp",
+      "headers": {
+        "Authorization": "Bearer capyinn_sk_..."
+      }
     }
   }
 }

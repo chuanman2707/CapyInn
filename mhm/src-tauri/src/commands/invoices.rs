@@ -244,3 +244,147 @@ pub async fn get_invoice(
 ) -> Result<Option<InvoiceData>, String> {
     do_get_invoice(&state.db, &booking_id).await
 }
+
+#[cfg(test)]
+mod tests {
+    use super::{do_generate_invoice, do_get_invoice};
+    use crate::app_identity;
+    use sqlx::{sqlite::SqlitePoolOptions, Pool, Sqlite};
+
+    async fn test_pool() -> Pool<Sqlite> {
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .expect("failed to open sqlite test pool");
+        crate::db::run_migrations(&pool)
+            .await
+            .expect("run migrations");
+        pool
+    }
+
+    async fn seed_invoice_booking(pool: &Pool<Sqlite>, booking_id: &str) {
+        let room_id = "room-1";
+        let guest_id = "guest-1";
+        let now = "2026-04-19T10:00:00+07:00";
+
+        sqlx::query(
+            "INSERT INTO rooms (
+                id, name, type, floor, has_balcony, base_price, max_guests,
+                extra_person_fee, status
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        )
+        .bind(room_id)
+        .bind("Room 1")
+        .bind("standard")
+        .bind(1_i32)
+        .bind(0_i32)
+        .bind(250_000.0_f64)
+        .bind(2_i32)
+        .bind(0.0_f64)
+        .bind("vacant")
+        .execute(pool)
+        .await
+        .expect("seed room");
+
+        sqlx::query(
+            "INSERT INTO guests (
+                id, guest_type, full_name, doc_number, phone, created_at
+            ) VALUES (?, 'domestic', ?, ?, ?, ?)",
+        )
+        .bind(guest_id)
+        .bind("Guest 1")
+        .bind("DOC-1")
+        .bind("0901234567")
+        .bind(now)
+        .execute(pool)
+        .await
+        .expect("seed guest");
+
+        sqlx::query(
+            "INSERT INTO bookings (
+                id, room_id, primary_guest_id, check_in_at, expected_checkout,
+                actual_checkout, nights, total_price, paid_amount, status,
+                source, notes, created_by, booking_type, pricing_type,
+                deposit_amount, guest_phone, scheduled_checkin, scheduled_checkout,
+                pricing_snapshot, created_at
+            ) VALUES (?, ?, ?, ?, ?, NULL, ?, ?, ?, 'active', ?, ?, NULL, 'walk-in', 'nightly', NULL, ?, NULL, NULL, NULL, ?)",
+        )
+        .bind(booking_id)
+        .bind(room_id)
+        .bind(guest_id)
+        .bind(now)
+        .bind("2026-04-20T10:00:00+07:00")
+        .bind(1_i64)
+        .bind(250_000.0_f64)
+        .bind(0.0_f64)
+        .bind("walk-in")
+        .bind("seed booking")
+        .bind("0901234567")
+        .bind(now)
+        .execute(pool)
+        .await
+        .expect("seed booking");
+    }
+
+    #[tokio::test]
+    async fn generate_invoice_falls_back_when_hotel_info_is_missing() {
+        let pool = test_pool().await;
+        seed_invoice_booking(&pool, "booking-1").await;
+
+        let invoice = do_generate_invoice(&pool, "booking-1")
+            .await
+            .expect("invoice should be generated");
+
+        assert_eq!(invoice.hotel_name, app_identity::APP_NAME);
+        assert_eq!(invoice.hotel_address, "");
+        assert_eq!(invoice.hotel_phone, "");
+    }
+
+    #[tokio::test]
+    async fn generate_invoice_falls_back_when_hotel_info_is_malformed() {
+        let pool = test_pool().await;
+        seed_invoice_booking(&pool, "booking-1").await;
+        sqlx::query("INSERT INTO settings (key, value) VALUES ('hotel_info', '{not-json')")
+            .execute(&pool)
+            .await
+            .expect("seed malformed setting");
+
+        let invoice = do_generate_invoice(&pool, "booking-1")
+            .await
+            .expect("invoice should be generated");
+
+        assert_eq!(invoice.hotel_name, app_identity::APP_NAME);
+        assert_eq!(invoice.hotel_address, "");
+        assert_eq!(invoice.hotel_phone, "");
+    }
+
+    #[tokio::test]
+    async fn get_invoice_returns_none_when_no_invoice_exists() {
+        let pool = test_pool().await;
+        seed_invoice_booking(&pool, "booking-2").await;
+
+        let invoice = do_get_invoice(&pool, "booking-2")
+            .await
+            .expect("lookup should succeed");
+
+        assert!(invoice.is_none());
+    }
+
+    #[tokio::test]
+    async fn get_invoice_returns_existing_invoice() {
+        let pool = test_pool().await;
+        seed_invoice_booking(&pool, "booking-3").await;
+        let generated = do_generate_invoice(&pool, "booking-3")
+            .await
+            .expect("invoice should be generated");
+
+        let invoice = do_get_invoice(&pool, "booking-3")
+            .await
+            .expect("lookup should succeed")
+            .expect("invoice should exist");
+
+        assert_eq!(invoice.invoice_number, generated.invoice_number);
+        assert_eq!(invoice.booking_id, "booking-3");
+    }
+}
