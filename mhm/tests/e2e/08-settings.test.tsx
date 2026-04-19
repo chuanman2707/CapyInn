@@ -77,6 +77,36 @@ describe("08 — Settings", () => {
         });
     });
 
+    it("hydrates checkin rules from the legacy onboarding payload shape", async () => {
+        setMockResponse("get_settings", (args: unknown) => {
+            const key = (args as { key: string }).key;
+            if (key === "hotel_info") {
+                return JSON.stringify({ name: "Grand Hotel", address: "123 Main St", phone: "0901234567" });
+            }
+            if (key === "checkin_rules") {
+                return JSON.stringify({
+                    default_checkin_time: "15:45",
+                    default_checkout_time: "10:30",
+                });
+            }
+            return null;
+        });
+
+        const user = userEvent.setup();
+        render(<Settings />);
+
+        await user.click(screen.getByText("Check-in Rules"));
+
+        await waitFor(() => {
+            expect(invoke).toHaveBeenCalledWith("get_settings", { key: "checkin_rules" });
+        });
+
+        await waitFor(() => {
+            expect(screen.getByDisplayValue("15:45")).toBeInTheDocument();
+            expect(screen.getByDisplayValue("10:30")).toBeInTheDocument();
+        });
+    });
+
     it("loads pricing rules", async () => {
         const user = userEvent.setup();
         render(<Settings />);
