@@ -1,4 +1,8 @@
-use super::read_bootstrap_status;
+use super::{complete_setup, read_bootstrap_status};
+use crate::models::{
+    OnboardingAppLockInput, OnboardingCompleteRequest, OnboardingHotelInfoInput,
+    OnboardingRoomInput, OnboardingRoomTypeInput,
+};
 use sqlx::{sqlite::SqlitePoolOptions, Pool, Sqlite};
 
 async fn test_pool() -> Pool<Sqlite> {
@@ -29,6 +33,73 @@ async fn seed_default_user(pool: &Pool<Sqlite>, id: &str) {
     .execute(pool)
     .await
     .unwrap();
+}
+
+fn sample_onboarding_request(with_pin: bool) -> OnboardingCompleteRequest {
+    OnboardingCompleteRequest {
+        hotel: OnboardingHotelInfoInput {
+            name: "Sunrise Hotel".to_string(),
+            address: "12 Tran Hung Dao".to_string(),
+            phone: "0909123456".to_string(),
+            rating: Some("4.8".to_string()),
+            default_checkin_time: "14:00".to_string(),
+            default_checkout_time: "12:00".to_string(),
+            locale: "vi".to_string(),
+        },
+        room_types: vec![
+            OnboardingRoomTypeInput {
+                name: "Deluxe".to_string(),
+                base_price: 500_000.0,
+                max_guests: 4,
+                extra_person_fee: 50_000.0,
+                default_has_balcony: true,
+                bed_note: Some("2 giường đôi".to_string()),
+            },
+            OnboardingRoomTypeInput {
+                name: "Standard".to_string(),
+                base_price: 300_000.0,
+                max_guests: 2,
+                extra_person_fee: 100_000.0,
+                default_has_balcony: false,
+                bed_note: Some("1 giường đôi".to_string()),
+            },
+        ],
+        rooms: vec![
+            OnboardingRoomInput {
+                id: "1A".to_string(),
+                name: "Phòng 1A".to_string(),
+                floor: 1,
+                room_type_name: "Deluxe".to_string(),
+                has_balcony: true,
+                base_price: 500_000.0,
+                max_guests: 4,
+                extra_person_fee: 50_000.0,
+            },
+            OnboardingRoomInput {
+                id: "1B".to_string(),
+                name: "Phòng 1B".to_string(),
+                floor: 1,
+                room_type_name: "Standard".to_string(),
+                has_balcony: false,
+                base_price: 300_000.0,
+                max_guests: 2,
+                extra_person_fee: 100_000.0,
+            },
+        ],
+        app_lock: OnboardingAppLockInput {
+            enabled: with_pin,
+            admin_name: if with_pin {
+                Some("Owner".to_string())
+            } else {
+                None
+            },
+            pin: if with_pin {
+                Some("1234".to_string())
+            } else {
+                None
+            },
+        },
+    }
 }
 
 #[tokio::test]
@@ -72,4 +143,92 @@ async fn read_bootstrap_status_returns_no_current_user_for_completed_locked_setu
     assert!(status.setup_completed);
     assert!(status.app_lock_enabled);
     assert!(status.current_user.is_none());
+}
+
+#[tokio::test]
+async fn complete_setup_persists_canonical_settings_contract() {
+    let pool = test_pool().await;
+
+    let status = complete_setup(&pool, sample_onboarding_request(false))
+        .await
+        .expect("complete_setup should succeed");
+
+    assert!(status.setup_completed);
+    assert!(!status.app_lock_enabled);
+
+    let hotel_info = crate::services::settings_store::get_setting(&pool, "hotel_info")
+        .await
+        .expect("hotel_info setting should load");
+    let hotel_info: serde_json::Value = serde_json::from_str(
+        &hotel_info.expect("hotel_info should be stored after successful setup"),
+    )
+    .expect("hotel_info should be valid json");
+    assert_eq!(
+        hotel_info,
+        serde_json::json!({
+            "name": "Sunrise Hotel",
+            "address": "12 Tran Hung Dao",
+            "phone": "0909123456",
+            "rating": "4.8",
+        })
+    );
+
+    let checkin_rules = crate::services::settings_store::get_setting(&pool, "checkin_rules")
+        .await
+        .expect("checkin_rules setting should load");
+    let checkin_rules: serde_json::Value = serde_json::from_str(
+        &checkin_rules.expect("checkin_rules should be stored after successful setup"),
+    )
+    .expect("checkin_rules should be valid json");
+    assert_eq!(
+        checkin_rules,
+        serde_json::json!({
+            "checkin": "14:00",
+            "checkout": "12:00",
+        })
+    );
+
+    let default_user_id = crate::services::settings_store::get_setting(&pool, "default_user_id")
+        .await
+        .expect("default_user_id should load");
+    assert_eq!(
+        default_user_id,
+        status.current_user.as_ref().map(|user| user.id.clone())
+    );
+
+    let setup_completed = crate::services::settings_store::get_setting(&pool, "setup_completed")
+        .await
+        .expect("setup_completed should load");
+    assert_eq!(setup_completed.as_deref(), Some("true"));
+}
+
+#[tokio::test]
+async fn complete_setup_rejects_duplicate_room_ids() {
+    let pool = test_pool().await;
+    let mut req = sample_onboarding_request(false);
+    req.rooms[1].id = req.rooms[0].id.clone();
+
+    let error = complete_setup(&pool, req)
+        .await
+        .expect_err("duplicate room ids should be rejected");
+
+    assert!(
+        error.contains("Mã phòng '1A' bị trùng"),
+        "unexpected error: {error}"
+    );
+}
+
+#[tokio::test]
+async fn complete_setup_rejects_repeated_setup() {
+    let pool = test_pool().await;
+
+    complete_setup(&pool, sample_onboarding_request(false))
+        .await
+        .expect("initial setup should succeed");
+
+    let error = complete_setup(&pool, sample_onboarding_request(false))
+        .await
+        .expect_err("repeated setup should be rejected");
+
+    assert_eq!(error, "Setup đã hoàn thành, không thể thực hiện lại.");
 }
