@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { relaunch } from "@/__mocks__/tauri-process";
 import {
+  check,
   clearMockUpdate,
   setMockAvailableUpdate,
   setMockCheckError,
@@ -33,7 +34,7 @@ describe("useAppUpdateController", () => {
     setMockAvailableUpdate({ version: "0.2.0" });
 
     const { result } = renderHook(() =>
-      useAppUpdateController({ enabled: true, currentVersion: "0.1.0" }),
+      useAppUpdateController({ enabled: true, supported: true, currentVersion: "0.1.0" }),
     );
 
     await act(async () => {
@@ -65,7 +66,7 @@ describe("useAppUpdateController", () => {
     });
 
     const { result } = renderHook(() =>
-      useAppUpdateController({ enabled: true, currentVersion: "0.1.0" }),
+      useAppUpdateController({ enabled: true, supported: true, currentVersion: "0.1.0" }),
     );
 
     await act(async () => {
@@ -89,7 +90,7 @@ describe("useAppUpdateController", () => {
     setMockAvailableUpdate({ version: "0.2.0" });
 
     const { result } = renderHook(() =>
-      useAppUpdateController({ enabled: true, currentVersion: "0.1.0" }),
+      useAppUpdateController({ enabled: true, supported: true, currentVersion: "0.1.0" }),
     );
 
     await act(async () => {
@@ -112,7 +113,7 @@ describe("useAppUpdateController", () => {
     setMockAvailableUpdate({ version: "0.2.0" });
 
     const { result } = renderHook(() =>
-      useAppUpdateController({ enabled: true, currentVersion: "0.1.0" }),
+      useAppUpdateController({ enabled: true, supported: true, currentVersion: "0.1.0" }),
     );
 
     await act(async () => {
@@ -139,7 +140,7 @@ describe("useAppUpdateController", () => {
     });
 
     const { result } = renderHook(() =>
-      useAppUpdateController({ enabled: true, currentVersion: "0.1.0", timeoutMs: 30_000 }),
+      useAppUpdateController({ enabled: true, supported: true, currentVersion: "0.1.0", timeoutMs: 30_000 }),
     );
 
     await act(async () => {
@@ -160,7 +161,7 @@ describe("useAppUpdateController", () => {
     setMockCheckError(new Error("manifest 404"));
 
     const { result } = renderHook(() =>
-      useAppUpdateController({ enabled: true, currentVersion: "0.1.0" }),
+      useAppUpdateController({ enabled: true, supported: true, currentVersion: "0.1.0" }),
     );
 
     await act(async () => {
@@ -172,5 +173,19 @@ describe("useAppUpdateController", () => {
       await result.current.checkForUpdates({ silent: false });
     });
     expect(result.current.errorMessage).toMatch(/404/i);
+  });
+
+  it("does not call the updater plugin when the current build does not support updater", async () => {
+    const { result } = renderHook(() =>
+      useAppUpdateController({ enabled: true, supported: false, currentVersion: "0.1.0" }),
+    );
+
+    await act(async () => {
+      await result.current.checkForUpdates({ silent: false });
+    });
+
+    expect(check).not.toHaveBeenCalled();
+    expect(result.current.phase).toBe("idle");
+    expect(result.current.errorMessage).toBeNull();
   });
 });

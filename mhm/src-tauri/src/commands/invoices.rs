@@ -1,6 +1,6 @@
-use super::settings::do_get_settings;
 use super::{get_f64, AppState};
 use crate::models::*;
+use crate::services::settings_store::get_setting;
 use sqlx::{Pool, Row, Sqlite};
 use tauri::State;
 
@@ -42,8 +42,7 @@ pub async fn do_generate_invoice(
     let b = b.ok_or_else(|| format!("Booking '{}' not found", booking_id))?;
 
     // Get hotel info from settings (stored as JSON blob under "hotel_info")
-    let (hotel_name, hotel_address, hotel_phone) = match do_get_settings(pool, "hotel_info").await?
-    {
+    let (hotel_name, hotel_address, hotel_phone) = match get_setting(pool, "hotel_info").await? {
         Some(json_str) => {
             if let Ok(v) = serde_json::from_str::<serde_json::Value>(&json_str) {
                 (

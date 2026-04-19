@@ -8,6 +8,7 @@ type Update = NonNullable<Awaited<ReturnType<typeof check>>>;
 
 interface UseAppUpdateControllerOptions {
     enabled: boolean;
+    supported: boolean;
     currentVersion: string;
     timeoutMs?: number;
 }
@@ -69,6 +70,7 @@ function mapInstallFailure(error: unknown): { phase: AppUpdatePhase; message: st
 
 export function useAppUpdateController({
     enabled,
+    supported,
     currentVersion,
     timeoutMs = DEFAULT_TIMEOUT_MS,
 }: UseAppUpdateControllerOptions): AppUpdateState & {
@@ -85,7 +87,12 @@ export function useAppUpdateController({
     const [restartPromptOpen, setRestartPromptOpen] = useState(false);
     const [pendingUpdate, setPendingUpdate] = useState<Update | null>(null);
 
-    const canCheck = enabled && phase !== "checking" && phase !== "downloading" && phase !== "installing";
+    const canCheck =
+        supported &&
+        enabled &&
+        phase !== "checking" &&
+        phase !== "downloading" &&
+        phase !== "installing";
 
     async function checkForUpdates({ silent }: CheckOptions) {
         if (!canCheck) {
@@ -169,6 +176,7 @@ export function useAppUpdateController({
 
     return useMemo(
         () => ({
+            supported,
             phase,
             currentVersion,
             availableVersion,
@@ -193,6 +201,7 @@ export function useAppUpdateController({
             openRestartPrompt,
             phase,
             restartPromptOpen,
+            supported,
         ],
     );
 }

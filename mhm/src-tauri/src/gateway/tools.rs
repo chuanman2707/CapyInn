@@ -9,6 +9,7 @@ use super::models::*;
 use crate::app_identity;
 use crate::commands;
 use crate::models::{BookingFilter, CreateReservationRequest, InvoiceData};
+use crate::services::settings_store::get_setting;
 
 fn hotel_info_field_from_json(json_str: &str, field: &str) -> Option<String> {
     let field_name = match field {
@@ -31,16 +32,16 @@ async fn resolve_hotel_info_value(
 ) -> Result<Option<String>, String> {
     match key {
         "hotel_name" | "hotel_address" | "hotel_phone" => {
-            if let Some(json_str) = commands::do_get_settings(pool, "hotel_info").await? {
+            if let Some(json_str) = get_setting(pool, "hotel_info").await? {
                 if let Some(value) = hotel_info_field_from_json(&json_str, key) {
                     return Ok(Some(value));
                 }
             }
 
-            commands::do_get_settings(pool, key).await
+            get_setting(pool, key).await
         }
-        "hotel_rules" => commands::do_get_settings(pool, "hotel_rules").await,
-        _ => commands::do_get_settings(pool, key).await,
+        "hotel_rules" => get_setting(pool, "hotel_rules").await,
+        _ => get_setting(pool, key).await,
     }
 }
 
@@ -575,28 +576,26 @@ impl HotelTools {
     async fn get_hotel_context(&self) -> String {
         let now = chrono::Local::now();
 
-        let (hotel_name, hotel_address) = match commands::do_get_settings(&self.pool, "hotel_info")
-            .await
-            .unwrap_or(None)
-        {
-            Some(json_str) => {
-                if let Ok(v) = serde_json::from_str::<serde_json::Value>(&json_str) {
-                    (
-                        v.get("name")
-                            .and_then(|s| s.as_str())
-                            .unwrap_or(app_identity::APP_NAME)
-                            .to_string(),
-                        v.get("address")
-                            .and_then(|s| s.as_str())
-                            .unwrap_or("")
-                            .to_string(),
-                    )
-                } else {
-                    (app_identity::APP_NAME.to_string(), String::new())
+        let (hotel_name, hotel_address) =
+            match get_setting(&self.pool, "hotel_info").await.unwrap_or(None) {
+                Some(json_str) => {
+                    if let Ok(v) = serde_json::from_str::<serde_json::Value>(&json_str) {
+                        (
+                            v.get("name")
+                                .and_then(|s| s.as_str())
+                                .unwrap_or(app_identity::APP_NAME)
+                                .to_string(),
+                            v.get("address")
+                                .and_then(|s| s.as_str())
+                                .unwrap_or("")
+                                .to_string(),
+                        )
+                    } else {
+                        (app_identity::APP_NAME.to_string(), String::new())
+                    }
                 }
-            }
-            None => (app_identity::APP_NAME.to_string(), String::new()),
-        };
+                None => (app_identity::APP_NAME.to_string(), String::new()),
+            };
 
         let context = serde_json::json!({
             "current_datetime": now.to_rfc3339(),

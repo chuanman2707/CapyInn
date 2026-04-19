@@ -69,7 +69,6 @@ pub use reservations::{
 };
 pub use room_management::do_get_room_types;
 pub use rooms::{do_get_dashboard_stats, do_get_room_detail, do_get_rooms};
-pub use settings::do_get_settings;
 
 #[cfg(test)]
 mod tests {

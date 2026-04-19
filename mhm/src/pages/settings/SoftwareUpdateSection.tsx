@@ -7,6 +7,7 @@ export default function SoftwareUpdateSection() {
     update.phase === "checking" ||
     update.phase === "downloading" ||
     update.phase === "installing";
+  const updatesUnavailable = !update.supported;
 
   return (
     <div className="space-y-6 max-w-lg">
@@ -33,7 +34,7 @@ export default function SoftwareUpdateSection() {
         <Button
           variant="outline"
           onClick={() => void update.checkForUpdates({ silent: false })}
-          disabled={isBusy}
+          disabled={isBusy || updatesUnavailable}
         >
           Check for updates
         </Button>
@@ -49,7 +50,13 @@ export default function SoftwareUpdateSection() {
 
       {update.errorMessage && <p className="text-xs text-rose-600">{update.errorMessage}</p>}
 
-      {!update.availableVersion && update.phase === "idle" && (
+      {updatesUnavailable && (
+        <p className="text-xs text-brand-muted">
+          Updates are only available in release builds that include the updater signing key.
+        </p>
+      )}
+
+      {!updatesUnavailable && !update.availableVersion && update.phase === "idle" && (
         <p className="text-xs text-emerald-600">You are on the latest version.</p>
       )}
     </div>

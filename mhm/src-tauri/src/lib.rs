@@ -20,6 +20,7 @@ use std::sync::{Arc, Mutex, Once};
 use std::time::Duration;
 
 static LOG_INIT: Once = Once::new();
+const UPDATER_ENABLE_ENV: &str = "CAPYINN_ENABLE_UPDATER";
 
 struct GatewayRuntimeState {
     runtime: Mutex<Option<tokio::runtime::Runtime>>,
@@ -80,6 +81,17 @@ fn init_logging() {
     });
 }
 
+fn updater_enabled_from_env(value: Option<&str>) -> bool {
+    matches!(
+        value.map(str::trim).map(str::to_ascii_lowercase).as_deref(),
+        Some("1" | "true" | "yes" | "on")
+    )
+}
+
+fn updater_enabled() -> bool {
+    updater_enabled_from_env(std::env::var(UPDATER_ENABLE_ENV).ok().as_deref())
+}
+
 /// Run the Tauri GUI application with MCP Gateway
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
@@ -91,9 +103,16 @@ pub fn run() {
         .setup(|app| {
             #[cfg(desktop)]
             {
-                app.handle()
-                    .plugin(tauri_plugin_updater::Builder::new().build())
-                    .expect("failed to register updater plugin");
+                if updater_enabled() {
+                    app.handle()
+                        .plugin(tauri_plugin_updater::Builder::new().build())
+                        .expect("failed to register updater plugin");
+                } else {
+                    info!(
+                        "Updater plugin disabled because {} is not enabled for this build",
+                        UPDATER_ENABLE_ENV
+                    );
+                }
             }
 
             let rt = tokio::runtime::Runtime::new().expect("Failed to create Tokio runtime");
@@ -276,4 +295,24 @@ async fn gateway_get_status(
         "port": port,
         "has_api_keys": has_keys,
     }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::updater_enabled_from_env;
+
+    #[test]
+    fn updater_stays_disabled_without_an_explicit_release_flag() {
+        assert!(!updater_enabled_from_env(None));
+        assert!(!updater_enabled_from_env(Some("")));
+        assert!(!updater_enabled_from_env(Some("false")));
+    }
+
+    #[test]
+    fn updater_accepts_common_truthy_release_flags() {
+        assert!(updater_enabled_from_env(Some("1")));
+        assert!(updater_enabled_from_env(Some("true")));
+        assert!(updater_enabled_from_env(Some("YES")));
+        assert!(updater_enabled_from_env(Some(" on ")));
+    }
 }

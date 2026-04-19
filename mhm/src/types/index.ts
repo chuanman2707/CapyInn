@@ -212,6 +212,7 @@ export type AppUpdatePhase =
   | "error";
 
 export interface AppUpdateState {
+  supported: boolean;
   phase: AppUpdatePhase;
   currentVersion: string;
   availableVersion: string | null;
