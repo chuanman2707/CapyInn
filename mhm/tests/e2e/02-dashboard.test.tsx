@@ -1,5 +1,6 @@
 import { describe, it, expect, beforeEach } from "vitest";
 import { render, screen, waitFor } from "../helpers/render-app";
+import userEvent from "@testing-library/user-event";
 import Dashboard from "@/pages/Dashboard";
 import { setMockResponse, clearMockResponses, invoke } from "@test-mocks/tauri-core";
 import { useHotelStore } from "@/stores/useHotelStore";
@@ -26,7 +27,17 @@ describe("02 — Dashboard", () => {
         setMockResponse("get_rooms", () => mockRooms);
         setMockResponse("get_dashboard_stats", () => mockStats);
         setMockResponse("get_recent_activity", () => [
-            { icon: "🔑", text: "Check-in phòng 2A — Nguyễn Văn A", time: "10:30", color: "green" },
+            {
+                icon: "🔑",
+                text: "Check-in phòng 2A — Nguyễn Văn A",
+                time: "10:30",
+                color: "green",
+                kind: "check_in",
+                room_id: "2A",
+                guest_name: "Nguyễn Văn A",
+                occurred_at: "2026-03-15T10:30:00",
+                status_label: "Đã check-in",
+            },
         ]);
         setMockResponse("get_revenue_stats", () => ({
             total_revenue: 1200000,
@@ -103,5 +114,23 @@ describe("02 — Dashboard", () => {
         // Find and click a room card — rooms are rendered via RoomCard
         // The room name "1A" should be clickable
         screen.getByText("1A");
+    });
+
+    it("opens activity detail drawer when clicking an activity item", async () => {
+        const user = userEvent.setup();
+
+        render(<Dashboard />);
+
+        const activityButton = await screen.findByRole("button", {
+            name: /check-in phòng 2a — nguyễn văn a/i,
+        });
+
+        await user.click(activityButton);
+
+        expect(screen.getByText("Chi tiết hoạt động")).toBeInTheDocument();
+        expect(screen.getAllByText("Đã check-in").length).toBeGreaterThan(0);
+        expect(screen.getByText("Ghi nhận lúc")).toBeInTheDocument();
+        expect(screen.getByText("Điều hướng")).toBeInTheDocument();
+        expect(screen.getByRole("button", { name: /mở phòng 2a/i })).toBeInTheDocument();
     });
 });
