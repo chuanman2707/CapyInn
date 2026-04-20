@@ -27,17 +27,17 @@ describe("05 — Check-out Flow", () => {
     it("check_out calls correct invoke command", async () => {
         setMockResponse("check_out", () => undefined);
 
-        await useHotelStore.getState().checkOut("booking-1", 400000);
+        await useHotelStore.getState().checkOut("booking-1", "hourly", 400000);
 
         expect(invoke).toHaveBeenCalledWith("check_out", {
-            req: { booking_id: "booking-1", final_paid: 400000 },
+            req: { booking_id: "booking-1", settlement_mode: "hourly", final_total: 400000 },
         });
     });
 
     it("refreshes rooms and stats after checkout", async () => {
         setMockResponse("check_out", () => undefined);
 
-        await useHotelStore.getState().checkOut("booking-1");
+        await useHotelStore.getState().checkOut("booking-1", "actual_nights", 500000);
 
         // Should refresh data
         expect(invoke).toHaveBeenCalledWith("get_rooms");
@@ -48,7 +48,7 @@ describe("05 — Check-out Flow", () => {
         setMockResponse("check_out", () => undefined);
 
         useHotelStore.setState({ activeTab: "rooms" });
-        await useHotelStore.getState().checkOut("booking-1");
+        await useHotelStore.getState().checkOut("booking-1", "actual_nights", 500000);
 
         expect(useHotelStore.getState().activeTab).toBe("dashboard");
     });
@@ -59,19 +59,19 @@ describe("05 — Check-out Flow", () => {
         });
 
         await expect(
-            useHotelStore.getState().checkOut("nonexistent")
+            useHotelStore.getState().checkOut("nonexistent", "actual_nights", 500000)
         ).rejects.toThrow("Booking not found");
 
         expect(useHotelStore.getState().loading).toBe(false);
     });
 
-    it("checkout with no final_paid sends undefined", async () => {
+    it("checkout sends the requested settlement payload", async () => {
         setMockResponse("check_out", () => undefined);
 
-        await useHotelStore.getState().checkOut("booking-1");
+        await useHotelStore.getState().checkOut("booking-1", "booked_nights", 2500000);
 
         expect(invoke).toHaveBeenCalledWith("check_out", {
-            req: { booking_id: "booking-1", final_paid: undefined },
+            req: { booking_id: "booking-1", settlement_mode: "booked_nights", final_total: 2500000 },
         });
     });
 });

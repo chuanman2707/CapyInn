@@ -1,9 +1,12 @@
-use chrono::{Duration, Local, NaiveDate};
+use chrono::{DateTime, Duration, Local, NaiveDate};
 use sqlx::{Pool, Row, Sqlite, Transaction};
 
 use crate::{
     domain::booking::{pricing::calculate_stay_price_tx, BookingError, BookingResult},
-    models::{status, Booking, CheckInRequest, CheckOutRequest},
+    models::{
+        status, Booking, CheckInRequest, CheckOutRequest, CheckoutSettlementMode,
+        CheckoutSettlementPreview, CheckoutSettlementPreviewRequest,
+    },
 };
 
 use super::{
@@ -152,17 +155,136 @@ pub async fn check_in(
     .await
 }
 
-pub async fn check_out(pool: &Pool<Sqlite>, req: CheckOutRequest) -> BookingResult<()> {
-    let mut tx = begin_tx(pool).await?;
+#[allow(dead_code)]
+struct CheckoutSettlementComputation {
+    room_id: String,
+    original_nights: i32,
+    actual_nights: i32,
+    settled_nights: i32,
+    original_total: f64,
+    recommended_total: f64,
+    already_paid: f64,
+    explanation: String,
+    reporting_checkout: String,
+}
 
-    let booking =
-        sqlx::query("SELECT room_id, paid_amount FROM bookings WHERE id = ? AND status = ?")
-            .bind(&req.booking_id)
-            .bind(status::booking::ACTIVE)
-            .fetch_optional(&mut *tx)
-            .await?;
+fn settlement_mode_label(mode: CheckoutSettlementMode) -> &'static str {
+    match mode {
+        CheckoutSettlementMode::ActualNights => "Thanh toán theo số đêm thực tế",
+        CheckoutSettlementMode::Hourly => "Thanh toán theo giờ",
+        CheckoutSettlementMode::BookedNights => "Thanh toán theo số đêm đã đặt",
+    }
+}
 
-    let booking = booking.ok_or_else(|| {
+fn actual_nights_for_checkout(
+    check_in_at: &str,
+    actual_checkout: DateTime<Local>,
+) -> BookingResult<i32> {
+    let check_in_date = parse_booking_datetime(check_in_at)?.date_naive();
+    let checkout_date = actual_checkout.date_naive();
+
+    Ok((checkout_date - check_in_date).num_days().max(1) as i32)
+}
+
+fn settlement_boundary_for(check_in_at: &str, settled_nights: i32) -> BookingResult<String> {
+    let check_in_dt = parse_booking_datetime(check_in_at)?;
+    Ok((check_in_dt + Duration::days(settled_nights as i64)).to_rfc3339())
+}
+
+fn reporting_checkout_for(
+    check_in_at: &str,
+    settled_nights: i32,
+    actual_checkout: DateTime<Local>,
+    settlement_mode: CheckoutSettlementMode,
+) -> BookingResult<String> {
+    let check_in_dt = parse_booking_datetime(check_in_at)?;
+    let check_in_date = check_in_dt.date_naive();
+
+    let report_date = match settlement_mode {
+        CheckoutSettlementMode::BookedNights => {
+            check_in_date + Duration::days(settled_nights as i64)
+        }
+        CheckoutSettlementMode::ActualNights | CheckoutSettlementMode::Hourly => {
+            let checkout_date = actual_checkout.date_naive();
+            if checkout_date <= check_in_date {
+                check_in_date + Duration::days(1)
+            } else {
+                checkout_date
+            }
+        }
+    };
+
+    Ok(report_date.format("%Y-%m-%d").to_string())
+}
+
+fn settlement_explanation(
+    settlement_mode: CheckoutSettlementMode,
+    settled_nights: i32,
+    recommended_total: f64,
+) -> String {
+    match settlement_mode {
+        CheckoutSettlementMode::Hourly => {
+            "Thanh toán theo giờ: nhập tay số tiền quyết toán".to_string()
+        }
+        CheckoutSettlementMode::ActualNights | CheckoutSettlementMode::BookedNights => {
+            let nightly_rate = if settled_nights > 0 {
+                recommended_total / settled_nights as f64
+            } else {
+                recommended_total
+            };
+
+            format!(
+                "{}: {} đêm x {:.0}đ",
+                settlement_mode_label(settlement_mode),
+                settled_nights,
+                nightly_rate
+            )
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn checkout_settlement_snapshot(
+    settlement_mode: CheckoutSettlementMode,
+    original_nights: i32,
+    actual_nights: i32,
+    settled_nights: i32,
+    reporting_checkout: &str,
+    original_total: f64,
+    settled_total: f64,
+    manual_override: bool,
+) -> String {
+    serde_json::json!({
+        "checkout_settlement": {
+            "mode": settlement_mode,
+            "label": settlement_mode_label(settlement_mode),
+            "reporting_checkout": reporting_checkout,
+            "original_nights": original_nights,
+            "actual_nights": actual_nights,
+            "settled_nights": settled_nights,
+            "original_total": original_total,
+            "settled_total": settled_total,
+            "manual_override": manual_override,
+        }
+    })
+    .to_string()
+}
+
+async fn preview_checkout_settlement_tx(
+    tx: &mut Transaction<'_, Sqlite>,
+    req: &CheckoutSettlementPreviewRequest,
+    now: DateTime<Local>,
+) -> BookingResult<CheckoutSettlementComputation> {
+    let booking = sqlx::query(
+        "SELECT room_id, check_in_at, nights, total_price, paid_amount,
+                COALESCE(pricing_type, 'nightly') AS pricing_type
+         FROM bookings WHERE id = ? AND status = ?",
+    )
+    .bind(&req.booking_id)
+    .bind(status::booking::ACTIVE)
+    .fetch_optional(&mut **tx)
+    .await?
+    .ok_or_else(|| {
         BookingError::not_found(format!(
             "Không tìm thấy booking đang active {}",
             req.booking_id
@@ -170,27 +292,159 @@ pub async fn check_out(pool: &Pool<Sqlite>, req: CheckOutRequest) -> BookingResu
     })?;
 
     let room_id: String = booking.get("room_id");
+    let check_in_at: String = booking.get("check_in_at");
+    let pricing_type: String = booking.get("pricing_type");
+    let original_nights: i32 = booking.get("nights");
+    let original_total = read_f64_or_zero(&booking, "total_price");
     let already_paid = read_f64_or_zero(&booking, "paid_amount");
+    let actual_nights = actual_nights_for_checkout(&check_in_at, now)?;
 
-    if let Some(final_paid) = req.final_paid {
-        let delta = final_paid - already_paid;
-        if delta > 0.0 {
-            record_payment_tx(&mut tx, &req.booking_id, delta, "Thanh toán khi check-out").await?;
+    let (settled_nights, recommended_total) = match req.settlement_mode {
+        CheckoutSettlementMode::ActualNights => {
+            let settled_nights = actual_nights.max(1);
+            let settlement_boundary = settlement_boundary_for(&check_in_at, settled_nights)?;
+            let pricing = calculate_stay_price_tx(
+                tx,
+                &room_id,
+                &check_in_at,
+                &settlement_boundary,
+                &pricing_type,
+            )
+            .await?;
+            (settled_nights, pricing.total)
         }
+        CheckoutSettlementMode::BookedNights => (original_nights.max(1), original_total),
+        CheckoutSettlementMode::Hourly => (1, original_total),
+    };
+
+    let explanation =
+        settlement_explanation(req.settlement_mode, settled_nights, recommended_total);
+    let reporting_checkout =
+        reporting_checkout_for(&check_in_at, settled_nights, now, req.settlement_mode)?;
+
+    Ok(CheckoutSettlementComputation {
+        room_id,
+        original_nights,
+        actual_nights,
+        settled_nights,
+        original_total,
+        recommended_total,
+        already_paid,
+        explanation,
+        reporting_checkout,
+    })
+}
+
+#[allow(dead_code)]
+pub async fn preview_checkout_settlement(
+    pool: &Pool<Sqlite>,
+    req: CheckoutSettlementPreviewRequest,
+) -> BookingResult<CheckoutSettlementPreview> {
+    preview_checkout_settlement_at(pool, req, Local::now()).await
+}
+
+#[allow(dead_code)]
+pub async fn preview_checkout_settlement_at(
+    pool: &Pool<Sqlite>,
+    req: CheckoutSettlementPreviewRequest,
+    now: DateTime<Local>,
+) -> BookingResult<CheckoutSettlementPreview> {
+    let mut tx = begin_tx(pool).await?;
+    let settlement = preview_checkout_settlement_tx(&mut tx, &req, now).await?;
+
+    tx.rollback().await.map_err(BookingError::from)?;
+
+    Ok(CheckoutSettlementPreview {
+        settlement_mode: req.settlement_mode,
+        settled_nights: settlement.settled_nights,
+        recommended_total: settlement.recommended_total,
+        explanation: settlement.explanation,
+    })
+}
+
+pub async fn check_out(pool: &Pool<Sqlite>, req: CheckOutRequest) -> BookingResult<()> {
+    check_out_at(pool, req, Local::now()).await
+}
+
+pub async fn check_out_at(
+    pool: &Pool<Sqlite>,
+    req: CheckOutRequest,
+    now: DateTime<Local>,
+) -> BookingResult<()> {
+    if req.final_total < 0.0 {
+        return Err(BookingError::validation(
+            "Tổng quyết toán phải lớn hơn hoặc bằng 0".to_string(),
+        ));
     }
 
-    let actual_checkout = Local::now().to_rfc3339();
+    let mut tx = begin_tx(pool).await?;
+    let preview_req = CheckoutSettlementPreviewRequest {
+        booking_id: req.booking_id.clone(),
+        settlement_mode: req.settlement_mode,
+    };
+    let settlement = preview_checkout_settlement_tx(&mut tx, &preview_req, now).await?;
+    let actual_checkout = now.to_rfc3339();
 
-    sqlx::query("UPDATE bookings SET status = ?, actual_checkout = ? WHERE id = ?")
+    if settlement.already_paid > req.final_total {
+        return Err(BookingError::validation(
+            "Overpaid booking requires refund handling before checkout".to_string(),
+        ));
+    }
+
+    let charge_delta = req.final_total - settlement.original_total;
+    if charge_delta.abs() > f64::EPSILON {
+        let adjustment_note = if charge_delta < 0.0 {
+            "Điều chỉnh giảm tiền phòng khi quyết toán check-out"
+        } else {
+            "Điều chỉnh tăng tiền phòng khi quyết toán check-out"
+        };
+
+        record_charge_tx(
+            &mut tx,
+            &req.booking_id,
+            charge_delta,
+            adjustment_note,
+            actual_checkout.clone(),
+        )
+        .await?;
+    }
+
+    let payment_delta = req.final_total - settlement.already_paid;
+    if payment_delta > f64::EPSILON {
+        record_payment_tx(&mut tx, &req.booking_id, payment_delta, "Thanh toán khi check-out")
+            .await?;
+    }
+
+    let manual_override = (req.final_total - settlement.recommended_total).abs() > f64::EPSILON;
+    let pricing_snapshot = checkout_settlement_snapshot(
+        req.settlement_mode,
+        settlement.original_nights,
+        settlement.actual_nights,
+        settlement.settled_nights,
+        &settlement.reporting_checkout,
+        settlement.original_total,
+        req.final_total,
+        manual_override,
+    );
+
+    sqlx::query(
+        "UPDATE bookings
+         SET status = ?, actual_checkout = ?, nights = ?, total_price = ?, paid_amount = ?, pricing_snapshot = ?
+         WHERE id = ?",
+    )
         .bind(status::booking::CHECKED_OUT)
         .bind(&actual_checkout)
+        .bind(settlement.settled_nights)
+        .bind(req.final_total)
+        .bind(req.final_total)
+        .bind(pricing_snapshot)
         .bind(&req.booking_id)
         .execute(&mut *tx)
         .await?;
 
     sqlx::query("UPDATE rooms SET status = ? WHERE id = ?")
         .bind(status::room::CLEANING)
-        .bind(&room_id)
+        .bind(&settlement.room_id)
         .execute(&mut *tx)
         .await?;
 
@@ -199,7 +453,7 @@ pub async fn check_out(pool: &Pool<Sqlite>, req: CheckOutRequest) -> BookingResu
          VALUES (?, ?, 'needs_cleaning', ?, ?)",
     )
     .bind(uuid::Uuid::new_v4().to_string())
-    .bind(&room_id)
+    .bind(&settlement.room_id)
     .bind(&actual_checkout)
     .bind(&actual_checkout)
     .execute(&mut *tx)

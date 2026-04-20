@@ -178,6 +178,17 @@ pub async fn check_out(
     Ok(())
 }
 
+#[allow(dead_code)]
+#[tauri::command]
+pub async fn preview_checkout_settlement(
+    state: State<'_, AppState>,
+    req: CheckoutSettlementPreviewRequest,
+) -> Result<CheckoutSettlementPreview, String> {
+    stay_lifecycle::preview_checkout_settlement(&state.db, req)
+        .await
+        .map_err(|error| error.to_string())
+}
+
 // ─── Extend Stay ───
 
 #[tauri::command]

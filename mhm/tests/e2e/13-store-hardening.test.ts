@@ -48,7 +48,7 @@ describe("13 — Store Hardening", () => {
 
         expect(useHotelStore.getState().loading).toBe(true);
 
-        await useHotelStore.getState().checkOut("booking-1");
+        await useHotelStore.getState().checkOut("booking-1", "actual_nights", 500000);
 
         expect(useHotelStore.getState().loading).toBe(true);
 
