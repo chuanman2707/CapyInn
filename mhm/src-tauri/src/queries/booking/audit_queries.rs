@@ -29,17 +29,19 @@ pub async fn load_night_audit_snapshot(
         .fetch_one(pool)
         .await?;
 
-    let rooms_sold: (i32,) = sqlx::query_as(
+    let occupancy_checkout = revenue_queries::occupancy_checkout_date_sql("");
+    let rooms_sold_query = format!(
         "SELECT COUNT(DISTINCT room_id)
          FROM bookings
          WHERE status IN ('active', 'checked_out')
            AND DATE(check_in_at) < DATE(?1, '+1 day')
-           AND DATE(COALESCE(actual_checkout, expected_checkout)) > DATE(?2)",
-    )
-    .bind(audit_date)
-    .bind(audit_date)
-    .fetch_one(pool)
-    .await?;
+           AND DATE({occupancy_checkout}) > DATE(?2)"
+    );
+    let rooms_sold: (i32,) = sqlx::query_as(&rooms_sold_query)
+        .bind(audit_date)
+        .bind(audit_date)
+        .fetch_one(pool)
+        .await?;
 
     let occupancy_pct = if total_rooms.0 > 0 {
         (rooms_sold.0 as f64 / total_rooms.0 as f64 * 100.0).round()
@@ -93,12 +95,19 @@ pub async fn load_booking_export_rows(
     from_date: &str,
     to_date: &str,
 ) -> Result<Vec<BookingExportRow>, sqlx::Error> {
-    let rows = sqlx::query(
+    let reporting_checkout = revenue_queries::recognized_checkout_date_sql("b.");
+    let export_checkout = format!(
+        "CASE
+            WHEN b.status = 'checked_out' THEN {reporting_checkout}
+            ELSE b.expected_checkout
+        END"
+    );
+    let rows = sqlx::query(&format!(
         "SELECT b.id, b.room_id,
                 COALESCE(g.full_name, '') AS guest_name,
                 COALESCE(g.doc_number, '') AS doc_number,
                 COALESCE(g.phone, '') AS phone,
-                b.check_in_at, b.expected_checkout, COALESCE(b.actual_checkout, '') AS actual_checkout,
+                b.check_in_at, {export_checkout} AS expected_checkout, COALESCE(b.actual_checkout, '') AS actual_checkout,
                 b.nights, b.total_price,
                 COALESCE(charges.charge_total, 0) AS charge_total,
                 COALESCE(fees.cancellation_fee_total, 0) AS cancellation_fee_total,
@@ -127,8 +136,22 @@ pub async fn load_booking_export_rows(
              FROM folio_lines
              GROUP BY booking_id
          ) folio ON folio.booking_id = b.id
-         WHERE DATE(b.check_in_at) BETWEEN DATE(?) AND DATE(?)
-         ORDER BY b.check_in_at DESC",
+         WHERE (
+                b.status = 'checked_out'
+                AND DATE({reporting_checkout}) BETWEEN DATE(?1) AND DATE(?2)
+            )
+            OR (
+                b.status != 'checked_out'
+                AND DATE(b.check_in_at) BETWEEN DATE(?1) AND DATE(?2)
+            )
+            OR EXISTS (
+                SELECT 1
+                FROM transactions tx
+                WHERE tx.booking_id = b.id
+                  AND tx.type = 'cancellation_fee'
+                  AND DATE(tx.created_at) BETWEEN DATE(?1) AND DATE(?2)
+            )
+         ORDER BY b.check_in_at DESC")
     )
     .bind(from_date)
     .bind(to_date)

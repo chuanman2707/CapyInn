@@ -199,10 +199,33 @@ pub struct CheckInRequest {
     pub pricing_type: Option<String>,
 }
 
+#[derive(Debug, Serialize, Deserialize, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum CheckoutSettlementMode {
+    ActualNights,
+    Hourly,
+    BookedNights,
+}
+
 #[derive(Debug, Deserialize)]
 pub struct CheckOutRequest {
     pub booking_id: String,
-    pub final_paid: Option<f64>,
+    pub settlement_mode: CheckoutSettlementMode,
+    pub final_total: f64,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct CheckoutSettlementPreviewRequest {
+    pub booking_id: String,
+    pub settlement_mode: CheckoutSettlementMode,
+}
+
+#[derive(Debug, Serialize)]
+pub struct CheckoutSettlementPreview {
+    pub settlement_mode: CheckoutSettlementMode,
+    pub settled_nights: i32,
+    pub recommended_total: f64,
+    pub explanation: String,
 }
 
 #[derive(Debug, Serialize)]

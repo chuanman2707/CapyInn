@@ -24,7 +24,7 @@ pub async fn do_generate_invoice(
     // Fetch booking
     let b = sqlx::query(
         "SELECT b.id, b.room_id, b.primary_guest_id, b.check_in_at, b.expected_checkout,
-                b.nights, b.total_price, b.paid_amount, b.status, b.notes,
+                b.actual_checkout, b.nights, b.total_price, b.paid_amount, b.status, b.notes,
                 b.booking_type, b.deposit_amount, b.scheduled_checkin, b.scheduled_checkout,
                 b.pricing_snapshot, b.pricing_type,
                 r.name as room_name, r.type as room_type, r.base_price,
@@ -80,33 +80,65 @@ pub async fn do_generate_invoice(
     let guest_phone: Option<String> = b.get("guest_phone");
     let nights: i32 = b.get("nights");
     let total_price: f64 = get_f64(&b, "total_price");
+    let paid_amount: f64 = get_f64(&b, "paid_amount");
     let deposit_amount: f64 = b.try_get::<f64, _>("deposit_amount").unwrap_or(0.0);
     let notes: Option<String> = b.get("notes");
+    let pricing_snapshot: Option<String> = b.get("pricing_snapshot");
+
+    let checkout_settlement = pricing_snapshot
+        .as_deref()
+        .and_then(|raw| serde_json::from_str::<serde_json::Value>(raw).ok())
+        .and_then(|value| value.get("checkout_settlement").cloned());
+
+    let settlement_label = checkout_settlement
+        .as_ref()
+        .and_then(|value| value.get("label").cloned())
+        .and_then(|value| value.as_str().map(str::to_string));
+    let settlement_mode = checkout_settlement
+        .as_ref()
+        .and_then(|value| value.get("mode").cloned())
+        .and_then(|value| value.as_str().map(str::to_string));
+    let settlement_reporting_checkout = checkout_settlement
+        .as_ref()
+        .and_then(|value| value.get("reporting_checkout").cloned())
+        .and_then(|value| value.as_str().map(str::to_string));
 
     let check_in: String = b
         .try_get::<String, _>("scheduled_checkin")
         .ok()
         .or_else(|| Some(b.get::<String, _>("check_in_at")))
         .unwrap();
-    let check_out: String = b
-        .try_get::<String, _>("scheduled_checkout")
-        .ok()
-        .or_else(|| Some(b.get::<String, _>("expected_checkout")))
-        .unwrap();
+    let scheduled_checkout = b.try_get::<Option<String>, _>("scheduled_checkout").ok().flatten();
+    let expected_checkout = b.try_get::<String, _>("expected_checkout").ok();
+    let actual_checkout = b.try_get::<Option<String>, _>("actual_checkout").ok().flatten();
+    let check_out: String = if settlement_mode.as_deref() == Some("booked_nights") {
+        settlement_reporting_checkout
+            .or(scheduled_checkout)
+            .or(expected_checkout)
+            .or(actual_checkout)
+            .unwrap_or_default()
+    } else {
+        actual_checkout
+            .or(scheduled_checkout)
+            .or(expected_checkout)
+            .unwrap_or_default()
+    };
 
-    // Build pricing breakdown — always use fresh English labels
+    // Keep invoice wording aligned with the settlement metadata when checkout finalized with
+    // an explicit settlement mode.
     let per_night = if nights > 0 {
         total_price / nights as f64
     } else {
         total_price
     };
     let breakdown: Vec<crate::pricing::PricingLine> = vec![crate::pricing::PricingLine {
-        label: format!("{} night(s) x {}d", nights, per_night as i64),
+        label: settlement_label
+            .unwrap_or_else(|| format!("{} night(s) x {}d", nights, per_night as i64)),
         amount: total_price,
     }];
 
     let subtotal = total_price;
-    let balance_due = total_price - deposit_amount;
+    let balance_due = (total_price - paid_amount).max(0.0);
 
     // Generate invoice number: INV-YYYYMMDD-XXX
     let today = chrono::Local::now().format("%Y%m%d").to_string();
@@ -356,6 +388,97 @@ mod tests {
         assert_eq!(invoice.hotel_name, app_identity::APP_NAME);
         assert_eq!(invoice.hotel_address, "");
         assert_eq!(invoice.hotel_phone, "");
+    }
+
+    #[tokio::test]
+    async fn generate_invoice_prefers_actual_checkout_and_settlement_label() {
+        let pool = test_pool().await;
+        seed_invoice_booking(&pool, "booking-settled").await;
+
+        sqlx::query(
+            "UPDATE bookings
+             SET status = 'checked_out',
+                 actual_checkout = '2026-04-20T18:00:00+07:00',
+                 nights = 1,
+                 total_price = 500000,
+                 paid_amount = 500000,
+                 pricing_snapshot = ?
+             WHERE id = ?",
+        )
+        .bind(r#"{"checkout_settlement":{"label":"Thanh toán theo số đêm thực tế"}}"#)
+        .bind("booking-settled")
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let invoice = do_generate_invoice(&pool, "booking-settled")
+            .await
+            .unwrap();
+
+        assert_eq!(invoice.check_out, "2026-04-20T18:00:00+07:00");
+        assert_eq!(invoice.total, 500_000.0);
+        assert_eq!(invoice.balance_due, 0.0);
+        assert_eq!(
+            invoice.pricing_breakdown[0].label,
+            "Thanh toán theo số đêm thực tế"
+        );
+    }
+
+    #[tokio::test]
+    async fn generate_invoice_booked_nights_uses_billed_checkout_boundary() {
+        let pool = test_pool().await;
+        seed_invoice_booking(&pool, "booking-booked-nights").await;
+
+        sqlx::query(
+            "UPDATE bookings
+             SET status = 'checked_out',
+                 expected_checkout = '2026-04-26T10:00:00+07:00',
+                 actual_checkout = '2026-04-22T09:00:00+07:00',
+                 nights = 5,
+                 total_price = 2500000,
+                 paid_amount = 2500000,
+                 pricing_snapshot = ?
+             WHERE id = ?",
+        )
+        .bind(
+            r#"{"checkout_settlement":{"mode":"booked_nights","label":"Thanh toán theo số đêm đã đặt","reporting_checkout":"2026-04-25"}}"#,
+        )
+        .bind("booking-booked-nights")
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let invoice = do_generate_invoice(&pool, "booking-booked-nights")
+            .await
+            .unwrap();
+
+        assert_eq!(invoice.check_out, "2026-04-25");
+        assert_eq!(
+            invoice.pricing_breakdown[0].label,
+            "Thanh toán theo số đêm đã đặt"
+        );
+    }
+
+    #[tokio::test]
+    async fn generate_invoice_uses_paid_amount_not_deposit_amount_for_balance_due() {
+        let pool = test_pool().await;
+        seed_invoice_booking(&pool, "booking-balance").await;
+
+        sqlx::query(
+            "UPDATE bookings
+             SET total_price = 500000, paid_amount = 500000, deposit_amount = 100000
+             WHERE id = ?",
+        )
+        .bind("booking-balance")
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let invoice = do_generate_invoice(&pool, "booking-balance")
+            .await
+            .unwrap();
+
+        assert_eq!(invoice.balance_due, 0.0);
     }
 
     #[tokio::test]

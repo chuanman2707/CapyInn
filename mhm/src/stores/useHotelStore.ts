@@ -14,6 +14,7 @@ import type {
   AddGroupServiceRequest,
   GroupService,
   AutoAssignResult,
+  CheckoutSettlementMode,
   GroupInvoiceData,
 } from "@/types";
 
@@ -34,7 +35,11 @@ interface HotelStore {
   setTab: (tab: HotelTab) => void;
   setCheckinOpen: (open: boolean, roomId?: string | null) => void;
   checkIn: (roomId: string, guests: CheckInGuestInput[], nights: number, paidAmount?: number, source?: string, notes?: string) => Promise<void>;
-  checkOut: (bookingId: string, finalPaid?: number) => Promise<void>;
+  checkOut: (
+    bookingId: string,
+    settlementMode: CheckoutSettlementMode,
+    finalTotal: number,
+  ) => Promise<void>;
   extendStay: (bookingId: string) => Promise<void>;
   fetchHousekeeping: () => Promise<void>;
   updateHousekeeping: (taskId: string, status: string, note?: string) => Promise<void>;
@@ -109,10 +114,16 @@ export const useHotelStore = create<HotelStore>((set, get) => {
       }
     },
 
-    checkOut: async (bookingId, finalPaid) => {
+    checkOut: async (bookingId, settlementMode, finalTotal) => {
       beginAction();
       try {
-        await invoke("check_out", { req: { booking_id: bookingId, final_paid: finalPaid } });
+        await invoke("check_out", {
+          req: {
+            booking_id: bookingId,
+            settlement_mode: settlementMode,
+            final_total: finalTotal,
+          },
+        });
         await get().fetchRooms();
         await get().fetchStats();
         set({ activeTab: "dashboard" });

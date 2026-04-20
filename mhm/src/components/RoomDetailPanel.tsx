@@ -13,6 +13,7 @@ import {
 import { toast } from "sonner";
 
 import InvoiceDialog from "@/components/InvoiceDialog";
+import CheckoutSettlementModal from "@/components/CheckoutSettlementModal";
 import InfoItem from "@/components/shared/InfoItem";
 import ActionBtn from "@/components/shared/ActionBtn";
 import PaymentBlock from "@/components/shared/PaymentBlock";
@@ -24,9 +25,8 @@ import { Button } from "@/components/ui/button";
 import { useInvoiceDialog } from "@/hooks/useInvoiceDialog";
 import { getRoomTypeLabel } from "@/lib/constants";
 import { fmtDate, fmtDateShort, fmtMoney } from "@/lib/format";
-import Modal from "@/components/ui/Modal";
 import { useHotelStore } from "@/stores/useHotelStore";
-import type { RoomWithBooking } from "@/types";
+import type { CheckoutSettlementPayload, RoomWithBooking } from "@/types";
 
 interface RoomDetailPanelProps {
   mode: "page" | "sheet";
@@ -50,7 +50,6 @@ export default function RoomDetailPanel({
     loading,
   } = useHotelStore();
   const [showCheckout, setShowCheckout] = useState(false);
-  const [finalPaid, setFinalPaid] = useState(0);
   const [copied, setCopied] = useState(false);
   const { invoiceOpen, invoiceData, invoiceLoading, openInvoice, closeInvoice } = useInvoiceDialog();
 
@@ -87,10 +86,13 @@ export default function RoomDetailPanel({
     setTimeout(() => setCopied(false), 2000);
   };
 
-  const handleCheckout = async () => {
+  const handleCheckoutConfirm = async ({
+    settlementMode,
+    finalTotal,
+  }: CheckoutSettlementPayload) => {
     if (!booking) return;
     try {
-      await checkOut(booking.id, finalPaid || undefined);
+      await checkOut(booking.id, settlementMode, finalTotal);
       setShowCheckout(false);
       toast.success("Check-out thành công!");
       if (mode === "sheet") {
@@ -198,10 +200,7 @@ export default function RoomDetailPanel({
                 {invoiceLoading ? "Đang tạo..." : "📄 Invoice"}
               </Button>
               <button
-                onClick={() => {
-                  setFinalPaid(booking.total_price);
-                  setShowCheckout(true);
-                }}
+                onClick={() => setShowCheckout(true)}
                 className="flex items-center justify-center gap-2 py-3 bg-red-600 hover:bg-red-700 text-white rounded-xl font-semibold text-[13px] transition-colors cursor-pointer"
               >
                 <LogOut size={15} /> Check-out
@@ -265,37 +264,14 @@ export default function RoomDetailPanel({
     <>
       {mode === "page" ? pageContent : sheetContent}
 
-      {showCheckout && booking && (
-        <Modal title="Xác nhận Check-out">
-          <div className="space-y-3 text-[13px]">
-            <InfoItem label="Phòng" value={room.id} variant="block" />
-            <InfoItem label="Tổng tiền" value={fmtMoney(booking.total_price)} variant="block" />
-            <InfoItem label="Đã trả" value={fmtMoney(booking.paid_amount)} variant="block" />
-            <div>
-              <label className="text-[11px] text-slate-400 font-medium block mb-1">Thanh toán cuối</label>
-              <input
-                type="number"
-                value={finalPaid}
-                onChange={(event) => setFinalPaid(Number(event.target.value))}
-                className="w-full bg-white border border-slate-200 rounded-lg px-3 py-2 text-slate-900 text-[13px] focus:outline-none focus:ring-2 focus:ring-blue-500/30 focus:border-blue-500"
-              />
-            </div>
-          </div>
-          <div className="flex gap-2.5 mt-5">
-            <button
-              onClick={() => setShowCheckout(false)}
-              className="flex-1 py-2.5 bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-xl text-[13px] font-medium cursor-pointer transition-colors"
-            >
-              Hủy
-            </button>
-            <button
-              onClick={handleCheckout}
-              className="flex-1 py-2.5 bg-red-600 hover:bg-red-700 text-white rounded-xl text-[13px] font-semibold cursor-pointer transition-colors"
-            >
-              Xác nhận
-            </button>
-          </div>
-        </Modal>
+      {booking && (
+        <CheckoutSettlementModal
+          open={showCheckout}
+          roomId={room.id}
+          booking={booking}
+          onClose={() => setShowCheckout(false)}
+          onConfirm={handleCheckoutConfirm}
+        />
       )}
 
       <InvoiceDialog

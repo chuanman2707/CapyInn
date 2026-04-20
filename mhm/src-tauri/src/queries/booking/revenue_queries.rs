@@ -289,17 +289,19 @@ pub async fn load_daily_revenue(
 }
 
 async fn load_rooms_sold(pool: &Pool<Sqlite>, from: &str, to: &str) -> Result<i32, sqlx::Error> {
-    let row: (i64,) = sqlx::query_as(
+    let occupancy_checkout = occupancy_checkout_date_sql("");
+    let query = format!(
         "SELECT COUNT(DISTINCT room_id)
          FROM bookings
          WHERE status IN ('active', 'checked_out')
            AND DATE(check_in_at) < DATE(?1, '+1 day')
-           AND DATE(COALESCE(actual_checkout, expected_checkout)) > DATE(?2)",
-    )
-    .bind(to)
-    .bind(from)
-    .fetch_one(pool)
-    .await?;
+           AND DATE({occupancy_checkout}) > DATE(?2)"
+    );
+    let row: (i64,) = sqlx::query_as(&query)
+        .bind(to)
+        .bind(from)
+        .fetch_one(pool)
+        .await?;
 
     Ok(row.0 as i32)
 }
@@ -309,19 +311,19 @@ async fn load_room_nights_sold(
     from: &str,
     to: &str,
 ) -> Result<f64, sqlx::Error> {
-    let row: (f64,) = sqlx::query_as(
+    let recognized_checkout = recognized_checkout_date_sql("");
+    let row: (f64,) = sqlx::query_as(&format!(
         "SELECT CAST(COALESCE(SUM(
             MAX(
                 0,
-                JULIANDAY(MIN(DATE(COALESCE(actual_checkout, expected_checkout)), DATE(?1, '+1 day'))) -
+                JULIANDAY(MIN(DATE({recognized_checkout}), DATE(?1, '+1 day'))) -
                 JULIANDAY(MAX(DATE(check_in_at), DATE(?2)))
             )
          ), 0) AS REAL)
          FROM bookings
-         WHERE status IN ('active', 'checked_out')
-           AND DATE(check_in_at) < DATE(?1, '+1 day')
-           AND DATE(COALESCE(actual_checkout, expected_checkout)) > DATE(?2)",
-    )
+         WHERE {}",
+        recognized_room_revenue_filter_sql(""),
+    ))
     .bind(to)
     .bind(from)
     .fetch_one(pool)
@@ -336,13 +338,34 @@ fn normalize_date(value: &str) -> NaiveDate {
         .expect("revenue query dates should always be normalized")
 }
 
+pub(crate) fn recognized_checkout_date_sql(column_prefix: &str) -> String {
+    format!(
+        "COALESCE(
+            DATE(json_extract({column_prefix}pricing_snapshot, '$.checkout_settlement.reporting_checkout')),
+            DATE(COALESCE({column_prefix}actual_checkout, {column_prefix}expected_checkout))
+        )"
+    )
+}
+
+pub(crate) fn occupancy_checkout_date_sql(column_prefix: &str) -> String {
+    format!(
+        "CASE
+            WHEN json_extract({column_prefix}pricing_snapshot, '$.checkout_settlement.mode') IN ('actual_nights', 'hourly')
+                 AND DATE(COALESCE({column_prefix}actual_checkout, {column_prefix}expected_checkout)) <= DATE({column_prefix}check_in_at)
+            THEN DATE({column_prefix}check_in_at, '+1 day')
+            ELSE DATE(COALESCE({column_prefix}actual_checkout, {column_prefix}expected_checkout))
+        END"
+    )
+}
+
 fn recognized_room_revenue_amount_sql(column_prefix: &str) -> String {
+    let recognized_checkout = recognized_checkout_date_sql(column_prefix);
     format!(
         "CASE
             WHEN {column_prefix}nights > 0 THEN {column_prefix}total_price * (
                 MAX(
                     0,
-                    JULIANDAY(MIN(DATE(COALESCE({column_prefix}actual_checkout, {column_prefix}expected_checkout)), DATE(?1, '+1 day'))) -
+                    JULIANDAY(MIN(DATE({recognized_checkout}), DATE(?1, '+1 day'))) -
                     JULIANDAY(MAX(DATE({column_prefix}check_in_at), DATE(?2)))
                 )
             ) / {column_prefix}nights
@@ -352,9 +375,10 @@ fn recognized_room_revenue_amount_sql(column_prefix: &str) -> String {
 }
 
 fn recognized_room_revenue_filter_sql(column_prefix: &str) -> String {
+    let recognized_checkout = recognized_checkout_date_sql(column_prefix);
     format!(
         "{column_prefix}status IN ('active', 'checked_out')
          AND DATE({column_prefix}check_in_at) < DATE(?1, '+1 day')
-         AND DATE(COALESCE({column_prefix}actual_checkout, {column_prefix}expected_checkout)) > DATE(?2)"
+         AND DATE({recognized_checkout}) > DATE(?2)"
     )
 }
