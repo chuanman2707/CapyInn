@@ -5,6 +5,7 @@ pub mod app_identity;
 mod backup;
 mod commands;
 mod db;
+mod diagnostics;
 mod domain;
 pub mod gateway;
 mod models;
@@ -96,6 +97,14 @@ fn updater_enabled() -> bool {
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     init_logging();
+    diagnostics::install_panic_hook(
+        env!("CARGO_PKG_VERSION"),
+        if cfg!(debug_assertions) {
+            "development"
+        } else {
+            "production"
+        },
+    );
 
     let app = tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
@@ -188,6 +197,14 @@ pub fn run() {
             // Settings
             commands::settings::save_settings,
             commands::settings::get_settings,
+            commands::settings::get_crash_reporting_preference,
+            commands::settings::set_crash_reporting_preference,
+            commands::diagnostics::record_js_crash,
+            commands::diagnostics::get_pending_crash_report,
+            commands::diagnostics::mark_crash_report_submitted,
+            commands::diagnostics::mark_crash_report_dismissed,
+            commands::diagnostics::mark_crash_report_send_failed,
+            commands::diagnostics::export_crash_report,
             commands::onboarding::get_bootstrap_status,
             commands::onboarding::complete_onboarding,
             // Auth & RBAC

@@ -143,6 +143,11 @@ CapyInn is built for a narrow but practical use case: small hotels that need a s
 - These flows can be paired with OpenClaw and n8n for custom orchestration around hotel operations
 - For Zalo personal chat automations, you can use the prebuilt community node [`n8n-nodes-zca-zalo`](https://www.npmjs.com/package/n8n-nodes-zca-zalo), published on npm and built on top of `zca-js`
 
+### Crash reporting
+
+- Severe crashes are always written locally under `~/CapyInn/diagnostics` so the app can recover on the next launch.
+- Sending a sanitized crash report to Sentry is optional and controlled in Settings. The remote report flow does not include usage analytics, session replay, guest records, or raw OCR payloads.
+
 ## Tech stack
 
 | Layer | Technology |

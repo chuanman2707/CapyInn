@@ -16,6 +16,7 @@ import CheckinSheet from "./components/CheckinSheet";
 import GroupCheckinSheet from "./components/GroupCheckinSheet";
 import GroupManagement from "./pages/GroupManagement";
 import AppLogo from "./components/AppLogo";
+import CrashReportPrompt from "./components/CrashReportPrompt";
 import AppUpdateBadge from "./components/AppUpdateBadge";
 import AppUpdateRestartModal from "./components/AppUpdateRestartModal";
 import { BackupStatusIndicator } from "./components/BackupStatusIndicator";
@@ -24,6 +25,8 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { AppUpdateProvider } from "@/contexts/AppUpdateContext";
 import { APP_NAME } from "@/lib/appIdentity";
+import { hasRemoteCrashReporting, submitCrashBundle } from "@/lib/crashReporting/sentry";
+import type { CrashReportSummary } from "@/lib/crashReporting/types";
 import { createDeferredCleanup } from "@/lib/deferredCleanup";
 import { useAppUpdateController } from "@/hooks/useAppUpdateController";
 import { Toaster, toast } from "sonner";
@@ -84,7 +87,11 @@ export default function App() {
   const [bootstrap, setBootstrap] = useState<BootstrapStatus | null>(null);
   const [bootstrapLoading, setBootstrapLoading] = useState(true);
   const [backupUi, setBackupUi] = useState<BackupUiState>(INITIAL_BACKUP_UI);
+  const [pendingCrashReport, setPendingCrashReport] = useState<CrashReportSummary | null>(null);
+  const [crashPromptBusy, setCrashPromptBusy] = useState(false);
+  const [crashExportPath, setCrashExportPath] = useState<string | null>(null);
   const didAutoCheckRef = useRef(false);
+  const didCrashRecoveryCheckRef = useRef(false);
   const hideBackupRef = useRef<number | null>(null);
   const shellReady =
     !bootstrapLoading &&
@@ -217,6 +224,47 @@ export default function App() {
     void appUpdate.checkForUpdates({ silent: true });
   }, [appUpdate, shellReady]);
 
+  useEffect(() => {
+    if (!shellReady || didCrashRecoveryCheckRef.current) {
+      return;
+    }
+
+    didCrashRecoveryCheckRef.current = true;
+
+    void invoke<boolean>("get_crash_reporting_preference")
+      .then(async (enabled) => {
+        const pending = await invoke<CrashReportSummary | null>("get_pending_crash_report");
+        if (!pending) {
+          return;
+        }
+
+        setCrashExportPath(null);
+
+        if (enabled && hasRemoteCrashReporting()) {
+          try {
+            await submitCrashBundle(pending);
+          } catch {
+            await invoke("mark_crash_report_send_failed", { bundle_id: pending.bundle_id });
+            setPendingCrashReport(pending);
+            return;
+          }
+
+          try {
+            await invoke("mark_crash_report_submitted", { bundle_id: pending.bundle_id });
+            return;
+          } catch {
+            toast.error("Crash report đã gửi nhưng không thể dọn bundle cục bộ");
+            setPendingCrashReport(null);
+          }
+        }
+
+        setPendingCrashReport(pending);
+      })
+      .catch(() => {
+        // Diagnostics lookups must never block the shell.
+      });
+  }, [shellReady]);
+
   // Responsive: auto-collapse sidebar when window is narrow
   useEffect(() => {
     const handleResize = () => {
@@ -297,6 +345,69 @@ export default function App() {
     }
   };
 
+  const handleSendCrashReport = async () => {
+    if (!pendingCrashReport) {
+      return;
+    }
+
+    setCrashPromptBusy(true);
+    try {
+      await submitCrashBundle(pendingCrashReport);
+    } catch {
+      await invoke("mark_crash_report_send_failed", {
+        bundle_id: pendingCrashReport.bundle_id,
+      });
+      toast.error("Gửi crash report thất bại");
+      return;
+    }
+
+    try {
+      await invoke("set_crash_reporting_preference", { enabled: true });
+      await invoke("mark_crash_report_submitted", {
+        bundle_id: pendingCrashReport.bundle_id,
+      });
+      setPendingCrashReport(null);
+      setCrashExportPath(null);
+    } catch {
+      toast.error("Crash report đã gửi nhưng không thể hoàn tất cleanup cục bộ");
+    } finally {
+      setCrashPromptBusy(false);
+    }
+  };
+
+  const handleDismissCrashReport = async () => {
+    if (!pendingCrashReport) {
+      return;
+    }
+
+    setCrashPromptBusy(true);
+    try {
+      await invoke("mark_crash_report_dismissed", {
+        bundle_id: pendingCrashReport.bundle_id,
+      });
+      setPendingCrashReport(null);
+      setCrashExportPath(null);
+    } finally {
+      setCrashPromptBusy(false);
+    }
+  };
+
+  const handleExportCrashReport = async () => {
+    if (!pendingCrashReport) {
+      return;
+    }
+
+    setCrashPromptBusy(true);
+    try {
+      const path = await invoke<string>("export_crash_report", {
+        bundle_id: pendingCrashReport.bundle_id,
+      });
+      setCrashExportPath(path);
+    } finally {
+      setCrashPromptBusy(false);
+    }
+  };
+
   return (
     <AppUpdateProvider value={appUpdate}>
       <div className="flex h-screen w-screen bg-brand-bg font-sans text-brand-text overflow-hidden select-none">
@@ -311,6 +422,17 @@ export default function App() {
           onConfirm={appUpdate.confirmInstall}
           onLater={appUpdate.dismissRestartPrompt}
         />
+        {pendingCrashReport && (
+          <CrashReportPrompt
+            report={pendingCrashReport}
+            remoteEnabled={hasRemoteCrashReporting()}
+            busy={crashPromptBusy}
+            exportPath={crashExportPath}
+            onSend={handleSendCrashReport}
+            onDismiss={handleDismissCrashReport}
+            onExport={handleExportCrashReport}
+          />
+        )}
 
         {/* SIDEBAR */}
         <aside className={`${collapsed ? "w-[72px]" : "w-[260px]"} bg-white border-r border-slate-100 flex flex-col z-20 shrink-0 transition-all duration-300`}>

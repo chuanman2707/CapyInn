@@ -313,6 +313,8 @@ export interface AnalyticsData {
   top_rooms: { room: string; revenue: number }[];
 }
 
+export type { CrashReportSummary } from "@/lib/crashReporting/types";
+
 // ── Group Booking Types ──
 
 export type GroupStatus = "active" | "partial_checkout" | "completed";

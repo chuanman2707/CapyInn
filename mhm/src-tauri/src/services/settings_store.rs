@@ -96,4 +96,30 @@ mod tests {
 
         assert_eq!(value, Some("After".to_string()));
     }
+
+    #[tokio::test]
+    async fn missing_send_crash_reports_is_treated_as_false() {
+        let pool = test_pool().await;
+
+        let value = get_setting(&pool, "send_crash_reports")
+            .await
+            .expect("get_setting should succeed");
+
+        assert_eq!(value, None);
+    }
+
+    #[tokio::test]
+    async fn save_setting_round_trips_send_crash_reports() {
+        let pool = test_pool().await;
+
+        save_setting(&pool, "send_crash_reports", "true")
+            .await
+            .expect("save_setting should succeed");
+
+        let value = get_setting(&pool, "send_crash_reports")
+            .await
+            .expect("get_setting should succeed");
+
+        assert_eq!(value, Some("true".to_string()));
+    }
 }
