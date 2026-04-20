@@ -443,6 +443,7 @@ pub async fn seed_active_booking(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 pub async fn seed_active_booking_with_terms(
     pool: &Pool<Sqlite>,
     booking_id: &str,
@@ -878,7 +879,7 @@ async fn group_checkin_reservation_blocks_calendar_and_tracks_deposit() {
 
     let mut req = minimal_group_checkin_request(&["G201", "G202"]);
     req.check_in_date = Some(
-        (Local::now().date_naive() + Duration::days(2))
+        (Local::now().date_naive() + Duration::days(1))
             .format("%Y-%m-%d")
             .to_string(),
     );
