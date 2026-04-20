@@ -1192,7 +1192,16 @@ async fn calculate_stay_price_matches_tx_path_and_applies_special_date_uplift() 
     .unwrap();
 
     assert_eq!(pool_pricing.total, 1_320_000.0);
+    assert_eq!(pool_pricing.base_amount, 1_200_000.0);
     assert_eq!(pool_pricing.surcharge_amount, 120_000.0);
+    assert_eq!(pool_pricing.weekend_amount, 0.0);
+    assert_eq!(pool_pricing.breakdown.len(), 2);
+    assert_eq!(pool_pricing.breakdown[0].amount, 1_200_000.0);
+    assert!(pool_pricing.breakdown[0].label.contains("night(s)"));
+    assert!(pool_pricing
+        .breakdown
+        .iter()
+        .any(|line| line.label == "Holiday surcharge"));
 
     let mut tx = pool.begin().await.unwrap();
     let tx_pricing = calculate_stay_price_tx(
@@ -1210,6 +1219,53 @@ async fn calculate_stay_price_matches_tx_path_and_applies_special_date_uplift() 
     assert_eq!(tx_pricing.surcharge_amount, pool_pricing.surcharge_amount);
     assert_eq!(tx_pricing.weekend_amount, pool_pricing.weekend_amount);
     assert_eq!(tx_pricing.total, pool_pricing.total);
+
+    tx.rollback().await.unwrap();
+}
+
+#[tokio::test]
+async fn calculate_stay_price_tx_returns_not_found_for_missing_room() {
+    let pool = test_pool().await;
+    let mut tx = pool.begin().await.unwrap();
+
+    let error = calculate_stay_price_tx(
+        &mut tx,
+        "missing-room",
+        "2026-04-20T10:00:00+07:00",
+        "2026-04-22T10:00:00+07:00",
+        "nightly",
+    )
+    .await
+    .unwrap_err();
+
+    assert!(matches!(
+        error,
+        BookingError::NotFound(message) if message.contains("Không tìm thấy phòng missing-room")
+    ));
+
+    tx.rollback().await.unwrap();
+}
+
+#[tokio::test]
+async fn calculate_stay_price_tx_returns_datetime_parse_for_invalid_check_in() {
+    let pool = test_pool().await;
+    seed_room(&pool, "R153").await.unwrap();
+    let mut tx = pool.begin().await.unwrap();
+
+    let error = calculate_stay_price_tx(
+        &mut tx,
+        "R153",
+        "not-a-datetime",
+        "2026-04-22T10:00:00+07:00",
+        "nightly",
+    )
+    .await
+    .unwrap_err();
+
+    assert!(matches!(
+        error,
+        BookingError::DateTimeParse(message) if message.contains("Invalid check-in datetime")
+    ));
 
     tx.rollback().await.unwrap();
 }
