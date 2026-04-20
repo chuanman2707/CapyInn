@@ -243,6 +243,7 @@ fn settlement_explanation(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn checkout_settlement_snapshot(
     settlement_mode: CheckoutSettlementMode,
     original_nights: i32,
