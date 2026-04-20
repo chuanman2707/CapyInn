@@ -270,6 +270,11 @@ export interface ActivityItem {
   text: string;
   time: string;
   color: string;
+  kind?: "check_in" | "check_out" | "housekeeping";
+  room_id?: string | null;
+  guest_name?: string | null;
+  occurred_at?: string;
+  status_label?: string;
 }
 
 export interface ExpenseItem {

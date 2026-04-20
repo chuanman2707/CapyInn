@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { useHotelStore } from "../stores/useHotelStore";
+import ActivityDetailDrawer from "@/components/ActivityDetailDrawer";
 import UnifiedRoomCard from "../components/UnifiedRoomCard";
 import RoomDrawer from "../components/RoomDrawer";
 import StatCard from "@/components/shared/StatCard";
@@ -22,6 +23,7 @@ export default function Dashboard() {
   const [chartData, setChartData] = useState<ChartDataPoint[]>([]);
   const [roomAvailability, setRoomAvailability] = useState<Record<string, string | null>>({});
   const [drawerRoomId, setDrawerRoomId] = useState<string | null>(null);
+  const [selectedActivity, setSelectedActivity] = useState<ActivityItem | null>(null);
 
   useEffect(() => {
     fetchRooms();
@@ -65,6 +67,11 @@ export default function Dashboard() {
     setDrawerRoomId(null);
     fetchRooms();
     fetchStats();
+  };
+
+  const handleActivityRoomOpen = (roomId: string) => {
+    setSelectedActivity(null);
+    setDrawerRoomId(roomId);
   };
 
   return (
@@ -215,7 +222,12 @@ export default function Dashboard() {
           </div>
           <div className="flex-1 space-y-3 overflow-y-auto pr-1">
             {activities.length > 0 ? activities.map((item, i) => (
-              <div key={i} className="flex items-start gap-3 p-2.5 rounded-xl hover:bg-slate-50/50 transition-colors">
+              <button
+                key={`${item.kind ?? "activity"}-${item.occurred_at ?? item.time}-${i}`}
+                type="button"
+                onClick={() => setSelectedActivity(item)}
+                className="w-full flex items-start gap-3 p-2.5 rounded-xl hover:bg-slate-50/50 transition-colors text-left cursor-pointer"
+              >
                 <div className={`w-8 h-8 rounded-lg flex items-center justify-center shrink-0 text-sm ${item.color}`}>
                   {item.icon}
                 </div>
@@ -223,7 +235,7 @@ export default function Dashboard() {
                   <p className="text-sm font-medium text-brand-text leading-tight">{item.text}</p>
                   <p className="text-[11px] text-brand-muted mt-0.5">{item.time}</p>
                 </div>
-              </div>
+              </button>
             )) : (
               <EmptyState message="Chưa có hoạt động nào" />
             )}
@@ -232,9 +244,15 @@ export default function Dashboard() {
 
       </div>
 
+      <ActivityDetailDrawer
+        open={!!selectedActivity}
+        activity={selectedActivity}
+        onClose={() => setSelectedActivity(null)}
+        onOpenRoom={handleActivityRoomOpen}
+      />
+
       {/* Room Drawer */}
       <RoomDrawer open={!!drawerRoomId} onClose={handleDrawerClose} roomId={drawerRoomId} />
     </div >
   );
 }
-
