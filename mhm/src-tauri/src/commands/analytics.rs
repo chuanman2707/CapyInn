@@ -56,6 +56,11 @@ pub async fn get_recent_activity(
             text: format!("Check-in {} → {}", name, room_id),
             time,
             color: "bg-emerald-50".to_string(),
+            kind: "check_in".to_string(),
+            room_id: Some(room_id),
+            guest_name: Some(name),
+            occurred_at: time_str,
+            status_label: "Đã check-in".to_string(),
         });
     }
 
@@ -81,6 +86,11 @@ pub async fn get_recent_activity(
             text: format!("Check-out {} — Room {}", name, room_id),
             time,
             color: "bg-red-50".to_string(),
+            kind: "check_out".to_string(),
+            room_id: Some(room_id),
+            guest_name: Some(name),
+            occurred_at: time_str,
+            status_label: "Đã check-out".to_string(),
         });
     }
 
@@ -109,11 +119,16 @@ pub async fn get_recent_activity(
             text: format!("{} — Room {}", label, room_id),
             time,
             color: "bg-amber-50".to_string(),
+            kind: "housekeeping".to_string(),
+            room_id: Some(room_id),
+            guest_name: None,
+            occurred_at: time_str,
+            status_label: label.to_string(),
         });
     }
 
-    // Sort by time descending and limit
-    activities.sort_by(|a, b| b.time.cmp(&a.time));
+    // Sort by full timestamp descending to keep cross-day ordering stable.
+    activities.sort_by(|a, b| b.occurred_at.cmp(&a.occurred_at));
     activities.truncate(limit as usize);
 
     Ok(activities)

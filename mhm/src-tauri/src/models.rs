@@ -396,6 +396,11 @@ pub struct ActivityItem {
     pub text: String,
     pub time: String,
     pub color: String,
+    pub kind: String,
+    pub room_id: Option<String>,
+    pub guest_name: Option<String>,
+    pub occurred_at: String,
+    pub status_label: String,
 }
 
 #[derive(Debug, Deserialize)]
