@@ -55,6 +55,20 @@ export interface Booking {
   created_at: string;
 }
 
+export type CheckoutSettlementMode = "actual_nights" | "hourly" | "booked_nights";
+
+export interface CheckoutSettlementPreview {
+  settlement_mode: CheckoutSettlementMode;
+  settled_nights: number;
+  recommended_total: number;
+  explanation: string;
+}
+
+export interface CheckoutSettlementPayload {
+  settlementMode: CheckoutSettlementMode;
+  finalTotal: number;
+}
+
 export interface RoomWithBooking {
   room: Room;
   booking: Booking | null;

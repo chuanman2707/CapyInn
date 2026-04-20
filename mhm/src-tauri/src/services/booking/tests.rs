@@ -1,11 +1,12 @@
-use chrono::{Duration, Local};
+use chrono::{Duration, Local, TimeZone};
 use sqlx::{sqlite::SqlitePoolOptions, Pool, Row, Sqlite, Transaction};
 
 use crate::{
     commands::reservations,
     domain::booking::{pricing::calculate_stay_price_tx, BookingResult},
     models::{
-        CheckInRequest, CheckOutRequest, CreateGuestRequest, CreateReservationRequest,
+        CheckInRequest, CheckOutRequest, CheckoutSettlementMode,
+        CheckoutSettlementPreviewRequest, CreateGuestRequest, CreateReservationRequest,
         GroupCheckinRequest, GroupCheckoutRequest,
     },
     queries::booking::{audit_queries, billing_queries, revenue_queries},
@@ -388,6 +389,35 @@ pub async fn seed_active_booking(
         "INSERT INTO room_calendar (room_id, date, booking_id, status) VALUES (?, '2026-04-15', ?, 'occupied')",
     )
     .bind(room_id)
+    .bind(booking_id)
+    .execute(pool)
+    .await?;
+
+    Ok(())
+}
+
+pub async fn seed_active_booking_with_terms(
+    pool: &Pool<Sqlite>,
+    booking_id: &str,
+    room_id: &str,
+    check_in_at: &str,
+    expected_checkout: &str,
+    nights: i64,
+    total_price: f64,
+    paid_amount: Option<f64>,
+) -> BookingResult<()> {
+    seed_active_booking(pool, booking_id, room_id).await?;
+
+    sqlx::query(
+        "UPDATE bookings
+         SET check_in_at = ?, expected_checkout = ?, nights = ?, total_price = ?, paid_amount = ?
+         WHERE id = ?",
+    )
+    .bind(check_in_at)
+    .bind(expected_checkout)
+    .bind(nights)
+    .bind(total_price)
+    .bind(paid_amount)
     .bind(booking_id)
     .execute(pool)
     .await?;
@@ -1735,64 +1765,586 @@ async fn check_in_posts_charge_and_marks_room_occupied() {
 }
 
 #[tokio::test]
-async fn check_out_allows_outstanding_balance_if_final_paid_absent() {
+async fn check_out_settles_same_day_actual_nights_to_minimum_one_night() {
     let pool = test_pool().await;
-    seed_room(&pool, "R202").await.unwrap();
-    seed_active_booking(&pool, "B202", "R202").await.unwrap();
-
-    stay_lifecycle::check_out(
+    seed_room(&pool, "R410").await.unwrap();
+    seed_pricing_rule(&pool, "standard", 500_000.0).await.unwrap();
+    seed_active_booking_with_terms(
         &pool,
-        CheckOutRequest {
-            booking_id: "B202".to_string(),
-            final_paid: None,
-        },
+        "B410",
+        "R410",
+        "2026-04-20T08:00:00+07:00",
+        "2026-04-25T12:00:00+07:00",
+        5,
+        2_500_000.0,
+        Some(0.0),
     )
     .await
     .unwrap();
 
-    let booking =
-        sqlx::query("SELECT status, actual_checkout, paid_amount FROM bookings WHERE id = ?")
-            .bind("B202")
-            .fetch_one(&pool)
-            .await
-            .unwrap();
-    assert_eq!(booking.get::<String, _>("status"), "checked_out");
-    assert!(booking
-        .get::<Option<String>, _>("actual_checkout")
-        .is_some());
-    assert_eq!(booking.get::<Option<f64>, _>("paid_amount"), None);
-
-    let payment_count: (i64,) = sqlx::query_as(
-        "SELECT COUNT(*) FROM transactions WHERE booking_id = ? AND type = 'payment'",
+    let preview = stay_lifecycle::preview_checkout_settlement_at(
+        &pool,
+        CheckoutSettlementPreviewRequest {
+            booking_id: "B410".to_string(),
+            settlement_mode: CheckoutSettlementMode::ActualNights,
+        },
+        chrono::Local
+            .with_ymd_and_hms(2026, 4, 20, 18, 0, 0)
+            .single()
+            .unwrap(),
     )
-    .bind("B202")
+    .await
+    .unwrap();
+
+    assert_eq!(preview.settled_nights, 1);
+    assert_eq!(preview.recommended_total, 500_000.0);
+
+    stay_lifecycle::check_out_at(
+        &pool,
+        CheckOutRequest {
+            booking_id: "B410".to_string(),
+            settlement_mode: CheckoutSettlementMode::ActualNights,
+            final_total: preview.recommended_total,
+        },
+        chrono::Local
+            .with_ymd_and_hms(2026, 4, 20, 18, 0, 0)
+            .single()
+            .unwrap(),
+    )
+    .await
+    .unwrap();
+
+    let booking = sqlx::query(
+        "SELECT nights, total_price, paid_amount, pricing_snapshot
+         FROM bookings WHERE id = ?",
+    )
+    .bind("B410")
     .fetch_one(&pool)
     .await
     .unwrap();
-    assert_eq!(payment_count.0, 0);
 
-    let room = sqlx::query("SELECT status FROM rooms WHERE id = ?")
-        .bind("R202")
+    assert_eq!(booking.get::<i64, _>("nights"), 1);
+    assert_eq!(booking.get::<f64, _>("total_price"), 500_000.0);
+    assert_eq!(booking.get::<f64, _>("paid_amount"), 500_000.0);
+    assert!(booking
+        .get::<Option<String>, _>("pricing_snapshot")
+        .unwrap()
+        .contains("\"reporting_checkout\""));
+}
+
+#[tokio::test]
+async fn check_out_keeps_active_booking_values_for_booked_nights_mode() {
+    let pool = test_pool().await;
+    seed_room(&pool, "R411").await.unwrap();
+    seed_active_booking_with_terms(
+        &pool,
+        "B411",
+        "R411",
+        "2026-04-20T08:00:00+07:00",
+        "2026-04-25T12:00:00+07:00",
+        5,
+        2_500_000.0,
+        Some(1_000_000.0),
+    )
+    .await
+    .unwrap();
+
+    let preview = stay_lifecycle::preview_checkout_settlement_at(
+        &pool,
+        CheckoutSettlementPreviewRequest {
+            booking_id: "B411".to_string(),
+            settlement_mode: CheckoutSettlementMode::BookedNights,
+        },
+        chrono::Local
+            .with_ymd_and_hms(2026, 4, 22, 9, 0, 0)
+            .single()
+            .unwrap(),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(preview.settled_nights, 5);
+    assert_eq!(preview.recommended_total, 2_500_000.0);
+
+    stay_lifecycle::check_out_at(
+        &pool,
+        CheckOutRequest {
+            booking_id: "B411".to_string(),
+            settlement_mode: CheckoutSettlementMode::BookedNights,
+            final_total: preview.recommended_total,
+        },
+        chrono::Local
+            .with_ymd_and_hms(2026, 4, 22, 9, 0, 0)
+            .single()
+            .unwrap(),
+    )
+    .await
+    .unwrap();
+
+    let booking = sqlx::query("SELECT nights, total_price, paid_amount FROM bookings WHERE id = ?")
+        .bind("B411")
         .fetch_one(&pool)
         .await
         .unwrap();
-    assert_eq!(room.get::<String, _>("status"), "cleaning");
 
-    let housekeeping_count: (i64,) =
-        sqlx::query_as("SELECT COUNT(*) FROM housekeeping WHERE room_id = ?")
-            .bind("R202")
-            .fetch_one(&pool)
-            .await
-            .unwrap();
-    assert_eq!(housekeeping_count.0, 1);
+    assert_eq!(booking.get::<i64, _>("nights"), 5);
+    assert_eq!(booking.get::<f64, _>("total_price"), 2_500_000.0);
+    assert_eq!(booking.get::<f64, _>("paid_amount"), 2_500_000.0);
+}
 
-    let calendar_count: (i64,) =
-        sqlx::query_as("SELECT COUNT(*) FROM room_calendar WHERE booking_id = ?")
-            .bind("B202")
-            .fetch_one(&pool)
-            .await
-            .unwrap();
-    assert_eq!(calendar_count.0, 0);
+#[tokio::test]
+async fn check_out_booked_nights_enforces_minimum_one_night_for_corrupted_booking() {
+    let pool = test_pool().await;
+    seed_room(&pool, "R413").await.unwrap();
+    seed_active_booking_with_terms(
+        &pool,
+        "B413",
+        "R413",
+        "2026-04-20T08:00:00+07:00",
+        "2026-04-20T12:00:00+07:00",
+        0,
+        0.0,
+        Some(0.0),
+    )
+    .await
+    .unwrap();
+
+    let preview = stay_lifecycle::preview_checkout_settlement_at(
+        &pool,
+        CheckoutSettlementPreviewRequest {
+            booking_id: "B413".to_string(),
+            settlement_mode: CheckoutSettlementMode::BookedNights,
+        },
+        chrono::Local
+            .with_ymd_and_hms(2026, 4, 20, 12, 0, 0)
+            .single()
+            .unwrap(),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(preview.settled_nights, 1);
+
+    stay_lifecycle::check_out_at(
+        &pool,
+        CheckOutRequest {
+            booking_id: "B413".to_string(),
+            settlement_mode: CheckoutSettlementMode::BookedNights,
+            final_total: 0.0,
+        },
+        chrono::Local
+            .with_ymd_and_hms(2026, 4, 20, 12, 0, 0)
+            .single()
+            .unwrap(),
+    )
+    .await
+    .unwrap();
+
+    let booking = sqlx::query("SELECT nights FROM bookings WHERE id = ?")
+        .bind("B413")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+
+    assert_eq!(booking.get::<i64, _>("nights"), 1);
+}
+
+#[tokio::test]
+async fn check_out_actual_nights_uses_early_checkout_nights() {
+    let pool = test_pool().await;
+    seed_room(&pool, "R414").await.unwrap();
+    seed_pricing_rule(&pool, "standard", 500_000.0).await.unwrap();
+    seed_active_booking_with_terms(
+        &pool,
+        "B414",
+        "R414",
+        "2026-04-20T08:00:00+07:00",
+        "2026-04-25T12:00:00+07:00",
+        5,
+        2_500_000.0,
+        Some(0.0),
+    )
+    .await
+    .unwrap();
+
+    let preview = stay_lifecycle::preview_checkout_settlement_at(
+        &pool,
+        CheckoutSettlementPreviewRequest {
+            booking_id: "B414".to_string(),
+            settlement_mode: CheckoutSettlementMode::ActualNights,
+        },
+        chrono::Local
+            .with_ymd_and_hms(2026, 4, 22, 9, 0, 0)
+            .single()
+            .unwrap(),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(preview.settled_nights, 2);
+    assert_eq!(preview.recommended_total, 1_000_000.0);
+
+    stay_lifecycle::check_out_at(
+        &pool,
+        CheckOutRequest {
+            booking_id: "B414".to_string(),
+            settlement_mode: CheckoutSettlementMode::ActualNights,
+            final_total: preview.recommended_total,
+        },
+        chrono::Local
+            .with_ymd_and_hms(2026, 4, 22, 9, 0, 0)
+            .single()
+            .unwrap(),
+    )
+    .await
+    .unwrap();
+
+    let booking = sqlx::query("SELECT nights, total_price FROM bookings WHERE id = ?")
+        .bind("B414")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+
+    assert_eq!(booking.get::<i64, _>("nights"), 2);
+    assert_eq!(booking.get::<f64, _>("total_price"), 1_000_000.0);
+}
+
+#[tokio::test]
+async fn check_out_hourly_persists_manual_settlement() {
+    let pool = test_pool().await;
+    seed_room(&pool, "R415").await.unwrap();
+    seed_active_booking_with_terms(
+        &pool,
+        "B415",
+        "R415",
+        "2026-04-20T08:00:00+07:00",
+        "2026-04-25T12:00:00+07:00",
+        5,
+        2_500_000.0,
+        Some(0.0),
+    )
+    .await
+    .unwrap();
+
+    stay_lifecycle::check_out_at(
+        &pool,
+        CheckOutRequest {
+            booking_id: "B415".to_string(),
+            settlement_mode: CheckoutSettlementMode::Hourly,
+            final_total: 500_000.0,
+        },
+        chrono::Local
+            .with_ymd_and_hms(2026, 4, 20, 10, 0, 0)
+            .single()
+            .unwrap(),
+    )
+    .await
+    .unwrap();
+
+    let booking = sqlx::query(
+        "SELECT nights, total_price, paid_amount, pricing_snapshot
+         FROM bookings WHERE id = ?",
+    )
+    .bind("B415")
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+
+    let pricing_snapshot = booking
+        .get::<Option<String>, _>("pricing_snapshot")
+        .unwrap();
+    let pricing_snapshot: serde_json::Value = serde_json::from_str(&pricing_snapshot).unwrap();
+
+    assert_eq!(booking.get::<i64, _>("nights"), 1);
+    assert_eq!(booking.get::<f64, _>("total_price"), 500_000.0);
+    assert_eq!(booking.get::<f64, _>("paid_amount"), 500_000.0);
+    assert_eq!(
+        pricing_snapshot["checkout_settlement"]["mode"],
+        serde_json::json!("hourly")
+    );
+    assert_eq!(
+        pricing_snapshot["checkout_settlement"]["settled_total"],
+        serde_json::json!(500_000.0)
+    );
+}
+
+#[tokio::test]
+async fn check_out_hourly_multi_day_stay_still_persists_one_night() {
+    let pool = test_pool().await;
+    seed_room(&pool, "R419").await.unwrap();
+    seed_active_booking_with_terms(
+        &pool,
+        "B419",
+        "R419",
+        "2026-04-20T08:00:00+07:00",
+        "2026-04-25T12:00:00+07:00",
+        5,
+        2_500_000.0,
+        Some(0.0),
+    )
+    .await
+    .unwrap();
+
+    stay_lifecycle::check_out_at(
+        &pool,
+        CheckOutRequest {
+            booking_id: "B419".to_string(),
+            settlement_mode: CheckoutSettlementMode::Hourly,
+            final_total: 500_000.0,
+        },
+        chrono::Local
+            .with_ymd_and_hms(2026, 4, 22, 9, 0, 0)
+            .single()
+            .unwrap(),
+    )
+    .await
+    .unwrap();
+
+    let booking = sqlx::query("SELECT nights, total_price FROM bookings WHERE id = ?")
+        .bind("B419")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+
+    assert_eq!(booking.get::<i64, _>("nights"), 1);
+    assert_eq!(booking.get::<f64, _>("total_price"), 500_000.0);
+}
+
+#[tokio::test]
+async fn check_out_persists_manual_override_when_final_total_differs_from_recommendation() {
+    let pool = test_pool().await;
+    seed_room(&pool, "R416").await.unwrap();
+    seed_pricing_rule(&pool, "standard", 500_000.0).await.unwrap();
+    seed_active_booking_with_terms(
+        &pool,
+        "B416",
+        "R416",
+        "2026-04-20T08:00:00+07:00",
+        "2026-04-25T12:00:00+07:00",
+        5,
+        2_500_000.0,
+        Some(300_000.0),
+    )
+    .await
+    .unwrap();
+
+    let preview = stay_lifecycle::preview_checkout_settlement_at(
+        &pool,
+        CheckoutSettlementPreviewRequest {
+            booking_id: "B416".to_string(),
+            settlement_mode: CheckoutSettlementMode::ActualNights,
+        },
+        chrono::Local
+            .with_ymd_and_hms(2026, 4, 22, 9, 0, 0)
+            .single()
+            .unwrap(),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(preview.recommended_total, 1_000_000.0);
+
+    stay_lifecycle::check_out_at(
+        &pool,
+        CheckOutRequest {
+            booking_id: "B416".to_string(),
+            settlement_mode: CheckoutSettlementMode::ActualNights,
+            final_total: 800_000.0,
+        },
+        chrono::Local
+            .with_ymd_and_hms(2026, 4, 22, 9, 0, 0)
+            .single()
+            .unwrap(),
+    )
+    .await
+    .unwrap();
+
+    let booking = sqlx::query(
+        "SELECT total_price, paid_amount, pricing_snapshot
+         FROM bookings WHERE id = ?",
+    )
+    .bind("B416")
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+
+    let pricing_snapshot = booking
+        .get::<Option<String>, _>("pricing_snapshot")
+        .unwrap();
+    let pricing_snapshot: serde_json::Value = serde_json::from_str(&pricing_snapshot).unwrap();
+
+    assert_eq!(booking.get::<f64, _>("total_price"), 800_000.0);
+    assert_eq!(booking.get::<f64, _>("paid_amount"), 800_000.0);
+    assert_eq!(
+        pricing_snapshot["checkout_settlement"]["manual_override"],
+        serde_json::json!(true)
+    );
+    assert_eq!(
+        pricing_snapshot["checkout_settlement"]["settled_total"],
+        serde_json::json!(800_000.0)
+    );
+}
+
+#[tokio::test]
+async fn check_out_writes_charge_adjustment_ledger_when_settled_total_drops() {
+    let pool = test_pool().await;
+    seed_room(&pool, "R417").await.unwrap();
+    seed_pricing_rule(&pool, "standard", 500_000.0).await.unwrap();
+    seed_active_booking_with_terms(
+        &pool,
+        "B417",
+        "R417",
+        "2026-04-20T08:00:00+07:00",
+        "2026-04-25T12:00:00+07:00",
+        5,
+        2_500_000.0,
+        Some(800_000.0),
+    )
+    .await
+    .unwrap();
+
+    stay_lifecycle::check_out_at(
+        &pool,
+        CheckOutRequest {
+            booking_id: "B417".to_string(),
+            settlement_mode: CheckoutSettlementMode::ActualNights,
+            final_total: 800_000.0,
+        },
+        chrono::Local
+            .with_ymd_and_hms(2026, 4, 22, 9, 0, 0)
+            .single()
+            .unwrap(),
+    )
+    .await
+    .unwrap();
+
+    let adjustment = sqlx::query(
+        "SELECT amount, note FROM transactions
+         WHERE booking_id = ? AND type = 'charge' AND note LIKE 'Điều chỉnh %'
+         LIMIT 1",
+    )
+    .bind("B417")
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+
+    let payment_count: (i64,) = sqlx::query_as(
+        "SELECT COUNT(*) FROM transactions
+         WHERE booking_id = ? AND type = 'payment'"
+    )
+    .bind("B417")
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+
+    assert_eq!(adjustment.get::<f64, _>("amount"), -1_700_000.0);
+    assert_eq!(
+        adjustment.get::<String, _>("note"),
+        "Điều chỉnh giảm tiền phòng khi quyết toán check-out"
+    );
+    assert_eq!(payment_count.0, 0);
+}
+
+#[tokio::test]
+async fn check_out_writes_payment_delta_ledger_when_collecting_extra_payment() {
+    let pool = test_pool().await;
+    seed_room(&pool, "R418").await.unwrap();
+    seed_active_booking_with_terms(
+        &pool,
+        "B418",
+        "R418",
+        "2026-04-20T08:00:00+07:00",
+        "2026-04-25T12:00:00+07:00",
+        5,
+        2_500_000.0,
+        Some(1_000_000.0),
+    )
+    .await
+    .unwrap();
+
+    stay_lifecycle::check_out_at(
+        &pool,
+        CheckOutRequest {
+            booking_id: "B418".to_string(),
+            settlement_mode: CheckoutSettlementMode::BookedNights,
+            final_total: 2_500_000.0,
+        },
+        chrono::Local
+            .with_ymd_and_hms(2026, 4, 22, 9, 0, 0)
+            .single()
+            .unwrap(),
+    )
+    .await
+    .unwrap();
+
+    let payment = sqlx::query(
+        "SELECT amount, note FROM transactions
+         WHERE booking_id = ? AND type = 'payment'
+         ORDER BY created_at DESC
+         LIMIT 1",
+    )
+    .bind("B418")
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+
+    let booking = sqlx::query("SELECT paid_amount FROM bookings WHERE id = ?")
+        .bind("B418")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+
+    let charge_adjustment_count: (i64,) = sqlx::query_as(
+        "SELECT COUNT(*) FROM transactions
+         WHERE booking_id = ? AND type = 'charge' AND note LIKE 'Điều chỉnh %'"
+    )
+    .bind("B418")
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+
+    assert_eq!(payment.get::<f64, _>("amount"), 1_500_000.0);
+    assert_eq!(
+        payment.get::<String, _>("note"),
+        "Thanh toán khi check-out"
+    );
+    assert_eq!(booking.get::<f64, _>("paid_amount"), 2_500_000.0);
+    assert_eq!(charge_adjustment_count.0, 0);
+}
+
+#[tokio::test]
+async fn check_out_rejects_overpaid_booking_until_refund_flow_exists() {
+    let pool = test_pool().await;
+    seed_room(&pool, "R412").await.unwrap();
+    seed_active_booking_with_terms(
+        &pool,
+        "B412",
+        "R412",
+        "2026-04-20T08:00:00+07:00",
+        "2026-04-25T12:00:00+07:00",
+        5,
+        2_500_000.0,
+        Some(700_000.0),
+    )
+    .await
+    .unwrap();
+
+    let error = stay_lifecycle::check_out_at(
+        &pool,
+        CheckOutRequest {
+            booking_id: "B412".to_string(),
+            settlement_mode: CheckoutSettlementMode::Hourly,
+            final_total: 500_000.0,
+        },
+        chrono::Local
+            .with_ymd_and_hms(2026, 4, 20, 12, 0, 0)
+            .single()
+            .unwrap(),
+    )
+    .await
+    .unwrap_err();
+
+    assert!(error.to_string().contains("refund"));
 }
 
 #[tokio::test]
@@ -1948,6 +2500,336 @@ async fn revenue_queries_include_cancellation_fees_in_recognized_revenue() {
     assert_eq!(cancelled_row.charge_total, 0.0);
     assert_eq!(cancelled_row.cancellation_fee_total, 50_000.0);
     assert_eq!(cancelled_row.recognized_revenue, 50_000.0);
+}
+
+#[tokio::test]
+async fn same_day_checkout_settlement_counts_one_room_sold_and_full_revenue() {
+    let pool = test_pool().await;
+    seed_room(&pool, "R420").await.unwrap();
+    seed_active_booking_with_terms(
+        &pool,
+        "B420",
+        "R420",
+        "2026-04-20T08:00:00+07:00",
+        "2026-04-25T12:00:00+07:00",
+        5,
+        2_500_000.0,
+        Some(0.0),
+    )
+    .await
+    .unwrap();
+
+    sqlx::query(
+        "UPDATE bookings
+         SET status = 'checked_out',
+             actual_checkout = '2026-04-20T18:00:00+07:00',
+             nights = 1,
+             total_price = 500000,
+             paid_amount = 500000,
+             pricing_snapshot = ?
+         WHERE id = ?",
+    )
+    .bind(r#"{"checkout_settlement":{"mode":"actual_nights","reporting_checkout":"2026-04-21","settled_nights":1,"settled_total":500000}}"#)
+    .bind("B420")
+    .execute(&pool)
+    .await
+    .unwrap();
+    seed_transaction(
+        &pool,
+        "B420",
+        250_000.0,
+        "charge",
+        "Room charge",
+        "2026-04-20T08:00:00+07:00",
+    )
+    .await
+    .unwrap();
+    seed_transaction(
+        &pool,
+        "B420",
+        -1_750_000.0,
+        "charge",
+        "Điều chỉnh checkout settlement",
+        "2026-04-20T18:00:00+07:00",
+    )
+    .await
+    .unwrap();
+
+    let stats = revenue_queries::load_revenue_stats(&pool, "2026-04-20", "2026-04-20")
+        .await
+        .unwrap();
+    let audit = audit_queries::load_night_audit_snapshot(&pool, "2026-04-20")
+        .await
+        .unwrap();
+
+    assert_eq!(stats.total_revenue, 500_000.0);
+    assert_eq!(stats.rooms_sold, 1);
+    assert_eq!(audit.room_revenue, 500_000.0);
+    assert_eq!(audit.rooms_sold, 1);
+}
+
+#[tokio::test]
+async fn booked_nights_settlement_uses_reporting_checkout_for_financial_revenue() {
+    let pool = test_pool().await;
+    seed_room(&pool, "R421").await.unwrap();
+    seed_active_booking_with_terms(
+        &pool,
+        "B421",
+        "R421",
+        "2026-04-20T08:00:00+07:00",
+        "2026-04-25T12:00:00+07:00",
+        5,
+        2_500_000.0,
+        Some(2_500_000.0),
+    )
+    .await
+    .unwrap();
+
+    sqlx::query(
+        "UPDATE bookings
+         SET status = 'checked_out',
+             actual_checkout = '2026-04-22T09:00:00+07:00',
+             pricing_snapshot = ?
+         WHERE id = ?",
+    )
+    .bind(r#"{"checkout_settlement":{"mode":"booked_nights","reporting_checkout":"2026-04-25","settled_nights":5,"settled_total":2500000}}"#)
+    .bind("B421")
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    let revenue = revenue_queries::load_room_revenue(&pool, "2026-04-20", "2026-04-24")
+        .await
+        .unwrap();
+
+    assert_eq!(revenue, 2_500_000.0);
+}
+
+#[tokio::test]
+async fn checkout_settlement_updates_booking_export_rows() {
+    let pool = test_pool().await;
+    seed_room(&pool, "R422").await.unwrap();
+    seed_active_booking_with_terms(
+        &pool,
+        "B422",
+        "R422",
+        "2026-04-20T08:00:00+07:00",
+        "2026-04-25T12:00:00+07:00",
+        5,
+        2_500_000.0,
+        Some(0.0),
+    )
+    .await
+    .unwrap();
+
+    sqlx::query(
+        "UPDATE bookings
+         SET status = 'checked_out',
+             actual_checkout = '2026-04-20T18:00:00+07:00',
+             nights = 1,
+             total_price = 500000,
+             paid_amount = 500000,
+             pricing_snapshot = ?
+         WHERE id = ?",
+    )
+    .bind(r#"{"checkout_settlement":{"mode":"actual_nights","reporting_checkout":"2026-04-21","settled_nights":1,"settled_total":500000}}"#)
+    .bind("B422")
+    .execute(&pool)
+    .await
+    .unwrap();
+    seed_transaction(
+        &pool,
+        "B422",
+        2_500_000.0,
+        "charge",
+        "Room charge",
+        "2026-04-20T08:00:00+07:00",
+    )
+    .await
+    .unwrap();
+    seed_transaction(
+        &pool,
+        "B422",
+        -2_000_000.0,
+        "charge",
+        "Điều chỉnh checkout settlement",
+        "2026-04-20T18:00:00+07:00",
+    )
+    .await
+    .unwrap();
+
+    let export_rows = audit_queries::load_booking_export_rows(&pool, "2026-04-01", "2026-04-30")
+        .await
+        .unwrap();
+    let row = export_rows.iter().find(|row| row.id == "B422").unwrap();
+
+    assert_eq!(row.room_price, 500_000.0);
+    assert_eq!(row.charge_total, 500_000.0);
+    assert_eq!(row.recognized_revenue, 500_000.0);
+}
+
+#[tokio::test]
+async fn checkout_settlement_export_rows_follow_reporting_checkout_boundary() {
+    let pool = test_pool().await;
+    seed_room(&pool, "R423").await.unwrap();
+    seed_active_booking_with_terms(
+        &pool,
+        "B423",
+        "R423",
+        "2026-04-20T08:00:00+07:00",
+        "2026-04-25T12:00:00+07:00",
+        5,
+        2_500_000.0,
+        Some(0.0),
+    )
+    .await
+    .unwrap();
+
+    sqlx::query(
+        "UPDATE bookings
+         SET status = 'checked_out',
+             actual_checkout = '2026-04-20T18:00:00+07:00',
+             nights = 1,
+             total_price = 500000,
+             paid_amount = 500000,
+             pricing_snapshot = ?
+         WHERE id = ?",
+    )
+    .bind(r#"{"checkout_settlement":{"mode":"actual_nights","reporting_checkout":"2026-04-21","settled_nights":1,"settled_total":500000}}"#)
+    .bind("B423")
+    .execute(&pool)
+    .await
+    .unwrap();
+    seed_transaction(
+        &pool,
+        "B423",
+        2_500_000.0,
+        "charge",
+        "Room charge",
+        "2026-04-20T08:00:00+07:00",
+    )
+    .await
+    .unwrap();
+    seed_transaction(
+        &pool,
+        "B423",
+        -2_000_000.0,
+        "charge",
+        "Điều chỉnh checkout settlement",
+        "2026-04-20T18:00:00+07:00",
+    )
+    .await
+    .unwrap();
+
+    let export_rows = audit_queries::load_booking_export_rows(&pool, "2026-04-21", "2026-04-21")
+        .await
+        .unwrap();
+    let row = export_rows.iter().find(|row| row.id == "B423").unwrap();
+
+    assert_eq!(row.expected_checkout, "2026-04-21");
+    assert_eq!(row.actual_checkout, "2026-04-20T18:00:00+07:00");
+}
+
+#[tokio::test]
+async fn checkout_settlement_export_rows_exclude_original_checkin_window_after_shift() {
+    let pool = test_pool().await;
+    seed_room(&pool, "R424").await.unwrap();
+    seed_active_booking_with_terms(
+        &pool,
+        "B424",
+        "R424",
+        "2026-04-20T08:00:00+07:00",
+        "2026-04-25T12:00:00+07:00",
+        5,
+        2_500_000.0,
+        Some(0.0),
+    )
+    .await
+    .unwrap();
+
+    sqlx::query(
+        "UPDATE bookings
+         SET status = 'checked_out',
+             actual_checkout = '2026-04-20T18:00:00+07:00',
+             nights = 1,
+             total_price = 500000,
+             paid_amount = 500000,
+             pricing_snapshot = ?
+         WHERE id = ?",
+    )
+    .bind(r#"{"checkout_settlement":{"mode":"actual_nights","reporting_checkout":"2026-04-21","settled_nights":1,"settled_total":500000}}"#)
+    .bind("B424")
+    .execute(&pool)
+    .await
+    .unwrap();
+    seed_transaction(
+        &pool,
+        "B424",
+        2_500_000.0,
+        "charge",
+        "Room charge",
+        "2026-04-20T08:00:00+07:00",
+    )
+    .await
+    .unwrap();
+    seed_transaction(
+        &pool,
+        "B424",
+        -2_000_000.0,
+        "charge",
+        "Điều chỉnh checkout settlement",
+        "2026-04-20T18:00:00+07:00",
+    )
+    .await
+    .unwrap();
+
+    let export_rows = audit_queries::load_booking_export_rows(&pool, "2026-04-20", "2026-04-20")
+        .await
+        .unwrap();
+    let row = export_rows.iter().find(|row| row.id == "B424");
+
+    assert!(row.is_none());
+}
+
+#[tokio::test]
+async fn cancellation_fee_export_uses_transaction_period_when_checkin_is_future() {
+    let pool = test_pool().await;
+    seed_room(&pool, "R425").await.unwrap();
+    seed_booked_reservation(&pool, "B425", "R425")
+        .await
+        .unwrap();
+
+    sqlx::query(
+        "UPDATE bookings
+         SET check_in_at = '2026-05-20',
+             expected_checkout = '2026-05-22',
+             scheduled_checkin = '2026-05-20',
+             scheduled_checkout = '2026-05-22',
+             status = 'cancelled'
+         WHERE id = ?",
+    )
+    .bind("B425")
+    .execute(&pool)
+    .await
+    .unwrap();
+    seed_transaction(
+        &pool,
+        "B425",
+        50_000.0,
+        "cancellation_fee",
+        "Retained deposit",
+        "2026-04-15T14:00:00+07:00",
+    )
+    .await
+    .unwrap();
+
+    let export_rows = audit_queries::load_booking_export_rows(&pool, "2026-04-15", "2026-04-15")
+        .await
+        .unwrap();
+    let row = export_rows.iter().find(|row| row.id == "B425").unwrap();
+
+    assert_eq!(row.cancellation_fee_total, 50_000.0);
+    assert_eq!(row.recognized_revenue, 50_000.0);
 }
 
 #[tokio::test]
