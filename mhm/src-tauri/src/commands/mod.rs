@@ -47,6 +47,7 @@ pub mod audit;
 pub mod auth;
 pub mod billing;
 pub mod bookings;
+pub mod diagnostics;
 pub mod groups;
 pub mod guests;
 pub mod invoices;

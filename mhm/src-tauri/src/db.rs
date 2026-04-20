@@ -6,6 +6,8 @@ use crate::app_identity;
 pub async fn init_db() -> Result<Pool<Sqlite>, sqlx::Error> {
     let db_dir = app_identity::runtime_root();
     std::fs::create_dir_all(&db_dir).expect("Cannot create runtime directory");
+    std::fs::create_dir_all(app_identity::diagnostics_dir())
+        .expect("Cannot create diagnostics directory");
 
     let db_path = app_identity::database_path();
     let db_url = format!("sqlite:{}?mode=rwc", db_path.display());
@@ -21,6 +23,7 @@ pub async fn init_db() -> Result<Pool<Sqlite>, sqlx::Error> {
 
     run_migrations(&pool).await?;
     ensure_setting_default(&pool, "setup_completed", "false").await?;
+    ensure_setting_default(&pool, "send_crash_reports", "false").await?;
 
     Ok(pool)
 }
