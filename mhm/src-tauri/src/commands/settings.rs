@@ -4,6 +4,8 @@ use tauri::State;
 
 // ─── Settings Commands ───
 
+const SEND_CRASH_REPORTS_KEY: &str = "send_crash_reports";
+
 #[tauri::command]
 pub async fn save_settings(
     state: State<'_, AppState>,
@@ -29,4 +31,27 @@ pub async fn get_settings(
     key: String,
 ) -> Result<Option<String>, String> {
     settings_store::get_setting(&state.db, &key).await
+}
+
+#[tauri::command]
+pub async fn get_crash_reporting_preference(state: State<'_, AppState>) -> Result<bool, String> {
+    Ok(matches!(
+        settings_store::get_setting(&state.db, SEND_CRASH_REPORTS_KEY)
+            .await?
+            .as_deref(),
+        Some("true")
+    ))
+}
+
+#[tauri::command]
+pub async fn set_crash_reporting_preference(
+    state: State<'_, AppState>,
+    enabled: bool,
+) -> Result<(), String> {
+    settings_store::save_setting(
+        &state.db,
+        SEND_CRASH_REPORTS_KEY,
+        if enabled { "true" } else { "false" },
+    )
+    .await
 }

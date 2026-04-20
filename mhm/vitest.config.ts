@@ -6,6 +6,9 @@ export default defineConfig({
     define: {
         __APP_VERSION__: JSON.stringify("0.1.0"),
         __UPDATER_ENABLED__: JSON.stringify(true),
+        __SENTRY_DSN__: JSON.stringify(""),
+        __SENTRY_RELEASE__: JSON.stringify("capyinn@0.1.0"),
+        __SENTRY_ENVIRONMENT__: JSON.stringify("development"),
     },
     plugins: [react()],
     resolve: {

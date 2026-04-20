@@ -18,6 +18,7 @@ import { useAuthStore } from "@/stores/useAuthStore";
 import AppearanceSection from "./AppearanceSection";
 import CheckinRulesSection from "./CheckinRulesSection";
 import DataSection from "./DataSection";
+import DiagnosticsSection from "./DiagnosticsSection";
 import GatewaySection from "./GatewaySection";
 import HotelInfoSection from "./HotelInfoSection";
 import OcrConfigSection from "./OcrConfigSection";
@@ -32,6 +33,7 @@ type SettingsSectionKey =
   | "checkin"
   | "ocr"
   | "appearance"
+  | "diagnostics"
   | "data"
   | "gateway"
   | "updates"
@@ -48,6 +50,7 @@ export default function SettingsPage() {
     { key: "checkin" as const, label: "Check-in Rules", icon: Clock },
     { key: "ocr" as const, label: "OCR Config", icon: Camera },
     { key: "appearance" as const, label: "Appearance", icon: Palette },
+    { key: "diagnostics" as const, label: "Diagnostics", icon: Database },
     { key: "data" as const, label: "Data & Backup", icon: Database },
     { key: "gateway" as const, label: "MCP Gateway", icon: Wifi },
     { key: "updates" as const, label: "Software Update", icon: RefreshCcw },
@@ -87,6 +90,7 @@ export default function SettingsPage() {
         {activeSection === "checkin" && <CheckinRulesSection />}
         {activeSection === "ocr" && <OcrConfigSection />}
         {activeSection === "appearance" && <AppearanceSection />}
+        {activeSection === "diagnostics" && <DiagnosticsSection />}
         {activeSection === "data" && <DataSection />}
         {activeSection === "gateway" && <GatewaySection />}
         {activeSection === "updates" && <SoftwareUpdateSection />}

@@ -2,6 +2,9 @@
 
 declare const __APP_VERSION__: string;
 declare const __UPDATER_ENABLED__: boolean;
+declare const __SENTRY_DSN__: string;
+declare const __SENTRY_RELEASE__: string;
+declare const __SENTRY_ENVIRONMENT__: "development" | "production";
 
 declare module "@tauri-apps/plugin-updater" {
     export interface Update {
