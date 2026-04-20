@@ -152,6 +152,7 @@ pub fn run() {
             commands::rooms::check_in,
             commands::rooms::get_room_detail,
             commands::rooms::check_out,
+            commands::rooms::preview_checkout_settlement,
             commands::rooms::extend_stay,
             commands::rooms::get_housekeeping_tasks,
             commands::rooms::update_housekeeping,
