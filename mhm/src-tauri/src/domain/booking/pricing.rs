@@ -298,7 +298,12 @@ fn read_f64(row: &sqlx::sqlite::SqliteRow, column: &str) -> f64 {
 
 #[cfg(test)]
 mod tests {
-    use super::{build_effective_pricing_rule, StayPricingInputs, StoredPricingRule};
+    use super::{
+        build_effective_pricing_rule, calculate_from_loaded_inputs, stored_rule_from_row,
+        StayPricingInputs, StoredPricingRule,
+    };
+    use crate::domain::booking::BookingError;
+    use sqlx::{Connection, SqliteConnection};
 
     fn sample_inputs() -> StayPricingInputs {
         StayPricingInputs {
@@ -352,48 +357,104 @@ mod tests {
         inputs.fallback_base_price = Some(500_000.0);
 
         let rule = build_effective_pricing_rule(&inputs);
-        let defaults = crate::pricing::PricingRule::default();
 
         assert_eq!(rule.room_type, "deluxe");
         assert_eq!(rule.hourly_rate, 100_000.0);
         assert_eq!(rule.overnight_rate, 375_000.0);
         assert_eq!(rule.daily_rate, 500_000.0);
-        assert_eq!(rule.overnight_start, defaults.overnight_start);
-        assert_eq!(rule.overnight_end, defaults.overnight_end);
-        assert_eq!(rule.daily_checkin, defaults.daily_checkin);
-        assert_eq!(rule.daily_checkout, defaults.daily_checkout);
-        assert_eq!(
-            rule.early_checkin_surcharge_pct,
-            defaults.early_checkin_surcharge_pct
-        );
-        assert_eq!(
-            rule.late_checkout_surcharge_pct,
-            defaults.late_checkout_surcharge_pct
-        );
-        assert_eq!(rule.weekend_uplift_pct, defaults.weekend_uplift_pct);
+        assert_eq!(rule.overnight_start, "22:00");
+        assert_eq!(rule.overnight_end, "11:00");
+        assert_eq!(rule.daily_checkin, "14:00");
+        assert_eq!(rule.daily_checkout, "12:00");
+        assert_eq!(rule.early_checkin_surcharge_pct, 30.0);
+        assert_eq!(rule.late_checkout_surcharge_pct, 30.0);
+        assert_eq!(rule.weekend_uplift_pct, 20.0);
     }
 
     #[test]
     fn build_effective_pricing_rule_uses_default_price_and_metadata_when_base_price_missing() {
         let rule = build_effective_pricing_rule(&sample_inputs());
-        let defaults = crate::pricing::PricingRule::default();
 
         assert_eq!(rule.room_type, "standard");
         assert_eq!(rule.hourly_rate, 70_000.0);
         assert_eq!(rule.overnight_rate, 262_500.0);
         assert_eq!(rule.daily_rate, 350_000.0);
-        assert_eq!(rule.overnight_start, defaults.overnight_start);
-        assert_eq!(rule.overnight_end, defaults.overnight_end);
-        assert_eq!(rule.daily_checkin, defaults.daily_checkin);
-        assert_eq!(rule.daily_checkout, defaults.daily_checkout);
-        assert_eq!(
-            rule.early_checkin_surcharge_pct,
-            defaults.early_checkin_surcharge_pct
-        );
-        assert_eq!(
-            rule.late_checkout_surcharge_pct,
-            defaults.late_checkout_surcharge_pct
-        );
-        assert_eq!(rule.weekend_uplift_pct, defaults.weekend_uplift_pct);
+        assert_eq!(rule.overnight_start, "22:00");
+        assert_eq!(rule.overnight_end, "11:00");
+        assert_eq!(rule.daily_checkin, "14:00");
+        assert_eq!(rule.daily_checkout, "12:00");
+        assert_eq!(rule.early_checkin_surcharge_pct, 30.0);
+        assert_eq!(rule.late_checkout_surcharge_pct, 30.0);
+        assert_eq!(rule.weekend_uplift_pct, 20.0);
+    }
+
+    #[test]
+    fn calculate_from_loaded_inputs_applies_special_uplift() {
+        let mut inputs = sample_inputs();
+        inputs.fallback_base_price = Some(500_000.0);
+        inputs.check_in = "2026-04-20T10:00:00+07:00".to_string();
+        inputs.check_out = "2026-04-22T10:00:00+07:00".to_string();
+        inputs.special_uplift_pct = 10.0;
+
+        let pricing = calculate_from_loaded_inputs(&inputs).unwrap();
+
+        assert_eq!(pricing.pricing_type, "nightly");
+        assert_eq!(pricing.base_amount, 1_000_000.0);
+        assert_eq!(pricing.weekend_amount, 0.0);
+        assert_eq!(pricing.surcharge_amount, 100_000.0);
+        assert_eq!(pricing.total, 1_100_000.0);
+        assert_eq!(pricing.breakdown.len(), 2);
+        assert_eq!(pricing.breakdown[0].amount, 1_000_000.0);
+        assert_eq!(pricing.breakdown[1].amount, 100_000.0);
+    }
+
+    #[test]
+    fn calculate_from_loaded_inputs_maps_invalid_datetime_errors() {
+        let mut inputs = sample_inputs();
+        inputs.fallback_base_price = Some(500_000.0);
+        inputs.check_in = "not-a-datetime".to_string();
+
+        let error = calculate_from_loaded_inputs(&inputs).unwrap_err();
+
+        assert!(matches!(
+            error,
+            BookingError::DateTimeParse(message) if message.contains("Invalid check-in datetime")
+        ));
+    }
+
+    #[tokio::test]
+    async fn stored_rule_from_row_maps_all_columns() {
+        let mut connection = SqliteConnection::connect(":memory:").await.unwrap();
+        let row = sqlx::query(
+            "SELECT
+                'deluxe' AS room_type,
+                120000.0 AS hourly_rate,
+                500000.0 AS overnight_rate,
+                700000.0 AS daily_rate,
+                '21:00' AS overnight_start,
+                '10:00' AS overnight_end,
+                '13:00' AS daily_checkin,
+                '11:00' AS daily_checkout,
+                15.0 AS early_checkin_surcharge_pct,
+                20.0 AS late_checkout_surcharge_pct,
+                12.5 AS weekend_uplift_pct",
+        )
+        .fetch_one(&mut connection)
+        .await
+        .unwrap();
+
+        let rule = stored_rule_from_row(&row);
+
+        assert_eq!(rule.room_type, "deluxe");
+        assert_eq!(rule.hourly_rate, 120_000.0);
+        assert_eq!(rule.overnight_rate, 500_000.0);
+        assert_eq!(rule.daily_rate, 700_000.0);
+        assert_eq!(rule.overnight_start, "21:00");
+        assert_eq!(rule.overnight_end, "10:00");
+        assert_eq!(rule.daily_checkin, "13:00");
+        assert_eq!(rule.daily_checkout, "11:00");
+        assert_eq!(rule.early_checkin_surcharge_pct, 15.0);
+        assert_eq!(rule.late_checkout_surcharge_pct, 20.0);
+        assert_eq!(rule.weekend_uplift_pct, 12.5);
     }
 }
