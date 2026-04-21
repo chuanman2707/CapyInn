@@ -12,7 +12,8 @@ pub fn runtime_root() -> PathBuf {
 }
 
 pub fn runtime_root_opt() -> Option<PathBuf> {
-    dirs::home_dir().map(|home| home.join(APP_RUNTIME_DIR))
+    crate::runtime_config::runtime_root_override()
+        .or_else(|| dirs::home_dir().map(|home| home.join(APP_RUNTIME_DIR)))
 }
 
 pub fn database_path() -> PathBuf {
@@ -80,7 +81,22 @@ mod tests {
     use super::*;
 
     #[test]
+    fn runtime_root_uses_override_when_present() {
+        let _guard = crate::runtime_config::env_lock().lock().unwrap();
+
+        std::env::set_var("CAPYINN_RUNTIME_ROOT", "/tmp/capyinn-test-suite");
+        assert_eq!(
+            runtime_root_opt().as_deref(),
+            Some(std::path::Path::new("/tmp/capyinn-test-suite"))
+        );
+        std::env::remove_var("CAPYINN_RUNTIME_ROOT");
+    }
+
+    #[test]
     fn uses_capyinn_runtime_names() {
+        let _guard = crate::runtime_config::env_lock().lock().unwrap();
+        std::env::remove_var("CAPYINN_RUNTIME_ROOT");
+
         let root = runtime_root();
         assert!(root.ends_with(APP_RUNTIME_DIR));
         assert_eq!(database_path(), root.join(APP_DATABASE_FILENAME));
