@@ -10,7 +10,10 @@
     "tauri": "tauri",
     "test": "vitest run",
     "test:watch": "vitest",
-    "test:coverage": "vitest run --coverage"
+    "test:coverage": "vitest run --coverage",
+    "verify:quick": "node ./scripts/verify/quick.mjs",
+    "verify:full": "node ./scripts/verify/full.mjs",
+    "verify:repeat": "node ./scripts/verify/repeat.mjs"
   },
   "dependencies": {
     "@sentry/browser": "^9.13.0",

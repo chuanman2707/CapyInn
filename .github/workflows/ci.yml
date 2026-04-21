@@ -53,3 +53,45 @@ jobs:
       - name: Run clippy
         working-directory: mhm/src-tauri
         run: cargo clippy --all-targets -- -D warnings
+
+  verify-wave1:
+    runs-on: macos-latest
+    needs: build-test
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: mhm/package-lock.json
+
+      - name: Setup Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            mhm/src-tauri -> target
+
+      - name: Install frontend dependencies
+        working-directory: mhm
+        run: npm ci
+
+      - name: Resolve verification artifact root
+        run: echo "CAPYINN_ARTIFACT_ROOT=$HOME/CapyInn-TestSuite" >> "$GITHUB_ENV"
+
+      - name: Run Wave 1 verification
+        working-directory: mhm
+        run: npm run verify:full
+
+      - name: Upload verification artifacts on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: verify-wave1-artifacts
+          path: ${{ env.CAPYINN_ARTIFACT_ROOT }}

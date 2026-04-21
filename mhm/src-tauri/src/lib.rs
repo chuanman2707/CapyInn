@@ -13,6 +13,7 @@ mod ocr;
 mod pricing;
 mod queries;
 mod repositories;
+mod runtime_config;
 mod services;
 mod watcher;
 
@@ -21,7 +22,6 @@ use std::sync::{Arc, Mutex, Once};
 use std::time::Duration;
 
 static LOG_INIT: Once = Once::new();
-const UPDATER_ENABLE_ENV: &str = "CAPYINN_ENABLE_UPDATER";
 
 struct GatewayRuntimeState {
     runtime: Mutex<Option<tokio::runtime::Runtime>>,
@@ -82,17 +82,22 @@ fn init_logging() {
     });
 }
 
-fn updater_enabled_from_env(value: Option<&str>) -> bool {
-    matches!(
-        value.map(str::trim).map(str::to_ascii_lowercase).as_deref(),
-        Some("1" | "true" | "yes" | "on")
-    )
-}
+fn write_smoke_ready_file() -> Result<(), String> {
+    let Some(path) = runtime_config::smoke_ready_file() else {
+        return Ok(());
+    };
 
-fn updater_enabled() -> bool {
-    updater_enabled_from_env(std::env::var(UPDATER_ENABLE_ENV).ok().as_deref())
-}
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|error| error.to_string())?;
+    }
 
+    let payload = serde_json::json!({
+        "status": "ready",
+        "runtime_root": crate::app_identity::runtime_root(),
+    });
+
+    std::fs::write(path, payload.to_string()).map_err(|error| error.to_string())
+}
 /// Run the Tauri GUI application with MCP Gateway
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
@@ -112,16 +117,9 @@ pub fn run() {
         .setup(|app| {
             #[cfg(desktop)]
             {
-                if updater_enabled() {
-                    app.handle()
-                        .plugin(tauri_plugin_updater::Builder::new().build())
-                        .expect("failed to register updater plugin");
-                } else {
-                    info!(
-                        "Updater plugin disabled because {} is not enabled for this build",
-                        UPDATER_ENABLE_ENV
-                    );
-                }
+                app.handle()
+                    .plugin(tauri_plugin_updater::Builder::new().build())
+                    .expect("failed to register updater plugin");
             }
 
             let rt = tokio::runtime::Runtime::new().expect("Failed to create Tokio runtime");
@@ -132,18 +130,23 @@ pub fn run() {
             // axum server task gets cancelled when the runtime drops.
             let gateway_pool = pool.clone();
             let gateway_handle = app.handle().clone();
-            let gateway_runtime = rt.block_on(async {
-                match gateway::start_gateway(gateway_pool, gateway_handle).await {
-                    Ok(gateway) => {
-                        info!("MCP Gateway started on port {}", gateway.port);
-                        Some(gateway)
+            let gateway_runtime = if runtime_config::env_flag("CAPYINN_DISABLE_GATEWAY") {
+                info!("MCP Gateway disabled by CAPYINN_DISABLE_GATEWAY");
+                None
+            } else {
+                rt.block_on(async {
+                    match gateway::start_gateway(gateway_pool, gateway_handle).await {
+                        Ok(gateway) => {
+                            info!("MCP Gateway started on port {}", gateway.port);
+                            Some(gateway)
+                        }
+                        Err(e) => {
+                            error!("Failed to start MCP Gateway: {}", e);
+                            None
+                        }
                     }
-                    Err(e) => {
-                        error!("Failed to start MCP Gateway: {}", e);
-                        None
-                    }
-                }
-            });
+                })
+            };
 
             app.manage(AppState {
                 db: pool,
@@ -154,13 +157,19 @@ pub fn run() {
 
             let _ = std::fs::create_dir_all(app_identity::models_dir());
 
-            // Start file watcher in background
-            let handle = app.handle().clone();
-            std::thread::spawn(move || {
-                if let Err(e) = watcher::start_watcher(handle) {
-                    error!("Failed to start file watcher: {}", e);
-                }
-            });
+            if runtime_config::env_flag("CAPYINN_DISABLE_WATCHER") {
+                info!("File watcher disabled by CAPYINN_DISABLE_WATCHER");
+            } else {
+                // Start file watcher in background
+                let handle = app.handle().clone();
+                std::thread::spawn(move || {
+                    if let Err(e) = watcher::start_watcher(handle) {
+                        error!("Failed to start file watcher: {}", e);
+                    }
+                });
+            }
+
+            write_smoke_ready_file().map_err(std::io::Error::other)?;
 
             Ok(())
         })
@@ -313,24 +322,4 @@ async fn gateway_get_status(
         "port": port,
         "has_api_keys": has_keys,
     }))
-}
-
-#[cfg(test)]
-mod tests {
-    use super::updater_enabled_from_env;
-
-    #[test]
-    fn updater_stays_disabled_without_an_explicit_release_flag() {
-        assert!(!updater_enabled_from_env(None));
-        assert!(!updater_enabled_from_env(Some("")));
-        assert!(!updater_enabled_from_env(Some("false")));
-    }
-
-    #[test]
-    fn updater_accepts_common_truthy_release_flags() {
-        assert!(updater_enabled_from_env(Some("1")));
-        assert!(updater_enabled_from_env(Some("true")));
-        assert!(updater_enabled_from_env(Some("YES")));
-        assert!(updater_enabled_from_env(Some(" on ")));
-    }
 }

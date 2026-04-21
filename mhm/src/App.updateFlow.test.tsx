@@ -1,4 +1,4 @@
-import type { ButtonHTMLAttributes, HTMLAttributes } from "react";
+import { useCallback, useMemo, useState, type ButtonHTMLAttributes, type HTMLAttributes } from "react";
 import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
@@ -6,9 +6,31 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import App from "./App";
 import { clearMockResponses, setMockResponses } from "./__mocks__/tauri-core";
 import { resetEventMocks } from "./__mocks__/tauri-event";
-import { clearMockUpdate, setMockAvailableUpdate } from "./__mocks__/tauri-updater";
 import { useAuthStore } from "./stores/useAuthStore";
 import { useHotelStore } from "./stores/useHotelStore";
+
+type MockUpdateControllerConfig = {
+  supported: boolean;
+  currentVersion: string;
+  nextAvailableVersion: string | null;
+};
+
+let mockUpdateControllerConfig: MockUpdateControllerConfig = {
+  supported: true,
+  currentVersion: "0.1.1",
+  nextAvailableVersion: "0.2.0",
+};
+
+function resetMockUpdateController(
+  overrides: Partial<MockUpdateControllerConfig> = {},
+) {
+  mockUpdateControllerConfig = {
+    supported: true,
+    currentVersion: "0.1.1",
+    nextAvailableVersion: "0.2.0",
+    ...overrides,
+  };
+}
 
 vi.mock("./pages/Dashboard", () => ({ default: () => <div>Dashboard page</div> }));
 vi.mock("./pages/Rooms", () => ({ default: () => <div>Rooms page</div> }));
@@ -24,6 +46,91 @@ vi.mock("./components/CheckinSheet", () => ({ default: () => null }));
 vi.mock("./components/GroupCheckinSheet", () => ({ default: () => null }));
 vi.mock("./pages/GroupManagement", () => ({ default: () => <div>Group page</div> }));
 vi.mock("./components/AppLogo", () => ({ default: () => <div>Logo</div> }));
+vi.mock("./hooks/useAppUpdateController", () => ({
+  useAppUpdateController: ({
+    enabled,
+    currentVersion,
+  }: {
+    enabled: boolean;
+    currentVersion: string;
+  }) => {
+    const [phase, setPhase] = useState<
+      "idle" | "available" | "downloaded" | "installing"
+    >("idle");
+    const [availableVersion, setAvailableVersion] = useState<string | null>(null);
+    const [restartPromptOpen, setRestartPromptOpen] = useState(false);
+    const supported = mockUpdateControllerConfig.supported;
+
+    const checkForUpdates = useCallback(async () => {
+      if (!enabled || !supported) {
+        return;
+      }
+
+      if (mockUpdateControllerConfig.nextAvailableVersion) {
+        setAvailableVersion(mockUpdateControllerConfig.nextAvailableVersion);
+        setPhase("available");
+        return;
+      }
+
+      setAvailableVersion(null);
+      setPhase("idle");
+    }, [enabled, supported]);
+
+    const downloadUpdate = useCallback(async () => {
+      if (phase !== "available") {
+        return;
+      }
+
+      setPhase("downloaded");
+      setRestartPromptOpen(true);
+    }, [phase]);
+
+    const dismissRestartPrompt = useCallback(() => {
+      setRestartPromptOpen(false);
+    }, []);
+
+    const openRestartPrompt = useCallback(() => {
+      if (phase === "downloaded") {
+        setRestartPromptOpen(true);
+      }
+    }, [phase]);
+
+    const confirmInstall = useCallback(async () => {
+      setRestartPromptOpen(false);
+      setPhase("installing");
+    }, []);
+
+    return useMemo(
+      () => ({
+        supported,
+        phase,
+        currentVersion: mockUpdateControllerConfig.currentVersion || currentVersion,
+        availableVersion,
+        restartPromptOpen,
+        errorMessage: null,
+        canCheck: enabled && supported,
+        checkForUpdates,
+        downloadUpdate,
+        dismissRestartPrompt,
+        openRestartPrompt,
+        confirmInstall,
+      }),
+      [
+        availableVersion,
+        checkForUpdates,
+        confirmInstall,
+        currentVersion,
+        dismissRestartPrompt,
+        downloadUpdate,
+        enabled,
+        openRestartPrompt,
+        phase,
+        restartPromptOpen,
+        supported,
+      ],
+    );
+  },
+}));
 vi.mock("@/components/ui/badge", () => ({
   Badge: ({ children, ...props }: HTMLAttributes<HTMLDivElement>) => <div {...props}>{children}</div>,
 }));
@@ -48,9 +155,9 @@ function setUserAgent(value: string) {
 describe("App update flow", () => {
   beforeEach(() => {
     clearMockResponses();
-    clearMockUpdate();
     resetEventMocks();
     vi.clearAllMocks();
+    resetMockUpdateController();
 
     useHotelStore.setState({
       rooms: [],
@@ -74,7 +181,6 @@ describe("App update flow", () => {
 
   it("does not auto-check before the app reaches the main shell", async () => {
     setUserAgent("Mozilla/5.0 (Macintosh; Intel Mac OS X 14_0)");
-    setMockAvailableUpdate({ version: "0.2.0" });
     setMockResponses({
       get_bootstrap_status: () => ({
         setup_completed: false,
@@ -95,7 +201,7 @@ describe("App update flow", () => {
     const user = userEvent.setup();
 
     setUserAgent("Mozilla/5.0 (Macintosh; Intel Mac OS X 14_0)");
-    setMockAvailableUpdate({ version: "0.2.0" });
+    resetMockUpdateController({ nextAvailableVersion: "0.2.0" });
     setMockResponses({
       get_bootstrap_status: () => ({
         setup_completed: true,

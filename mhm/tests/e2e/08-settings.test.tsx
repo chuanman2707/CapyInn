@@ -1,11 +1,120 @@
-import { describe, it, expect, beforeEach } from "vitest";
+import { useCallback, useMemo, useState } from "react";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import { render, screen, waitFor } from "../helpers/render-app";
 import userEvent from "@testing-library/user-event";
 import App from "@/App";
 import Settings from "@/pages/settings";
 import { setMockResponse, clearMockResponses, invoke } from "@test-mocks/tauri-core";
-import { clearMockUpdate, setMockAvailableUpdate } from "@/__mocks__/tauri-updater";
 import { useAuthStore } from "@/stores/useAuthStore";
+
+type MockUpdateControllerConfig = {
+    supported: boolean;
+    currentVersion: string;
+    nextAvailableVersion: string | null;
+};
+
+let mockUpdateControllerConfig: MockUpdateControllerConfig = {
+    supported: true,
+    currentVersion: "0.1.1",
+    nextAvailableVersion: "0.2.0",
+};
+
+function resetMockUpdateController(
+    overrides: Partial<MockUpdateControllerConfig> = {},
+) {
+    mockUpdateControllerConfig = {
+        supported: true,
+        currentVersion: "0.1.1",
+        nextAvailableVersion: "0.2.0",
+        ...overrides,
+    };
+}
+
+vi.mock("@/hooks/useAppUpdateController", () => ({
+    useAppUpdateController: ({
+        enabled,
+        currentVersion,
+    }: {
+        enabled: boolean;
+        currentVersion: string;
+    }) => {
+        const [phase, setPhase] = useState<
+            "idle" | "available" | "downloaded" | "installing"
+        >("idle");
+        const [availableVersion, setAvailableVersion] = useState<string | null>(null);
+        const [restartPromptOpen, setRestartPromptOpen] = useState(false);
+        const supported = mockUpdateControllerConfig.supported;
+
+        const checkForUpdates = useCallback(async () => {
+            if (!enabled || !supported) {
+                return;
+            }
+
+            if (mockUpdateControllerConfig.nextAvailableVersion) {
+                setAvailableVersion(mockUpdateControllerConfig.nextAvailableVersion);
+                setPhase("available");
+                return;
+            }
+
+            setAvailableVersion(null);
+            setPhase("idle");
+        }, [enabled, supported]);
+
+        const downloadUpdate = useCallback(async () => {
+            if (phase !== "available") {
+                return;
+            }
+
+            setPhase("downloaded");
+            setRestartPromptOpen(true);
+        }, [phase]);
+
+        const dismissRestartPrompt = useCallback(() => {
+            setRestartPromptOpen(false);
+        }, []);
+
+        const openRestartPrompt = useCallback(() => {
+            if (phase === "downloaded") {
+                setRestartPromptOpen(true);
+            }
+        }, [phase]);
+
+        const confirmInstall = useCallback(async () => {
+            setRestartPromptOpen(false);
+            setPhase("installing");
+        }, []);
+
+        return useMemo(
+            () => ({
+                supported,
+                phase,
+                currentVersion: mockUpdateControllerConfig.currentVersion || currentVersion,
+                availableVersion,
+                restartPromptOpen,
+                errorMessage: null,
+                canCheck: enabled && supported,
+                checkForUpdates,
+                downloadUpdate,
+                dismissRestartPrompt,
+                openRestartPrompt,
+                confirmInstall,
+            }),
+            [
+                availableVersion,
+                checkForUpdates,
+                confirmInstall,
+                currentVersion,
+                dismissRestartPrompt,
+                downloadUpdate,
+                enabled,
+                openRestartPrompt,
+                phase,
+                restartPromptOpen,
+                supported,
+            ],
+        );
+    },
+}));
 
 describe("08 — Settings", () => {
     const setAuthenticatedUser = (role: "admin" | "receptionist" = "admin") => {
@@ -19,8 +128,8 @@ describe("08 — Settings", () => {
 
     beforeEach(() => {
         clearMockResponses();
-        clearMockUpdate();
         invoke.mockClear();
+        resetMockUpdateController();
 
         setAuthenticatedUser();
 
@@ -194,7 +303,7 @@ describe("08 — Settings", () => {
 
     it("shows the Software Update section and triggers a manual update check", async () => {
         const user = userEvent.setup();
-        setMockAvailableUpdate({ version: "0.2.0" });
+        resetMockUpdateController({ nextAvailableVersion: "0.2.0" });
         setMockResponse("get_bootstrap_status", () => ({
             setup_completed: true,
             app_lock_enabled: false,
@@ -224,6 +333,7 @@ describe("08 — Settings", () => {
 
     it("shows a confirmation when there is no newer version", async () => {
         const user = userEvent.setup();
+        resetMockUpdateController({ nextAvailableVersion: null });
         setMockResponse("get_bootstrap_status", () => ({
             setup_completed: true,
             app_lock_enabled: false,

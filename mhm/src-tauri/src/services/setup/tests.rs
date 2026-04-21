@@ -203,6 +203,24 @@ async fn complete_setup_persists_canonical_settings_contract() {
 }
 
 #[tokio::test]
+async fn complete_setup_without_app_lock_creates_a_default_user_ready_for_login() {
+    let pool = test_pool().await;
+
+    let status = complete_setup(&pool, sample_onboarding_request(false))
+        .await
+        .expect("complete_setup should succeed");
+
+    let default_user_id = crate::services::settings_store::get_setting(&pool, "default_user_id")
+        .await
+        .expect("default_user_id should load")
+        .expect("default_user_id should exist");
+
+    let current_user = status.current_user.expect("unlocked setup should hydrate the default user");
+    assert_eq!(current_user.id, default_user_id);
+    assert_eq!(current_user.name, "Owner");
+}
+
+#[tokio::test]
 async fn complete_setup_returns_locked_status_when_app_lock_is_enabled() {
     let pool = test_pool().await;
 

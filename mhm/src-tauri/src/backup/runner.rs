@@ -5,12 +5,18 @@ use crate::backup::{
 use chrono::{NaiveDateTime, Utc};
 use std::{fs, path::Path, time::Duration};
 
+fn backup_timestamp_now() -> NaiveDateTime {
+    crate::runtime_config::test_now()
+        .map(|value| value.naive_local())
+        .unwrap_or_else(|| Utc::now().naive_utc())
+}
+
 pub async fn run_backup_once(
     db_path: &Path,
     runtime_root: &Path,
     reason: BackupReason,
 ) -> Result<BackupOutcome, BackupError> {
-    run_backup_once_at(db_path, runtime_root, reason, Utc::now().naive_utc(), None).await
+    run_backup_once_at(db_path, runtime_root, reason, backup_timestamp_now(), None).await
 }
 
 pub(crate) async fn run_backup_once_at(
@@ -61,7 +67,7 @@ pub(crate) async fn run_backup_once_at(
 mod tests {
     use super::*;
     use crate::backup::{
-        is_managed_backup_file,
+        build_backup_filename, is_managed_backup_file,
         test_support::{backup_file_name, BackupFixture},
     };
     use chrono::NaiveDate;
@@ -98,6 +104,20 @@ mod tests {
             .unwrap();
 
         assert_eq!(copied.0, "guest-001");
+    }
+
+    #[test]
+    fn build_backup_filename_uses_frozen_time_when_present() {
+        let _guard = crate::runtime_config::env_lock().lock().unwrap();
+
+        std::env::set_var("CAPYINN_TEST_NOW", "2026-04-21T09:15:00+07:00");
+        let timestamp = backup_timestamp_now();
+        std::env::remove_var("CAPYINN_TEST_NOW");
+
+        assert_eq!(
+            build_backup_filename(BackupReason::NightAudit, timestamp),
+            "capyinn_backup_night_audit_20260421_091500.db"
+        );
     }
 
     #[tokio::test]
