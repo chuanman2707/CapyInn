@@ -32,6 +32,8 @@ The rollout will start with shared infrastructure, then apply it to `auth`, `per
 - No full observability platform in this design. Crash dashboard, DB monitoring, command failure monitoring, and correlation IDs remain separate follow-up work under the parent roadmap.
 - No rewrite of all existing UI error presentations in one sweep if a screen is outside the selected rollout domains.
 - No guarantee that all old free-form backend errors disappear immediately; Phase 1 is intentionally incremental.
+- No multi-field validation contract in Phase 1.
+- No transient-versus-persistent system-error taxonomy beyond `SYSTEM_INTERNAL_ERROR` in Phase 1.
 
 ## Current Baseline
 
@@ -67,7 +69,7 @@ The selected approach has three parts:
 
 1. Backend introduces one shared application error model.
 2. Every migrated Tauri command converts failures into that shared model before rejecting to the frontend.
-3. Frontend introduces one shared command wrapper that parses the rejection into a reusable app error object.
+3. Frontend introduces one shared command wrapper that normalizes the rejected serialized error object into a reusable app error object.
 
 This is the preferred approach because it fixes the source of inconsistency instead of teaching each screen to decode fragile free-form strings.
 
@@ -88,6 +90,8 @@ Every migrated command failure should resolve to the same external shape:
 - `message`: short user-facing message that is safe to show directly
 - `kind`: one of `user` or `system`
 - `support_id`: nullable reference ID for support/debug lookup
+
+Phase 1 treats `kind` as a closed enum with exactly two values: `user` and `system`. Any future expansion requires a follow-up design decision because frontend branching and reporting assumptions depend on this binary split.
 
 Expected behavior:
 
@@ -122,7 +126,36 @@ Example user-facing payloads:
 }
 ```
 
-Phase 1 removes that ambiguity for migrated commands: the backend command boundary must reject with one JSON-serialized error string produced by a shared backend helper. The frontend wrapper for migrated commands must parse that JSON string into the app-level error object. Migrated commands must not mix object-shaped and string-shaped rejections.
+For migrated commands, the backend command boundary must reject with one native Tauri serialized error object produced by a shared backend helper. The frontend wrapper for migrated commands must treat that object shape as the contract and must not rely on parsing legacy string payloads.
+
+Forward-compatibility rule:
+
+- frontend must ignore unknown extra fields on the error object
+- Phase 1 does not add a `version` field yet
+- future contract additions must preserve existing field meanings
+
+### Message Source And Localization
+
+Phase 1 keeps `message` on the backend contract as the default display text.
+
+Rules:
+
+- backend is the source of truth for the default operator-facing message
+- Phase 1 messages are written for the current Vietnamese operator experience
+- frontend may later override message display by `code` for localization, but that is not required in Phase 1
+- `code` remains the stable machine key; `message` remains display text only
+
+### Field-Level Validation
+
+Phase 1 intentionally supports one primary error per failed interaction.
+
+Rules:
+
+- one failed command returns one `code` and one `message`
+- multi-field validation payloads are out of scope for Phase 1
+- if a command can fail for several validation reasons at once, it should return the most actionable primary failure for the current interaction
+
+This avoids over-designing the contract before the first shared path is proven.
 
 ## Backend Error Model
 
@@ -145,6 +178,18 @@ The internal model should keep enough structure to distinguish:
 
 The internal model must preserve the original lower-level error for logging even when the UI receives only the generic system message.
 
+### Existing Domain Error Types
+
+Phase 1 does not remove existing domain-local error types such as [error.rs](/Users/binhan/HotelManager/mhm/src-tauri/src/domain/booking/error.rs).
+
+Rules:
+
+- domain and service layers may keep using local error types such as `BookingError`
+- the shared FE/BE contract is enforced at the command boundary, not by forcing every internal module to use the same Rust enum immediately
+- migrated commands must convert domain-local errors into the shared external app error shape before returning to Tauri
+
+This avoids creating two external contracts while still letting existing domain code evolve incrementally.
+
 ### Mapping Rules
 
 Mapping rules for migrated commands:
@@ -155,6 +200,8 @@ Mapping rules for migrated commands:
   log the original error, generate `support_id`, map to a generic system response
 
 Classification is based on business meaning, not the technical layer where the failure surfaced. If a known operator-facing condition is detected through a lower-level mechanism such as a database uniqueness violation, missing row, or invalid state discovered inside a service call, the command must reclassify that failure into the correct stable domain code instead of passing it through as a generic system failure.
+
+For existing booking-domain code, that means local variants such as `BookingError::Conflict`, `BookingError::NotFound`, and `BookingError::Validation` are not returned to the frontend directly. Each migrated command must map them into the correct external `code` for that interaction. `BookingError::Database` and `BookingError::DateTimeParse` may still be reclassified into domain codes if the command has enough context; otherwise they fall back to `SYSTEM_INTERNAL_ERROR`.
 
 Examples:
 
@@ -190,6 +237,30 @@ Rules:
   relevant safe identifiers such as `room_id`, `booking_id`, or `group_id`
 
 The UI should show the `support_id` as part of the generic system failure message whenever the value is non-null so support can use what the operator sees on screen.
+
+Support IDs must be backend-issued. The frontend wrapper must not invent synthetic `support_id` values for unmigrated or malformed failures, because that would create lookup IDs with no authoritative backend log record.
+
+### Logging And Lookup
+
+Phase 1 uses the existing Rust `log` facade and `env_logger` stack already initialized in [lib.rs](/Users/binhan/HotelManager/mhm/src-tauri/src/lib.rs:79) for developer visibility, but it also needs one deterministic local support log for packaged runtime troubleshooting.
+
+Step 1 should therefore add a shared backend logging path that writes one structured JSON line per migrated `system` error to a local diagnostics file under the app runtime diagnostics directory.
+
+Each record should include at least:
+
+- timestamp
+- `support_id`
+- command name
+- external `code`
+- root cause string
+- safe context fields such as `room_id`, `booking_id`, or `group_id` when available
+
+Phase 1 support lookup is local-first:
+
+- developers can inspect normal app logs during development
+- operators or support can use the on-screen `support_id` to locate the matching JSON line in the exported local diagnostics logs
+
+Centralized aggregation remains follow-up work under the broader observability roadmap.
 
 ## Error Code Naming
 
@@ -228,6 +299,14 @@ Rules:
 - Rust and TypeScript may each define local helpers or types, but tests must fail if a code is emitted or consumed outside the registry
 
 This keeps the code list curated in one place without requiring a full code-generation pipeline in the first rollout.
+
+Enforcement mechanism for Phase 1:
+
+- a Rust test loads the registry JSON using a repository-relative path and asserts that exported backend code constants are listed there
+- a TypeScript test loads the same registry JSON and asserts that frontend code unions or constants match it
+- CI runs both tests so drift fails the build before runtime
+
+The registry path is intentionally outside both `src/` trees so it can remain the single checked-in source of truth for both Rust and TypeScript.
 
 ## Frontend Handling Model
 
@@ -287,6 +366,17 @@ The key rule is that migration happens per interaction, not per whole screen. A 
 
 The project should avoid hybrid logic where the same interaction partly depends on standard codes and partly depends on legacy string parsing.
 
+### Crash Reporting Integration
+
+Phase 1 does not add automatic command-failure submission to Sentry or turn every command error into a crash-report event.
+
+However, it should reserve two compatibility rules with the crash-reporting work already shipped in PR `#27`:
+
+- if frontend code deliberately reports a migrated failure through the existing browser-side Sentry path, it should attach `code` and `support_id` as tags or extra fields
+- if a crash or exported diagnostics bundle captures recent migrated command-failure context, `code` and `support_id` should be included when available
+
+This keeps the new error contract compatible with future observability work without expanding Phase 1 into a full remote monitoring pipeline.
+
 ## Phase 1 Scope
 
 Phase 1 covers the shared infrastructure plus a focused set of command domains.
@@ -334,10 +424,17 @@ Deliverables:
 - shared backend error definitions and serializers
 - shared frontend wrapper and app-error types
 - shared UI helper for operator-safe error display
+- canonical error-code registry at `mhm/shared/error-codes.json`
+- backend structured support-log writer for migrated `system` errors
+- Rust and TypeScript registry-drift tests wired into CI
 
 ### Step 2: Authentication And Permission
 
 Migrate the easiest and highest-signal flows first.
+
+Prerequisite:
+
+- refactor [mod.rs](/Users/binhan/HotelManager/mhm/src-tauri/src/commands/mod.rs:29) helpers `require_admin_user` and `require_admin` so migrated permission-gated flows stop returning raw Vietnamese `String` errors and instead return the shared auth or permission error type
 
 Target outcomes:
 
@@ -364,6 +461,12 @@ These are good candidates because they already represent clear business conditio
 ### Step 4: Booking And Group Flows
 
 Expand to booking and group operations with the clearest operator-facing failures first.
+
+Rules for booking-domain migration:
+
+- existing `BookingError` remains the internal domain and service error type in Phase 1
+- migrated booking and group commands are responsible for mapping `BookingError` variants to the shared external contract at the command boundary
+- no booking-domain command may expose raw `BookingError` display text directly once that interaction is migrated
 
 Target outcomes:
 
