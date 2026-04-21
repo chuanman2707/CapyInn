@@ -18,7 +18,6 @@ export function verificationEnv(extra = {}) {
     CAPYINN_RUNTIME_ROOT: runtimeRoot,
     CAPYINN_DISABLE_GATEWAY: "true",
     CAPYINN_DISABLE_WATCHER: "true",
-    CAPYINN_ENABLE_UPDATER: "false",
     ...extra,
   };
 }

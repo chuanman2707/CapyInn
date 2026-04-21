@@ -75,7 +75,6 @@ Changes:
 
 - gateway startup can be disabled by `CAPYINN_DISABLE_GATEWAY`
 - watcher startup can be disabled by `CAPYINN_DISABLE_WATCHER`
-- updater enablement is explicitly gated by `CAPYINN_ENABLE_UPDATER`
 - a smoke-ready payload can be written when `CAPYINN_SMOKE_READY_FILE` is set
 
 The smoke-ready file is the handshake used by the native smoke script to confirm that the Tauri app booted successfully under the isolated runtime root.
@@ -184,14 +183,21 @@ Behavior:
 
 `native-smoke.mjs` launches:
 
-- `npm run tauri -- dev --no-watch`
+- `npm run tauri -- dev --no-watch --config ~/CapyInn-TestSuite/artifacts/tauri.smoke.conf.json`
+
+Before launch, the script:
+
+- reads `mhm/src-tauri/tauri.conf.json`
+- writes a smoke-only merged config under the isolated artifact root
+- injects a test-only updater `pubkey` into that merged config
+
+This keeps the verification suite self-contained and avoids changing production updater behavior just to make smoke runs pass.
 
 Environment:
 
 - isolated runtime root
 - watcher disabled
 - gateway disabled
-- updater disabled
 - smoke-ready file path configured
 
 Pass condition:

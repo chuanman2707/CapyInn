@@ -220,9 +220,6 @@ Required environment contract:
 - `CAPYINN_DISABLE_GATEWAY`
   Prevents automatic gateway startup in tests that do not need MCP HTTP behavior.
 
-- `CAPYINN_ENABLE_UPDATER`
-  Reuses the existing backend updater flag and must become the single source of truth for updater enablement semantics in verification flows.
-
 - `CAPYINN_TEST_NOW`
   Freezes time-sensitive behavior for backup naming, night audit timestamps, analytics windows, and diagnostics timestamps.
 

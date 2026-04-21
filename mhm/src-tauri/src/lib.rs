@@ -323,23 +323,3 @@ async fn gateway_get_status(
         "has_api_keys": has_keys,
     }))
 }
-
-#[cfg(test)]
-mod tests {
-    use super::updater_enabled_from_env;
-
-    #[test]
-    fn updater_stays_disabled_without_an_explicit_release_flag() {
-        assert!(!updater_enabled_from_env(None));
-        assert!(!updater_enabled_from_env(Some("")));
-        assert!(!updater_enabled_from_env(Some("false")));
-    }
-
-    #[test]
-    fn updater_accepts_common_truthy_release_flags() {
-        assert!(updater_enabled_from_env(Some("1")));
-        assert!(updater_enabled_from_env(Some("true")));
-        assert!(updater_enabled_from_env(Some("YES")));
-        assert!(updater_enabled_from_env(Some(" on ")));
-    }
-}

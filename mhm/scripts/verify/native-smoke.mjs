@@ -1,4 +1,4 @@
-import { readFile, rm } from "node:fs/promises";
+import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 
 import {
@@ -11,13 +11,33 @@ import {
 
 const cwd = process.cwd();
 const readyFile = path.join(artifactsRoot, "smoke-ready.json");
+const smokeConfigPath = path.join(artifactsRoot, "tauri.smoke.conf.json");
+const baseConfigPath = path.join(cwd, "src-tauri", "tauri.conf.json");
+const smokeUpdaterPubkey =
+  process.env.CAPYINN_SMOKE_UPDATER_PUBLIC_KEY ??
+  "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDY2QzJBRjMwN0JDODIxRjAKUldUd0ljaDdNSy9DWnFydkdtM3BVQ1g0WXh2aWo5S0NkejhMbkxkeER2clZRVHFHVWtzZHJnZzMK";
 
 await rm(readyFile, { force: true });
+await mkdir(artifactsRoot, { recursive: true });
+
+const baseConfig = JSON.parse(await readFile(baseConfigPath, "utf8"));
+const smokeConfig = {
+  ...baseConfig,
+  plugins: {
+    ...(baseConfig.plugins ?? {}),
+    updater: {
+      ...(baseConfig.plugins?.updater ?? {}),
+      pubkey: smokeUpdaterPubkey,
+    },
+  },
+};
+
+await writeFile(smokeConfigPath, `${JSON.stringify(smokeConfig, null, 2)}\n`);
 
 const { child, logPath } = await spawnLoggedProcess(
   "native-smoke-app",
   "npm",
-  ["run", "tauri", "--", "dev", "--no-watch"],
+  ["run", "tauri", "--", "dev", "--no-watch", "--config", smokeConfigPath],
   {
     cwd,
     env: {

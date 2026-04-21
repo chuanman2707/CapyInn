@@ -25,7 +25,7 @@
 - Modify: `mhm/src-tauri/src/services/booking/tests.rs`
   Responsibility: add reservation → check-in and checkout/night-audit Wave 1 scenarios using the existing SQLite-backed test helpers.
 - Modify: `mhm/vitest.config.ts`
-  Responsibility: derive app version and Sentry release from `package.json`, keep updater defaults aligned with runtime semantics, and remove config drift from the test environment.
+  Responsibility: derive app version and Sentry release from `package.json` and remove config drift from the test environment.
 - Modify: `mhm/src/App.updateFlow.test.tsx`
   Responsibility: stabilize the current shell update-flow regression tests against the chosen update contract.
 - Modify: `mhm/tests/e2e/08-settings.test.tsx`
@@ -354,7 +354,6 @@ export function verificationEnv(extra = {}) {
     CAPYINN_RUNTIME_ROOT: runtimeRoot,
     CAPYINN_DISABLE_GATEWAY: "true",
     CAPYINN_DISABLE_WATCHER: "true",
-    CAPYINN_ENABLE_UPDATER: "false",
     ...extra,
   };
 }
