@@ -10,6 +10,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { FormField, FormFieldSelect } from "@/components/shared/FormField";
+import { formatAppError } from "@/lib/appError";
 import { fmtMoney } from "@/lib/format";
 import { toast } from "sonner";
 import { Sparkles, Hand, Check, ChevronLeft, ChevronRight, Users, Star, CalendarClock } from "lucide-react";
@@ -90,7 +91,7 @@ export default function GroupCheckinSheet() {
             if (ids.length > 0) setMasterRoomId(ids[0]);
             toast.success(`Đã chọn tự động ${ids.length} phòng`);
         } catch (err) {
-            toast.error(String(err));
+            toast.error(formatAppError(err));
         }
     };
 
@@ -127,7 +128,7 @@ export default function GroupCheckinSheet() {
             }
             setGroupCheckinOpen(false);
         } catch (err) {
-            toast.error(String(err));
+            toast.error(formatAppError(err));
         }
     };
 

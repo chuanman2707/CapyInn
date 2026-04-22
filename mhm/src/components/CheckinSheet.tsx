@@ -7,6 +7,7 @@ import { Sheet, SheetContent, SheetHeader, SheetTitle } from "@/components/ui/sh
 import { Button } from "@/components/ui/button";
 import { FormField, FormFieldSelect } from "@/components/shared/FormField";
 import { useAvailability } from "@/hooks/useAvailability";
+import { formatAppError } from "@/lib/appError";
 import { getRoomTypeLabel } from "@/lib/constants";
 import { fmtMoney } from "@/lib/format";
 import { createDeferredCleanup } from "@/lib/deferredCleanup";
@@ -168,7 +169,7 @@ export default function CheckinSheet({ preSelectedRoomId }: { preSelectedRoomId?
             closeAll();
             toast.success("Check-in thành công!");
         } catch (err) {
-            toast.error("Lỗi check-in: " + err);
+            toast.error("Lỗi check-in: " + formatAppError(err));
         }
         setSubmitting(false);
     };

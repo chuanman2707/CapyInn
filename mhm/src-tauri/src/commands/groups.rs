@@ -1,10 +1,72 @@
 use super::{emit_db_update, get_f64, get_user_id, AppState};
-use crate::models::*;
+use crate::{
+    app_error::{codes, log_system_error, CommandError, CommandResult},
+    domain::booking::BookingError,
+    models::*,
+};
 use crate::services::booking::group_lifecycle;
+use serde_json::{json, Value};
 use sqlx::{Pool, Row, Sqlite};
 use tauri::State;
 
 // ─── Group Booking Commands ───
+
+fn map_group_error(command_name: &str, error: BookingError, context: Value) -> CommandError {
+    match error {
+        BookingError::Validation(message) if message == "Phải chọn ít nhất 1 phòng để checkout" => {
+            CommandError::user(codes::GROUP_CHECKOUT_SELECTION_REQUIRED, message)
+        }
+        BookingError::Validation(message)
+            if message == "Phải chọn ít nhất 1 phòng" || message == "Số phòng phải > 0" =>
+        {
+            CommandError::user(codes::GROUP_INVALID_ROOM_COUNT, message)
+        }
+        BookingError::Validation(message) if message == "Số đêm phải > 0" => {
+            CommandError::user(codes::BOOKING_INVALID_NIGHTS, message)
+        }
+        BookingError::NotFound(message) if message.starts_with("Phòng ") => {
+            CommandError::user(codes::ROOM_NOT_FOUND, message)
+        }
+        BookingError::NotFound(message) if message.starts_with("Không tìm thấy group ") => {
+            CommandError::user(codes::GROUP_NOT_FOUND, message)
+        }
+        BookingError::NotFound(message)
+            if message.starts_with("Booking ") && message.contains("không tìm thấy") =>
+        {
+            CommandError::user(codes::BOOKING_NOT_FOUND, message)
+        }
+        BookingError::Validation(message) | BookingError::Conflict(message) => {
+            CommandError::user(codes::BOOKING_INVALID_STATE, message)
+        }
+        BookingError::NotFound(message)
+        | BookingError::Database(message)
+        | BookingError::DateTimeParse(message) => log_system_error(command_name, message, context),
+    }
+}
+
+fn map_auto_assign_error(command_name: &str, message: String, context: Value) -> CommandError {
+    if message == "Số phòng phải > 0" {
+        return CommandError::user(codes::GROUP_INVALID_ROOM_COUNT, message);
+    }
+    if message.starts_with("Chỉ có ") && message.contains(" phòng trống, cần ") {
+        return CommandError::user(codes::GROUP_NOT_ENOUGH_VACANT_ROOMS, message);
+    }
+    log_system_error(command_name, message, context)
+}
+
+fn map_group_detail_error(group_id: &str, error: sqlx::Error) -> CommandError {
+    match error {
+        sqlx::Error::RowNotFound => CommandError::user(
+            codes::GROUP_NOT_FOUND,
+            format!("Không tìm thấy group {}", group_id),
+        ),
+        other => log_system_error(
+            "get_group_detail",
+            other.to_string(),
+            json!({ "group_id": group_id }),
+        ),
+    }
+}
 
 /// Check-in a group: creates booking_groups + N bookings atomically
 #[tauri::command]
@@ -12,10 +74,16 @@ pub async fn group_checkin(
     state: State<'_, AppState>,
     app: tauri::AppHandle,
     req: GroupCheckinRequest,
-) -> Result<BookingGroup, String> {
+) -> CommandResult<BookingGroup> {
+    let error_context = json!({
+        "group_name": req.group_name.clone(),
+        "room_count": req.room_ids.len(),
+        "nights": req.nights,
+        "master_room_id": req.master_room_id.clone(),
+    });
     let group = group_lifecycle::group_checkin(&state.db, get_user_id(&state), req)
         .await
-        .map_err(|error| error.to_string())?;
+        .map_err(|error| map_group_error("group_checkin", error, error_context))?;
     emit_db_update(&app, "rooms");
     emit_db_update(&app, "groups");
     Ok(group)
@@ -27,10 +95,15 @@ pub async fn group_checkout(
     state: State<'_, AppState>,
     app: tauri::AppHandle,
     req: GroupCheckoutRequest,
-) -> Result<(), String> {
+) -> CommandResult<()> {
+    let error_context = json!({
+        "group_id": req.group_id.clone(),
+        "booking_count": req.booking_ids.len(),
+        "final_paid": req.final_paid,
+    });
     group_lifecycle::group_checkout(&state.db, req)
         .await
-        .map_err(|error| error.to_string())?;
+        .map_err(|error| map_group_error("group_checkout", error, error_context))?;
     emit_db_update(&app, "rooms");
     emit_db_update(&app, "groups");
 
@@ -44,15 +117,14 @@ pub async fn group_checkout(
 }
 
 /// Get group detail with bookings, services, totals
-pub async fn do_get_group_detail(
+async fn load_group_detail(
     pool: &Pool<Sqlite>,
     group_id: &str,
-) -> Result<GroupDetailResponse, String> {
+) -> Result<GroupDetailResponse, sqlx::Error> {
     let row = sqlx::query("SELECT * FROM booking_groups WHERE id = ?")
         .bind(group_id)
         .fetch_one(pool)
-        .await
-        .map_err(|e| e.to_string())?;
+        .await?;
 
     let group = BookingGroup {
         id: row.get("id"),
@@ -80,7 +152,8 @@ pub async fn do_get_group_detail(
          ORDER BY r.floor, r.id"
     )
     .bind(group_id)
-    .fetch_all(pool).await.map_err(|e| e.to_string())?;
+    .fetch_all(pool)
+    .await?;
 
     let bookings: Vec<BookingWithGuest> = booking_rows
         .iter()
@@ -110,8 +183,7 @@ pub async fn do_get_group_detail(
         sqlx::query("SELECT * FROM group_services WHERE group_id = ? ORDER BY created_at")
             .bind(group_id)
             .fetch_all(pool)
-            .await
-            .map_err(|e| e.to_string())?;
+            .await?;
 
     let services: Vec<GroupService> = service_rows
         .iter()
@@ -144,12 +216,23 @@ pub async fn do_get_group_detail(
     })
 }
 
+pub async fn do_get_group_detail(
+    pool: &Pool<Sqlite>,
+    group_id: &str,
+) -> Result<GroupDetailResponse, String> {
+    load_group_detail(pool, group_id)
+        .await
+        .map_err(|error| error.to_string())
+}
+
 #[tauri::command]
 pub async fn get_group_detail(
     state: State<'_, AppState>,
     group_id: String,
-) -> Result<GroupDetailResponse, String> {
-    do_get_group_detail(&state.db, &group_id).await
+) -> CommandResult<GroupDetailResponse> {
+    load_group_detail(&state.db, &group_id)
+        .await
+        .map_err(|error| map_group_detail_error(&group_id, error))
 }
 
 /// List all groups, optionally filtered by status
@@ -254,9 +337,13 @@ pub async fn remove_group_service(
 pub async fn auto_assign_rooms(
     state: State<'_, AppState>,
     req: AutoAssignRequest,
-) -> Result<AutoAssignResult, String> {
+) -> CommandResult<AutoAssignResult> {
     if req.room_count <= 0 {
-        return Err("Số phòng phải > 0".to_string());
+        return Err(map_auto_assign_error(
+            "auto_assign_rooms",
+            "Số phòng phải > 0".to_string(),
+            json!({ "room_count": req.room_count, "room_type": req.room_type }),
+        ));
     }
 
     let rows = if let Some(ref rt) = req.room_type {
@@ -264,12 +351,24 @@ pub async fn auto_assign_rooms(
             .bind(rt)
             .fetch_all(&state.db)
             .await
-            .map_err(|e| e.to_string())?
+            .map_err(|error| {
+                log_system_error(
+                    "auto_assign_rooms",
+                    error.to_string(),
+                    json!({ "room_count": req.room_count, "room_type": req.room_type }),
+                )
+            })?
     } else {
         sqlx::query("SELECT * FROM rooms WHERE status = 'vacant' ORDER BY floor, id")
             .fetch_all(&state.db)
             .await
-            .map_err(|e| e.to_string())?
+            .map_err(|error| {
+                log_system_error(
+                    "auto_assign_rooms",
+                    error.to_string(),
+                    json!({ "room_count": req.room_count, "room_type": req.room_type }),
+                )
+            })?
     };
 
     let vacant_rooms: Vec<Room> = rows
@@ -288,10 +387,18 @@ pub async fn auto_assign_rooms(
         .collect();
 
     if vacant_rooms.len() < req.room_count as usize {
-        return Err(format!(
-            "Chỉ có {} phòng trống, cần {} phòng",
-            vacant_rooms.len(),
-            req.room_count
+        return Err(map_auto_assign_error(
+            "auto_assign_rooms",
+            format!(
+                "Chỉ có {} phòng trống, cần {} phòng",
+                vacant_rooms.len(),
+                req.room_count
+            ),
+            json!({
+                "available_rooms": vacant_rooms.len(),
+                "requested_rooms": req.room_count,
+                "room_type": req.room_type,
+            }),
         ));
     }
 
@@ -400,4 +507,92 @@ pub async fn generate_group_invoice(
     group_id: String,
 ) -> Result<GroupInvoiceData, String> {
     do_generate_group_invoice(&state.db, &group_id).await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{map_auto_assign_error, map_group_detail_error, map_group_error};
+    use crate::app_error::{codes, AppErrorKind};
+    use crate::domain::booking::BookingError;
+    use serde_json::json;
+
+    #[test]
+    fn map_group_error_maps_missing_group_to_shared_contract() {
+        let error = map_group_error(
+            "group_checkin",
+            BookingError::not_found("Không tìm thấy group group-1"),
+            json!({ "group_id": "group-1" }),
+        );
+
+        assert_eq!(error.code, codes::GROUP_NOT_FOUND);
+        assert_eq!(error.message, "Không tìm thấy group group-1");
+        assert_eq!(error.kind, AppErrorKind::User);
+        assert!(error.support_id.is_none());
+    }
+
+    #[test]
+    fn map_group_error_maps_checkout_selection_required_to_shared_code() {
+        let error = map_group_error(
+            "group_checkout",
+            BookingError::validation("Phải chọn ít nhất 1 phòng để checkout"),
+            json!({ "group_id": "group-1" }),
+        );
+
+        assert_eq!(error.code, codes::GROUP_CHECKOUT_SELECTION_REQUIRED);
+        assert_eq!(error.message, "Phải chọn ít nhất 1 phòng để checkout");
+        assert_eq!(error.kind, AppErrorKind::User);
+        assert!(error.support_id.is_none());
+    }
+
+    #[test]
+    fn map_group_error_maps_invalid_room_count_to_shared_code() {
+        let error = map_group_error(
+            "group_checkin",
+            BookingError::validation("Phải chọn ít nhất 1 phòng"),
+            json!({ "group_id": "group-1" }),
+        );
+
+        assert_eq!(error.code, codes::GROUP_INVALID_ROOM_COUNT);
+        assert_eq!(error.message, "Phải chọn ít nhất 1 phòng");
+        assert_eq!(error.kind, AppErrorKind::User);
+        assert!(error.support_id.is_none());
+    }
+
+    #[test]
+    fn map_auto_assign_error_maps_invalid_room_count_to_shared_code() {
+        let error = map_auto_assign_error(
+            "auto_assign_rooms",
+            "Số phòng phải > 0".to_string(),
+            json!({ "room_count": 0 }),
+        );
+
+        assert_eq!(error.code, codes::GROUP_INVALID_ROOM_COUNT);
+        assert_eq!(error.message, "Số phòng phải > 0");
+        assert_eq!(error.kind, AppErrorKind::User);
+        assert!(error.support_id.is_none());
+    }
+
+    #[test]
+    fn map_auto_assign_error_maps_insufficient_vacancy_to_shared_code() {
+        let error = map_auto_assign_error(
+            "auto_assign_rooms",
+            "Chỉ có 1 phòng trống, cần 3 phòng".to_string(),
+            json!({ "room_count": 3 }),
+        );
+
+        assert_eq!(error.code, codes::GROUP_NOT_ENOUGH_VACANT_ROOMS);
+        assert_eq!(error.message, "Chỉ có 1 phòng trống, cần 3 phòng");
+        assert_eq!(error.kind, AppErrorKind::User);
+        assert!(error.support_id.is_none());
+    }
+
+    #[test]
+    fn map_group_detail_error_maps_missing_group_rows_to_shared_code() {
+        let error = map_group_detail_error("group-404", sqlx::Error::RowNotFound);
+
+        assert_eq!(error.code, codes::GROUP_NOT_FOUND);
+        assert_eq!(error.message, "Không tìm thấy group group-404");
+        assert_eq!(error.kind, AppErrorKind::User);
+        assert!(error.support_id.is_none());
+    }
 }

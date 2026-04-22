@@ -6,6 +6,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import EmptyState from "@/components/shared/EmptyState";
 import SlideDrawer from "@/components/shared/SlideDrawer";
+import { formatAppError } from "@/lib/appError";
 import { fmtMoney, fmtDateShort } from "@/lib/format";
 import { toast } from "sonner";
 import { Users, Plus, Trash2, FileText, LogOut, ChevronRight } from "lucide-react";
@@ -55,7 +56,7 @@ export default function GroupManagement() {
             const d = await getGroupDetail(groupId);
             setDetail(d);
         } catch (err) {
-            toast.error(String(err));
+            toast.error(formatAppError(err));
         }
         setLoadingDetail(false);
     };
@@ -110,7 +111,7 @@ export default function GroupManagement() {
             setCheckoutIds([]);
             await refreshDetail();
         } catch (err) {
-            toast.error(String(err));
+            toast.error(formatAppError(err));
         }
     };
 
