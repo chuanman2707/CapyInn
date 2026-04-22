@@ -3,6 +3,7 @@ use serde_json::Map;
 use serde_json::Value;
 
 use crate::app_identity;
+use crate::command_failure_log::{self, CommandFailureRecord};
 use crate::support_log::{self, SupportErrorRecord};
 
 pub mod codes {
@@ -189,6 +190,38 @@ pub fn correlation_context(correlation_id: &str, context: Value) -> Value {
             object.insert("context".to_string(), other);
             Value::Object(object)
         }
+    }
+}
+
+pub fn record_command_failure(command_name: &str, error: &CommandError, context: Value) {
+    let correlation_id = context
+        .get("correlation_id")
+        .and_then(|value| value.as_str())
+        .map(str::to_string);
+    let record = CommandFailureRecord::new(
+        command_name,
+        error.code.clone(),
+        error.kind,
+        correlation_id,
+        error.support_id.clone(),
+        context,
+    );
+
+    if let Some(runtime_root) = app_identity::runtime_root_opt() {
+        if let Err(error) =
+            command_failure_log::append_command_failure_record(&runtime_root, &record)
+        {
+            log::error!(
+                "failed to write command failure record for {}: {}",
+                command_name,
+                error
+            );
+        }
+    } else {
+        log::error!(
+            "unable to resolve runtime root for command failure record from {}",
+            command_name
+        );
     }
 }
 
@@ -462,6 +495,92 @@ mod tests {
         assert!(parsed.get("room_id").is_none());
         assert!(parsed.get("booking_id").is_none());
         assert_eq!(parsed["support_id"], support_id);
+
+        let _ = fs::remove_dir_all(&runtime_root);
+    }
+
+    #[test]
+    fn record_command_failure_writes_normalized_user_failure_record() {
+        let _guard = crate::runtime_config::env_lock().lock().unwrap();
+        let runtime_root = std::env::temp_dir().join(format!(
+            "capyinn-command-failure-user-{}",
+            uuid::Uuid::new_v4()
+        ));
+
+        std::env::set_var("CAPYINN_RUNTIME_ROOT", &runtime_root);
+        let error = CommandError::user(codes::AUTH_INVALID_PIN, "Mã PIN không đúng");
+        record_command_failure(
+            "login",
+            &error,
+            correlation_context(
+                "COR-1A2B3C4D",
+                json!({ "room_id": "R101", "step": "validate_pin" }),
+            ),
+        );
+        std::env::remove_var("CAPYINN_RUNTIME_ROOT");
+
+        let log_path = runtime_root
+            .join("diagnostics")
+            .join("command-failures.jsonl");
+        let contents = fs::read_to_string(&log_path).expect("command failure log contents");
+        let parsed: serde_json::Value =
+            serde_json::from_str(contents.trim()).expect("command failure json");
+
+        assert_eq!(parsed["schema_version"], 1);
+        assert_eq!(parsed["command"], "login");
+        assert_eq!(parsed["code"], codes::AUTH_INVALID_PIN);
+        assert_eq!(parsed["kind"], "user");
+        assert_eq!(parsed["correlation_id"], "COR-1A2B3C4D");
+        assert!(parsed["support_id"].is_null());
+        assert_eq!(parsed["context"]["correlation_id"], "COR-1A2B3C4D");
+        assert_eq!(parsed["context"]["room_id"], "R101");
+        assert_eq!(parsed["context"]["step"], "validate_pin");
+        assert!(parsed.get("room_id").is_none());
+        assert!(parsed.get("step").is_none());
+        assert!(parsed.get("root_cause").is_none());
+
+        let _ = fs::remove_dir_all(&runtime_root);
+    }
+
+    #[test]
+    fn record_command_failure_preserves_system_support_id() {
+        let _guard = crate::runtime_config::env_lock().lock().unwrap();
+        let runtime_root = std::env::temp_dir().join(format!(
+            "capyinn-command-failure-system-{}",
+            uuid::Uuid::new_v4()
+        ));
+
+        std::env::set_var("CAPYINN_RUNTIME_ROOT", &runtime_root);
+        let error = CommandError::system(codes::SYSTEM_INTERNAL_ERROR, "database offline");
+        let support_id = error.support_id.clone().expect("system error support id");
+        record_command_failure(
+            "check_out",
+            &error,
+            correlation_context(
+                "COR-5A6B7C8D",
+                json!({ "booking_id": "B202", "step": "settle_booking" }),
+            ),
+        );
+        std::env::remove_var("CAPYINN_RUNTIME_ROOT");
+
+        let log_path = runtime_root
+            .join("diagnostics")
+            .join("command-failures.jsonl");
+        let contents = fs::read_to_string(&log_path).expect("command failure log contents");
+        let parsed: serde_json::Value =
+            serde_json::from_str(contents.trim()).expect("command failure json");
+
+        assert_eq!(parsed["schema_version"], 1);
+        assert_eq!(parsed["command"], "check_out");
+        assert_eq!(parsed["code"], codes::SYSTEM_INTERNAL_ERROR);
+        assert_eq!(parsed["kind"], "system");
+        assert_eq!(parsed["correlation_id"], "COR-5A6B7C8D");
+        assert_eq!(parsed["support_id"], support_id);
+        assert_eq!(parsed["context"]["booking_id"], "B202");
+        assert_eq!(parsed["context"]["step"], "settle_booking");
+        assert!(parsed.get("booking_id").is_none());
+        assert!(parsed.get("step").is_none());
+        assert!(parsed.get("root_cause").is_none());
 
         let _ = fs::remove_dir_all(&runtime_root);
     }
