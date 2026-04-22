@@ -2,8 +2,8 @@ use super::{emit_db_update, require_admin, AppState};
 use crate::app_identity;
 use crate::{
     app_error::{
-        codes, correlation_context, log_system_error, normalize_correlation_id, CommandError,
-        CommandResult, EffectiveCorrelationId,
+        codes, correlation_context, log_system_error, normalize_correlation_id,
+        record_command_failure, CommandError, CommandResult, EffectiveCorrelationId,
     },
     domain::booking::BookingError,
     queries::booking::audit_queries,
@@ -100,6 +100,15 @@ fn map_audit_error(
     }
 }
 
+fn audit_failure_context(audit_date: &str, notes: Option<&str>) -> Value {
+    let notes_present = notes.map(|value| !value.trim().is_empty()).unwrap_or(false);
+
+    json!({
+        "audit_date": audit_date,
+        "notes_present": notes_present,
+    })
+}
+
 #[tauri::command]
 pub async fn run_night_audit(
     state: State<'_, AppState>,
@@ -109,14 +118,8 @@ pub async fn run_night_audit(
     correlation_id: Option<String>,
 ) -> CommandResult<crate::models::AuditLog> {
     let effective_correlation_id = normalize_correlation_id(correlation_id);
-    let notes_present = notes
-        .as_ref()
-        .map(|value| !value.trim().is_empty())
-        .unwrap_or(false);
-    let error_context = json!({
-        "audit_date": audit_date.clone(),
-        "notes_present": notes_present,
-    });
+    let error_context = audit_failure_context(&audit_date, notes.as_deref());
+    let notes_present = error_context["notes_present"].as_bool().unwrap_or(false);
     log::info!(
         "run_night_audit start correlation_id={} source={:?} audit_date={} notes_present={}",
         effective_correlation_id.value,
@@ -128,12 +131,19 @@ pub async fn run_night_audit(
     let log = audit_service::run_night_audit(&state.db, &audit_date, notes, &user.id)
         .await
         .map_err(|error| {
-            map_audit_error(
+            let command_error = map_audit_error(
                 "run_night_audit",
                 &effective_correlation_id,
                 error,
-                error_context,
-            )
+                error_context.clone(),
+            );
+            record_command_failure(
+                "run_night_audit",
+                &command_error,
+                &effective_correlation_id.value,
+                error_context.clone(),
+            );
+            command_error
         })?;
 
     log::info!(
@@ -240,7 +250,7 @@ pub async fn export_bookings_csv(
 
 #[cfg(test)]
 mod tests {
-    use super::map_audit_error;
+    use super::{audit_failure_context, map_audit_error};
     use crate::app_error::{
         codes, AppErrorKind, CorrelationIdSource, EffectiveCorrelationId,
     };
@@ -297,5 +307,18 @@ mod tests {
         assert_eq!(error.code, codes::SYSTEM_INTERNAL_ERROR);
         assert_eq!(error.kind, AppErrorKind::System);
         assert!(error.support_id.is_some());
+    }
+
+    #[test]
+    fn audit_failure_context_keeps_only_date_and_notes_flag() {
+        let context = audit_failure_context("2026-04-20", Some("Đã kiểm tra kho"));
+
+        assert_eq!(
+            context,
+            json!({
+                "audit_date": "2026-04-20",
+                "notes_present": true,
+            })
+        );
     }
 }

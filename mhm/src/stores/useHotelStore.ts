@@ -103,9 +103,21 @@ export const useHotelStore = create<HotelStore>((set, get) => {
       beginAction();
       try {
         const correlationId = createCorrelationId();
-        await invokeCommand("check_in", {
-          req: { room_id: roomId, guests, nights, source, notes, paid_amount: paidAmount },
-        }, { correlationId });
+        await invokeCommand(
+          "check_in",
+          {
+            req: { room_id: roomId, guests, nights, source, notes, paid_amount: paidAmount },
+          },
+          {
+            correlationId,
+            monitoringContext: {
+              guest_count: guests.length,
+              nights,
+              source,
+              notes_present: Boolean(notes?.trim()),
+            },
+          },
+        );
         await get().fetchRooms();
         await get().fetchStats();
         set({ activeTab: "dashboard" });
@@ -121,13 +133,22 @@ export const useHotelStore = create<HotelStore>((set, get) => {
       beginAction();
       try {
         const correlationId = createCorrelationId();
-        await invokeCommand("check_out", {
-          req: {
-            booking_id: bookingId,
-            settlement_mode: settlementMode,
-            final_total: finalTotal,
+        await invokeCommand(
+          "check_out",
+          {
+            req: {
+              booking_id: bookingId,
+              settlement_mode: settlementMode,
+              final_total: finalTotal,
+            },
           },
-        }, { correlationId });
+          {
+            correlationId,
+            monitoringContext: {
+              settlement_mode: settlementMode,
+            },
+          },
+        );
         await get().fetchRooms();
         await get().fetchStats();
         set({ activeTab: "dashboard" });
