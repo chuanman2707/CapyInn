@@ -252,9 +252,10 @@ pub async fn export_bookings_csv(
 mod tests {
     use super::{audit_failure_context, map_audit_error};
     use crate::app_error::{
-        codes, AppErrorKind, CorrelationIdSource, EffectiveCorrelationId,
+        codes, record_command_failure, AppErrorKind, CorrelationIdSource, EffectiveCorrelationId,
     };
     use crate::domain::booking::BookingError;
+    use std::fs;
     use serde_json::json;
 
     fn frontend_correlation_id() -> EffectiveCorrelationId {
@@ -320,5 +321,62 @@ mod tests {
                 "notes_present": true,
             })
         );
+    }
+
+    #[test]
+    fn system_run_night_audit_failure_reuses_support_id_across_logs() {
+        let _guard = crate::runtime_config::env_lock().lock().unwrap();
+        let runtime_root = std::env::temp_dir().join(format!(
+            "capyinn-night-audit-support-id-{}",
+            uuid::Uuid::new_v4()
+        ));
+
+        std::env::set_var("CAPYINN_RUNTIME_ROOT", &runtime_root);
+        let context = audit_failure_context("2026-04-20", Some("Đã kiểm tra kho"));
+        let error = map_audit_error(
+            "run_night_audit",
+            &frontend_correlation_id(),
+            BookingError::database("disk I/O failure"),
+            context.clone(),
+        );
+        let support_id = error.support_id.clone().expect("system error support id");
+        record_command_failure(
+            "run_night_audit",
+            &error,
+            "COR-1A2B3C4D",
+            context,
+        );
+        std::env::remove_var("CAPYINN_RUNTIME_ROOT");
+
+        let support_log_path = runtime_root
+            .join("diagnostics")
+            .join("support-errors.jsonl");
+        let support_contents = fs::read_to_string(&support_log_path).expect("support log contents");
+        let support_record: serde_json::Value = serde_json::from_str(
+            support_contents
+                .lines()
+                .last()
+                .expect("support log line"),
+        )
+        .expect("support log json");
+
+        let command_log_path = runtime_root
+            .join("diagnostics")
+            .join("command-failures.jsonl");
+        let command_contents =
+            fs::read_to_string(&command_log_path).expect("command failure log contents");
+        let command_record: serde_json::Value = serde_json::from_str(
+            command_contents
+                .lines()
+                .last()
+                .expect("command failure log line"),
+        )
+        .expect("command failure json");
+
+        assert_eq!(support_record["support_id"], support_id);
+        assert_eq!(command_record["support_id"], support_id);
+        assert_eq!(command_record["command"], "run_night_audit");
+
+        let _ = fs::remove_dir_all(&runtime_root);
     }
 }
