@@ -1,5 +1,6 @@
 import { create } from "zustand";
 import { invoke } from "@tauri-apps/api/core";
+import { createCorrelationId } from "@/lib/correlationId";
 import { invokeCommand } from "@/lib/invokeCommand";
 import type {
   CheckInGuestInput,
@@ -100,10 +101,11 @@ export const useHotelStore = create<HotelStore>((set, get) => {
 
     checkIn: async (roomId, guests, nights, paidAmount, source, notes) => {
       beginAction();
+      const correlationId = createCorrelationId();
       try {
         await invokeCommand("check_in", {
           req: { room_id: roomId, guests, nights, source, notes, paid_amount: paidAmount },
-        });
+        }, { correlationId });
         await get().fetchRooms();
         await get().fetchStats();
         set({ activeTab: "dashboard" });
@@ -117,6 +119,7 @@ export const useHotelStore = create<HotelStore>((set, get) => {
 
     checkOut: async (bookingId, settlementMode, finalTotal) => {
       beginAction();
+      const correlationId = createCorrelationId();
       try {
         await invokeCommand("check_out", {
           req: {
@@ -124,7 +127,7 @@ export const useHotelStore = create<HotelStore>((set, get) => {
             settlement_mode: settlementMode,
             final_total: finalTotal,
           },
-        });
+        }, { correlationId });
         await get().fetchRooms();
         await get().fetchStats();
         set({ activeTab: "dashboard" });

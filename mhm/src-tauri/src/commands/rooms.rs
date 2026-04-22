@@ -1,6 +1,9 @@
 use super::{emit_db_update, get_f64, get_user_id, AppState};
 use crate::{
-    app_error::{codes, log_system_error, CommandError, CommandResult},
+    app_error::{
+        codes, correlation_context, log_system_error, normalize_correlation_id, CommandError,
+        CommandResult, EffectiveCorrelationId,
+    },
     domain::booking::BookingError,
     models::*,
     queries::booking::revenue_queries,
@@ -57,39 +60,128 @@ pub async fn get_dashboard_stats(state: State<'_, AppState>) -> Result<Dashboard
 
 // ─── Check-in Command ───
 
-fn map_stay_error(command_name: &str, error: BookingError, context: Value) -> CommandError {
+fn log_user_stay_error(
+    command_name: &str,
+    effective_correlation_id: &EffectiveCorrelationId,
+    message: &str,
+    context: &Value,
+) {
+    let context_json = serde_json::to_string(&correlation_context(
+        &effective_correlation_id.value,
+        context.clone(),
+    ))
+    .unwrap_or_else(|_| "{}".to_string());
+
+    log::warn!(
+        "user error {} correlation_id={} source={:?}: {} | context={}",
+        command_name,
+        effective_correlation_id.value,
+        effective_correlation_id.source,
+        message,
+        context_json
+    );
+}
+
+fn map_stay_user_error(
+    code: &'static str,
+    command_name: &str,
+    effective_correlation_id: &EffectiveCorrelationId,
+    message: String,
+    context: &Value,
+) -> CommandError {
+    log_user_stay_error(
+        command_name,
+        effective_correlation_id,
+        message.as_str(),
+        context,
+    );
+    CommandError::user(code, message)
+}
+
+fn map_stay_error(
+    command_name: &str,
+    effective_correlation_id: &EffectiveCorrelationId,
+    error: BookingError,
+    context: Value,
+) -> CommandError {
     match error {
         BookingError::NotFound(message) if message.starts_with("Không tìm thấy phòng ") => {
-            CommandError::user(codes::ROOM_NOT_FOUND, message)
+            map_stay_user_error(
+                codes::ROOM_NOT_FOUND,
+                command_name,
+                effective_correlation_id,
+                message,
+                &context,
+            )
         }
         BookingError::NotFound(message)
             if message.starts_with("Không tìm thấy booking đang active ")
                 || message.starts_with("Không tìm thấy booking ") =>
         {
-            CommandError::user(codes::BOOKING_NOT_FOUND, message)
+            map_stay_user_error(
+                codes::BOOKING_NOT_FOUND,
+                command_name,
+                effective_correlation_id,
+                message,
+                &context,
+            )
         }
         BookingError::Validation(message) if message == "Phải có ít nhất 1 khách" => {
-            CommandError::user(codes::BOOKING_GUEST_REQUIRED, message)
+            map_stay_user_error(
+                codes::BOOKING_GUEST_REQUIRED,
+                command_name,
+                effective_correlation_id,
+                message,
+                &context,
+            )
         }
         BookingError::Validation(message) if message == "Number of nights must be greater than 0" => {
-            CommandError::user(codes::BOOKING_INVALID_NIGHTS, message)
+            map_stay_user_error(
+                codes::BOOKING_INVALID_NIGHTS,
+                command_name,
+                effective_correlation_id,
+                message,
+                &context,
+            )
         }
         BookingError::Validation(message)
             if message == "Tổng quyết toán phải lớn hơn hoặc bằng 0" =>
         {
-            CommandError::user(codes::BOOKING_INVALID_SETTLEMENT_TOTAL, message)
+            map_stay_user_error(
+                codes::BOOKING_INVALID_SETTLEMENT_TOTAL,
+                command_name,
+                effective_correlation_id,
+                message,
+                &context,
+            )
         }
         BookingError::Validation(message)
             if message == "Overpaid booking requires refund handling before checkout" =>
         {
-            CommandError::user(codes::BOOKING_INVALID_STATE, message)
+            map_stay_user_error(
+                codes::BOOKING_INVALID_STATE,
+                command_name,
+                effective_correlation_id,
+                message,
+                &context,
+            )
         }
         BookingError::Validation(message) | BookingError::Conflict(message) => {
-            CommandError::user(codes::BOOKING_INVALID_STATE, message)
+            map_stay_user_error(
+                codes::BOOKING_INVALID_STATE,
+                command_name,
+                effective_correlation_id,
+                message,
+                &context,
+            )
         }
         BookingError::NotFound(message)
         | BookingError::Database(message)
-        | BookingError::DateTimeParse(message) => log_system_error(command_name, message, context),
+        | BookingError::DateTimeParse(message) => log_system_error(
+            command_name,
+            message,
+            correlation_context(&effective_correlation_id.value, context),
+        ),
     }
 }
 
@@ -98,15 +190,35 @@ pub async fn check_in(
     state: State<'_, AppState>,
     app: tauri::AppHandle,
     req: CheckInRequest,
+    correlation_id: Option<String>,
 ) -> CommandResult<Booking> {
+    let effective_correlation_id = normalize_correlation_id(correlation_id);
     let error_context = json!({
         "room_id": req.room_id.clone(),
         "guest_count": req.guests.len(),
         "nights": req.nights,
     });
+    log::info!(
+        "check_in start correlation_id={} source={:?} room_id={} guest_count={} nights={}",
+        effective_correlation_id.value,
+        effective_correlation_id.source,
+        req.room_id,
+        req.guests.len(),
+        req.nights
+    );
     let booking = stay_lifecycle::check_in(&state.db, req, get_user_id(&state))
         .await
-        .map_err(|error| map_stay_error("check_in", error, error_context))?;
+        .map_err(|error| {
+            map_stay_error("check_in", &effective_correlation_id, error, error_context)
+        })?;
+
+    log::info!(
+        "check_in success correlation_id={} source={:?} booking_id={} room_id={}",
+        effective_correlation_id.value,
+        effective_correlation_id.source,
+        booking.id,
+        booking.room_id
+    );
 
     emit_db_update(&app, "rooms");
 
@@ -210,15 +322,33 @@ pub async fn check_out(
     state: State<'_, AppState>,
     app: tauri::AppHandle,
     req: CheckOutRequest,
+    correlation_id: Option<String>,
 ) -> CommandResult<()> {
+    let effective_correlation_id = normalize_correlation_id(correlation_id);
     let error_context = json!({
         "booking_id": req.booking_id.clone(),
         "settlement_mode": req.settlement_mode,
         "final_total": req.final_total,
     });
+    log::info!(
+        "check_out start correlation_id={} source={:?} booking_id={} settlement_mode={:?} final_total={}",
+        effective_correlation_id.value,
+        effective_correlation_id.source,
+        req.booking_id,
+        req.settlement_mode,
+        req.final_total
+    );
     stay_lifecycle::check_out(&state.db, req)
         .await
-        .map_err(|error| map_stay_error("check_out", error, error_context))?;
+        .map_err(|error| {
+            map_stay_error("check_out", &effective_correlation_id, error, error_context)
+        })?;
+
+    log::info!(
+        "check_out success correlation_id={} source={:?}",
+        effective_correlation_id.value,
+        effective_correlation_id.source
+    );
 
     emit_db_update(&app, "rooms");
 
@@ -460,14 +590,23 @@ pub async fn scan_image(path: String) -> Result<crate::ocr::CccdInfo, String> {
 #[cfg(test)]
 mod tests {
     use super::map_stay_error;
-    use crate::app_error::{codes, AppErrorKind};
+    use crate::app_error::{codes, AppErrorKind, CorrelationIdSource, EffectiveCorrelationId};
     use crate::domain::booking::BookingError;
     use serde_json::json;
+
+    fn frontend_correlation_id() -> EffectiveCorrelationId {
+        EffectiveCorrelationId {
+            value: "COR-1A2B3C4D".to_string(),
+            source: CorrelationIdSource::Frontend,
+            rejected_length: None,
+        }
+    }
 
     #[test]
     fn map_stay_error_maps_missing_room_to_room_not_found_contract() {
         let error = map_stay_error(
             "check_in",
+            &frontend_correlation_id(),
             BookingError::not_found("Không tìm thấy phòng R101"),
             json!({ "room_id": "R101" }),
         );
@@ -482,6 +621,7 @@ mod tests {
     fn map_stay_error_maps_guest_required_validation_to_shared_code() {
         let error = map_stay_error(
             "check_in",
+            &frontend_correlation_id(),
             BookingError::validation("Phải có ít nhất 1 khách"),
             json!({ "room_id": "R101" }),
         );
@@ -496,6 +636,7 @@ mod tests {
     fn map_stay_error_maps_invalid_settlement_total_to_shared_code() {
         let error = map_stay_error(
             "check_out",
+            &frontend_correlation_id(),
             BookingError::validation("Tổng quyết toán phải lớn hơn hoặc bằng 0"),
             json!({ "booking_id": "booking-1" }),
         );
@@ -510,6 +651,7 @@ mod tests {
     fn map_stay_error_maps_invalid_checkout_state_to_shared_code() {
         let error = map_stay_error(
             "check_out",
+            &frontend_correlation_id(),
             BookingError::validation("Overpaid booking requires refund handling before checkout"),
             json!({ "booking_id": "booking-1" }),
         );
@@ -521,5 +663,19 @@ mod tests {
         );
         assert_eq!(error.kind, AppErrorKind::User);
         assert!(error.support_id.is_none());
+    }
+
+    #[test]
+    fn map_stay_error_keeps_system_errors_in_system_contract() {
+        let error = map_stay_error(
+            "check_out",
+            &frontend_correlation_id(),
+            BookingError::database("disk I/O failure"),
+            json!({ "booking_id": "booking-1" }),
+        );
+
+        assert_eq!(error.code, codes::SYSTEM_INTERNAL_ERROR);
+        assert_eq!(error.kind, AppErrorKind::System);
+        assert!(error.support_id.is_some());
     }
 }
