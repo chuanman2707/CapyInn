@@ -562,10 +562,12 @@ mod tests {
             "COR-5A6B7C8D",
             json!({
                 "room_id": "R202",
-                "guest_name": "Nguyen Van A",
                 "check_in_date": "2026-04-22",
                 "check_out_date": "2026-04-24",
                 "nights": 2,
+                "deposit_present": false,
+                "source": "phone",
+                "notes_present": false,
             }),
         );
         std::env::remove_var("CAPYINN_RUNTIME_ROOT");
@@ -584,10 +586,12 @@ mod tests {
         assert_eq!(parsed["correlation_id"], "COR-5A6B7C8D");
         assert_eq!(parsed["support_id"], support_id);
         assert_eq!(parsed["context"]["room_id"], "R202");
-        assert_eq!(parsed["context"]["guest_name"], "Nguyen Van A");
         assert_eq!(parsed["context"]["check_in_date"], "2026-04-22");
         assert_eq!(parsed["context"]["check_out_date"], "2026-04-24");
         assert_eq!(parsed["context"]["nights"], 2);
+        assert_eq!(parsed["context"]["deposit_present"], false);
+        assert_eq!(parsed["context"]["source"], "phone");
+        assert_eq!(parsed["context"]["notes_present"], false);
         assert!(parsed["context"].get("correlation_id").is_none());
         assert!(parsed.get("room_id").is_none());
         assert!(parsed.get("root_cause").is_none());
