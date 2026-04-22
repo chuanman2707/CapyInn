@@ -248,7 +248,30 @@ describe("08 — Settings", () => {
         await user.click(screen.getByText("Users"));
 
         await waitFor(() => {
-            expect(invoke).toHaveBeenCalledWith("list_users");
+            expect(invoke).toHaveBeenCalledWith("list_users", undefined);
+        });
+    });
+
+    it("shows a forbidden error when list_users is rejected", async () => {
+        const forbiddenError = {
+            code: "AUTH_FORBIDDEN",
+            message: "Không có quyền thực hiện. Yêu cầu quyền Admin.",
+            kind: "user" as const,
+            support_id: null,
+        };
+
+        setMockResponse("list_users", () => {
+            throw forbiddenError;
+        });
+
+        const user = userEvent.setup();
+        render(<Settings />);
+
+        await user.click(screen.getByText("Users"));
+
+        await waitFor(() => {
+            expect(invoke).toHaveBeenCalledWith("list_users", undefined);
+            expect(screen.getByRole("alert")).toHaveTextContent(forbiddenError.message);
         });
     });
 

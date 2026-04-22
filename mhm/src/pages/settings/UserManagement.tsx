@@ -1,5 +1,4 @@
 import { useEffect, useState } from "react";
-import { invoke } from "@tauri-apps/api/core";
 import { Shield } from "lucide-react";
 import { toast } from "sonner";
 
@@ -7,17 +6,40 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { formatAppError, normalizeAppError, type AppError } from "@/lib/appError";
+import { invokeCommand } from "@/lib/invokeCommand";
 import { type User } from "@/stores/useAuthStore";
 
 export default function UserManagement() {
   const [users, setUsers] = useState<User[]>([]);
+  const [loadError, setLoadError] = useState<AppError | null>(null);
   const [newName, setNewName] = useState("");
   const [newPin, setNewPin] = useState("");
   const [newRole, setNewRole] = useState("receptionist");
   const [creating, setCreating] = useState(false);
 
   useEffect(() => {
-    invoke<User[]>("list_users").then(setUsers).catch(() => {});
+    let active = true;
+
+    void (async () => {
+      try {
+        const loadedUsers = await invokeCommand<User[]>("list_users");
+        if (active) {
+          setUsers(loadedUsers);
+          setLoadError(null);
+        }
+      } catch (error) {
+        if (active) {
+          const appError = normalizeAppError(error);
+          setLoadError(appError);
+          toast.error(formatAppError(appError));
+        }
+      }
+    })();
+
+    return () => {
+      active = false;
+    };
   }, []);
 
   const handleCreate = async () => {
@@ -28,7 +50,7 @@ export default function UserManagement() {
 
     setCreating(true);
     try {
-      const user = await invoke<User>("create_user", {
+      const user = await invokeCommand<User>("create_user", {
         req: { name: newName, pin: newPin, role: newRole },
       });
       setUsers((prev) => [...prev, user]);
@@ -37,7 +59,7 @@ export default function UserManagement() {
       setNewRole("receptionist");
       toast.success(`Đã tạo user "${user.name}"!`);
     } catch (error) {
-      toast.error(String(error) || "Lỗi tạo user");
+      toast.error(formatAppError(error));
     } finally {
       setCreating(false);
     }
@@ -52,6 +74,12 @@ export default function UserManagement() {
         </h3>
         <p className="text-sm text-brand-muted">Tạo tài khoản và phân quyền cho nhân viên (chỉ Admin)</p>
       </div>
+
+      {loadError && (
+        <div role="alert" className="rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700">
+          {formatAppError(loadError)}
+        </div>
+      )}
 
       <div className="space-y-2">
         {users.map((user) => (
