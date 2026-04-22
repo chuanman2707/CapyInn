@@ -180,7 +180,9 @@ describe("captureCommandFailure", () => {
         kind: "user",
         support_id: null,
       },
-      ...(options as never),
+      correlationId: "correlationId" in options ? options.correlationId : undefined,
+      monitoringContext:
+        "monitoringContext" in options ? options.monitoringContext : undefined,
     });
 
     expect(invoke).not.toHaveBeenCalled();
