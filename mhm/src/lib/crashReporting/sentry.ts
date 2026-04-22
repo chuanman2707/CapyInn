@@ -109,7 +109,8 @@ export async function submitCommandFailureEvent(event: CommandFailureRemoteEvent
 
   Sentry.captureEvent({
     level,
-    message: `Command failure: ${event.command}`,
+    message: `Command failure: ${event.command} (${event.appError.code})`,
+    fingerprint: ["command_failure", event.command, event.appError.code],
     tags: {
       event_type: "command_failure",
       command: event.command,
