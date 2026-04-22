@@ -94,6 +94,40 @@ describe("useHotelStore monitoring context", () => {
     );
   });
 
+  it("normalizes omitted checkIn source to null in monitoring context", async () => {
+    await useHotelStore.getState().checkIn(
+      "101",
+      [{ full_name: "Nguyen Van A", doc_number: "012345678901" }],
+      1,
+      250000,
+      undefined,
+      "",
+    );
+
+    expect(invokeCommand).toHaveBeenCalledWith(
+      "check_in",
+      {
+        req: {
+          room_id: "101",
+          guests: [{ full_name: "Nguyen Van A", doc_number: "012345678901" }],
+          nights: 1,
+          source: undefined,
+          notes: "",
+          paid_amount: 250000,
+        },
+      },
+      {
+        correlationId: "COR-1A2B3C4D",
+        monitoringContext: {
+          guest_count: 1,
+          nights: 1,
+          source: null,
+          notes_present: false,
+        },
+      },
+    );
+  });
+
   it("passes scrubbed monitoring context for checkOut", async () => {
     await useHotelStore.getState().checkOut("booking-1", "hourly", 400000);
 

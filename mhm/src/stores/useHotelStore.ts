@@ -113,7 +113,7 @@ export const useHotelStore = create<HotelStore>((set, get) => {
             monitoringContext: {
               guest_count: guests.length,
               nights,
-              source,
+              source: source ?? null,
               notes_present: Boolean(notes?.trim()),
             },
           },
