@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { clearMockResponses, invoke, setMockResponse } from "@test-mocks/tauri-core";
 import { useHotelStore } from "@/stores/useHotelStore";
 import { useAuthStore } from "@/stores/useAuthStore";
@@ -15,6 +15,8 @@ function deferred<T>() {
 }
 
 describe("13 — Store Hardening", () => {
+    const originalCrypto = globalThis.crypto;
+
     beforeEach(() => {
         clearMockResponses();
         invoke.mockClear();
@@ -40,6 +42,13 @@ describe("13 — Store Hardening", () => {
             loading: false,
             error: null,
         });
+    });
+
+    afterEach(() => {
+        vi.unstubAllGlobals();
+        if (originalCrypto) {
+            vi.stubGlobal("crypto", originalCrypto);
+        }
     });
 
     it("keeps loading true while another booking action is still pending", async () => {
@@ -191,5 +200,52 @@ describe("13 — Store Hardening", () => {
         await promise.catch((error) => {
             expect(error.correlation_id).toBe(correlationId);
         });
+    });
+
+    it.each([
+        [
+            "checkIn",
+            () =>
+                useHotelStore.getState().checkIn(
+                    "1A",
+                    [{ full_name: "Nguyễn Văn A", doc_number: "012345678901" }],
+                    1
+                ),
+        ],
+        [
+            "checkOut",
+            () => useHotelStore.getState().checkOut("booking-1", "actual_nights", 500000),
+        ],
+        [
+            "groupCheckIn",
+            () =>
+                useHotelStore.getState().groupCheckIn({
+                    group_name: "Đoàn A",
+                    organizer_name: "Trưởng đoàn",
+                    room_ids: ["1A"],
+                    master_room_id: "1A",
+                    guests_per_room: {},
+                    nights: 1,
+                    source: "walk-in",
+                }),
+        ],
+        [
+            "groupCheckout",
+            () =>
+                useHotelStore.getState().groupCheckout({
+                    group_id: "group-1",
+                    booking_ids: ["booking-1"],
+                }),
+        ],
+    ])("%s clears loading when correlation ID generation throws", async (_actionName, runAction) => {
+        vi.stubGlobal("crypto", {
+            getRandomValues: () => {
+                throw new Error("crypto unavailable");
+            },
+        });
+
+        await expect(runAction()).rejects.toThrow("crypto unavailable");
+        expect(useHotelStore.getState().loading).toBe(false);
+        expect(invoke).not.toHaveBeenCalled();
     });
 });
