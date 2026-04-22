@@ -8,9 +8,11 @@ await run(
   [
     "test",
     "--",
+    "src/lib/correlationId.test.ts",
     "src/lib/appError.test.ts",
     "src/pages/settings/useRoomConfig.test.tsx",
     "src/components/GroupCheckinSheet.test.tsx",
+    "src/pages/GroupManagement.test.tsx",
     "src/pages/NightAudit.test.tsx",
     "src/App.updateFlow.test.tsx",
     "src/hooks/useAppUpdateController.test.tsx",
@@ -19,6 +21,7 @@ await run(
     "tests/e2e/05-checkout.test.tsx",
     "tests/e2e/08-settings.test.tsx",
     "tests/e2e/11-night-audit.test.tsx",
+    "tests/e2e/13-store-hardening.test.ts",
   ],
   { cwd },
 );

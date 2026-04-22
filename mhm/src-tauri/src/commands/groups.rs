@@ -707,6 +707,21 @@ mod tests {
     }
 
     #[test]
+    fn map_group_error_keeps_system_failures_in_system_contract() {
+        let effective_correlation_id = frontend_correlation_id();
+        let error = map_group_error(
+            "group_checkout",
+            &effective_correlation_id,
+            BookingError::database("disk I/O failure"),
+            json!({ "group_id": "group-1" }),
+        );
+
+        assert_eq!(error.code, codes::SYSTEM_INTERNAL_ERROR);
+        assert_eq!(error.kind, AppErrorKind::System);
+        assert!(error.support_id.is_some());
+    }
+
+    #[test]
     fn map_auto_assign_error_maps_invalid_room_count_to_shared_code() {
         let error = map_auto_assign_error(
             "auto_assign_rooms",
