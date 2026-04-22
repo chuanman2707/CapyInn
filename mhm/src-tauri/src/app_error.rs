@@ -193,11 +193,12 @@ pub fn correlation_context(correlation_id: &str, context: Value) -> Value {
     }
 }
 
-pub fn record_command_failure(command_name: &str, error: &CommandError, context: Value) {
-    let correlation_id = context
-        .get("correlation_id")
-        .and_then(|value| value.as_str())
-        .map(str::to_string);
+pub fn record_command_failure(
+    command_name: &str,
+    error: &CommandError,
+    correlation_id: &str,
+    context: Value,
+) {
     let record = CommandFailureRecord::new(
         command_name,
         error.code.clone(),
@@ -508,14 +509,12 @@ mod tests {
         ));
 
         std::env::set_var("CAPYINN_RUNTIME_ROOT", &runtime_root);
-        let error = CommandError::user(codes::AUTH_INVALID_PIN, "Mã PIN không đúng");
+        let error = CommandError::user(codes::BOOKING_GUEST_REQUIRED, "Phải có ít nhất 1 khách");
         record_command_failure(
-            "login",
+            "check_in",
             &error,
-            correlation_context(
-                "COR-1A2B3C4D",
-                json!({ "room_id": "R101", "step": "validate_pin" }),
-            ),
+            "COR-1A2B3C4D",
+            json!({ "room_id": "R101" }),
         );
         std::env::remove_var("CAPYINN_RUNTIME_ROOT");
 
@@ -527,16 +526,14 @@ mod tests {
             serde_json::from_str(contents.trim()).expect("command failure json");
 
         assert_eq!(parsed["schema_version"], 1);
-        assert_eq!(parsed["command"], "login");
-        assert_eq!(parsed["code"], codes::AUTH_INVALID_PIN);
+        assert_eq!(parsed["command"], "check_in");
+        assert_eq!(parsed["code"], codes::BOOKING_GUEST_REQUIRED);
         assert_eq!(parsed["kind"], "user");
         assert_eq!(parsed["correlation_id"], "COR-1A2B3C4D");
         assert!(parsed["support_id"].is_null());
-        assert_eq!(parsed["context"]["correlation_id"], "COR-1A2B3C4D");
         assert_eq!(parsed["context"]["room_id"], "R101");
-        assert_eq!(parsed["context"]["step"], "validate_pin");
+        assert!(parsed["context"].get("correlation_id").is_none());
         assert!(parsed.get("room_id").is_none());
-        assert!(parsed.get("step").is_none());
         assert!(parsed.get("root_cause").is_none());
 
         let _ = fs::remove_dir_all(&runtime_root);
@@ -554,12 +551,10 @@ mod tests {
         let error = CommandError::system(codes::SYSTEM_INTERNAL_ERROR, "database offline");
         let support_id = error.support_id.clone().expect("system error support id");
         record_command_failure(
-            "check_out",
+            "create_reservation",
             &error,
-            correlation_context(
-                "COR-5A6B7C8D",
-                json!({ "booking_id": "B202", "step": "settle_booking" }),
-            ),
+            "COR-5A6B7C8D",
+            json!({ "booking_id": "B202" }),
         );
         std::env::remove_var("CAPYINN_RUNTIME_ROOT");
 
@@ -571,15 +566,14 @@ mod tests {
             serde_json::from_str(contents.trim()).expect("command failure json");
 
         assert_eq!(parsed["schema_version"], 1);
-        assert_eq!(parsed["command"], "check_out");
+        assert_eq!(parsed["command"], "create_reservation");
         assert_eq!(parsed["code"], codes::SYSTEM_INTERNAL_ERROR);
         assert_eq!(parsed["kind"], "system");
         assert_eq!(parsed["correlation_id"], "COR-5A6B7C8D");
         assert_eq!(parsed["support_id"], support_id);
         assert_eq!(parsed["context"]["booking_id"], "B202");
-        assert_eq!(parsed["context"]["step"], "settle_booking");
+        assert!(parsed["context"].get("correlation_id").is_none());
         assert!(parsed.get("booking_id").is_none());
-        assert!(parsed.get("step").is_none());
         assert!(parsed.get("root_cause").is_none());
 
         let _ = fs::remove_dir_all(&runtime_root);
