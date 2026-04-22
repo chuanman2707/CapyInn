@@ -25,6 +25,16 @@ const STATUS_LABELS: Record<string, string> = {
     completed: "Completed",
 };
 
+function getLegacyErrorMessage(error: unknown): string {
+    if (typeof error === "string") {
+        return error;
+    }
+    if (error instanceof Error) {
+        return error.message;
+    }
+    return "Có lỗi xảy ra";
+}
+
 export default function GroupManagement() {
     const { groups, fetchGroups, getGroupDetail, groupCheckout, addGroupService, removeGroupService, generateGroupInvoice } = useHotelStore();
     const [filter, setFilter] = useState<string>("");
@@ -86,7 +96,7 @@ export default function GroupManagement() {
             setSvcNote("");
             await refreshDetail();
         } catch (err) {
-            toast.error(String(err));
+            toast.error(getLegacyErrorMessage(err));
         }
     };
 
@@ -96,7 +106,7 @@ export default function GroupManagement() {
             toast.success("Đã xóa dịch vụ");
             await refreshDetail();
         } catch (err) {
-            toast.error(String(err));
+            toast.error(getLegacyErrorMessage(err));
         }
     };
 
@@ -122,7 +132,7 @@ export default function GroupManagement() {
             setInvoiceData(invoice);
             setInvoiceOpen(true);
         } catch (err) {
-            toast.error(String(err));
+            toast.error(getLegacyErrorMessage(err));
         }
     };
 
