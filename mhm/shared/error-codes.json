@@ -1,0 +1,102 @@
+[
+  {
+    "code": "AUTH_INVALID_PIN",
+    "kind": "user",
+    "defaultMessage": "Mã PIN không đúng"
+  },
+  {
+    "code": "AUTH_NOT_AUTHENTICATED",
+    "kind": "user",
+    "defaultMessage": "Chưa đăng nhập"
+  },
+  {
+    "code": "AUTH_FORBIDDEN",
+    "kind": "user",
+    "defaultMessage": "Không có quyền thực hiện. Yêu cầu quyền Admin."
+  },
+  {
+    "code": "ROOM_ALREADY_EXISTS",
+    "kind": "user",
+    "defaultMessage": "Phòng đã tồn tại"
+  },
+  {
+    "code": "ROOM_NOT_FOUND",
+    "kind": "user",
+    "defaultMessage": "Phòng không tồn tại"
+  },
+  {
+    "code": "ROOM_DELETE_OCCUPIED",
+    "kind": "user",
+    "defaultMessage": "Không thể xóa phòng đang có khách"
+  },
+  {
+    "code": "ROOM_DELETE_ACTIVE_BOOKING",
+    "kind": "user",
+    "defaultMessage": "Không thể xóa phòng có booking đang hoạt động"
+  },
+  {
+    "code": "ROOM_TYPE_ALREADY_EXISTS",
+    "kind": "user",
+    "defaultMessage": "Loại phòng đã tồn tại"
+  },
+  {
+    "code": "ROOM_TYPE_NOT_FOUND",
+    "kind": "user",
+    "defaultMessage": "Loại phòng không tồn tại"
+  },
+  {
+    "code": "ROOM_TYPE_IN_USE",
+    "kind": "user",
+    "defaultMessage": "Không thể xóa loại phòng đang được sử dụng"
+  },
+  {
+    "code": "GROUP_INVALID_ROOM_COUNT",
+    "kind": "user",
+    "defaultMessage": "Số phòng phải lớn hơn 0"
+  },
+  {
+    "code": "GROUP_NOT_ENOUGH_VACANT_ROOMS",
+    "kind": "user",
+    "defaultMessage": "Không đủ phòng trống"
+  },
+  {
+    "code": "GROUP_NOT_FOUND",
+    "kind": "user",
+    "defaultMessage": "Không tìm thấy đoàn"
+  },
+  {
+    "code": "GROUP_CHECKOUT_SELECTION_REQUIRED",
+    "kind": "user",
+    "defaultMessage": "Phải chọn ít nhất 1 phòng để checkout"
+  },
+  {
+    "code": "BOOKING_NOT_FOUND",
+    "kind": "user",
+    "defaultMessage": "Không tìm thấy booking"
+  },
+  {
+    "code": "BOOKING_INVALID_STATE",
+    "kind": "user",
+    "defaultMessage": "Booking hiện không ở trạng thái hợp lệ cho thao tác này"
+  },
+  {
+    "code": "BOOKING_GUEST_REQUIRED",
+    "kind": "user",
+    "defaultMessage": "Phải có ít nhất 1 khách"
+  },
+  {
+    "code": "BOOKING_INVALID_NIGHTS",
+    "kind": "user",
+    "defaultMessage": "Số đêm phải lớn hơn 0"
+  },
+  {
+    "code": "BOOKING_INVALID_SETTLEMENT_TOTAL",
+    "kind": "user",
+    "defaultMessage": "Tổng quyết toán phải lớn hơn hoặc bằng 0"
+  },
+  {
+    "code": "SYSTEM_INTERNAL_ERROR",
+    "kind": "system",
+    "defaultMessage": "Có lỗi hệ thống, vui lòng thử lại"
+  }
+]

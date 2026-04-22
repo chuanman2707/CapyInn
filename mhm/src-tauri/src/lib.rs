@@ -1,6 +1,7 @@
 use log::{error, info};
 use tauri::Manager;
 
+pub mod app_error;
 pub mod app_identity;
 mod backup;
 mod commands;
@@ -15,6 +16,7 @@ mod queries;
 mod repositories;
 mod runtime_config;
 mod services;
+pub mod support_log;
 mod watcher;
 
 use commands::AppState;
