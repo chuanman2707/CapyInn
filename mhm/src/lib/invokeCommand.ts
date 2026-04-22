@@ -16,12 +16,15 @@ export async function invokeCommand<TResponse>(
 
     return await invoke<TResponse>(command, payload);
   } catch (error) {
-    await captureCommandFailure(command, error, {
+    const appError = normalizeAppError(error);
+    void captureCommandFailure({
+      command,
+      appError,
       correlationId: options?.correlationId,
       monitoringContext: options?.monitoringContext,
-    }).catch(() => undefined);
+    }).catch(() => {});
 
-    throw createAppErrorException(normalizeAppError(error), error, {
+    throw createAppErrorException(appError, error, {
       correlation_id: options?.correlationId,
     });
   }

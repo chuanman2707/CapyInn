@@ -1,10 +1,9 @@
 import { invoke } from "@tauri-apps/api/core";
 
-import { normalizeAppError, type AppError } from "../appError";
+import type { AppError } from "../appError";
 import {
   hasRemoteCrashReporting,
   submitCommandFailureEvent,
-  type CommandFailureRemoteEvent,
 } from "./sentry";
 
 export type MonitoringContext =
@@ -46,36 +45,21 @@ function hasMonitoringContext(value: MonitoringContext | null | undefined): valu
   return value !== undefined && value !== null;
 }
 
-function toRemoteEvent(
-  command: string,
-  appError: AppError,
-  correlationId: string,
-  monitoringContext: MonitoringContext,
-): CommandFailureRemoteEvent {
-  return {
-    command,
-    code: appError.code,
-    kind: appError.kind,
-    support_id: appError.support_id,
-    correlation_id: correlationId,
-    context: monitoringContext,
-  };
+export interface CaptureCommandFailureInput {
+  command: string;
+  appError: AppError;
+  correlationId?: string | null;
+  monitoringContext?: MonitoringContext | null;
 }
 
 export async function captureCommandFailure(
-  command: string,
-  error: unknown,
-  options?: {
-    correlationId?: string | null;
-    monitoringContext?: MonitoringContext | null;
-  },
+  input: CaptureCommandFailureInput,
 ): Promise<void> {
+  const { command, appError, correlationId, monitoringContext } = input;
   if (!isMonitoredCommand(command)) {
     return;
   }
 
-  const correlationId = options?.correlationId;
-  const monitoringContext = options?.monitoringContext;
   if (!hasCorrelationId(correlationId) || !hasMonitoringContext(monitoringContext)) {
     return;
   }
@@ -89,7 +73,10 @@ export async function captureCommandFailure(
     return;
   }
 
-  await submitCommandFailureEvent(
-    toRemoteEvent(command, normalizeAppError(error), correlationId, monitoringContext),
-  );
+  await submitCommandFailureEvent({
+    command,
+    appError,
+    correlationId,
+    monitoringContext,
+  });
 }

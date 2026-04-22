@@ -88,45 +88,47 @@ describe("appError", () => {
 
   it("does not leak monitoring context into the invoke payload when remote capture rejects", async () => {
     const payload = {
-      code: "AUTH_INVALID_PIN",
-      message: "Mã PIN không đúng",
+      code: "BOOKING_GUEST_REQUIRED",
+      message: "Phải có ít nhất 1 khách",
       kind: "user",
       support_id: null,
     };
     const monitoringContext = {
-      guest_count: 2,
-      nights: 3,
-      source: "phone",
-      notes_present: true,
+      guest_count: 0,
+      nights: 1,
+      source: null,
+      notes_present: false,
     } as const;
 
     vi.mocked(invoke).mockRejectedValueOnce(payload);
     vi.mocked(captureCommandFailure).mockRejectedValueOnce(new Error("remote capture failed"));
 
     const promise = invokeCommand(
-      "login",
-      { req: { pin: "0000" } },
+      "check_in",
+      { req: { room_id: "room-101" } },
       {
         correlationId: "COR-8F3A1C7D",
         monitoringContext,
       },
     );
 
-    expect(invoke).toHaveBeenCalledWith("login", {
-      req: { pin: "0000" },
+    expect(invoke).toHaveBeenCalledWith("check_in", {
+      req: { room_id: "room-101" },
       correlationId: "COR-8F3A1C7D",
     });
 
     await expect(promise).rejects.toMatchObject({
       name: "AppError",
-      code: "AUTH_INVALID_PIN",
-      message: "Mã PIN không đúng",
+      code: "BOOKING_GUEST_REQUIRED",
+      message: "Phải có ít nhất 1 khách",
       kind: "user",
       support_id: null,
       correlation_id: "COR-8F3A1C7D",
     });
 
-    expect(captureCommandFailure).toHaveBeenCalledWith("login", payload, {
+    expect(captureCommandFailure).toHaveBeenCalledWith({
+      command: "check_in",
+      appError: payload,
       correlationId: "COR-8F3A1C7D",
       monitoringContext,
     });
@@ -135,8 +137,8 @@ describe("appError", () => {
       expect(error).toBeInstanceOf(Error);
       expect(error).toMatchObject({
         name: "AppError",
-        code: "AUTH_INVALID_PIN",
-        message: "Mã PIN không đúng",
+        code: "BOOKING_GUEST_REQUIRED",
+        message: "Phải có ít nhất 1 khách",
         kind: "user",
         support_id: null,
         correlation_id: "COR-8F3A1C7D",

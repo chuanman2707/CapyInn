@@ -2,6 +2,7 @@ import * as Sentry from "@sentry/browser";
 
 import type { MonitoringContext } from "./commandFailure";
 import type { CrashReportSummary } from "./types";
+import type { AppError } from "../appError";
 
 let initialized = false;
 
@@ -25,11 +26,9 @@ export function hasRemoteCrashReporting(): boolean {
 
 export interface CommandFailureRemoteEvent {
   command: string;
-  code: string;
-  kind: "user" | "system";
-  support_id: string | null;
-  correlation_id: string;
-  context: MonitoringContext;
+  appError: AppError;
+  correlationId: string;
+  monitoringContext: MonitoringContext;
 }
 
 function scrubValue(value: string): string {
@@ -106,21 +105,24 @@ export async function submitCommandFailureEvent(event: CommandFailureRemoteEvent
     throw new Error("Sentry DSN is not configured");
   }
 
+  const level = event.appError.kind === "user" ? "warning" : "error";
+
   Sentry.captureEvent({
-    level: "error",
+    level,
     message: `Command failure: ${event.command}`,
     tags: {
+      event_type: "command_failure",
       command: event.command,
-      code: event.code,
-      kind: event.kind,
+      code: event.appError.code,
+      kind: event.appError.kind,
     },
     extra: {
       command: event.command,
-      code: event.code,
-      kind: event.kind,
-      support_id: event.support_id,
-      correlation_id: event.correlation_id,
-      context: event.context,
+      code: event.appError.code,
+      kind: event.appError.kind,
+      support_id: event.appError.support_id,
+      correlation_id: event.correlationId,
+      context: event.monitoringContext,
     },
   });
 
