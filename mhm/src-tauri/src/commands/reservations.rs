@@ -138,12 +138,6 @@ fn map_create_reservation_user_error(
     CommandError::user(code, message)
 }
 
-fn is_invalid_reservation_nights_error(message: &str) -> bool {
-    message == "Number of nights must be greater than 0"
-        || message == "Check-out date must be after check-in date"
-        || message.starts_with("Number of nights must match the date range")
-}
-
 fn map_create_reservation_error(
     command_name: &str,
     effective_correlation_id: &EffectiveCorrelationId,
@@ -151,7 +145,7 @@ fn map_create_reservation_error(
     context: Value,
 ) -> CommandError {
     match error {
-        BookingError::Validation(message) if is_invalid_reservation_nights_error(&message) => {
+        BookingError::Validation(message) if message == "Number of nights must be greater than 0" => {
             map_create_reservation_user_error(
                 codes::BOOKING_INVALID_NIGHTS,
                 command_name,
@@ -206,6 +200,20 @@ fn reservation_failure_context(req: &CreateReservationRequest) -> Value {
     })
 }
 
+fn unauthenticated_create_reservation_error(
+    effective_correlation_id: &EffectiveCorrelationId,
+    context: Value,
+) -> CommandError {
+    let command_error = CommandError::user(codes::AUTH_NOT_AUTHENTICATED, "Chưa đăng nhập");
+    record_command_failure(
+        "create_reservation",
+        &command_error,
+        &effective_correlation_id.value,
+        context,
+    );
+    command_error
+}
+
 #[tauri::command]
 pub async fn create_reservation(
     state: State<'_, AppState>,
@@ -225,15 +233,10 @@ pub async fn create_reservation(
     );
 
     if get_user(&state).is_none() {
-        let command_error =
-            CommandError::user(codes::AUTH_NOT_AUTHENTICATED, "Chưa đăng nhập");
-        record_command_failure(
-            "create_reservation",
-            &command_error,
-            &effective_correlation_id.value,
+        return Err(unauthenticated_create_reservation_error(
+            &effective_correlation_id,
             error_context,
-        );
-        return Err(command_error);
+        ));
     }
 
     let booking = reservation_lifecycle::create_reservation(&state.db, req)
@@ -465,11 +468,30 @@ pub async fn get_rooms_availability(
 
 #[cfg(test)]
 mod tests {
-    use super::{map_create_reservation_error, reservation_failure_context};
+    use super::{
+        map_create_reservation_error, reservation_failure_context,
+        unauthenticated_create_reservation_error,
+    };
     use crate::app_error::{codes, AppErrorKind, CorrelationIdSource, EffectiveCorrelationId};
     use crate::domain::booking::BookingError;
     use crate::models::CreateReservationRequest;
     use serde_json::json;
+    use std::fs;
+
+    fn reservation_request() -> CreateReservationRequest {
+        CreateReservationRequest {
+            room_id: "R101".to_string(),
+            guest_name: "Nguyen Van A".to_string(),
+            guest_phone: Some("0901234567".to_string()),
+            guest_doc_number: Some("079123456789".to_string()),
+            check_in_date: "2026-04-25".to_string(),
+            check_out_date: "2026-04-27".to_string(),
+            nights: 2,
+            deposit_amount: Some(500000.0),
+            source: Some("zalo".to_string()),
+            notes: Some("Khách thích tầng cao".to_string()),
+        }
+    }
 
     fn frontend_correlation_id() -> EffectiveCorrelationId {
         EffectiveCorrelationId {
@@ -484,6 +506,26 @@ mod tests {
         let error = map_create_reservation_error(
             "create_reservation",
             &frontend_correlation_id(),
+            BookingError::validation("Number of nights must be greater than 0".to_string()),
+            json!({
+                "room_id": "R101",
+                "check_in_date": "2026-04-25",
+                "check_out_date": "2026-04-25",
+                "nights": 0,
+            }),
+        );
+
+        assert_eq!(error.code, codes::BOOKING_INVALID_NIGHTS);
+        assert_eq!(error.message, "Số đêm phải lớn hơn 0");
+        assert_eq!(error.kind, AppErrorKind::User);
+        assert!(error.support_id.is_none());
+    }
+
+    #[test]
+    fn map_create_reservation_error_keeps_date_range_mismatch_feedback_under_invalid_state() {
+        let error = map_create_reservation_error(
+            "create_reservation",
+            &frontend_correlation_id(),
             BookingError::validation(
                 "Number of nights must match the date range (expected 2)".to_string(),
             ),
@@ -495,26 +537,18 @@ mod tests {
             }),
         );
 
-        assert_eq!(error.code, codes::BOOKING_INVALID_NIGHTS);
-        assert_eq!(error.message, "Số đêm phải lớn hơn 0");
+        assert_eq!(error.code, codes::BOOKING_INVALID_STATE);
+        assert_eq!(
+            error.message,
+            "Number of nights must match the date range (expected 2)"
+        );
         assert_eq!(error.kind, AppErrorKind::User);
         assert!(error.support_id.is_none());
     }
 
     #[test]
     fn reservation_failure_context_keeps_only_scrubbed_flags_and_dates() {
-        let context = reservation_failure_context(&CreateReservationRequest {
-            room_id: "R101".to_string(),
-            guest_name: "Nguyen Van A".to_string(),
-            guest_phone: Some("0901234567".to_string()),
-            guest_doc_number: Some("079123456789".to_string()),
-            check_in_date: "2026-04-25".to_string(),
-            check_out_date: "2026-04-27".to_string(),
-            nights: 2,
-            deposit_amount: Some(500000.0),
-            source: Some("zalo".to_string()),
-            notes: Some("Khách thích tầng cao".to_string()),
-        });
+        let context = reservation_failure_context(&reservation_request());
 
         assert_eq!(
             context,
@@ -532,5 +566,56 @@ mod tests {
         assert!(context.get("guest_phone").is_none());
         assert!(context.get("guest_doc_number").is_none());
         assert!(context.get("notes").is_none());
+    }
+
+    #[test]
+    fn unauthenticated_create_reservation_error_records_scrubbed_failure_context() {
+        let _guard = crate::runtime_config::env_lock().lock().unwrap();
+        let runtime_root = std::env::temp_dir().join(format!(
+            "capyinn-create-reservation-auth-{}",
+            uuid::Uuid::new_v4()
+        ));
+
+        std::env::set_var("CAPYINN_RUNTIME_ROOT", &runtime_root);
+        let error = unauthenticated_create_reservation_error(
+            &EffectiveCorrelationId {
+                value: "COR-5E6F7A8B".to_string(),
+                source: CorrelationIdSource::Frontend,
+                rejected_length: None,
+            },
+            reservation_failure_context(&reservation_request()),
+        );
+        std::env::remove_var("CAPYINN_RUNTIME_ROOT");
+
+        assert_eq!(error.code, codes::AUTH_NOT_AUTHENTICATED);
+        assert_eq!(error.message, "Chưa đăng nhập");
+        assert_eq!(error.kind, AppErrorKind::User);
+        assert!(error.support_id.is_none());
+
+        let log_path = runtime_root
+            .join("diagnostics")
+            .join("command-failures.jsonl");
+        let contents = fs::read_to_string(&log_path).expect("command failure log contents");
+        let parsed: serde_json::Value =
+            serde_json::from_str(contents.trim()).expect("command failure json");
+
+        assert_eq!(parsed["command"], "create_reservation");
+        assert_eq!(parsed["code"], codes::AUTH_NOT_AUTHENTICATED);
+        assert_eq!(parsed["kind"], "user");
+        assert_eq!(parsed["correlation_id"], "COR-5E6F7A8B");
+        assert!(parsed["support_id"].is_null());
+        assert_eq!(parsed["context"]["room_id"], "R101");
+        assert_eq!(parsed["context"]["check_in_date"], "2026-04-25");
+        assert_eq!(parsed["context"]["check_out_date"], "2026-04-27");
+        assert_eq!(parsed["context"]["nights"], 2);
+        assert_eq!(parsed["context"]["deposit_present"], true);
+        assert_eq!(parsed["context"]["source"], "zalo");
+        assert_eq!(parsed["context"]["notes_present"], true);
+        assert!(parsed["context"].get("guest_name").is_none());
+        assert!(parsed["context"].get("guest_phone").is_none());
+        assert!(parsed["context"].get("guest_doc_number").is_none());
+        assert!(parsed["context"].get("notes").is_none());
+
+        let _ = fs::remove_dir_all(&runtime_root);
     }
 }
