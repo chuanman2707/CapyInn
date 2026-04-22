@@ -122,7 +122,7 @@ Example user-facing payloads:
   "code": "SYSTEM_INTERNAL_ERROR",
   "message": "Có lỗi hệ thống, vui lòng thử lại",
   "kind": "system",
-  "support_id": "SUP-9J4K2Q"
+  "support_id": "SUP-9F4A2C1D"
 }
 ```
 
@@ -133,6 +133,8 @@ Forward-compatibility rule:
 - frontend must ignore unknown extra fields on the error object
 - Phase 1 does not add a `version` field yet
 - future contract additions must preserve existing field meanings
+- Phase 1 treats the field set `{code, message, kind, support_id}` as the closed required contract for migrated interactions
+- reserve `details` as a future optional field name, but do not emit or consume it in Phase 1
 
 ### Message Source And Localization
 
@@ -230,6 +232,8 @@ Rules:
 - always present in the external contract
 - `null` for `user` errors
 - unique enough for practical support lookup
+- format: `SUP-` plus 8 uppercase hexadecimal characters generated backend-side from a UUIDv4 or equivalent random source
+- uniqueness target: best-effort uniqueness for local packaged-runtime diagnostics volume; Phase 1 does not attempt cross-install global uniqueness
 - logged together with:
   command name
   domain error code
@@ -244,7 +248,7 @@ Support IDs must be backend-issued. The frontend wrapper must not invent synthet
 
 Phase 1 uses the existing Rust `log` facade and `env_logger` stack already initialized in [lib.rs](/Users/binhan/HotelManager/mhm/src-tauri/src/lib.rs:79) for developer visibility, but it also needs one deterministic local support log for packaged runtime troubleshooting.
 
-Step 1 should therefore add a shared backend logging path that writes one structured JSON line per migrated `system` error to a local diagnostics file under the app runtime diagnostics directory.
+Step 1 should therefore add a shared backend logging path that writes one structured JSON line per migrated `system` error to `<runtime_root>/diagnostics/support-errors.jsonl`, where `runtime_root` is the existing path returned by [app_identity::runtime_root()](/Users/binhan/HotelManager/mhm/src-tauri/src/app_identity.rs:10).
 
 Each record should include at least:
 
@@ -254,6 +258,11 @@ Each record should include at least:
 - external `code`
 - root cause string
 - safe context fields such as `room_id`, `booking_id`, or `group_id` when available
+
+Phase 1 log-writer rules:
+
+- append writes must be serialized through one shared process-local mutex or equivalent single-writer path so concurrent command failures do not interleave JSON lines
+- Phase 1 does not add file rotation or truncation; operational volume is expected to stay small enough for one append-only JSONL file
 
 Phase 1 support lookup is local-first:
 
@@ -274,23 +283,24 @@ Naming rule:
 
 Examples:
 
-- `AUTH_INVALID_PIN`
-- `AUTH_NOT_AUTHENTICATED`
-- `AUTH_FORBIDDEN`
-- `ROOM_ALREADY_EXISTS`
-- `ROOM_NOT_FOUND`
-- `ROOM_DELETE_OCCUPIED`
-- `ROOM_DELETE_ACTIVE_BOOKING`
-- `GROUP_INVALID_ROOM_COUNT`
-- `GROUP_NOT_ENOUGH_VACANT_ROOMS`
-- `BOOKING_NOT_FOUND`
-- `BOOKING_INVALID_STATE`
+- `AUTH_INVALID_PIN` (`user`)
+- `AUTH_NOT_AUTHENTICATED` (`user`)
+- `AUTH_FORBIDDEN` (`user`)
+- `ROOM_ALREADY_EXISTS` (`user`)
+- `ROOM_NOT_FOUND` (`user`)
+- `ROOM_DELETE_OCCUPIED` (`user`)
+- `ROOM_DELETE_ACTIVE_BOOKING` (`user`)
+- `GROUP_INVALID_ROOM_COUNT` (`user`)
+- `GROUP_NOT_ENOUGH_VACANT_ROOMS` (`user`)
+- `BOOKING_NOT_FOUND` (`user`)
+- `BOOKING_INVALID_STATE` (`user`)
+- `SYSTEM_INTERNAL_ERROR` (`system`)
 
 Phase 1 should keep the code list curated instead of auto-generating codes from messages. New codes should be added deliberately when a migrated flow introduces a genuinely distinct operator-facing outcome.
 
 ### Canonical Registry
 
-Phase 1 should keep one canonical checked-in registry of externally visible error codes at `mhm/shared/error-codes.json`.
+Phase 1 should keep one canonical checked-in registry of externally visible error codes at `mhm/shared/error-codes.json`. The `mhm/shared/` directory does not exist yet and should be created as part of Step 1.
 
 Rules:
 
@@ -323,7 +333,14 @@ Its responsibilities:
 
 This wrapper should be the only place where the app knows how to interpret backend command failures.
 
-If the wrapper receives a rejection that does not match the standard migrated contract, it must fall back to one safe synthesized app error instead of trying to infer meaning from raw string text. In Phase 1, that fallback should behave like a generic `system` error with `code = SYSTEM_INTERNAL_ERROR`, a generic safe message, and `support_id = null`. This fallback is only a safety net for accidental misuse, not the intended path for unmigrated commands.
+If the wrapper receives a rejection that does not match the standard migrated contract, it must fall back to one safe synthesized app error instead of trying to infer meaning from raw string text. For Phase 1, a payload counts as contract-shaped only when all of the following are true:
+
+- `code` exists and is a string
+- `message` exists and is a string
+- `kind` exists and is exactly `user` or `system`
+- `support_id` is either `null`, a string, or missing
+
+Anything else must fall back to one synthesized generic `system` error with `code = SYSTEM_INTERNAL_ERROR`, a generic safe message, and `support_id = null`. This fallback is only a safety net for accidental misuse, not the intended path for unmigrated commands.
 
 ### Shared Error Presentation
 
@@ -435,6 +452,7 @@ Migrate the easiest and highest-signal flows first.
 Prerequisite:
 
 - refactor [mod.rs](/Users/binhan/HotelManager/mhm/src-tauri/src/commands/mod.rs:29) helpers `require_admin_user` and `require_admin` so migrated permission-gated flows stop returning raw Vietnamese `String` errors and instead return the shared auth or permission error type
+- update existing tests that assert raw string failures from those helpers, including the current [commands/mod.rs](/Users/binhan/HotelManager/mhm/src-tauri/src/commands/mod.rs:66) helper tests
 
 Target outcomes:
 
@@ -513,6 +531,8 @@ Priority migrated-screen tests:
 - login screen
 - room management flows
 - selected group booking flows
+
+Phase 1 should also include at least one end-to-end or UI-integration path per migrated domain so the backend contract, frontend wrapper, and user-facing presentation are exercised together instead of only in isolated unit layers.
 
 ### Repository Hygiene Checks
 
