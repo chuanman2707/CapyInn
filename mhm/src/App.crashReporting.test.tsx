@@ -9,6 +9,7 @@ import { clearMockResponses, setMockResponses } from "./__mocks__/tauri-core";
 import { resetEventMocks } from "./__mocks__/tauri-event";
 import { useAuthStore } from "./stores/useAuthStore";
 import { useHotelStore } from "./stores/useHotelStore";
+import { toast } from "sonner";
 
 vi.mock("./pages/Dashboard", () => ({ default: () => <div>Dashboard page</div> }));
 vi.mock("./pages/Rooms", () => ({ default: () => <div>Rooms page</div> }));
@@ -141,5 +142,56 @@ describe("App crash reporting flow", () => {
     expect(
       await screen.findByText("/Users/test/CapyInn/exports/crash-reports/bundle-1.json"),
     ).toBeInTheDocument();
+  });
+
+  it("lets the user dismiss the crash prompt even when local cleanup fails", async () => {
+    const user = userEvent.setup();
+
+    setMockResponses({
+      get_bootstrap_status: () => ({
+        setup_completed: true,
+        app_lock_enabled: false,
+        current_user: {
+          id: "owner",
+          name: "Owner",
+          role: "admin",
+          active: true,
+          created_at: "2026-04-20T00:00:00+07:00",
+        },
+      }),
+      get_crash_reporting_preference: () => false,
+      get_pending_crash_report: () => ({
+        bundle_id: "bundle-1",
+        crash_type: "rust_panic",
+        occurred_at: "2026-04-20T10:00:00+07:00",
+        app_version: "0.1.1",
+        environment: "production",
+        platform: "macos",
+        arch: "aarch64",
+        installation_id: "install-1",
+        message: "startup boom",
+        stacktrace: ["frame-a"],
+        module_hint: null,
+        attempt_count: 0,
+      }),
+      mark_crash_report_dismissed: () => {
+        throw new Error("disk still locked");
+      },
+    });
+
+    render(<App />);
+
+    await waitFor(() => expect(screen.getByText("Overview")).toBeInTheDocument());
+    expect(await screen.findByText("App encountered a serious error")).toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "Don't send" }));
+
+    expect(invoke).toHaveBeenCalledWith("mark_crash_report_dismissed", {
+      bundle_id: "bundle-1",
+    });
+    await waitFor(() => {
+      expect(screen.queryByText("App encountered a serious error")).not.toBeInTheDocument();
+    });
+    expect(toast.error).toHaveBeenCalled();
   });
 });
