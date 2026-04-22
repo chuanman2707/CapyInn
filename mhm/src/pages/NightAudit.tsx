@@ -4,6 +4,9 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { invoke } from "@tauri-apps/api/core";
 import { toast } from "sonner";
+import { createCorrelationId } from "@/lib/correlationId";
+import { formatAppError } from "@/lib/appError";
+import { invokeCommand } from "@/lib/invokeCommand";
 import { useAuthStore } from "@/stores/useAuthStore";
 import { Moon, TrendingUp, Home, DollarSign, AlertCircle } from "lucide-react";
 import { fmtMoney } from "@/lib/format";
@@ -30,15 +33,16 @@ export default function NightAudit() {
         }
         setRunning(true);
         try {
-            const result = await invoke<AuditLog>("run_night_audit", {
+            const correlationId = createCorrelationId();
+            const result = await invokeCommand<AuditLog>("run_night_audit", {
                 auditDate,
                 notes: notes || null,
-            });
+            }, { correlationId });
             toast.success(`Night Audit ngày ${auditDate} hoàn tất!`);
             setLogs((prev) => [result, ...prev]);
             setNotes("");
         } catch (e: any) {
-            toast.error(e?.toString?.() || "Lỗi chạy Night Audit");
+            toast.error(formatAppError(e));
         } finally {
             setRunning(false);
         }

@@ -84,12 +84,20 @@ const autoAssignUserError: AppError = {
   support_id: null,
 };
 
+const groupCheckInUserError: AppError = {
+  code: "BOOKING_INVALID_STATE",
+  message: "Master guest information is required",
+  kind: "user",
+  support_id: null,
+};
+
 describe("GroupCheckinSheet", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     autoAssignRooms.mockRejectedValue(
       createAppErrorException(autoAssignUserError),
     );
+    groupCheckIn.mockResolvedValue(undefined);
   });
 
   it("keeps the sheet open and formats migrated auto-assign failures", async () => {
@@ -105,6 +113,58 @@ describe("GroupCheckinSheet", () => {
     expect(autoAssignRooms).toHaveBeenCalledWith(3, undefined);
     expect(toastError).toHaveBeenCalledWith(formatAppError(autoAssignUserError));
     expect(screen.getByText(/Bước 2\/4: Chọn phòng/i)).toBeInTheDocument();
+    expect(setGroupCheckinOpen).not.toHaveBeenCalledWith(false);
+  });
+
+  it("surfaces correlation IDs when group check-in fails", async () => {
+    const correlationId = "COR-1A2B3C4D";
+    const user = userEvent.setup();
+
+    autoAssignRooms.mockResolvedValue({
+      assignments: [
+        {
+          room: {
+            id: "R101",
+            name: "R101",
+            type: "standard",
+            room_type: "standard",
+            floor: 1,
+            has_balcony: false,
+            base_price: 500000,
+            max_guests: 2,
+            extra_person_fee: 0,
+            status: "vacant",
+          },
+          floor: 1,
+        },
+      ],
+    });
+    groupCheckIn.mockRejectedValue(
+      createAppErrorException(groupCheckInUserError, undefined, {
+        correlation_id: correlationId,
+      }),
+    );
+
+    render(<GroupCheckinSheet />);
+
+    const textboxes = screen.getAllByRole("textbox");
+    await user.type(textboxes[0], "Test Group");
+    await user.type(textboxes[1], "Organizer");
+    await user.click(screen.getByRole("button", { name: /Tiếp theo/i }));
+    await user.click(screen.getByRole("button", { name: /Tự động chọn 3 phòng/i }));
+    await user.click(screen.getByRole("button", { name: /Tiếp theo/i }));
+    await user.click(screen.getByRole("button", { name: /Tiếp theo/i }));
+    await user.click(
+      screen.getByRole("button", { name: /Hoàn tất Group Check-in/i }),
+    );
+
+    expect(groupCheckIn).toHaveBeenCalledTimes(1);
+    expect(toastError).toHaveBeenCalledWith(
+      formatAppError({
+        ...groupCheckInUserError,
+        correlation_id: correlationId,
+      }),
+    );
     expect(setGroupCheckinOpen).not.toHaveBeenCalledWith(false);
   });
 });

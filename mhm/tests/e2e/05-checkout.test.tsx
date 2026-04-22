@@ -29,8 +29,12 @@ describe("05 — Check-out Flow", () => {
 
         await useHotelStore.getState().checkOut("booking-1", "hourly", 400000);
 
-        expect(invoke).toHaveBeenCalledWith("check_out", {
+        const checkOutCall = invoke.mock.calls.find(([command]) => command === "check_out");
+        expect(checkOutCall).toBeDefined();
+
+        expect(checkOutCall?.[1]).toMatchObject({
             req: { booking_id: "booking-1", settlement_mode: "hourly", final_total: 400000 },
+            correlationId: expect.stringMatching(/^COR-[0-9A-F]{8}$/),
         });
     });
 
@@ -63,14 +67,25 @@ describe("05 — Check-out Flow", () => {
             };
         });
 
-        await expect(
-            useHotelStore.getState().checkOut("nonexistent", "actual_nights", 500000)
-        ).rejects.toMatchObject({
+        const promise = useHotelStore
+            .getState()
+            .checkOut("nonexistent", "actual_nights", 500000);
+
+        await expect(promise).rejects.toMatchObject({
             name: "AppError",
             code: "BOOKING_NOT_FOUND",
             message: "Booking not found",
             kind: "user",
             support_id: null,
+            correlation_id: expect.stringMatching(/^COR-[0-9A-F]{8}$/),
+        });
+
+        const checkOutCall = invoke.mock.calls.find(([command]) => command === "check_out");
+        const correlationId = checkOutCall?.[1]?.correlationId;
+        expect(correlationId).toMatch(/^COR-[0-9A-F]{8}$/);
+
+        await promise.catch((error) => {
+            expect(error.correlation_id).toBe(correlationId);
         });
 
         expect(useHotelStore.getState().loading).toBe(false);
@@ -81,8 +96,10 @@ describe("05 — Check-out Flow", () => {
 
         await useHotelStore.getState().checkOut("booking-1", "booked_nights", 2500000);
 
-        expect(invoke).toHaveBeenCalledWith("check_out", {
+        const checkOutCall = invoke.mock.calls.find(([command]) => command === "check_out");
+        expect(checkOutCall?.[1]).toMatchObject({
             req: { booking_id: "booking-1", settlement_mode: "booked_nights", final_total: 2500000 },
+            correlationId: expect.stringMatching(/^COR-[0-9A-F]{8}$/),
         });
     });
 });

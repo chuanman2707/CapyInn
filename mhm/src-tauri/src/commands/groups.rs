@@ -1,6 +1,9 @@
 use super::{emit_db_update, get_f64, get_user_id, AppState};
 use crate::{
-    app_error::{codes, log_system_error, CommandError, CommandResult},
+    app_error::{
+        codes, correlation_context, log_system_error, normalize_correlation_id, CommandError,
+        CommandResult, EffectiveCorrelationId,
+    },
     domain::booking::BookingError,
     models::*,
 };
@@ -11,36 +14,125 @@ use tauri::State;
 
 // ─── Group Booking Commands ───
 
-fn map_group_error(command_name: &str, error: BookingError, context: Value) -> CommandError {
+fn log_group_user_error(
+    command_name: &str,
+    effective_correlation_id: &EffectiveCorrelationId,
+    message: &str,
+    context: &Value,
+) {
+    let context_json = serde_json::to_string(&correlation_context(
+        &effective_correlation_id.value,
+        context.clone(),
+    ))
+    .unwrap_or_else(|_| "{}".to_string());
+
+    log::warn!(
+        "user error {} correlation_id={} source={:?}: {} | context={}",
+        command_name,
+        effective_correlation_id.value,
+        effective_correlation_id.source,
+        message,
+        context_json
+    );
+}
+
+fn map_group_user_error(
+    code: &'static str,
+    command_name: &str,
+    effective_correlation_id: &EffectiveCorrelationId,
+    message: String,
+    context: &Value,
+) -> CommandError {
+    log_group_user_error(
+        command_name,
+        effective_correlation_id,
+        message.as_str(),
+        context,
+    );
+    CommandError::user(code, message)
+}
+
+fn map_group_error(
+    command_name: &str,
+    effective_correlation_id: &EffectiveCorrelationId,
+    error: BookingError,
+    context: Value,
+) -> CommandError {
     match error {
         BookingError::Validation(message) if message == "Phải chọn ít nhất 1 phòng để checkout" => {
-            CommandError::user(codes::GROUP_CHECKOUT_SELECTION_REQUIRED, message)
+            map_group_user_error(
+                codes::GROUP_CHECKOUT_SELECTION_REQUIRED,
+                command_name,
+                effective_correlation_id,
+                message,
+                &context,
+            )
         }
         BookingError::Validation(message)
             if message == "Phải chọn ít nhất 1 phòng" || message == "Số phòng phải > 0" =>
         {
-            CommandError::user(codes::GROUP_INVALID_ROOM_COUNT, message)
+            map_group_user_error(
+                codes::GROUP_INVALID_ROOM_COUNT,
+                command_name,
+                effective_correlation_id,
+                message,
+                &context,
+            )
         }
         BookingError::Validation(message) if message == "Số đêm phải > 0" => {
-            CommandError::user(codes::BOOKING_INVALID_NIGHTS, message)
+            map_group_user_error(
+                codes::BOOKING_INVALID_NIGHTS,
+                command_name,
+                effective_correlation_id,
+                message,
+                &context,
+            )
         }
         BookingError::NotFound(message) if message.starts_with("Phòng ") => {
-            CommandError::user(codes::ROOM_NOT_FOUND, message)
+            map_group_user_error(
+                codes::ROOM_NOT_FOUND,
+                command_name,
+                effective_correlation_id,
+                message,
+                &context,
+            )
         }
         BookingError::NotFound(message) if message.starts_with("Không tìm thấy group ") => {
-            CommandError::user(codes::GROUP_NOT_FOUND, message)
+            map_group_user_error(
+                codes::GROUP_NOT_FOUND,
+                command_name,
+                effective_correlation_id,
+                message,
+                &context,
+            )
         }
         BookingError::NotFound(message)
             if message.starts_with("Booking ") && message.contains("không tìm thấy") =>
         {
-            CommandError::user(codes::BOOKING_NOT_FOUND, message)
+            map_group_user_error(
+                codes::BOOKING_NOT_FOUND,
+                command_name,
+                effective_correlation_id,
+                message,
+                &context,
+            )
         }
         BookingError::Validation(message) | BookingError::Conflict(message) => {
-            CommandError::user(codes::BOOKING_INVALID_STATE, message)
+            map_group_user_error(
+                codes::BOOKING_INVALID_STATE,
+                command_name,
+                effective_correlation_id,
+                message,
+                &context,
+            )
         }
         BookingError::NotFound(message)
         | BookingError::Database(message)
-        | BookingError::DateTimeParse(message) => log_system_error(command_name, message, context),
+        | BookingError::DateTimeParse(message) => log_system_error(
+            command_name,
+            message,
+            correlation_context(&effective_correlation_id.value, context),
+        ),
     }
 }
 
@@ -74,16 +166,35 @@ pub async fn group_checkin(
     state: State<'_, AppState>,
     app: tauri::AppHandle,
     req: GroupCheckinRequest,
+    correlation_id: Option<String>,
 ) -> CommandResult<BookingGroup> {
+    let effective_correlation_id = normalize_correlation_id(correlation_id);
     let error_context = json!({
         "group_name": req.group_name.clone(),
         "room_count": req.room_ids.len(),
         "nights": req.nights,
         "master_room_id": req.master_room_id.clone(),
     });
+    log::info!(
+        "group_checkin start correlation_id={} source={:?} group_name={} room_count={} nights={}",
+        effective_correlation_id.value,
+        effective_correlation_id.source,
+        req.group_name,
+        req.room_ids.len(),
+        req.nights
+    );
     let group = group_lifecycle::group_checkin(&state.db, get_user_id(&state), req)
         .await
-        .map_err(|error| map_group_error("group_checkin", error, error_context))?;
+        .map_err(|error| {
+            map_group_error("group_checkin", &effective_correlation_id, error, error_context)
+        })?;
+    log::info!(
+        "group_checkin success correlation_id={} source={:?} group_id={} total_rooms={}",
+        effective_correlation_id.value,
+        effective_correlation_id.source,
+        group.id,
+        group.total_rooms
+    );
     emit_db_update(&app, "rooms");
     emit_db_update(&app, "groups");
     Ok(group)
@@ -95,15 +206,36 @@ pub async fn group_checkout(
     state: State<'_, AppState>,
     app: tauri::AppHandle,
     req: GroupCheckoutRequest,
+    correlation_id: Option<String>,
 ) -> CommandResult<()> {
+    let effective_correlation_id = normalize_correlation_id(correlation_id);
+    let group_id = req.group_id.clone();
+    let booking_count = req.booking_ids.len();
     let error_context = json!({
-        "group_id": req.group_id.clone(),
-        "booking_count": req.booking_ids.len(),
+        "group_id": group_id,
+        "booking_count": booking_count,
         "final_paid": req.final_paid,
     });
+    log::info!(
+        "group_checkout start correlation_id={} source={:?} group_id={} booking_count={} final_paid={:?}",
+        effective_correlation_id.value,
+        effective_correlation_id.source,
+        req.group_id,
+        req.booking_ids.len(),
+        req.final_paid
+    );
     group_lifecycle::group_checkout(&state.db, req)
         .await
-        .map_err(|error| map_group_error("group_checkout", error, error_context))?;
+        .map_err(|error| {
+            map_group_error("group_checkout", &effective_correlation_id, error, error_context)
+        })?;
+    log::info!(
+        "group_checkout success correlation_id={} source={:?} group_id={} booking_count={}",
+        effective_correlation_id.value,
+        effective_correlation_id.source,
+        group_id,
+        booking_count
+    );
     emit_db_update(&app, "rooms");
     emit_db_update(&app, "groups");
 
@@ -512,14 +644,26 @@ pub async fn generate_group_invoice(
 #[cfg(test)]
 mod tests {
     use super::{map_auto_assign_error, map_group_detail_error, map_group_error};
-    use crate::app_error::{codes, AppErrorKind};
+    use crate::app_error::{
+        codes, AppErrorKind, CorrelationIdSource, EffectiveCorrelationId,
+    };
     use crate::domain::booking::BookingError;
     use serde_json::json;
 
+    fn frontend_correlation_id() -> EffectiveCorrelationId {
+        EffectiveCorrelationId {
+            value: "COR-1A2B3C4D".to_string(),
+            source: CorrelationIdSource::Frontend,
+            rejected_length: None,
+        }
+    }
+
     #[test]
     fn map_group_error_maps_missing_group_to_shared_contract() {
+        let effective_correlation_id = frontend_correlation_id();
         let error = map_group_error(
             "group_checkin",
+            &effective_correlation_id,
             BookingError::not_found("Không tìm thấy group group-1"),
             json!({ "group_id": "group-1" }),
         );
@@ -532,8 +676,10 @@ mod tests {
 
     #[test]
     fn map_group_error_maps_checkout_selection_required_to_shared_code() {
+        let effective_correlation_id = frontend_correlation_id();
         let error = map_group_error(
             "group_checkout",
+            &effective_correlation_id,
             BookingError::validation("Phải chọn ít nhất 1 phòng để checkout"),
             json!({ "group_id": "group-1" }),
         );
@@ -546,8 +692,10 @@ mod tests {
 
     #[test]
     fn map_group_error_maps_invalid_room_count_to_shared_code() {
+        let effective_correlation_id = frontend_correlation_id();
         let error = map_group_error(
             "group_checkin",
+            &effective_correlation_id,
             BookingError::validation("Phải chọn ít nhất 1 phòng"),
             json!({ "group_id": "group-1" }),
         );
@@ -556,6 +704,21 @@ mod tests {
         assert_eq!(error.message, "Phải chọn ít nhất 1 phòng");
         assert_eq!(error.kind, AppErrorKind::User);
         assert!(error.support_id.is_none());
+    }
+
+    #[test]
+    fn map_group_error_keeps_system_failures_in_system_contract() {
+        let effective_correlation_id = frontend_correlation_id();
+        let error = map_group_error(
+            "group_checkout",
+            &effective_correlation_id,
+            BookingError::database("disk I/O failure"),
+            json!({ "group_id": "group-1" }),
+        );
+
+        assert_eq!(error.code, codes::SYSTEM_INTERNAL_ERROR);
+        assert_eq!(error.kind, AppErrorKind::System);
+        assert!(error.support_id.is_some());
     }
 
     #[test]

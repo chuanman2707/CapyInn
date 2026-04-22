@@ -1,5 +1,6 @@
 import { create } from "zustand";
 import { invoke } from "@tauri-apps/api/core";
+import { createCorrelationId } from "@/lib/correlationId";
 import { invokeCommand } from "@/lib/invokeCommand";
 import type {
   CheckInGuestInput,
@@ -101,9 +102,10 @@ export const useHotelStore = create<HotelStore>((set, get) => {
     checkIn: async (roomId, guests, nights, paidAmount, source, notes) => {
       beginAction();
       try {
+        const correlationId = createCorrelationId();
         await invokeCommand("check_in", {
           req: { room_id: roomId, guests, nights, source, notes, paid_amount: paidAmount },
-        });
+        }, { correlationId });
         await get().fetchRooms();
         await get().fetchStats();
         set({ activeTab: "dashboard" });
@@ -118,13 +120,14 @@ export const useHotelStore = create<HotelStore>((set, get) => {
     checkOut: async (bookingId, settlementMode, finalTotal) => {
       beginAction();
       try {
+        const correlationId = createCorrelationId();
         await invokeCommand("check_out", {
           req: {
             booking_id: bookingId,
             settlement_mode: settlementMode,
             final_total: finalTotal,
           },
-        });
+        }, { correlationId });
         await get().fetchRooms();
         await get().fetchStats();
         set({ activeTab: "dashboard" });
@@ -172,7 +175,8 @@ export const useHotelStore = create<HotelStore>((set, get) => {
     groupCheckIn: async (req) => {
       beginAction();
       try {
-        await invokeCommand("group_checkin", { req });
+        const correlationId = createCorrelationId();
+        await invokeCommand("group_checkin", { req }, { correlationId });
         await get().fetchRooms();
         await get().fetchStats();
         await get().fetchGroups();
@@ -188,7 +192,8 @@ export const useHotelStore = create<HotelStore>((set, get) => {
     groupCheckout: async (req) => {
       beginAction();
       try {
-        await invokeCommand("group_checkout", { req });
+        const correlationId = createCorrelationId();
+        await invokeCommand("group_checkout", { req }, { correlationId });
         await get().fetchRooms();
         await get().fetchStats();
         await get().fetchGroups();

@@ -8,15 +8,20 @@ await run(
   [
     "test",
     "--",
+    "src/lib/correlationId.test.ts",
     "src/lib/appError.test.ts",
     "src/pages/settings/useRoomConfig.test.tsx",
     "src/components/GroupCheckinSheet.test.tsx",
+    "src/pages/GroupManagement.test.tsx",
+    "src/pages/NightAudit.test.tsx",
     "src/App.updateFlow.test.tsx",
     "src/hooks/useAppUpdateController.test.tsx",
     "tests/e2e/01-login.test.tsx",
     "tests/e2e/03-checkin.test.tsx",
     "tests/e2e/05-checkout.test.tsx",
     "tests/e2e/08-settings.test.tsx",
+    "tests/e2e/11-night-audit.test.tsx",
+    "tests/e2e/13-store-hardening.test.ts",
   ],
   { cwd },
 );
@@ -32,6 +37,13 @@ await run(
   "command-helper-tests",
   "cargo",
   ["test", "--manifest-path", "src-tauri/Cargo.toml", "commands::tests::", "--", "--nocapture"],
+  { cwd },
+);
+
+await run(
+  "audit-command-tests",
+  "cargo",
+  ["test", "--manifest-path", "src-tauri/Cargo.toml", "commands::audit::tests::", "--", "--nocapture"],
   { cwd },
 );
 
