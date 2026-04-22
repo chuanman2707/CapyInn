@@ -33,6 +33,7 @@ describe("13 — Store Hardening", () => {
 
         setMockResponse("get_rooms", () => createAllRooms());
         setMockResponse("get_dashboard_stats", () => createStats());
+        setMockResponse("get_all_groups", () => []);
         useAuthStore.setState({
             user: null,
             isAuthenticated: false,
@@ -107,5 +108,88 @@ describe("13 — Store Hardening", () => {
 
         expect(useAuthStore.getState().user).toBeNull();
         expect(useAuthStore.getState().isAuthenticated).toBe(false);
+    });
+
+    it("sends a correlation ID for group check-in and preserves it on rejection", async () => {
+        const req = {
+            group_name: "Đoàn A",
+            organizer_name: "Trưởng đoàn",
+            room_ids: ["1A"],
+            master_room_id: "1A",
+            guests_per_room: {},
+            nights: 1,
+            source: "walk-in",
+        };
+
+        setMockResponse("group_checkin", () => {
+            throw {
+                code: "BOOKING_INVALID_STATE",
+                message: "Master guest information is required",
+                kind: "user",
+                support_id: null,
+            };
+        });
+
+        const promise = useHotelStore.getState().groupCheckIn(req);
+
+        await expect(promise).rejects.toMatchObject({
+            name: "AppError",
+            code: "BOOKING_INVALID_STATE",
+            message: "Master guest information is required",
+            kind: "user",
+            support_id: null,
+            correlation_id: expect.stringMatching(/^COR-[0-9A-F]{8}$/),
+        });
+
+        const groupCheckInCall = invoke.mock.calls.find(([command]) => command === "group_checkin");
+        const correlationId = groupCheckInCall?.[1]?.correlationId;
+
+        expect(groupCheckInCall?.[1]).toMatchObject({
+            req,
+            correlationId: expect.stringMatching(/^COR-[0-9A-F]{8}$/),
+        });
+
+        await promise.catch((error) => {
+            expect(error.correlation_id).toBe(correlationId);
+        });
+    });
+
+    it("sends a correlation ID for group checkout and preserves it on rejection", async () => {
+        const req = {
+            group_id: "group-1",
+            booking_ids: ["booking-1"],
+        };
+
+        setMockResponse("group_checkout", () => {
+            throw {
+                code: "BOOKING_INVALID_STATE",
+                message: "Không thể checkout booking đã đóng",
+                kind: "user",
+                support_id: null,
+            };
+        });
+
+        const promise = useHotelStore.getState().groupCheckout(req);
+
+        await expect(promise).rejects.toMatchObject({
+            name: "AppError",
+            code: "BOOKING_INVALID_STATE",
+            message: "Không thể checkout booking đã đóng",
+            kind: "user",
+            support_id: null,
+            correlation_id: expect.stringMatching(/^COR-[0-9A-F]{8}$/),
+        });
+
+        const groupCheckoutCall = invoke.mock.calls.find(([command]) => command === "group_checkout");
+        const correlationId = groupCheckoutCall?.[1]?.correlationId;
+
+        expect(groupCheckoutCall?.[1]).toMatchObject({
+            req,
+            correlationId: expect.stringMatching(/^COR-[0-9A-F]{8}$/),
+        });
+
+        await promise.catch((error) => {
+            expect(error.correlation_id).toBe(correlationId);
+        });
     });
 });

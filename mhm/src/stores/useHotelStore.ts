@@ -174,8 +174,9 @@ export const useHotelStore = create<HotelStore>((set, get) => {
 
     groupCheckIn: async (req) => {
       beginAction();
+      const correlationId = createCorrelationId();
       try {
-        await invokeCommand("group_checkin", { req });
+        await invokeCommand("group_checkin", { req }, { correlationId });
         await get().fetchRooms();
         await get().fetchStats();
         await get().fetchGroups();
@@ -190,8 +191,9 @@ export const useHotelStore = create<HotelStore>((set, get) => {
 
     groupCheckout: async (req) => {
       beginAction();
+      const correlationId = createCorrelationId();
       try {
-        await invokeCommand("group_checkout", { req });
+        await invokeCommand("group_checkout", { req }, { correlationId });
         await get().fetchRooms();
         await get().fetchStats();
         await get().fetchGroups();
