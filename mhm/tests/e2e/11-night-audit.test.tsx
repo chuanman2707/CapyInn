@@ -1,5 +1,6 @@
 import { describe, it, expect, beforeEach } from "vitest";
-import { render, waitFor } from "../helpers/render-app";
+import { fireEvent, render, screen, waitFor } from "../helpers/render-app";
+import userEvent from "@testing-library/user-event";
 import NightAudit from "@/pages/NightAudit";
 import { setMockResponse, clearMockResponses, invoke } from "@test-mocks/tauri-core";
 import { useAuthStore } from "@/stores/useAuthStore";
@@ -40,10 +41,10 @@ describe("11 — Night Audit", () => {
         });
     });
 
-    it("run_night_audit sends correct command", async () => {
-        setMockResponse("run_night_audit", () => ({
+    it("run_night_audit sends correlation-aware command through the page", async () => {
+        setMockResponse("run_night_audit", (args) => ({
             id: "audit-1",
-            audit_date: "2026-03-15",
+            audit_date: String(args?.auditDate),
             total_revenue: 1200000,
             room_revenue: 800000,
             folio_revenue: 400000,
@@ -51,21 +52,30 @@ describe("11 — Night Audit", () => {
             occupancy_pct: 30,
             rooms_sold: 3,
             total_rooms: 10,
-            notes: null,
+            notes: args?.notes ?? null,
             created_at: "2026-03-15T23:59:59+07:00",
         }));
+        const user = userEvent.setup();
+        const { container } = render(<NightAudit />);
+        const dateInput = container.querySelector('input[type="date"]');
 
-        // Call directly through invoke
-        const result = await invoke("run_night_audit", {
+        expect(dateInput).not.toBeNull();
+
+        fireEvent.change(dateInput!, { target: { value: "2026-03-15" } });
+        await user.type(screen.getByPlaceholderText("VD: Đã kiểm tra kho..."), "Ca đêm");
+        await user.click(screen.getByRole("button", { name: /chạy audit/i }));
+
+        const auditCall = invoke.mock.calls.find(([command]) => command === "run_night_audit");
+        expect(auditCall).toBeDefined();
+        expect(auditCall?.[1]).toMatchObject({
             auditDate: "2026-03-15",
-            notes: null,
+            notes: "Ca đêm",
+            correlationId: expect.stringMatching(/^COR-[0-9A-F]{8}$/),
         });
 
-        expect(invoke).toHaveBeenCalledWith("run_night_audit", {
-            auditDate: "2026-03-15",
-            notes: null,
+        await waitFor(() => {
+            expect(screen.getByText("Ca đêm")).toBeInTheDocument();
         });
-        expect(result).toHaveProperty("total_rooms", 10);
     });
 
     it("handles audit logs display", async () => {

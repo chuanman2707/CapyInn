@@ -89,7 +89,10 @@ describe("03 — Check-in Flow", () => {
             ""
         );
 
-        expect(invoke).toHaveBeenCalledWith("check_in", {
+        const checkInCall = invoke.mock.calls.find(([command]) => command === "check_in");
+        expect(checkInCall).toBeDefined();
+
+        expect(checkInCall?.[1]).toMatchObject({
             req: {
                 room_id: "1A",
                 guests: [{ full_name: "Nguyễn Văn A", doc_number: "012345678901" }],
@@ -98,6 +101,7 @@ describe("03 — Check-in Flow", () => {
                 notes: "",
                 paid_amount: 400000,
             },
+            correlationId: expect.stringMatching(/^COR-[0-9A-F]{8}$/),
         });
     });
 
@@ -111,18 +115,27 @@ describe("03 — Check-in Flow", () => {
             };
         });
 
-        await expect(
-            useHotelStore.getState().checkIn(
-                "2A", // already occupied
-                [{ full_name: "Test", doc_number: "123456789012" }],
-                1
-            )
-        ).rejects.toMatchObject({
+        const promise = useHotelStore.getState().checkIn(
+            "2A", // already occupied
+            [{ full_name: "Test", doc_number: "123456789012" }],
+            1
+        );
+
+        await expect(promise).rejects.toMatchObject({
             name: "AppError",
             code: "BOOKING_INVALID_STATE",
             message: "Room is already occupied",
             kind: "user",
             support_id: null,
+            correlation_id: expect.stringMatching(/^COR-[0-9A-F]{8}$/),
+        });
+
+        const checkInCall = invoke.mock.calls.find(([command]) => command === "check_in");
+        const correlationId = checkInCall?.[1]?.correlationId;
+        expect(correlationId).toMatch(/^COR-[0-9A-F]{8}$/);
+
+        await promise.catch((error) => {
+            expect(error.correlation_id).toBe(correlationId);
         });
 
         // Store should not be in loading state after error

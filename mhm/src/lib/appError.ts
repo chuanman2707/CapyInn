@@ -105,25 +105,38 @@ export function normalizeAppError(error: unknown): AppError {
   };
 }
 
+function getLocalCorrelationId(error: unknown): string | null {
+  if (!isRecord(error)) {
+    return null;
+  }
+
+  const { correlation_id } = error;
+  return typeof correlation_id === "string" ? correlation_id : null;
+}
+
 export function formatAppError(error: unknown): string {
   const normalized = normalizeAppError(error);
+  const localCorrelationId = getLocalCorrelationId(error);
+  const trackingLine = localCorrelationId ? `\nMã theo dõi: ${localCorrelationId}` : "";
 
   if (normalized.kind === "user") {
-    return normalized.message;
+    return `${normalized.message}${trackingLine}`;
   }
 
   if (normalized.support_id) {
-    return `${normalized.message} (Mã hỗ trợ: ${normalized.support_id})`;
+    return `${normalized.message} (Mã hỗ trợ: ${normalized.support_id})${trackingLine}`;
   }
 
-  return normalized.message;
+  return `${normalized.message}${trackingLine}`;
 }
 
-export type NormalizedAppErrorException = Error & AppError & { cause?: unknown };
+export type NormalizedAppErrorException = Error &
+  AppError & { correlation_id?: string | null; cause?: unknown };
 
 export function createAppErrorException(
   appError: AppError,
   cause?: unknown,
+  options?: { correlation_id?: string | null },
 ): NormalizedAppErrorException {
   const error = new Error(appError.message) as NormalizedAppErrorException;
   error.name = "AppError";
@@ -131,6 +144,9 @@ export function createAppErrorException(
   error.message = appError.message;
   error.kind = appError.kind;
   error.support_id = appError.support_id;
+  if (options?.correlation_id !== undefined) {
+    error.correlation_id = options.correlation_id;
+  }
   if (cause !== undefined) {
     error.cause = cause;
   }
