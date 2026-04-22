@@ -1,5 +1,6 @@
 import * as Sentry from "@sentry/browser";
 
+import type { MonitoringContext } from "./commandFailure";
 import type { CrashReportSummary } from "./types";
 
 let initialized = false;
@@ -20,6 +21,15 @@ function getSentryEnvironment(): "development" | "production" {
 
 export function hasRemoteCrashReporting(): boolean {
   return Boolean(getSentryDsn());
+}
+
+export interface CommandFailureRemoteEvent {
+  command: string;
+  code: string;
+  kind: "user" | "system";
+  support_id: string | null;
+  correlation_id: string;
+  context: MonitoringContext;
 }
 
 function scrubValue(value: string): string {
@@ -84,6 +94,33 @@ export async function submitCrashBundle(bundle: CrashReportSummary) {
       attempt_count: bundle.attempt_count,
       stacktrace: bundle.stacktrace.map((frame) => scrubValue(frame)),
       module_hint: bundle.module_hint,
+    },
+  });
+
+  await Sentry.flush(2000);
+}
+
+export async function submitCommandFailureEvent(event: CommandFailureRemoteEvent) {
+  ensureCrashReportingClient();
+  if (!hasRemoteCrashReporting()) {
+    throw new Error("Sentry DSN is not configured");
+  }
+
+  Sentry.captureEvent({
+    level: "error",
+    message: `Command failure: ${event.command}`,
+    tags: {
+      command: event.command,
+      code: event.code,
+      kind: event.kind,
+    },
+    extra: {
+      command: event.command,
+      code: event.code,
+      kind: event.kind,
+      support_id: event.support_id,
+      correlation_id: event.correlation_id,
+      context: event.context,
     },
   });
 

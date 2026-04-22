@@ -1,11 +1,12 @@
 import { invoke } from "@tauri-apps/api/core";
 
 import { createAppErrorException, normalizeAppError } from "./appError";
+import { captureCommandFailure, type MonitoringContext } from "./crashReporting/commandFailure";
 
 export async function invokeCommand<TResponse>(
   command: string,
   args?: Record<string, unknown>,
-  options?: { correlationId?: string },
+  options?: { correlationId?: string; monitoringContext?: MonitoringContext },
 ): Promise<TResponse> {
   try {
     const payload =
@@ -15,6 +16,11 @@ export async function invokeCommand<TResponse>(
 
     return await invoke<TResponse>(command, payload);
   } catch (error) {
+    await captureCommandFailure(command, error, {
+      correlationId: options?.correlationId,
+      monitoringContext: options?.monitoringContext,
+    }).catch(() => undefined);
+
     throw createAppErrorException(normalizeAppError(error), error, {
       correlation_id: options?.correlationId,
     });
