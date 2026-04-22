@@ -514,7 +514,11 @@ mod tests {
             "check_in",
             &error,
             "COR-1A2B3C4D",
-            json!({ "room_id": "R101" }),
+            json!({
+                "room_id": "R101",
+                "guest_count": 1,
+                "nights": 2,
+            }),
         );
         std::env::remove_var("CAPYINN_RUNTIME_ROOT");
 
@@ -532,6 +536,8 @@ mod tests {
         assert_eq!(parsed["correlation_id"], "COR-1A2B3C4D");
         assert!(parsed["support_id"].is_null());
         assert_eq!(parsed["context"]["room_id"], "R101");
+        assert_eq!(parsed["context"]["guest_count"], 1);
+        assert_eq!(parsed["context"]["nights"], 2);
         assert!(parsed["context"].get("correlation_id").is_none());
         assert!(parsed.get("room_id").is_none());
         assert!(parsed.get("root_cause").is_none());
@@ -554,7 +560,13 @@ mod tests {
             "create_reservation",
             &error,
             "COR-5A6B7C8D",
-            json!({ "booking_id": "B202" }),
+            json!({
+                "room_id": "R202",
+                "guest_name": "Nguyen Van A",
+                "check_in_date": "2026-04-22",
+                "check_out_date": "2026-04-24",
+                "nights": 2,
+            }),
         );
         std::env::remove_var("CAPYINN_RUNTIME_ROOT");
 
@@ -571,9 +583,13 @@ mod tests {
         assert_eq!(parsed["kind"], "system");
         assert_eq!(parsed["correlation_id"], "COR-5A6B7C8D");
         assert_eq!(parsed["support_id"], support_id);
-        assert_eq!(parsed["context"]["booking_id"], "B202");
+        assert_eq!(parsed["context"]["room_id"], "R202");
+        assert_eq!(parsed["context"]["guest_name"], "Nguyen Van A");
+        assert_eq!(parsed["context"]["check_in_date"], "2026-04-22");
+        assert_eq!(parsed["context"]["check_out_date"], "2026-04-24");
+        assert_eq!(parsed["context"]["nights"], 2);
         assert!(parsed["context"].get("correlation_id").is_none());
-        assert!(parsed.get("booking_id").is_none());
+        assert!(parsed.get("room_id").is_none());
         assert!(parsed.get("root_cause").is_none());
 
         let _ = fs::remove_dir_all(&runtime_root);

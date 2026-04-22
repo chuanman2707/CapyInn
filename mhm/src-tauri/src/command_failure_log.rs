@@ -113,11 +113,15 @@ mod tests {
 
         let first = CommandFailureRecord::new(
             "check_in",
-            codes::AUTH_INVALID_PIN,
+            codes::BOOKING_INVALID_NIGHTS,
             AppErrorKind::User,
             "COR-AAAA0001",
             None::<String>,
-            json!({ "room_id": "R101" }),
+            json!({
+                "room_id": "R101",
+                "guest_count": 0,
+                "nights": 0,
+            }),
         );
         let second = CommandFailureRecord::new(
             "check_out",
@@ -182,6 +186,12 @@ mod tests {
             .any(|line| line["context"]["room_id"] == "R101"));
         assert!(parsed
             .iter()
+            .any(|line| line["context"]["guest_count"] == 0));
+        assert!(parsed
+            .iter()
+            .any(|line| line["context"]["nights"] == 0));
+        assert!(parsed
+            .iter()
             .any(|line| line["context"]["booking_id"] == "B202"));
         assert!(parsed.iter().all(|line| line.get("room_id").is_none()));
         assert!(parsed.iter().all(|line| line.get("booking_id").is_none()));
@@ -202,7 +212,7 @@ mod tests {
             None::<String>,
             json!({
                 "audit_date": "2026-04-22",
-                "run_id": "AUD-303",
+                "notes_present": true,
             }),
         );
 
@@ -226,7 +236,7 @@ mod tests {
                 > 0
         );
         assert_eq!(parsed["context"]["audit_date"], "2026-04-22");
-        assert_eq!(parsed["context"]["run_id"], "AUD-303");
+        assert_eq!(parsed["context"]["notes_present"], true);
         assert!(parsed["context"].get("correlation_id").is_none());
         assert_eq!(parsed.get("audit_date"), None);
 
