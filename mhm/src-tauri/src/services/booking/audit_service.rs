@@ -18,7 +18,7 @@ pub async fn run_night_audit(
     created_by: &str,
 ) -> BookingResult<AuditLog> {
     NaiveDate::parse_from_str(audit_date, "%Y-%m-%d")
-        .map_err(|error| BookingError::validation(error.to_string()))?;
+        .map_err(|_| BookingError::validation("Ngày audit không hợp lệ"))?;
 
     if night_audit_repository::find_audit_log_id(pool, audit_date)
         .await?
