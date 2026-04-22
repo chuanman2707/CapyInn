@@ -1,4 +1,4 @@
-use super::{emit_db_update, require_admin, AppState};
+use super::{emit_db_update, get_user, require_admin, require_admin_user, AppState};
 use crate::app_identity;
 use crate::{
     app_error::{
@@ -52,6 +52,26 @@ fn map_audit_user_error(
         context,
     );
     CommandError::user(code, message)
+}
+
+fn record_audit_auth_error(
+    effective_correlation_id: &EffectiveCorrelationId,
+    error: CommandError,
+    context: Value,
+) -> CommandError {
+    log_user_audit_error(
+        "run_night_audit",
+        effective_correlation_id,
+        error.message.as_str(),
+        &context,
+    );
+    record_command_failure(
+        "run_night_audit",
+        &error,
+        &effective_correlation_id.value,
+        context,
+    );
+    error
 }
 
 fn map_audit_error(
@@ -127,7 +147,9 @@ pub async fn run_night_audit(
         audit_date,
         notes_present
     );
-    let user = require_admin(&state)?;
+    let user = require_admin_user(get_user(&state)).map_err(|error| {
+        record_audit_auth_error(&effective_correlation_id, error, error_context.clone())
+    })?;
     let log = audit_service::run_night_audit(&state.db, &audit_date, notes, &user.id)
         .await
         .map_err(|error| {
@@ -250,19 +272,31 @@ pub async fn export_bookings_csv(
 
 #[cfg(test)]
 mod tests {
-    use super::{audit_failure_context, map_audit_error};
+    use super::{audit_failure_context, map_audit_error, record_audit_auth_error};
     use crate::app_error::{
         codes, record_command_failure, AppErrorKind, CorrelationIdSource, EffectiveCorrelationId,
     };
+    use crate::commands::require_admin_user;
     use crate::domain::booking::BookingError;
-    use std::fs;
+    use crate::models::User;
     use serde_json::json;
+    use std::fs;
 
     fn frontend_correlation_id() -> EffectiveCorrelationId {
         EffectiveCorrelationId {
             value: "COR-1A2B3C4D".to_string(),
             source: CorrelationIdSource::Frontend,
             rejected_length: None,
+        }
+    }
+
+    fn mock_user(role: &str) -> User {
+        User {
+            id: "u1".to_string(),
+            name: "Test".to_string(),
+            role: role.to_string(),
+            active: true,
+            created_at: "2026-01-01T00:00:00Z".to_string(),
         }
     }
 
@@ -376,6 +410,50 @@ mod tests {
         assert_eq!(support_record["support_id"], support_id);
         assert_eq!(command_record["support_id"], support_id);
         assert_eq!(command_record["command"], "run_night_audit");
+
+        let _ = fs::remove_dir_all(&runtime_root);
+    }
+
+    #[test]
+    fn forbidden_run_night_audit_auth_failure_is_recorded_with_scrubbed_context() {
+        let _guard = crate::runtime_config::env_lock().lock().unwrap();
+        let runtime_root =
+            std::env::temp_dir().join(format!("capyinn-night-audit-auth-{}", uuid::Uuid::new_v4()));
+
+        std::env::set_var("CAPYINN_RUNTIME_ROOT", &runtime_root);
+        let context = audit_failure_context("2026-04-20", Some("Đã kiểm tra kho"));
+        let auth_error =
+            require_admin_user(Some(mock_user("receptionist"))).expect_err("non-admin must fail");
+        let error = record_audit_auth_error(&frontend_correlation_id(), auth_error, context);
+        std::env::remove_var("CAPYINN_RUNTIME_ROOT");
+
+        let command_log_path = runtime_root
+            .join("diagnostics")
+            .join("command-failures.jsonl");
+        let command_contents =
+            fs::read_to_string(&command_log_path).expect("command failure log contents");
+        let command_record: serde_json::Value = serde_json::from_str(
+            command_contents
+                .lines()
+                .last()
+                .expect("command failure log line"),
+        )
+        .expect("command failure json");
+
+        assert_eq!(error.code, codes::AUTH_FORBIDDEN);
+        assert_eq!(error.kind, AppErrorKind::User);
+        assert!(error.support_id.is_none());
+        assert_eq!(command_record["command"], "run_night_audit");
+        assert_eq!(command_record["code"], codes::AUTH_FORBIDDEN);
+        assert_eq!(command_record["kind"], "user");
+        assert_eq!(command_record["correlation_id"], "COR-1A2B3C4D");
+        assert_eq!(
+            command_record["context"],
+            json!({
+                "audit_date": "2026-04-20",
+                "notes_present": true,
+            })
+        );
 
         let _ = fs::remove_dir_all(&runtime_root);
     }
