@@ -55,12 +55,23 @@ describe("05 — Check-out Flow", () => {
 
     it("handles checkout error", async () => {
         setMockResponse("check_out", () => {
-            throw new Error("Booking not found");
+            throw {
+                code: "BOOKING_NOT_FOUND",
+                message: "Booking not found",
+                kind: "user",
+                support_id: null,
+            };
         });
 
         await expect(
             useHotelStore.getState().checkOut("nonexistent", "actual_nights", 500000)
-        ).rejects.toThrow("Booking not found");
+        ).rejects.toMatchObject({
+            name: "AppError",
+            code: "BOOKING_NOT_FOUND",
+            message: "Booking not found",
+            kind: "user",
+            support_id: null,
+        });
 
         expect(useHotelStore.getState().loading).toBe(false);
     });
