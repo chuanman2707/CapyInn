@@ -8,8 +8,10 @@ await run(
   [
     "test",
     "--",
+    "src/lib/appError.test.ts",
     "src/App.updateFlow.test.tsx",
     "src/hooks/useAppUpdateController.test.tsx",
+    "tests/e2e/01-login.test.tsx",
     "tests/e2e/08-settings.test.tsx",
   ],
   { cwd },
