@@ -131,9 +131,19 @@ Example:
 
 The value only needs to be short, human-readable, and collision-resistant enough for local support and log lookup. This is not a security token.
 
+Backend must treat incoming correlation IDs as untrusted input.
+
+Rules:
+
+- accept only values that exactly match `^COR-[0-9A-F]{8}$`
+- never log an invalid raw value verbatim
+- never allow correlation ID parsing or validation failure to fail the business action by itself
+
+If the frontend sends a missing or invalid value, backend must replace it with a backend-generated fallback ID in the same format and continue the command.
+
 ### Source Of Truth
 
-The frontend is the source of truth for correlation ID generation in this release.
+The frontend is the source of truth for correlation ID generation in normal operation for this release.
 
 Rules:
 
@@ -141,6 +151,8 @@ Rules:
 - pass it through the command call as `correlationId`
 - if the command rejects, keep the same ID attached to the local thrown error object
 - do not regenerate the ID during error formatting
+
+Backend fallback generation exists only as a defensive path for partial rollout, malformed input, or caller bugs. It is not the intended steady-state path.
 
 ## Relationship To `support_id`
 
@@ -225,7 +237,7 @@ Required behavior:
 - keep the existing first two parameters unchanged: `invokeCommand(command, args?)`
 - add an optional third parameter for tracked calls only:
   `invokeCommand(command, args?, options?: { correlationId?: string })`
-- when present, merge `correlationId` into the outgoing command args for the selected commands
+- when `options.correlationId` is present, merge `correlationId` into the outgoing command args
 - if the command fails, normalize the backend error exactly as PR `#50` already does
 - then attach the correlation ID to the thrown local error object before rethrowing
 
@@ -249,19 +261,25 @@ Rules:
 
 This distinction keeps the transport contract stable and makes the correlation ID an application-level wrapper feature.
 
+Implementation direction:
+
+- extend `createAppErrorException(...)` with an optional local-extras parameter, for example:
+  `createAppErrorException(appError, cause?, extras?: { correlation_id?: string })`
+- have `invokeCommand(...)` pass the correlation ID through that helper instead of mutating the thrown object afterward
+
+This keeps the TypeScript error shape centralized in one place and avoids silent type drift between the helper and the wrapper.
+
 ### Error Formatting
 
-Frontend should add one focused helper for the selected flows, for example:
-
-- `formatTrackedAppError(error: unknown): string`
+Frontend should extend the existing `formatAppError(error)` helper rather than introduce a second formatter.
 
 Expected behavior:
 
-- preserve the existing output of `formatAppError(error)`
-- append `Mã theo dõi: COR-XXXXXXX` when the local error object carries `correlation_id`
+- preserve the existing `formatAppError(error)` output for callers that have no correlation ID
+- append `Mã theo dõi: COR-XXXXXXXX` when the local error object carries `correlation_id`
 - if both `support_id` and `correlation_id` exist, show both without dropping either
 
-The selected flows should use this tracked formatter instead of hand-building error strings.
+The selected flows should keep calling `formatAppError(error)` after that helper learns how to render the optional local `correlation_id`.
 
 ### UI Rules
 
@@ -281,13 +299,24 @@ This keeps the feature useful without adding noise to normal operator work.
 
 ### Command Signatures
 
-The selected commands should accept `correlation_id: String` as an additional argument:
+The selected commands should accept `correlation_id: Option<String>` as an additional argument:
 
 - [rooms.rs](/Users/binhan/HotelManager/mhm/src-tauri/src/commands/rooms.rs): `check_in`, `check_out`
 - [groups.rs](/Users/binhan/HotelManager/mhm/src-tauri/src/commands/groups.rs): `group_checkin`, `group_checkout`
 - [audit.rs](/Users/binhan/HotelManager/mhm/src-tauri/src/commands/audit.rs): `run_night_audit`
 
 No service-layer or repository-layer signature changes are required unless they make logging materially cleaner. The ID may remain command-boundary context in this release.
+
+At the command boundary, each selected command should normalize that optional input into one safe effective correlation ID before any log line is emitted.
+
+Normalization rules:
+
+- if the input matches `^COR-[0-9A-F]{8}$`, keep it
+- if the input is missing, generate a backend fallback ID and emit a warn-level log that the tracked command arrived without a frontend ID
+- if the input is present but invalid, generate a backend fallback ID and emit a warn-level log that the frontend ID failed validation
+- warning logs for missing or invalid IDs must not print the raw invalid value verbatim; logging the reason plus sanitized metadata such as length is sufficient
+
+This prevents Tauri argument deserialization failures from turning into a hidden rollout hazard and closes the log-injection risk from untrusted correlation ID input.
 
 ### Logging Rules
 
@@ -330,13 +359,13 @@ Because `normalizeAppError()` only accepts codes from the shared registry, this 
 Required new registry entries:
 
 - `AUDIT_INVALID_DATE`
-- `AUDIT_ALREADY_RUN`
+- `AUDIT_DATE_ALREADY_RUN`
 
 Expected user-facing meanings:
 
 - `AUDIT_INVALID_DATE`:
   the provided audit date cannot be parsed or is not acceptable input
-- `AUDIT_ALREADY_RUN`:
+- `AUDIT_DATE_ALREADY_RUN`:
   the requested date has already been audited
 
 Mapping rules for `run_night_audit`:
@@ -344,7 +373,7 @@ Mapping rules for `run_night_audit`:
 - invalid date parsing or equivalent audit-date validation failure:
   `AUDIT_INVALID_DATE`
 - duplicate audit attempt for the same date:
-  `AUDIT_ALREADY_RUN`
+  `AUDIT_DATE_ALREADY_RUN`
 - database, transaction, or query failures:
   `SYSTEM_INTERNAL_ERROR`
 
@@ -374,7 +403,9 @@ Frontend should add or update tests that cover:
 
 - correlation ID generation format
 - `invokeCommand(...)` attaching correlation ID to the thrown local error object
-- tracked error formatting showing correlation ID without breaking existing `support_id` formatting
+- `invokeCommand(...)` preserving the existing call shape for callers that omit the third parameter
+- `createAppErrorException(...)` carrying optional `correlation_id` through its typed exception shape
+- `formatAppError(...)` showing correlation ID without breaking existing `support_id` formatting
 - `NightAudit.tsx` switching to the shared tracked-command path
 
 If store-level tests are easier than component-level tests for the stay and group flows, that is acceptable. The important outcome is that selected actions pass a correlation ID and failed actions surface it.
@@ -383,11 +414,13 @@ If store-level tests are easier than component-level tests for the stay and grou
 
 Rust tests should cover:
 
+- correlation ID normalization accepting valid IDs and replacing missing or invalid input with a safe fallback
 - selected command failure paths include `correlation_id` in the structured failure context used for system-error logging
+- selected command start and success log payloads include the effective correlation ID
 - migrated audit error mapping now returns the shared `CommandError` contract instead of raw free-form strings
 - user-error mapping remains stable for stay and group flows after the extra parameter is added
 
-Where direct log capture is awkward, helper-level tests that assert the generated error context includes `correlation_id` are acceptable.
+Where direct log capture is awkward, extract a small helper for log payload construction or correlation ID normalization and unit-test that helper for start, success, and failure cases.
 
 ### Verification
 
@@ -400,5 +433,7 @@ Run the smallest existing verification path that still exercises the changed sur
 ## Rollout Notes
 
 This design intentionally adds correlation IDs only where issue `#30` asked first and where PR `#50` already laid shared groundwork.
+
+Audit migration also changes audit command failures from raw string errors to the shared FE/BE contract. That means admin rejection and audit validation failures in `run_night_audit` will become structured user errors with stable codes instead of free-form strings.
 
 If this release works well, the next wave can reuse the same pattern for reservation commands and other operator actions. That future expansion should be a separate design or implementation-plan decision, not an implicit requirement in this release.
