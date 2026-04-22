@@ -5,6 +5,7 @@ import { invoke } from "@tauri-apps/api/core";
 
 import errorCodes from "../../shared/error-codes.json";
 import { invokeCommand } from "./invokeCommand";
+import { createAppErrorException } from "./appError";
 import {
   APP_ERROR_REGISTRY,
   FALLBACK_SYSTEM_APP_ERROR,
@@ -55,14 +56,30 @@ describe("appError", () => {
   });
 
   it("formats system support ids alongside the generic message", () => {
-    expect(
-      formatAppError({
+    const error = createAppErrorException(
+      {
         code: "SYSTEM_INTERNAL_ERROR",
         message: "Có lỗi hệ thống, vui lòng thử lại",
         kind: "system",
         support_id: "SUP-ABCD1234",
-      }),
-    ).toBe("Có lỗi hệ thống, vui lòng thử lại (Mã hỗ trợ: SUP-ABCD1234)");
+      },
+      undefined,
+      {
+        correlation_id: "COR-8F3A1C7D",
+      },
+    );
+
+    expect(formatAppError(error)).toBe(
+      "Có lỗi hệ thống, vui lòng thử lại (Mã hỗ trợ: SUP-ABCD1234)\nMã theo dõi: COR-8F3A1C7D",
+    );
+  });
+
+  it("does not change invoke payloads when no correlation options are provided", async () => {
+    vi.mocked(invoke).mockResolvedValueOnce("ok");
+
+    await invokeCommand("login", { req: { pin: "0000" } });
+
+    expect(invoke).toHaveBeenCalledWith("login", { req: { pin: "0000" } });
   });
 
   it("stays aligned with the shared error registry", () => {
@@ -81,7 +98,14 @@ describe("appError", () => {
       support_id: null,
     });
 
-    const promise = invokeCommand("login", { req: { pin: "0000" } });
+    const promise = invokeCommand("login", { req: { pin: "0000" } }, {
+      correlationId: "COR-8F3A1C7D",
+    });
+
+    expect(invoke).toHaveBeenCalledWith("login", {
+      req: { pin: "0000" },
+      correlationId: "COR-8F3A1C7D",
+    });
 
     await expect(promise).rejects.toMatchObject({
       name: "AppError",
@@ -89,6 +113,7 @@ describe("appError", () => {
       message: "Mã PIN không đúng",
       kind: "user",
       support_id: null,
+      correlation_id: "COR-8F3A1C7D",
     });
 
     await promise.catch((error) => {
@@ -99,6 +124,7 @@ describe("appError", () => {
         message: "Mã PIN không đúng",
         kind: "user",
         support_id: null,
+        correlation_id: "COR-8F3A1C7D",
       });
       expect(error.cause).toEqual({
         code: "AUTH_INVALID_PIN",
