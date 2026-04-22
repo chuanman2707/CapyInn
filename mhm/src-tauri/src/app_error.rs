@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use serde_json::Map;
 use serde_json::Value;
 
 use crate::app_identity;
@@ -24,6 +25,8 @@ pub mod codes {
     pub const BOOKING_GUEST_REQUIRED: &str = "BOOKING_GUEST_REQUIRED";
     pub const BOOKING_INVALID_NIGHTS: &str = "BOOKING_INVALID_NIGHTS";
     pub const BOOKING_INVALID_SETTLEMENT_TOTAL: &str = "BOOKING_INVALID_SETTLEMENT_TOTAL";
+    pub const AUDIT_INVALID_DATE: &str = "AUDIT_INVALID_DATE";
+    pub const AUDIT_DATE_ALREADY_RUN: &str = "AUDIT_DATE_ALREADY_RUN";
     pub const SYSTEM_INTERNAL_ERROR: &str = "SYSTEM_INTERNAL_ERROR";
 
     pub const ALL: &[&str] = &[
@@ -46,6 +49,8 @@ pub mod codes {
         BOOKING_GUEST_REQUIRED,
         BOOKING_INVALID_NIGHTS,
         BOOKING_INVALID_SETTLEMENT_TOTAL,
+        AUDIT_INVALID_DATE,
+        AUDIT_DATE_ALREADY_RUN,
         SYSTEM_INTERNAL_ERROR,
     ];
 }
@@ -68,6 +73,20 @@ pub struct CommandError {
 }
 
 pub type CommandResult<T> = Result<T, CommandError>;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CorrelationIdSource {
+    Frontend,
+    MissingFallback,
+    InvalidFallback,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EffectiveCorrelationId {
+    pub value: String,
+    pub source: CorrelationIdSource,
+    pub rejected_length: Option<usize>,
+}
 
 fn ensure_registered_code(code: &'static str) -> &'static str {
     assert!(
@@ -116,6 +135,61 @@ impl CommandError {
 pub fn generate_support_id() -> String {
     let raw = uuid::Uuid::new_v4().simple().to_string();
     format!("SUP-{}", raw[..8].to_ascii_uppercase())
+}
+
+pub fn generate_correlation_id() -> String {
+    let raw = uuid::Uuid::new_v4().simple().to_string();
+    format!("COR-{}", raw[..8].to_ascii_uppercase())
+}
+
+fn is_valid_correlation_id(value: &str) -> bool {
+    let bytes = value.as_bytes();
+    bytes.len() == 12
+        && &bytes[..4] == b"COR-"
+        && bytes[4..]
+            .iter()
+            .all(|byte| byte.is_ascii_digit() || matches!(byte, b'A'..=b'F'))
+}
+
+pub fn normalize_correlation_id(input: Option<String>) -> EffectiveCorrelationId {
+    match input {
+        Some(value) if is_valid_correlation_id(&value) => EffectiveCorrelationId {
+            value,
+            source: CorrelationIdSource::Frontend,
+            rejected_length: None,
+        },
+        Some(value) => EffectiveCorrelationId {
+            value: generate_correlation_id(),
+            source: CorrelationIdSource::InvalidFallback,
+            rejected_length: Some(value.len()),
+        },
+        None => EffectiveCorrelationId {
+            value: generate_correlation_id(),
+            source: CorrelationIdSource::MissingFallback,
+            rejected_length: None,
+        },
+    }
+}
+
+pub fn correlation_context(correlation_id: &str, context: Value) -> Value {
+    match context {
+        Value::Object(mut object) => {
+            object.insert(
+                "correlation_id".to_string(),
+                Value::String(correlation_id.to_string()),
+            );
+            Value::Object(object)
+        }
+        other => {
+            let mut object = Map::new();
+            object.insert(
+                "correlation_id".to_string(),
+                Value::String(correlation_id.to_string()),
+            );
+            object.insert("context".to_string(), other);
+            Value::Object(object)
+        }
+    }
 }
 
 pub fn log_system_error(
@@ -327,6 +401,16 @@ mod tests {
                 "Tổng quyết toán phải lớn hơn hoặc bằng 0",
             ),
             (
+                codes::AUDIT_INVALID_DATE,
+                AppErrorKind::User,
+                "Ngày kiểm toán không hợp lệ",
+            ),
+            (
+                codes::AUDIT_DATE_ALREADY_RUN,
+                AppErrorKind::User,
+                "Ngày kiểm toán này đã được chạy",
+            ),
+            (
                 codes::SYSTEM_INTERNAL_ERROR,
                 AppErrorKind::System,
                 GENERIC_SYSTEM_ERROR_MESSAGE,
@@ -380,5 +464,57 @@ mod tests {
         assert_eq!(parsed["support_id"], support_id);
 
         let _ = fs::remove_dir_all(&runtime_root);
+    }
+
+    #[test]
+    fn normalize_correlation_id_preserves_valid_frontend_value() {
+        let effective = normalize_correlation_id(Some("COR-1A2B3C4D".to_string()));
+
+        assert_eq!(effective.value, "COR-1A2B3C4D");
+        assert_eq!(effective.source, CorrelationIdSource::Frontend);
+        assert_eq!(effective.rejected_length, None);
+    }
+
+    #[test]
+    fn normalize_correlation_id_generates_fallback_for_missing_value() {
+        let effective = normalize_correlation_id(None);
+
+        assert_eq!(effective.source, CorrelationIdSource::MissingFallback);
+        assert_eq!(effective.rejected_length, None);
+        assert_eq!(effective.value.len(), 12);
+        assert!(effective.value.starts_with("COR-"));
+        assert!(effective.value[4..]
+            .chars()
+            .all(|character: char| character.is_ascii_digit() || matches!(character, 'A'..='F')));
+    }
+
+    #[test]
+    fn normalize_correlation_id_replaces_invalid_input_without_echoing_it() {
+        let raw_input = "not-a-real-correlation-id";
+        let effective = normalize_correlation_id(Some(raw_input.to_string()));
+
+        assert_eq!(effective.source, CorrelationIdSource::InvalidFallback);
+        assert_eq!(effective.rejected_length, Some(raw_input.len()));
+        assert_eq!(effective.value.len(), 12);
+        assert!(effective.value.starts_with("COR-"));
+        assert_ne!(effective.value, raw_input);
+        assert!(!effective.value.contains(raw_input));
+    }
+
+    #[test]
+    fn correlation_context_merges_correlation_id_without_dropping_existing_fields() {
+        let merged = correlation_context(
+            "COR-1A2B3C4D",
+            json!({ "room_id": "R101", "booking_id": "B202" }),
+        );
+
+        assert_eq!(
+            merged,
+            json!({
+                "correlation_id": "COR-1A2B3C4D",
+                "room_id": "R101",
+                "booking_id": "B202",
+            })
+        );
     }
 }

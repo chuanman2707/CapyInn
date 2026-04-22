@@ -95,6 +95,16 @@
     "defaultMessage": "Tổng quyết toán phải lớn hơn hoặc bằng 0"
   },
   {
+    "code": "AUDIT_INVALID_DATE",
+    "kind": "user",
+    "defaultMessage": "Ngày kiểm toán không hợp lệ"
+  },
+  {
+    "code": "AUDIT_DATE_ALREADY_RUN",
+    "kind": "user",
+    "defaultMessage": "Ngày kiểm toán này đã được chạy"
+  },
+  {
     "code": "SYSTEM_INTERNAL_ERROR",
     "kind": "system",
     "defaultMessage": "Có lỗi hệ thống, vui lòng thử lại"
