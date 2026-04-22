@@ -115,8 +115,15 @@ describe("01 — Login Screen", () => {
     });
 
     it("shows error message on wrong PIN", async () => {
+        const invalidPinError = {
+            code: "AUTH_INVALID_PIN",
+            message: "Mã PIN không đúng",
+            kind: "user" as const,
+            support_id: null,
+        };
+
         setMockResponse("login", () => {
-            throw new Error("Invalid PIN");
+            throw invalidPinError;
         });
 
         render(<LoginScreen />);
@@ -129,7 +136,8 @@ describe("01 — Login Screen", () => {
 
         // Error message should appear
         await waitFor(() => {
-            expect(screen.getByText(/Mã PIN không đúng/)).toBeInTheDocument();
+            expect(screen.getByText(invalidPinError.message)).toBeInTheDocument();
+            expect(useAuthStore.getState().error).toEqual(invalidPinError);
         });
     });
 

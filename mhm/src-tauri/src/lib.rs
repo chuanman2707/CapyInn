@@ -1,6 +1,7 @@
 use log::{error, info};
 use tauri::Manager;
 
+pub mod app_error;
 pub mod app_identity;
 mod backup;
 mod commands;
@@ -15,6 +16,7 @@ mod queries;
 mod repositories;
 mod runtime_config;
 mod services;
+pub mod support_log;
 mod watcher;
 
 use commands::AppState;
@@ -98,6 +100,17 @@ fn write_smoke_ready_file() -> Result<(), String> {
 
     std::fs::write(path, payload.to_string()).map_err(|error| error.to_string())
 }
+
+fn updater_enabled_from_env(debug_build: bool, env_enabled: bool) -> bool {
+    !debug_build || env_enabled
+}
+
+fn updater_enabled() -> bool {
+    updater_enabled_from_env(
+        cfg!(debug_assertions),
+        runtime_config::env_flag("CAPYINN_ENABLE_UPDATER"),
+    )
+}
 /// Run the Tauri GUI application with MCP Gateway
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
@@ -117,9 +130,13 @@ pub fn run() {
         .setup(|app| {
             #[cfg(desktop)]
             {
-                app.handle()
-                    .plugin(tauri_plugin_updater::Builder::new().build())
-                    .expect("failed to register updater plugin");
+                if updater_enabled() {
+                    app.handle()
+                        .plugin(tauri_plugin_updater::Builder::new().build())
+                        .expect("failed to register updater plugin");
+                } else {
+                    info!("Updater plugin disabled for this build");
+                }
             }
 
             let rt = tokio::runtime::Runtime::new().expect("Failed to create Tokio runtime");
@@ -322,4 +339,24 @@ async fn gateway_get_status(
         "port": port,
         "has_api_keys": has_keys,
     }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::updater_enabled_from_env;
+
+    #[test]
+    fn updater_stays_disabled_for_plain_dev_runs() {
+        assert!(!updater_enabled_from_env(true, false));
+    }
+
+    #[test]
+    fn updater_can_be_enabled_for_dev_smoke_runs() {
+        assert!(updater_enabled_from_env(true, true));
+    }
+
+    #[test]
+    fn updater_stays_enabled_outside_dev_even_without_env_flag() {
+        assert!(updater_enabled_from_env(false, false));
+    }
 }

@@ -8,10 +8,51 @@ await run(
   [
     "test",
     "--",
+    "src/lib/appError.test.ts",
+    "src/pages/settings/useRoomConfig.test.tsx",
+    "src/components/GroupCheckinSheet.test.tsx",
     "src/App.updateFlow.test.tsx",
     "src/hooks/useAppUpdateController.test.tsx",
+    "tests/e2e/01-login.test.tsx",
+    "tests/e2e/03-checkin.test.tsx",
+    "tests/e2e/05-checkout.test.tsx",
     "tests/e2e/08-settings.test.tsx",
   ],
+  { cwd },
+);
+
+await run(
+  "app-error-tests",
+  "cargo",
+  ["test", "--manifest-path", "src-tauri/Cargo.toml", "app_error::tests::", "--", "--nocapture"],
+  { cwd },
+);
+
+await run(
+  "command-helper-tests",
+  "cargo",
+  ["test", "--manifest-path", "src-tauri/Cargo.toml", "commands::tests::", "--", "--nocapture"],
+  { cwd },
+);
+
+await run(
+  "room-management-tests",
+  "cargo",
+  ["test", "--manifest-path", "src-tauri/Cargo.toml", "commands::room_management::tests::", "--", "--nocapture"],
+  { cwd },
+);
+
+await run(
+  "stay-group-mapping-tests",
+  "cargo",
+  ["test", "--manifest-path", "src-tauri/Cargo.toml", "commands::rooms::tests::", "--", "--nocapture"],
+  { cwd },
+);
+
+await run(
+  "group-mapping-tests",
+  "cargo",
+  ["test", "--manifest-path", "src-tauri/Cargo.toml", "commands::groups::tests::", "--", "--nocapture"],
   { cwd },
 );
 

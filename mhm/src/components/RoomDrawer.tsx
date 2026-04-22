@@ -23,6 +23,7 @@ import StatusBadge from "@/components/shared/StatusBadge";
 import SlideDrawer from "@/components/shared/SlideDrawer";
 import { Button } from "@/components/ui/button";
 import { useInvoiceDialog } from "@/hooks/useInvoiceDialog";
+import { formatAppError } from "@/lib/appError";
 import { getRoomTypeLabel } from "@/lib/constants";
 import { fmtDateShort, fmtMoney } from "@/lib/format";
 import { useHotelStore } from "@/stores/useHotelStore";
@@ -112,7 +113,7 @@ export default function RoomDrawer({ open, onClose, roomId }: RoomDrawerProps) {
             toast.success("Check-out thành công!");
             handleClose();
         } catch (err) {
-            toast.error("Lỗi check-out: " + err);
+            toast.error("Lỗi check-out: " + formatAppError(err));
         }
     };
 

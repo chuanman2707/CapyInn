@@ -380,14 +380,17 @@ export default function App() {
       return;
     }
 
+    const report = pendingCrashReport;
     setCrashPromptBusy(true);
     try {
       await invoke("mark_crash_report_dismissed", {
-        bundle_id: pendingCrashReport.bundle_id,
+        bundle_id: report.bundle_id,
       });
+    } catch {
+      toast.error("Không thể dọn crash report cục bộ. Prompt sẽ được ẩn cho phiên này.");
+    } finally {
       setPendingCrashReport(null);
       setCrashExportPath(null);
-    } finally {
       setCrashPromptBusy(false);
     }
   };

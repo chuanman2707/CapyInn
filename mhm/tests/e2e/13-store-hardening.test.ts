@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it } from "vitest";
 import { clearMockResponses, invoke, setMockResponse } from "@test-mocks/tauri-core";
 import { useHotelStore } from "@/stores/useHotelStore";
+import { useAuthStore } from "@/stores/useAuthStore";
 import { createAllRooms, createBooking, createStats } from "../helpers/mock-data";
 
 function deferred<T>() {
@@ -32,6 +33,12 @@ describe("13 — Store Hardening", () => {
 
         setMockResponse("get_rooms", () => createAllRooms());
         setMockResponse("get_dashboard_stats", () => createStats());
+        useAuthStore.setState({
+            user: null,
+            isAuthenticated: false,
+            loading: false,
+            error: null,
+        });
     });
 
     it("keeps loading true while another booking action is still pending", async () => {
@@ -56,5 +63,49 @@ describe("13 — Store Hardening", () => {
         await checkInPromise;
 
         expect(useHotelStore.getState().loading).toBe(false);
+    });
+
+    it("clears stale auth state when session lookup returns null or throws", async () => {
+        useAuthStore.setState({
+            user: {
+                id: "u1",
+                name: "Admin",
+                role: "admin",
+                active: true,
+                created_at: "2026-01-01T00:00:00Z",
+            },
+            isAuthenticated: true,
+            loading: false,
+            error: null,
+        });
+
+        setMockResponse("get_current_user", () => null);
+
+        await useAuthStore.getState().checkSession();
+
+        expect(useAuthStore.getState().user).toBeNull();
+        expect(useAuthStore.getState().isAuthenticated).toBe(false);
+
+        useAuthStore.setState({
+            user: {
+                id: "u2",
+                name: "Admin 2",
+                role: "admin",
+                active: true,
+                created_at: "2026-01-01T00:00:00Z",
+            },
+            isAuthenticated: true,
+            loading: false,
+            error: null,
+        });
+
+        setMockResponse("get_current_user", () => {
+            throw new Error("boom");
+        });
+
+        await useAuthStore.getState().checkSession();
+
+        expect(useAuthStore.getState().user).toBeNull();
+        expect(useAuthStore.getState().isAuthenticated).toBe(false);
     });
 });

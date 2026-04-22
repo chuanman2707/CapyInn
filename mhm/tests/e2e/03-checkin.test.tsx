@@ -103,7 +103,12 @@ describe("03 — Check-in Flow", () => {
 
     it("handles check-in error gracefully", async () => {
         setMockResponse("check_in", () => {
-            throw new Error("Room is already occupied");
+            throw {
+                code: "BOOKING_INVALID_STATE",
+                message: "Room is already occupied",
+                kind: "user",
+                support_id: null,
+            };
         });
 
         await expect(
@@ -112,7 +117,13 @@ describe("03 — Check-in Flow", () => {
                 [{ full_name: "Test", doc_number: "123456789012" }],
                 1
             )
-        ).rejects.toThrow("Room is already occupied");
+        ).rejects.toMatchObject({
+            name: "AppError",
+            code: "BOOKING_INVALID_STATE",
+            message: "Room is already occupied",
+            kind: "user",
+            support_id: null,
+        });
 
         // Store should not be in loading state after error
         expect(useHotelStore.getState().loading).toBe(false);

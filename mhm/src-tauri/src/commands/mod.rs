@@ -1,3 +1,4 @@
+use crate::app_error::{codes, CommandError, CommandResult};
 use crate::models::*;
 use sqlx::{Pool, Row, Sqlite};
 use std::sync::{Arc, Mutex};
@@ -26,16 +27,27 @@ pub(crate) fn get_user_id(state: &State<'_, AppState>) -> Option<String> {
     get_user(state).map(|u| u.id)
 }
 
-pub(crate) fn require_admin_user(user: Option<User>) -> Result<User, String> {
-    let user = user.ok_or("Chưa đăng nhập".to_string())?;
+pub(crate) fn require_admin_user(user: Option<User>) -> CommandResult<User> {
+    let user = user.ok_or_else(|| {
+        CommandError::user(codes::AUTH_NOT_AUTHENTICATED, "Chưa đăng nhập")
+    })?;
     if user.role != "admin" {
-        return Err("Không có quyền thực hiện. Yêu cầu quyền Admin.".to_string());
+        return Err(CommandError::user(
+            codes::AUTH_FORBIDDEN,
+            "Không có quyền thực hiện. Yêu cầu quyền Admin.",
+        ));
     }
     Ok(user)
 }
 
-pub(crate) fn require_admin(state: &State<'_, AppState>) -> Result<User, String> {
+pub(crate) fn require_admin(state: &State<'_, AppState>) -> CommandResult<User> {
     require_admin_user(get_user(state))
+}
+
+impl From<CommandError> for String {
+    fn from(error: CommandError) -> Self {
+        error.message
+    }
 }
 
 pub(crate) fn emit_db_update(app: &tauri::AppHandle, entity: &str) {
@@ -74,6 +86,7 @@ pub use rooms::{do_get_dashboard_stats, do_get_room_detail, do_get_rooms};
 #[cfg(test)]
 mod tests {
     use super::require_admin_user;
+    use crate::app_error::{codes, AppErrorKind};
     use crate::models::User;
 
     fn mock_user(role: &str) -> User {
@@ -89,14 +102,20 @@ mod tests {
     #[test]
     fn require_admin_user_rejects_missing_user() {
         let error = require_admin_user(None).expect_err("missing user must be rejected");
-        assert_eq!(error, "Chưa đăng nhập");
+        assert_eq!(error.code, codes::AUTH_NOT_AUTHENTICATED);
+        assert_eq!(error.message, "Chưa đăng nhập");
+        assert_eq!(error.kind, AppErrorKind::User);
+        assert!(error.support_id.is_none());
     }
 
     #[test]
     fn require_admin_user_rejects_non_admin_user() {
         let error =
             require_admin_user(Some(mock_user("receptionist"))).expect_err("non-admin must fail");
-        assert_eq!(error, "Không có quyền thực hiện. Yêu cầu quyền Admin.");
+        assert_eq!(error.code, codes::AUTH_FORBIDDEN);
+        assert_eq!(error.message, "Không có quyền thực hiện. Yêu cầu quyền Admin.");
+        assert_eq!(error.kind, AppErrorKind::User);
+        assert!(error.support_id.is_none());
     }
 
     #[test]

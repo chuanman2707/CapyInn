@@ -2,6 +2,7 @@ import { useState, useRef, useEffect } from "react";
 import { useAuthStore } from "@/stores/useAuthStore";
 import { Delete, Lock } from "lucide-react";
 import AppLogo from "@/components/AppLogo";
+import { formatAppError } from "@/lib/appError";
 
 export default function LoginScreen() {
     const { login, loading, error, clearError } = useAuthStore();
@@ -73,7 +74,7 @@ export default function LoginScreen() {
                 {/* Error message */}
                 {error && (
                     <p className="text-sm text-red-500 font-medium -mt-4 animate-fade-up">
-                        Mã PIN không đúng
+                        {formatAppError(error)}
                     </p>
                 )}
 

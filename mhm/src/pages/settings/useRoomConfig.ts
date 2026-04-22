@@ -1,7 +1,8 @@
 import { useEffect, useState } from "react";
-import { invoke } from "@tauri-apps/api/core";
 import { toast } from "sonner";
 import type { ConfigurableRoom, RoomTypeItem } from "@/types";
+import { formatAppError } from "@/lib/appError";
+import { invokeCommand } from "@/lib/invokeCommand";
 
 export interface RoomFormValues {
     id: string;
@@ -34,8 +35,8 @@ export default function useRoomConfig() {
     const [form, setForm] = useState<RoomFormValues>(EMPTY_FORM);
 
     const loadData = () => {
-        invoke<ConfigurableRoom[]>("get_rooms").then(setRooms).catch(() => { });
-        invoke<RoomTypeItem[]>("get_room_types").then(setRoomTypes).catch(() => { });
+        invokeCommand<ConfigurableRoom[]>("get_rooms").then(setRooms).catch(() => { });
+        invokeCommand<RoomTypeItem[]>("get_room_types").then(setRoomTypes).catch(() => { });
     };
 
     useEffect(loadData, []);
@@ -47,24 +48,25 @@ export default function useRoomConfig() {
     };
 
     const handleAddType = async () => {
-        if (!newTypeName.trim()) return;
+        const trimmedTypeName = newTypeName.trim();
+        if (!trimmedTypeName) return;
         try {
-            await invoke("create_room_type", { req: { name: newTypeName.trim() } });
-            toast.success(`Đã tạo loại phòng "${newTypeName}"`);
+            await invokeCommand("create_room_type", { req: { name: trimmedTypeName } });
+            toast.success(`Đã tạo loại phòng "${trimmedTypeName}"`);
             setNewTypeName("");
             loadData();
         } catch (error) {
-            toast.error(String(error));
+            toast.error(formatAppError(error));
         }
     };
 
     const handleDeleteType = async (roomTypeId: string) => {
         try {
-            await invoke("delete_room_type", { roomTypeId });
+            await invokeCommand("delete_room_type", { roomTypeId });
             toast.success("Đã xóa loại phòng");
             loadData();
         } catch (error) {
-            toast.error(String(error));
+            toast.error(formatAppError(error));
         }
     };
 
@@ -97,7 +99,7 @@ export default function useRoomConfig() {
 
         try {
             if (editingRoom) {
-                const updated = await invoke<ConfigurableRoom>("update_room", {
+                const updated = await invokeCommand<ConfigurableRoom>("update_room", {
                     req: {
                         room_id: editingRoom.id,
                         name: form.name,
@@ -112,7 +114,7 @@ export default function useRoomConfig() {
                 setRooms((prev) => prev.map((room) => (room.id === updated.id ? updated : room)));
                 toast.success("Đã cập nhật phòng!");
             } else {
-                const created = await invoke<ConfigurableRoom>("create_room", {
+                const created = await invokeCommand<ConfigurableRoom>("create_room", {
                     req: {
                         id: form.id,
                         name: form.name,
@@ -129,18 +131,18 @@ export default function useRoomConfig() {
             }
             resetForm();
         } catch (error) {
-            toast.error(String(error));
+            toast.error(formatAppError(error));
         }
     };
 
     const handleDeleteRoom = async (roomId: string) => {
         if (!confirm(`Xác nhận xóa phòng ${roomId}?`)) return;
         try {
-            await invoke("delete_room", { roomId });
+            await invokeCommand("delete_room", { roomId });
             setRooms((prev) => prev.filter((room) => room.id !== roomId));
             toast.success("Đã xóa phòng");
         } catch (error) {
-            toast.error(String(error));
+            toast.error(formatAppError(error));
         }
     };
 

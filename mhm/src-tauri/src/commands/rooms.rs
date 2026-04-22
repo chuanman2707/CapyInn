@@ -1,5 +1,12 @@
 use super::{emit_db_update, get_f64, get_user_id, AppState};
-use crate::{models::*, queries::booking::revenue_queries, services::booking::stay_lifecycle};
+use crate::{
+    app_error::{codes, log_system_error, CommandError, CommandResult},
+    domain::booking::BookingError,
+    models::*,
+    queries::booking::revenue_queries,
+    services::booking::stay_lifecycle,
+};
+use serde_json::{json, Value};
 use sqlx::{Pool, Row, Sqlite};
 use tauri::State;
 
@@ -50,15 +57,56 @@ pub async fn get_dashboard_stats(state: State<'_, AppState>) -> Result<Dashboard
 
 // ─── Check-in Command ───
 
+fn map_stay_error(command_name: &str, error: BookingError, context: Value) -> CommandError {
+    match error {
+        BookingError::NotFound(message) if message.starts_with("Không tìm thấy phòng ") => {
+            CommandError::user(codes::ROOM_NOT_FOUND, message)
+        }
+        BookingError::NotFound(message)
+            if message.starts_with("Không tìm thấy booking đang active ")
+                || message.starts_with("Không tìm thấy booking ") =>
+        {
+            CommandError::user(codes::BOOKING_NOT_FOUND, message)
+        }
+        BookingError::Validation(message) if message == "Phải có ít nhất 1 khách" => {
+            CommandError::user(codes::BOOKING_GUEST_REQUIRED, message)
+        }
+        BookingError::Validation(message) if message == "Number of nights must be greater than 0" => {
+            CommandError::user(codes::BOOKING_INVALID_NIGHTS, message)
+        }
+        BookingError::Validation(message)
+            if message == "Tổng quyết toán phải lớn hơn hoặc bằng 0" =>
+        {
+            CommandError::user(codes::BOOKING_INVALID_SETTLEMENT_TOTAL, message)
+        }
+        BookingError::Validation(message)
+            if message == "Overpaid booking requires refund handling before checkout" =>
+        {
+            CommandError::user(codes::BOOKING_INVALID_STATE, message)
+        }
+        BookingError::Validation(message) | BookingError::Conflict(message) => {
+            CommandError::user(codes::BOOKING_INVALID_STATE, message)
+        }
+        BookingError::NotFound(message)
+        | BookingError::Database(message)
+        | BookingError::DateTimeParse(message) => log_system_error(command_name, message, context),
+    }
+}
+
 #[tauri::command]
 pub async fn check_in(
     state: State<'_, AppState>,
     app: tauri::AppHandle,
     req: CheckInRequest,
-) -> Result<Booking, String> {
+) -> CommandResult<Booking> {
+    let error_context = json!({
+        "room_id": req.room_id.clone(),
+        "guest_count": req.guests.len(),
+        "nights": req.nights,
+    });
     let booking = stay_lifecycle::check_in(&state.db, req, get_user_id(&state))
         .await
-        .map_err(|error| error.to_string())?;
+        .map_err(|error| map_stay_error("check_in", error, error_context))?;
 
     emit_db_update(&app, "rooms");
 
@@ -162,10 +210,15 @@ pub async fn check_out(
     state: State<'_, AppState>,
     app: tauri::AppHandle,
     req: CheckOutRequest,
-) -> Result<(), String> {
+) -> CommandResult<()> {
+    let error_context = json!({
+        "booking_id": req.booking_id.clone(),
+        "settlement_mode": req.settlement_mode,
+        "final_total": req.final_total,
+    });
     stay_lifecycle::check_out(&state.db, req)
         .await
-        .map_err(|error| error.to_string())?;
+        .map_err(|error| map_stay_error("check_out", error, error_context))?;
 
     emit_db_update(&app, "rooms");
 
@@ -402,4 +455,71 @@ pub async fn scan_image(path: String) -> Result<crate::ocr::CccdInfo, String> {
     let cccd = crate::ocr::parse_cccd(&lines);
 
     Ok(cccd)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::map_stay_error;
+    use crate::app_error::{codes, AppErrorKind};
+    use crate::domain::booking::BookingError;
+    use serde_json::json;
+
+    #[test]
+    fn map_stay_error_maps_missing_room_to_room_not_found_contract() {
+        let error = map_stay_error(
+            "check_in",
+            BookingError::not_found("Không tìm thấy phòng R101"),
+            json!({ "room_id": "R101" }),
+        );
+
+        assert_eq!(error.code, codes::ROOM_NOT_FOUND);
+        assert_eq!(error.message, "Không tìm thấy phòng R101");
+        assert_eq!(error.kind, AppErrorKind::User);
+        assert!(error.support_id.is_none());
+    }
+
+    #[test]
+    fn map_stay_error_maps_guest_required_validation_to_shared_code() {
+        let error = map_stay_error(
+            "check_in",
+            BookingError::validation("Phải có ít nhất 1 khách"),
+            json!({ "room_id": "R101" }),
+        );
+
+        assert_eq!(error.code, codes::BOOKING_GUEST_REQUIRED);
+        assert_eq!(error.message, "Phải có ít nhất 1 khách");
+        assert_eq!(error.kind, AppErrorKind::User);
+        assert!(error.support_id.is_none());
+    }
+
+    #[test]
+    fn map_stay_error_maps_invalid_settlement_total_to_shared_code() {
+        let error = map_stay_error(
+            "check_out",
+            BookingError::validation("Tổng quyết toán phải lớn hơn hoặc bằng 0"),
+            json!({ "booking_id": "booking-1" }),
+        );
+
+        assert_eq!(error.code, codes::BOOKING_INVALID_SETTLEMENT_TOTAL);
+        assert_eq!(error.message, "Tổng quyết toán phải lớn hơn hoặc bằng 0");
+        assert_eq!(error.kind, AppErrorKind::User);
+        assert!(error.support_id.is_none());
+    }
+
+    #[test]
+    fn map_stay_error_maps_invalid_checkout_state_to_shared_code() {
+        let error = map_stay_error(
+            "check_out",
+            BookingError::validation("Overpaid booking requires refund handling before checkout"),
+            json!({ "booking_id": "booking-1" }),
+        );
+
+        assert_eq!(error.code, codes::BOOKING_INVALID_STATE);
+        assert_eq!(
+            error.message,
+            "Overpaid booking requires refund handling before checkout"
+        );
+        assert_eq!(error.kind, AppErrorKind::User);
+        assert!(error.support_id.is_none());
+    }
 }

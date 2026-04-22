@@ -41,6 +41,7 @@ const { child, logPath } = await spawnLoggedProcess(
   {
     cwd,
     env: {
+      CAPYINN_ENABLE_UPDATER: "1",
       CAPYINN_SMOKE_READY_FILE: readyFile,
     },
   },

@@ -1,6 +1,8 @@
 use super::{emit_db_update, get_f64, require_admin, AppState};
+use crate::app_error::{codes, log_system_error, CommandError, CommandResult};
 use crate::app_identity;
 use crate::models::*;
+use serde_json::json;
 use sqlx::{Pool, Row, Sqlite};
 use tauri::State;
 
@@ -11,7 +13,7 @@ pub async fn update_room(
     state: State<'_, AppState>,
     app: tauri::AppHandle,
     req: UpdateRoomRequest,
-) -> Result<Room, String> {
+) -> CommandResult<Room> {
     require_admin(&state)?;
 
     let r = do_update_room(&state.db, req).await?;
@@ -20,7 +22,7 @@ pub async fn update_room(
     Ok(r)
 }
 
-async fn do_update_room(pool: &Pool<Sqlite>, req: UpdateRoomRequest) -> Result<Room, String> {
+async fn do_update_room(pool: &Pool<Sqlite>, req: UpdateRoomRequest) -> CommandResult<Room> {
     let UpdateRoomRequest {
         room_id,
         name,
@@ -32,7 +34,7 @@ async fn do_update_room(pool: &Pool<Sqlite>, req: UpdateRoomRequest) -> Result<R
         extra_person_fee,
     } = req;
 
-    sqlx::query(
+    let result = sqlx::query(
         "UPDATE rooms
          SET name = COALESCE(?, name),
              type = COALESCE(?, type),
@@ -53,11 +55,29 @@ async fn do_update_room(pool: &Pool<Sqlite>, req: UpdateRoomRequest) -> Result<R
     .bind(&room_id)
     .execute(pool)
     .await
-    .map_err(|e| e.to_string())?;
+    .map_err(|error| {
+        log_system_error(
+            "update_room",
+            error.to_string(),
+            json!({ "step": "update_room", "room_id": &room_id }),
+        )
+    })?;
+
+    if result.rows_affected() == 0 {
+        return Err(CommandError::user(codes::ROOM_NOT_FOUND, "Phòng không tồn tại"));
+    }
 
     let r = sqlx::query("SELECT id, name, type, floor, has_balcony, base_price, max_guests, extra_person_fee, status FROM rooms WHERE id = ?")
         .bind(&room_id)
-        .fetch_one(pool).await.map_err(|e| e.to_string())?;
+        .fetch_one(pool)
+        .await
+        .map_err(|error| {
+            log_system_error(
+                "update_room",
+                error.to_string(),
+                json!({ "step": "fetch_updated_room", "room_id": &room_id }),
+            )
+        })?;
 
     Ok(Room {
         id: r.get("id"),
@@ -79,44 +99,77 @@ pub async fn create_room(
     state: State<'_, AppState>,
     app: tauri::AppHandle,
     req: CreateRoomRequest,
-) -> Result<Room, String> {
+) -> CommandResult<Room> {
     require_admin(&state)?;
 
-    // Check ID doesn't already exist
+    let room = do_create_room(&state.db, req).await?;
+
+    emit_db_update(&app, "rooms");
+    Ok(room)
+}
+
+async fn do_create_room(pool: &Pool<Sqlite>, req: CreateRoomRequest) -> CommandResult<Room> {
+    let CreateRoomRequest {
+        id,
+        name,
+        room_type,
+        floor,
+        has_balcony,
+        base_price,
+        max_guests,
+        extra_person_fee,
+    } = req;
+
     let existing: Option<(String,)> = sqlx::query_as("SELECT id FROM rooms WHERE id = ?")
-        .bind(&req.id)
-        .fetch_optional(&state.db)
+        .bind(&id)
+        .fetch_optional(pool)
         .await
-        .map_err(|e| e.to_string())?;
+        .map_err(|error| {
+            log_system_error(
+                "create_room",
+                error.to_string(),
+                json!({ "step": "check_existing_room", "room_id": &id }),
+            )
+        })?;
     if existing.is_some() {
-        return Err(format!("Phòng '{}' đã tồn tại", req.id));
+        return Err(CommandError::user(codes::ROOM_ALREADY_EXISTS, "Phòng đã tồn tại"));
     }
 
     sqlx::query(
         "INSERT INTO rooms (id, name, type, floor, has_balcony, base_price, max_guests, extra_person_fee, status)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'vacant')"
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'vacant')",
     )
-    .bind(&req.id)
-    .bind(&req.name)
-    .bind(&req.room_type)
-    .bind(req.floor)
-    .bind(req.has_balcony as i32)
-    .bind(req.base_price)
-    .bind(req.max_guests)
-    .bind(req.extra_person_fee)
-    .execute(&state.db).await.map_err(|e| e.to_string())?;
-
-    emit_db_update(&app, "rooms");
+    .bind(&id)
+    .bind(&name)
+    .bind(&room_type)
+    .bind(floor)
+    .bind(has_balcony as i32)
+    .bind(base_price)
+    .bind(max_guests)
+    .bind(extra_person_fee)
+    .execute(pool)
+    .await
+    .map_err(|error| {
+        if is_unique_constraint_error(&error) {
+            CommandError::user(codes::ROOM_ALREADY_EXISTS, "Phòng đã tồn tại")
+        } else {
+            log_system_error(
+                "create_room",
+                error.to_string(),
+                json!({ "step": "insert_room", "room_id": &id }),
+            )
+        }
+    })?;
 
     Ok(Room {
-        id: req.id,
-        name: req.name,
-        room_type: req.room_type,
-        floor: req.floor,
-        has_balcony: req.has_balcony,
-        base_price: req.base_price,
-        max_guests: req.max_guests,
-        extra_person_fee: req.extra_person_fee,
+        id,
+        name,
+        room_type,
+        floor,
+        has_balcony,
+        base_price,
+        max_guests,
+        extra_person_fee,
         status: "vacant".to_string(),
     })
 }
@@ -128,40 +181,71 @@ pub async fn delete_room(
     state: State<'_, AppState>,
     app: tauri::AppHandle,
     room_id: String,
-) -> Result<(), String> {
+) -> CommandResult<()> {
     require_admin(&state)?;
 
-    // Check room exists
+    do_delete_room(&state.db, room_id.clone()).await?;
+
+    emit_db_update(&app, "rooms");
+    Ok(())
+}
+
+async fn do_delete_room(pool: &Pool<Sqlite>, room_id: String) -> CommandResult<()> {
     let room_row = sqlx::query("SELECT status FROM rooms WHERE id = ?")
         .bind(&room_id)
-        .fetch_optional(&state.db)
+        .fetch_optional(pool)
         .await
-        .map_err(|e| e.to_string())?;
-    let room_row = room_row.ok_or(format!("Phòng '{}' không tồn tại", room_id))?;
+        .map_err(|error| {
+            log_system_error(
+                "delete_room",
+                error.to_string(),
+                json!({ "step": "fetch_room", "room_id": &room_id }),
+            )
+        })?;
+    let room_row = match room_row {
+        Some(row) => row,
+        None => return Err(CommandError::user(codes::ROOM_NOT_FOUND, "Phòng không tồn tại")),
+    };
     let status: String = room_row.get("status");
 
     if status == "occupied" {
-        return Err("Không thể xóa phòng đang có khách".to_string());
+        return Err(CommandError::user(
+            codes::ROOM_DELETE_OCCUPIED,
+            "Không thể xóa phòng đang có khách",
+        ));
     }
 
-    // Check no active bookings
     let active: (i64,) =
         sqlx::query_as("SELECT COUNT(*) FROM bookings WHERE room_id = ? AND status = 'active'")
             .bind(&room_id)
-            .fetch_one(&state.db)
+            .fetch_one(pool)
             .await
-            .map_err(|e| e.to_string())?;
+            .map_err(|error| {
+                log_system_error(
+                    "delete_room",
+                    error.to_string(),
+                    json!({ "step": "count_active_bookings", "room_id": &room_id }),
+                )
+            })?;
     if active.0 > 0 {
-        return Err("Không thể xóa phòng có booking đang hoạt động".to_string());
+        return Err(CommandError::user(
+            codes::ROOM_DELETE_ACTIVE_BOOKING,
+            "Không thể xóa phòng có booking đang hoạt động",
+        ));
     }
 
     sqlx::query("DELETE FROM rooms WHERE id = ?")
         .bind(&room_id)
-        .execute(&state.db)
+        .execute(pool)
         .await
-        .map_err(|e| e.to_string())?;
+        .map_err(|error| {
+            log_system_error(
+                "delete_room",
+                error.to_string(),
+                json!({ "step": "delete_room", "room_id": &room_id }),
+            )
+        })?;
 
-    emit_db_update(&app, "rooms");
     Ok(())
 }
 
@@ -193,31 +277,68 @@ pub async fn create_room_type(
     state: State<'_, AppState>,
     app: tauri::AppHandle,
     req: CreateRoomTypeRequest,
-) -> Result<RoomType, String> {
+) -> CommandResult<RoomType> {
     require_admin(&state)?;
 
-    let id = req.name.to_lowercase().replace(' ', "_");
+    let room_type = do_create_room_type(&state.db, req).await?;
+
+    emit_db_update(&app, "room_types");
+    Ok(room_type)
+}
+
+async fn do_create_room_type(
+    pool: &Pool<Sqlite>,
+    req: CreateRoomTypeRequest,
+) -> CommandResult<RoomType> {
+    let name = req.name;
+    let id = name.to_lowercase().replace(' ', "_");
     let now = chrono::Local::now().to_rfc3339();
+
+    let existing: Option<(String,)> = sqlx::query_as(
+        "SELECT id FROM room_types WHERE id = ? OR name = ?",
+    )
+    .bind(&id)
+    .bind(&name)
+    .fetch_optional(pool)
+    .await
+    .map_err(|error| {
+        log_system_error(
+            "create_room_type",
+            error.to_string(),
+            json!({ "step": "check_existing_room_type", "room_type_id": &id, "room_type_name": &name }),
+        )
+    })?;
+    if existing.is_some() {
+        return Err(CommandError::user(
+            codes::ROOM_TYPE_ALREADY_EXISTS,
+            "Loại phòng đã tồn tại",
+        ));
+    }
 
     sqlx::query("INSERT INTO room_types (id, name, created_at) VALUES (?, ?, ?)")
         .bind(&id)
-        .bind(&req.name)
+        .bind(&name)
         .bind(&now)
-        .execute(&state.db)
+        .execute(pool)
         .await
-        .map_err(|e| {
-            if e.to_string().contains("UNIQUE") {
-                format!("Loại phòng '{}' đã tồn tại", req.name)
+        .map_err(|error| {
+            if is_unique_constraint_error(&error) {
+                CommandError::user(
+                    codes::ROOM_TYPE_ALREADY_EXISTS,
+                    "Loại phòng đã tồn tại",
+                )
             } else {
-                e.to_string()
+                log_system_error(
+                    "create_room_type",
+                    error.to_string(),
+                    json!({ "step": "insert_room_type", "room_type_id": &id, "room_type_name": &name }),
+                )
             }
         })?;
 
-    emit_db_update(&app, "room_types");
-
     Ok(RoomType {
         id,
-        name: req.name,
+        name,
         created_at: now,
     })
 }
@@ -227,38 +348,73 @@ pub async fn delete_room_type(
     state: State<'_, AppState>,
     app: tauri::AppHandle,
     room_type_id: String,
-) -> Result<(), String> {
+) -> CommandResult<()> {
     require_admin(&state)?;
 
-    // Check no rooms using this type
+    do_delete_room_type(&state.db, room_type_id.clone()).await?;
+
+    emit_db_update(&app, "room_types");
+    Ok(())
+}
+
+async fn do_delete_room_type(pool: &Pool<Sqlite>, room_type_id: String) -> CommandResult<()> {
     let rt_row = sqlx::query("SELECT name FROM room_types WHERE id = ?")
         .bind(&room_type_id)
-        .fetch_optional(&state.db)
+        .fetch_optional(pool)
         .await
-        .map_err(|e| e.to_string())?;
-    let rt_row = rt_row.ok_or("Loại phòng không tồn tại".to_string())?;
+        .map_err(|error| {
+            log_system_error(
+                "delete_room_type",
+                error.to_string(),
+                json!({ "step": "fetch_room_type", "room_type_id": &room_type_id }),
+            )
+        })?;
+    let rt_row = match rt_row {
+        Some(row) => row,
+        None => return Err(CommandError::user(codes::ROOM_TYPE_NOT_FOUND, "Loại phòng không tồn tại")),
+    };
     let type_name: String = rt_row.get("name");
 
     let in_use: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM rooms WHERE type = ?")
         .bind(&type_name)
-        .fetch_one(&state.db)
+        .fetch_one(pool)
         .await
-        .map_err(|e| e.to_string())?;
+        .map_err(|error| {
+            log_system_error(
+                "delete_room_type",
+                error.to_string(),
+                json!({ "step": "count_rooms_by_type", "room_type_id": &room_type_id, "room_type_name": &type_name }),
+            )
+        })?;
     if in_use.0 > 0 {
-        return Err(format!(
-            "Không thể xóa: có {} phòng đang sử dụng loại '{}'",
-            in_use.0, type_name
+        return Err(CommandError::user(
+            codes::ROOM_TYPE_IN_USE,
+            "Không thể xóa loại phòng đang được sử dụng",
         ));
     }
 
     sqlx::query("DELETE FROM room_types WHERE id = ?")
         .bind(&room_type_id)
-        .execute(&state.db)
+        .execute(pool)
         .await
-        .map_err(|e| e.to_string())?;
+        .map_err(|error| {
+            log_system_error(
+                "delete_room_type",
+                error.to_string(),
+                json!({ "step": "delete_room_type", "room_type_id": &room_type_id }),
+            )
+        })?;
 
-    emit_db_update(&app, "room_types");
     Ok(())
+}
+
+fn is_unique_constraint_error(error: &sqlx::Error) -> bool {
+    matches!(
+        error,
+        sqlx::Error::Database(database_error)
+            if database_error.message().contains("UNIQUE constraint failed")
+                || database_error.message().contains("UNIQUE")
+    )
 }
 
 // ─── A5: Export CSV ───
@@ -320,8 +476,11 @@ pub async fn export_csv(state: State<'_, AppState>) -> Result<String, String> {
 
 #[cfg(test)]
 mod tests {
-    use super::do_update_room;
-    use crate::models::UpdateRoomRequest;
+    use super::{
+        do_create_room, do_create_room_type, do_delete_room, do_delete_room_type, do_update_room,
+    };
+    use crate::app_error::codes;
+    use crate::models::{CreateRoomRequest, CreateRoomTypeRequest, UpdateRoomRequest};
     use sqlx::{sqlite::SqlitePoolOptions, Pool, Row, Sqlite};
 
     async fn test_pool() -> Pool<Sqlite> {
@@ -348,10 +507,32 @@ mod tests {
         .await
         .expect("create rooms table");
 
+        sqlx::query(
+            "CREATE TABLE bookings (
+                id TEXT PRIMARY KEY,
+                room_id TEXT NOT NULL,
+                status TEXT NOT NULL
+            )",
+        )
+        .execute(&pool)
+        .await
+        .expect("create bookings table");
+
+        sqlx::query(
+            "CREATE TABLE room_types (
+                id TEXT PRIMARY KEY,
+                name TEXT NOT NULL UNIQUE,
+                created_at TEXT NOT NULL
+            )",
+        )
+        .execute(&pool)
+        .await
+        .expect("create room_types table");
+
         pool
     }
 
-    async fn seed_room(pool: &Pool<Sqlite>, room_id: &str) {
+    async fn seed_room(pool: &Pool<Sqlite>, room_id: &str, room_type: &str, status: &str) {
         sqlx::query(
             "INSERT INTO rooms (
                 id, name, type, floor, has_balcony, base_price, max_guests, extra_person_fee, status
@@ -359,22 +540,32 @@ mod tests {
         )
         .bind(room_id)
         .bind("Room 101")
-        .bind("standard")
+        .bind(room_type)
         .bind(1)
         .bind(1)
         .bind(300_000.0)
         .bind(2)
         .bind(100_000.0)
-        .bind("vacant")
+        .bind(status)
         .execute(pool)
         .await
         .expect("seed room");
     }
 
+    async fn seed_room_type(pool: &Pool<Sqlite>, id: &str, name: &str) {
+        sqlx::query("INSERT INTO room_types (id, name, created_at) VALUES (?, ?, ?)")
+            .bind(id)
+            .bind(name)
+            .bind("2026-04-22T00:00:00Z")
+            .execute(pool)
+            .await
+            .expect("seed room type");
+    }
+
     #[tokio::test]
     async fn update_room_leaves_unspecified_fields_unchanged() {
         let pool = test_pool().await;
-        seed_room(&pool, "R101").await;
+        seed_room(&pool, "R101", "standard", "vacant").await;
 
         let updated = do_update_room(
             &pool,
@@ -404,7 +595,7 @@ mod tests {
     #[tokio::test]
     async fn update_room_updates_multiple_fields_in_one_call() {
         let pool = test_pool().await;
-        seed_room(&pool, "R102").await;
+        seed_room(&pool, "R102", "standard", "vacant").await;
 
         let updated = do_update_room(
             &pool,
@@ -448,7 +639,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn update_room_returns_not_found_error_for_missing_room() {
+    async fn update_room_returns_room_not_found_error_for_missing_room() {
         let pool = test_pool().await;
 
         let error = do_update_room(
@@ -467,9 +658,109 @@ mod tests {
         .await
         .expect_err("missing room must return an error");
 
-        assert!(
-            error.contains("no rows returned"),
-            "expected fetch_one not-found error, got: {error}"
-        );
+        assert_eq!(error.code, codes::ROOM_NOT_FOUND);
+        assert_eq!(error.message, "Phòng không tồn tại");
+    }
+
+    #[tokio::test]
+    async fn create_room_returns_duplicate_room_error_for_taken_id() {
+        let pool = test_pool().await;
+        seed_room(&pool, "R201", "standard", "vacant").await;
+
+        let error = do_create_room(
+            &pool,
+            CreateRoomRequest {
+                id: "R201".to_string(),
+                name: "Suite 201".to_string(),
+                room_type: "standard".to_string(),
+                floor: 2,
+                has_balcony: false,
+                base_price: 500_000.0,
+                max_guests: 2,
+                extra_person_fee: 150_000.0,
+            },
+        )
+        .await
+        .expect_err("duplicate room id must fail");
+
+        assert_eq!(error.code, codes::ROOM_ALREADY_EXISTS);
+        assert_eq!(error.message, "Phòng đã tồn tại");
+    }
+
+    #[tokio::test]
+    async fn delete_room_returns_occupied_error_for_occupied_room() {
+        let pool = test_pool().await;
+        seed_room(&pool, "R301", "standard", "occupied").await;
+
+        let error = do_delete_room(&pool, "R301".to_string())
+            .await
+        .expect_err("occupied room must fail");
+
+        assert_eq!(error.code, codes::ROOM_DELETE_OCCUPIED);
+        assert_eq!(error.message, "Không thể xóa phòng đang có khách");
+    }
+
+    #[tokio::test]
+    async fn delete_room_returns_active_booking_error_for_room_with_booking() {
+        let pool = test_pool().await;
+        seed_room(&pool, "R302", "standard", "vacant").await;
+        sqlx::query("INSERT INTO bookings (id, room_id, status) VALUES (?, ?, ?)")
+            .bind("B302")
+            .bind("R302")
+            .bind("active")
+            .execute(&pool)
+            .await
+            .expect("seed active booking");
+
+        let error = do_delete_room(&pool, "R302".to_string())
+            .await
+        .expect_err("active booking must fail");
+
+        assert_eq!(error.code, codes::ROOM_DELETE_ACTIVE_BOOKING);
+        assert_eq!(error.message, "Không thể xóa phòng có booking đang hoạt động");
+    }
+
+    #[tokio::test]
+    async fn create_room_type_returns_duplicate_error_for_taken_name() {
+        let pool = test_pool().await;
+        seed_room_type(&pool, "standard", "Standard").await;
+
+        let error = do_create_room_type(
+            &pool,
+            CreateRoomTypeRequest {
+                name: "Standard".to_string(),
+            },
+        )
+        .await
+        .expect_err("duplicate room type must fail");
+
+        assert_eq!(error.code, codes::ROOM_TYPE_ALREADY_EXISTS);
+        assert_eq!(error.message, "Loại phòng đã tồn tại");
+    }
+
+    #[tokio::test]
+    async fn delete_room_type_returns_not_found_error_for_missing_type() {
+        let pool = test_pool().await;
+
+        let error = do_delete_room_type(&pool, "missing-type".to_string())
+            .await
+            .expect_err("missing room type must fail");
+
+        assert_eq!(error.code, codes::ROOM_TYPE_NOT_FOUND);
+        assert_eq!(error.message, "Loại phòng không tồn tại");
+    }
+
+    #[tokio::test]
+    async fn delete_room_type_returns_in_use_error_when_rooms_reference_it() {
+        let pool = test_pool().await;
+        seed_room_type(&pool, "standard", "Standard").await;
+        seed_room(&pool, "R401", "Standard", "vacant").await;
+
+        let error = do_delete_room_type(&pool, "standard".to_string())
+            .await
+        .expect_err("room type in use must fail");
+
+        assert_eq!(error.code, codes::ROOM_TYPE_IN_USE);
+        assert_eq!(error.message, "Không thể xóa loại phòng đang được sử dụng");
     }
 }

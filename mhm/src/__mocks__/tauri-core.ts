@@ -90,7 +90,12 @@ export const invoke = vi.fn(async (command: string, args?: Record<string, unknow
     };
 
     if (command === "login") {
-        throw new Error("Invalid PIN");
+        throw {
+            code: "AUTH_INVALID_PIN",
+            message: "Mã PIN không đúng",
+            kind: "user",
+            support_id: null,
+        };
     }
 
     if (command in defaults) {
@@ -99,6 +104,5 @@ export const invoke = vi.fn(async (command: string, args?: Record<string, unknow
         return val;
     }
 
-    console.warn(`[tauri-mock] Unhandled invoke: "${command}" with args:`, args);
-    return undefined;
+    throw new Error(`[tauri-mock] Unhandled invoke: "${command}" with args: ${JSON.stringify(args ?? null)}`);
 });

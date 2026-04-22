@@ -1,0 +1,384 @@
+use serde::{Deserialize, Serialize};
+use serde_json::Value;
+
+use crate::app_identity;
+use crate::support_log::{self, SupportErrorRecord};
+
+pub mod codes {
+    pub const AUTH_INVALID_PIN: &str = "AUTH_INVALID_PIN";
+    pub const AUTH_NOT_AUTHENTICATED: &str = "AUTH_NOT_AUTHENTICATED";
+    pub const AUTH_FORBIDDEN: &str = "AUTH_FORBIDDEN";
+    pub const ROOM_ALREADY_EXISTS: &str = "ROOM_ALREADY_EXISTS";
+    pub const ROOM_NOT_FOUND: &str = "ROOM_NOT_FOUND";
+    pub const ROOM_DELETE_OCCUPIED: &str = "ROOM_DELETE_OCCUPIED";
+    pub const ROOM_DELETE_ACTIVE_BOOKING: &str = "ROOM_DELETE_ACTIVE_BOOKING";
+    pub const ROOM_TYPE_ALREADY_EXISTS: &str = "ROOM_TYPE_ALREADY_EXISTS";
+    pub const ROOM_TYPE_NOT_FOUND: &str = "ROOM_TYPE_NOT_FOUND";
+    pub const ROOM_TYPE_IN_USE: &str = "ROOM_TYPE_IN_USE";
+    pub const GROUP_INVALID_ROOM_COUNT: &str = "GROUP_INVALID_ROOM_COUNT";
+    pub const GROUP_NOT_ENOUGH_VACANT_ROOMS: &str = "GROUP_NOT_ENOUGH_VACANT_ROOMS";
+    pub const GROUP_NOT_FOUND: &str = "GROUP_NOT_FOUND";
+    pub const GROUP_CHECKOUT_SELECTION_REQUIRED: &str = "GROUP_CHECKOUT_SELECTION_REQUIRED";
+    pub const BOOKING_NOT_FOUND: &str = "BOOKING_NOT_FOUND";
+    pub const BOOKING_INVALID_STATE: &str = "BOOKING_INVALID_STATE";
+    pub const BOOKING_GUEST_REQUIRED: &str = "BOOKING_GUEST_REQUIRED";
+    pub const BOOKING_INVALID_NIGHTS: &str = "BOOKING_INVALID_NIGHTS";
+    pub const BOOKING_INVALID_SETTLEMENT_TOTAL: &str = "BOOKING_INVALID_SETTLEMENT_TOTAL";
+    pub const SYSTEM_INTERNAL_ERROR: &str = "SYSTEM_INTERNAL_ERROR";
+
+    pub const ALL: &[&str] = &[
+        AUTH_INVALID_PIN,
+        AUTH_NOT_AUTHENTICATED,
+        AUTH_FORBIDDEN,
+        ROOM_ALREADY_EXISTS,
+        ROOM_NOT_FOUND,
+        ROOM_DELETE_OCCUPIED,
+        ROOM_DELETE_ACTIVE_BOOKING,
+        ROOM_TYPE_ALREADY_EXISTS,
+        ROOM_TYPE_NOT_FOUND,
+        ROOM_TYPE_IN_USE,
+        GROUP_INVALID_ROOM_COUNT,
+        GROUP_NOT_ENOUGH_VACANT_ROOMS,
+        GROUP_NOT_FOUND,
+        GROUP_CHECKOUT_SELECTION_REQUIRED,
+        BOOKING_NOT_FOUND,
+        BOOKING_INVALID_STATE,
+        BOOKING_GUEST_REQUIRED,
+        BOOKING_INVALID_NIGHTS,
+        BOOKING_INVALID_SETTLEMENT_TOTAL,
+        SYSTEM_INTERNAL_ERROR,
+    ];
+}
+
+pub const GENERIC_SYSTEM_ERROR_MESSAGE: &str = "Có lỗi hệ thống, vui lòng thử lại";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum AppErrorKind {
+    User,
+    System,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CommandError {
+    pub code: String,
+    pub message: String,
+    pub kind: AppErrorKind,
+    pub support_id: Option<String>,
+}
+
+pub type CommandResult<T> = Result<T, CommandError>;
+
+fn ensure_registered_code(code: &'static str) -> &'static str {
+    assert!(
+        codes::ALL.contains(&code),
+        "unregistered command error code: {code}"
+    );
+    code
+}
+
+impl CommandError {
+    pub fn user(code: &'static str, message: impl Into<String>) -> Self {
+        let code = ensure_registered_code(code);
+        Self {
+            code: code.to_string(),
+            message: message.into(),
+            kind: AppErrorKind::User,
+            support_id: None,
+        }
+    }
+
+    pub fn system(code: &'static str, message: impl Into<String>) -> Self {
+        let code = ensure_registered_code(code);
+        Self {
+            code: code.to_string(),
+            message: message.into(),
+            kind: AppErrorKind::System,
+            support_id: Some(generate_support_id()),
+        }
+    }
+
+    pub fn with_support_id(
+        code: &'static str,
+        message: impl Into<String>,
+        support_id: impl Into<String>,
+    ) -> Self {
+        let code = ensure_registered_code(code);
+        Self {
+            code: code.to_string(),
+            message: message.into(),
+            kind: AppErrorKind::System,
+            support_id: Some(support_id.into()),
+        }
+    }
+}
+
+pub fn generate_support_id() -> String {
+    let raw = uuid::Uuid::new_v4().simple().to_string();
+    format!("SUP-{}", raw[..8].to_ascii_uppercase())
+}
+
+pub fn log_system_error(
+    command_name: &str,
+    root_cause: impl AsRef<str>,
+    context: Value,
+) -> CommandError {
+    let root_cause = root_cause.as_ref();
+    let support_id = generate_support_id();
+    let record = SupportErrorRecord::new(
+        command_name,
+        codes::SYSTEM_INTERNAL_ERROR,
+        root_cause,
+        support_id.clone(),
+        context,
+    );
+    let context_json = serde_json::to_string(&record.context).unwrap_or_else(|_| "{}".to_string());
+
+    log::error!(
+        "system error [{}] {}: {} | context={}",
+        support_id,
+        command_name,
+        root_cause,
+        context_json
+    );
+
+    if let Some(runtime_root) = app_identity::runtime_root_opt() {
+        if let Err(error) = support_log::append_support_error_record(&runtime_root, &record) {
+            log::error!(
+                "failed to write support error record for {}: {}",
+                command_name,
+                error
+            );
+        }
+    } else {
+        log::error!(
+            "unable to resolve runtime root for support error record from {}",
+            command_name
+        );
+    }
+
+    CommandError::with_support_id(
+        codes::SYSTEM_INTERNAL_ERROR,
+        GENERIC_SYSTEM_ERROR_MESSAGE,
+        support_id,
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+    use std::fs;
+    use std::path::Path;
+
+    #[test]
+    fn user_error_serializes_to_the_expected_contract_shape() {
+        let error = CommandError::user(codes::AUTH_INVALID_PIN, "Mã PIN không đúng");
+        let serialized = serde_json::to_value(&error).expect("serialize command error");
+
+        assert_eq!(
+            serialized,
+            json!({
+                "code": codes::AUTH_INVALID_PIN,
+                "message": "Mã PIN không đúng",
+                "kind": "user",
+                "support_id": null,
+            })
+        );
+    }
+
+    #[test]
+    fn system_error_serializes_support_id_in_the_expected_format() {
+        let error = CommandError::system(
+            codes::SYSTEM_INTERNAL_ERROR,
+            "Có lỗi hệ thống, vui lòng thử lại",
+        );
+        let support_id = error
+            .support_id
+            .clone()
+            .expect("system errors carry support ids");
+
+        assert_eq!(support_id.len(), 12);
+        assert!(support_id.starts_with("SUP-"));
+        assert!(support_id[4..]
+            .chars()
+            .all(|character| character.is_ascii_digit() || matches!(character, 'A'..='F')));
+
+        let serialized = serde_json::to_value(&error).expect("serialize command error");
+        assert_eq!(serialized["kind"], "system");
+        assert_eq!(serialized["support_id"], support_id);
+    }
+
+    #[test]
+    #[should_panic(expected = "unregistered command error code")]
+    fn rejects_unregistered_command_error_code() {
+        let _ = CommandError::user("NOT_REGISTERED", "boom");
+    }
+
+    #[test]
+    fn registry_matches_the_exported_code_constants() {
+        #[derive(Deserialize)]
+        struct RegistryEntry {
+            code: String,
+            kind: AppErrorKind,
+            #[serde(rename = "defaultMessage")]
+            default_message: String,
+        }
+
+        let registry_path =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("../shared/error-codes.json");
+        let registry: Vec<RegistryEntry> =
+            serde_json::from_str(&fs::read_to_string(&registry_path).expect("read registry"))
+                .expect("parse registry");
+        let expected = vec![
+            (
+                codes::AUTH_INVALID_PIN,
+                AppErrorKind::User,
+                "Mã PIN không đúng",
+            ),
+            (
+                codes::AUTH_NOT_AUTHENTICATED,
+                AppErrorKind::User,
+                "Chưa đăng nhập",
+            ),
+            (
+                codes::AUTH_FORBIDDEN,
+                AppErrorKind::User,
+                "Không có quyền thực hiện. Yêu cầu quyền Admin.",
+            ),
+            (
+                codes::ROOM_ALREADY_EXISTS,
+                AppErrorKind::User,
+                "Phòng đã tồn tại",
+            ),
+            (
+                codes::ROOM_NOT_FOUND,
+                AppErrorKind::User,
+                "Phòng không tồn tại",
+            ),
+            (
+                codes::ROOM_DELETE_OCCUPIED,
+                AppErrorKind::User,
+                "Không thể xóa phòng đang có khách",
+            ),
+            (
+                codes::ROOM_DELETE_ACTIVE_BOOKING,
+                AppErrorKind::User,
+                "Không thể xóa phòng có booking đang hoạt động",
+            ),
+            (
+                codes::ROOM_TYPE_ALREADY_EXISTS,
+                AppErrorKind::User,
+                "Loại phòng đã tồn tại",
+            ),
+            (
+                codes::ROOM_TYPE_NOT_FOUND,
+                AppErrorKind::User,
+                "Loại phòng không tồn tại",
+            ),
+            (
+                codes::ROOM_TYPE_IN_USE,
+                AppErrorKind::User,
+                "Không thể xóa loại phòng đang được sử dụng",
+            ),
+            (
+                codes::GROUP_INVALID_ROOM_COUNT,
+                AppErrorKind::User,
+                "Số phòng phải lớn hơn 0",
+            ),
+            (
+                codes::GROUP_NOT_ENOUGH_VACANT_ROOMS,
+                AppErrorKind::User,
+                "Không đủ phòng trống",
+            ),
+            (
+                codes::GROUP_NOT_FOUND,
+                AppErrorKind::User,
+                "Không tìm thấy đoàn",
+            ),
+            (
+                codes::GROUP_CHECKOUT_SELECTION_REQUIRED,
+                AppErrorKind::User,
+                "Phải chọn ít nhất 1 phòng để checkout",
+            ),
+            (
+                codes::BOOKING_NOT_FOUND,
+                AppErrorKind::User,
+                "Không tìm thấy booking",
+            ),
+            (
+                codes::BOOKING_INVALID_STATE,
+                AppErrorKind::User,
+                "Booking hiện không ở trạng thái hợp lệ cho thao tác này",
+            ),
+            (
+                codes::BOOKING_GUEST_REQUIRED,
+                AppErrorKind::User,
+                "Phải có ít nhất 1 khách",
+            ),
+            (
+                codes::BOOKING_INVALID_NIGHTS,
+                AppErrorKind::User,
+                "Số đêm phải lớn hơn 0",
+            ),
+            (
+                codes::BOOKING_INVALID_SETTLEMENT_TOTAL,
+                AppErrorKind::User,
+                "Tổng quyết toán phải lớn hơn hoặc bằng 0",
+            ),
+            (
+                codes::SYSTEM_INTERNAL_ERROR,
+                AppErrorKind::System,
+                GENERIC_SYSTEM_ERROR_MESSAGE,
+            ),
+        ];
+
+        assert_eq!(registry.len(), expected.len());
+        for (entry, (code, kind, default_message)) in registry.iter().zip(expected.iter()) {
+            assert_eq!(entry.code, *code);
+            assert_eq!(entry.kind, *kind);
+            assert_eq!(entry.default_message, *default_message);
+        }
+        assert!(registry
+            .iter()
+            .all(|entry| !entry.default_message.is_empty()));
+    }
+
+    #[test]
+    fn log_system_error_returns_generic_system_contract_and_writes_support_record() {
+        let _guard = crate::runtime_config::env_lock().lock().unwrap();
+        let runtime_root =
+            std::env::temp_dir().join(format!("capyinn-log-system-error-{}", uuid::Uuid::new_v4()));
+
+        std::env::set_var("CAPYINN_RUNTIME_ROOT", &runtime_root);
+        let error = log_system_error(
+            "login",
+            "database offline",
+            json!({ "room_id": "R101", "booking_id": "B202" }),
+        );
+        std::env::remove_var("CAPYINN_RUNTIME_ROOT");
+
+        assert_eq!(error.code, codes::SYSTEM_INTERNAL_ERROR);
+        assert_eq!(error.message, GENERIC_SYSTEM_ERROR_MESSAGE);
+        assert_eq!(error.kind, AppErrorKind::System);
+        let support_id = error.support_id.expect("support id");
+        assert!(support_id.starts_with("SUP-"));
+
+        let log_path = runtime_root
+            .join("diagnostics")
+            .join("support-errors.jsonl");
+        let contents = fs::read_to_string(&log_path).expect("support log contents");
+        let parsed: serde_json::Value =
+            serde_json::from_str(contents.trim()).expect("support log json");
+        assert_eq!(parsed["command"], "login");
+        assert_eq!(parsed["code"], codes::SYSTEM_INTERNAL_ERROR);
+        assert_eq!(parsed["root_cause"], "database offline");
+        assert_eq!(parsed["context"]["room_id"], "R101");
+        assert_eq!(parsed["context"]["booking_id"], "B202");
+        assert!(parsed.get("room_id").is_none());
+        assert!(parsed.get("booking_id").is_none());
+        assert_eq!(parsed["support_id"], support_id);
+
+        let _ = fs::remove_dir_all(&runtime_root);
+    }
+}
