@@ -6,7 +6,10 @@ import { Sheet, SheetContent, SheetHeader, SheetTitle } from "@/components/ui/sh
 import { Button } from "@/components/ui/button";
 import { useAvailability } from "@/hooks/useAvailability";
 import { useInvoiceDialog } from "@/hooks/useInvoiceDialog";
+import { formatAppError } from "@/lib/appError";
+import { createCorrelationId } from "@/lib/correlationId";
 import { fmtNumber } from "@/lib/format";
+import { invokeCommand } from "@/lib/invokeCommand";
 import { toast } from "sonner";
 import InvoiceDialog from "./InvoiceDialog";
 import type { EditableBooking } from "@/types";
@@ -109,7 +112,8 @@ export default function ReservationSheet({ open, onOpenChange, preSelectedRoomId
                 });
                 toast.success("Đã cập nhật đặt phòng!");
             } else {
-                await invoke("create_reservation", {
+                const correlationId = createCorrelationId();
+                await invokeCommand("create_reservation", {
                     req: {
                         room_id: roomId,
                         guest_name: guestName,
@@ -122,6 +126,14 @@ export default function ReservationSheet({ open, onOpenChange, preSelectedRoomId
                         source,
                         notes: notes || null,
                     },
+                }, {
+                    correlationId,
+                    monitoringContext: {
+                        nights,
+                        deposit_present: deposit.trim().length > 0,
+                        source: source || null,
+                        notes_present: notes.trim().length > 0,
+                    },
                 });
                 toast.success("Đặt phòng thành công!");
             }
@@ -129,7 +141,7 @@ export default function ReservationSheet({ open, onOpenChange, preSelectedRoomId
             onOpenChange(false);
             fetchRooms();
         } catch (e) {
-            toast.error(String(e));
+            toast.error(isEditMode ? String(e) : formatAppError(e));
         }
         setLoading(false);
     }

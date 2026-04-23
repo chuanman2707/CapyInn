@@ -103,6 +103,7 @@ describe("03 — Check-in Flow", () => {
             },
             correlationId: expect.stringMatching(/^COR-[0-9A-F]{8}$/),
         });
+        expect(checkInCall?.[1]).not.toHaveProperty("monitoringContext");
     });
 
     it("handles check-in error gracefully", async () => {
@@ -133,6 +134,7 @@ describe("03 — Check-in Flow", () => {
         const checkInCall = invoke.mock.calls.find(([command]) => command === "check_in");
         const correlationId = checkInCall?.[1]?.correlationId;
         expect(correlationId).toMatch(/^COR-[0-9A-F]{8}$/);
+        expect(checkInCall?.[1]).not.toHaveProperty("monitoringContext");
 
         await promise.catch((error) => {
             expect(error.correlation_id).toBe(correlationId);

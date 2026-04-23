@@ -34,13 +34,24 @@ describe("DiagnosticsSection", () => {
 
     render(<DiagnosticsSection />);
 
-    const checkbox = await screen.findByRole("checkbox", { name: "Send crash reports" });
+    expect(
+      screen.getByText(
+        "Chỉ gửi báo cáo sau khi bạn đồng ý, gồm sự cố nghiêm trọng và chẩn đoán lỗi lệnh đã làm sạch dữ liệu nhạy cảm. Không theo dõi hành vi sử dụng.",
+      ),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText(
+        "Báo cáo chỉ được gửi sau khi bạn đồng ý, gồm sự cố nghiêm trọng và chẩn đoán lỗi lệnh đã làm sạch, không bao gồm dữ liệu khách hoặc session replay.",
+      ),
+    ).toBeInTheDocument();
+
+    const checkbox = await screen.findByRole("checkbox", { name: "Send diagnostics reports" });
     expect(checkbox).not.toBeChecked();
 
     await user.click(checkbox);
 
     await waitFor(() =>
-      expect(screen.getByText("Severe crash reports are enabled")).toBeInTheDocument(),
+      expect(screen.getByText("Diagnostics reports are enabled")).toBeInTheDocument(),
     );
   });
 });

@@ -95,7 +95,10 @@ describe("NightAudit", () => {
           auditDate: "2026-04-20",
           notes: "Đã kiểm tra kho",
         },
-        { correlationId: "COR-5E6F7A8B" },
+        {
+          correlationId: "COR-5E6F7A8B",
+          monitoringContext: { notes_present: true },
+        },
       );
     });
     expect(toastSuccess).toHaveBeenCalledWith(
@@ -124,7 +127,10 @@ describe("NightAudit", () => {
         expect.objectContaining({
           notes: null,
         }),
-        { correlationId: "COR-5E6F7A8B" },
+        {
+          correlationId: "COR-5E6F7A8B",
+          monitoringContext: { notes_present: false },
+        },
       );
     });
     expect(toastError).toHaveBeenCalledWith(formatAppError(error));

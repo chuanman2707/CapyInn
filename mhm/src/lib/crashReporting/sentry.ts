@@ -1,6 +1,8 @@
 import * as Sentry from "@sentry/browser";
 
+import type { MonitoringContext } from "./commandFailure";
 import type { CrashReportSummary } from "./types";
+import type { AppError } from "../appError";
 
 let initialized = false;
 
@@ -20,6 +22,13 @@ function getSentryEnvironment(): "development" | "production" {
 
 export function hasRemoteCrashReporting(): boolean {
   return Boolean(getSentryDsn());
+}
+
+export interface CommandFailureRemoteEvent {
+  command: string;
+  appError: AppError;
+  correlationId: string;
+  monitoringContext: MonitoringContext;
 }
 
 function scrubValue(value: string): string {
@@ -84,6 +93,37 @@ export async function submitCrashBundle(bundle: CrashReportSummary) {
       attempt_count: bundle.attempt_count,
       stacktrace: bundle.stacktrace.map((frame) => scrubValue(frame)),
       module_hint: bundle.module_hint,
+    },
+  });
+
+  await Sentry.flush(2000);
+}
+
+export async function submitCommandFailureEvent(event: CommandFailureRemoteEvent) {
+  ensureCrashReportingClient();
+  if (!hasRemoteCrashReporting()) {
+    throw new Error("Sentry DSN is not configured");
+  }
+
+  const level = event.appError.kind === "user" ? "warning" : "error";
+
+  Sentry.captureEvent({
+    level,
+    message: `Command failure: ${event.command} (${event.appError.code})`,
+    fingerprint: ["command_failure", event.command, event.appError.code],
+    tags: {
+      event_type: "command_failure",
+      command: event.command,
+      code: event.appError.code,
+      kind: event.appError.kind,
+    },
+    extra: {
+      command: event.command,
+      code: event.appError.code,
+      kind: event.appError.kind,
+      support_id: event.appError.support_id,
+      correlation_id: event.correlationId,
+      context: event.monitoringContext,
     },
   });
 

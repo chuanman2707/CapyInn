@@ -1,5 +1,9 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 vi.mock("@tauri-apps/api/core", () => ({ invoke: vi.fn() }));
+const { captureCommandFailure } = vi.hoisted(() => ({
+  captureCommandFailure: vi.fn().mockResolvedValue(undefined),
+}));
+vi.mock("./crashReporting/commandFailure", () => ({ captureCommandFailure }));
 
 import { invoke } from "@tauri-apps/api/core";
 
@@ -80,6 +84,67 @@ describe("appError", () => {
     await invokeCommand("login", { req: { pin: "0000" } });
 
     expect(invoke).toHaveBeenCalledWith("login", { req: { pin: "0000" } });
+  });
+
+  it("does not leak monitoring context into the invoke payload when remote capture rejects", async () => {
+    const payload = {
+      code: "BOOKING_GUEST_REQUIRED",
+      message: "Phải có ít nhất 1 khách",
+      kind: "user",
+      support_id: null,
+    };
+    const monitoringContext = {
+      guest_count: 0,
+      nights: 1,
+      source: null,
+      notes_present: false,
+    } as const;
+
+    vi.mocked(invoke).mockRejectedValueOnce(payload);
+    vi.mocked(captureCommandFailure).mockRejectedValueOnce(new Error("remote capture failed"));
+
+    const promise = invokeCommand(
+      "check_in",
+      { req: { room_id: "room-101" } },
+      {
+        correlationId: "COR-8F3A1C7D",
+        monitoringContext,
+      },
+    );
+
+    expect(invoke).toHaveBeenCalledWith("check_in", {
+      req: { room_id: "room-101" },
+      correlationId: "COR-8F3A1C7D",
+    });
+
+    await expect(promise).rejects.toMatchObject({
+      name: "AppError",
+      code: "BOOKING_GUEST_REQUIRED",
+      message: "Phải có ít nhất 1 khách",
+      kind: "user",
+      support_id: null,
+      correlation_id: "COR-8F3A1C7D",
+    });
+
+    expect(captureCommandFailure).toHaveBeenCalledWith({
+      command: "check_in",
+      appError: payload,
+      correlationId: "COR-8F3A1C7D",
+      monitoringContext,
+    });
+
+    await promise.catch((error) => {
+      expect(error).toBeInstanceOf(Error);
+      expect(error).toMatchObject({
+        name: "AppError",
+        code: "BOOKING_GUEST_REQUIRED",
+        message: "Phải có ít nhất 1 khách",
+        kind: "user",
+        support_id: null,
+        correlation_id: "COR-8F3A1C7D",
+      });
+      expect(error.cause).toEqual(payload);
+    });
   });
 
   it("stays aligned with the shared error registry", () => {

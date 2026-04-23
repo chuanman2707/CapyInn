@@ -36,6 +36,7 @@ describe("05 — Check-out Flow", () => {
             req: { booking_id: "booking-1", settlement_mode: "hourly", final_total: 400000 },
             correlationId: expect.stringMatching(/^COR-[0-9A-F]{8}$/),
         });
+        expect(checkOutCall?.[1]).not.toHaveProperty("monitoringContext");
     });
 
     it("refreshes rooms and stats after checkout", async () => {
@@ -83,6 +84,7 @@ describe("05 — Check-out Flow", () => {
         const checkOutCall = invoke.mock.calls.find(([command]) => command === "check_out");
         const correlationId = checkOutCall?.[1]?.correlationId;
         expect(correlationId).toMatch(/^COR-[0-9A-F]{8}$/);
+        expect(checkOutCall?.[1]).not.toHaveProperty("monitoringContext");
 
         await promise.catch((error) => {
             expect(error.correlation_id).toBe(correlationId);
@@ -101,5 +103,6 @@ describe("05 — Check-out Flow", () => {
             req: { booking_id: "booking-1", settlement_mode: "booked_nights", final_total: 2500000 },
             correlationId: expect.stringMatching(/^COR-[0-9A-F]{8}$/),
         });
+        expect(checkOutCall?.[1]).not.toHaveProperty("monitoringContext");
     });
 });

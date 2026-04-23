@@ -1,8 +1,8 @@
 use super::{emit_db_update, get_f64, get_user_id, AppState};
 use crate::{
     app_error::{
-        codes, correlation_context, log_system_error, normalize_correlation_id, CommandError,
-        CommandResult, EffectiveCorrelationId,
+        codes, correlation_context, log_system_error, normalize_correlation_id,
+        record_command_failure, CommandError, CommandResult, EffectiveCorrelationId,
     },
     domain::booking::BookingError,
     models::*,
@@ -185,6 +185,30 @@ fn map_stay_error(
     }
 }
 
+fn check_in_failure_context(req: &CheckInRequest) -> Value {
+    let notes_present = req
+        .notes
+        .as_ref()
+        .map(|value| !value.trim().is_empty())
+        .unwrap_or(false);
+
+    json!({
+        "room_id": req.room_id.clone(),
+        "guest_count": req.guests.len(),
+        "nights": req.nights,
+        "source": req.source.clone(),
+        "notes_present": notes_present,
+    })
+}
+
+fn check_out_failure_context(req: &CheckOutRequest) -> Value {
+    json!({
+        "booking_id": req.booking_id.clone(),
+        "settlement_mode": req.settlement_mode,
+        "final_total": req.final_total,
+    })
+}
+
 #[tauri::command]
 pub async fn check_in(
     state: State<'_, AppState>,
@@ -193,11 +217,7 @@ pub async fn check_in(
     correlation_id: Option<String>,
 ) -> CommandResult<Booking> {
     let effective_correlation_id = normalize_correlation_id(correlation_id);
-    let error_context = json!({
-        "room_id": req.room_id.clone(),
-        "guest_count": req.guests.len(),
-        "nights": req.nights,
-    });
+    let error_context = check_in_failure_context(&req);
     log::info!(
         "check_in start correlation_id={} source={:?} room_id={} guest_count={} nights={}",
         effective_correlation_id.value,
@@ -209,7 +229,19 @@ pub async fn check_in(
     let booking = stay_lifecycle::check_in(&state.db, req, get_user_id(&state))
         .await
         .map_err(|error| {
-            map_stay_error("check_in", &effective_correlation_id, error, error_context)
+            let command_error = map_stay_error(
+                "check_in",
+                &effective_correlation_id,
+                error,
+                error_context.clone(),
+            );
+            record_command_failure(
+                "check_in",
+                &command_error,
+                &effective_correlation_id.value,
+                error_context.clone(),
+            );
+            command_error
         })?;
 
     log::info!(
@@ -325,11 +357,7 @@ pub async fn check_out(
     correlation_id: Option<String>,
 ) -> CommandResult<()> {
     let effective_correlation_id = normalize_correlation_id(correlation_id);
-    let error_context = json!({
-        "booking_id": req.booking_id.clone(),
-        "settlement_mode": req.settlement_mode,
-        "final_total": req.final_total,
-    });
+    let error_context = check_out_failure_context(&req);
     log::info!(
         "check_out start correlation_id={} source={:?} booking_id={} settlement_mode={:?} final_total={}",
         effective_correlation_id.value,
@@ -341,7 +369,19 @@ pub async fn check_out(
     stay_lifecycle::check_out(&state.db, req)
         .await
         .map_err(|error| {
-            map_stay_error("check_out", &effective_correlation_id, error, error_context)
+            let command_error = map_stay_error(
+                "check_out",
+                &effective_correlation_id,
+                error,
+                error_context.clone(),
+            );
+            record_command_failure(
+                "check_out",
+                &command_error,
+                &effective_correlation_id.value,
+                error_context.clone(),
+            );
+            command_error
         })?;
 
     log::info!(
@@ -589,9 +629,13 @@ pub async fn scan_image(path: String) -> Result<crate::ocr::CccdInfo, String> {
 
 #[cfg(test)]
 mod tests {
-    use super::map_stay_error;
-    use crate::app_error::{codes, AppErrorKind, CorrelationIdSource, EffectiveCorrelationId};
+    use super::{check_in_failure_context, check_out_failure_context, map_stay_error};
+    use crate::app_error::{
+        codes, record_command_failure, AppErrorKind, CorrelationIdSource, EffectiveCorrelationId,
+    };
     use crate::domain::booking::BookingError;
+    use crate::models::{CheckInRequest, CheckOutRequest, CheckoutSettlementMode, CreateGuestRequest};
+    use std::fs;
     use serde_json::json;
 
     fn frontend_correlation_id() -> EffectiveCorrelationId {
@@ -600,6 +644,13 @@ mod tests {
             source: CorrelationIdSource::Frontend,
             rejected_length: None,
         }
+    }
+
+    fn parse_json_lines(contents: &str) -> Vec<serde_json::Value> {
+        contents
+            .lines()
+            .map(|line| serde_json::from_str(line).expect("json line"))
+            .collect()
     }
 
     #[test]
@@ -677,5 +728,133 @@ mod tests {
         assert_eq!(error.code, codes::SYSTEM_INTERNAL_ERROR);
         assert_eq!(error.kind, AppErrorKind::System);
         assert!(error.support_id.is_some());
+    }
+
+    #[test]
+    fn check_in_failure_context_uses_counts_and_flags_only() {
+        let context = check_in_failure_context(&CheckInRequest {
+            room_id: "R101".to_string(),
+            guests: vec![
+                CreateGuestRequest {
+                    guest_type: Some("domestic".to_string()),
+                    full_name: "Nguyen Van A".to_string(),
+                    doc_number: "012345678901".to_string(),
+                    dob: None,
+                    gender: None,
+                    nationality: None,
+                    address: Some("Hanoi".to_string()),
+                    visa_expiry: None,
+                    scan_path: None,
+                    phone: Some("0901".to_string()),
+                },
+                CreateGuestRequest {
+                    guest_type: Some("domestic".to_string()),
+                    full_name: "Tran Thi B".to_string(),
+                    doc_number: "109876543210".to_string(),
+                    dob: None,
+                    gender: None,
+                    nationality: None,
+                    address: None,
+                    visa_expiry: None,
+                    scan_path: None,
+                    phone: None,
+                },
+            ],
+            nights: 2,
+            source: Some("walk-in".to_string()),
+            notes: Some("Late arrival".to_string()),
+            paid_amount: Some(500000.0),
+            pricing_type: None,
+        });
+
+        assert_eq!(
+            context,
+            json!({
+                "room_id": "R101",
+                "guest_count": 2,
+                "nights": 2,
+                "source": "walk-in",
+                "notes_present": true,
+            })
+        );
+        assert!(context.get("guests").is_none());
+        assert!(context.get("notes").is_none());
+    }
+
+    #[test]
+    fn check_out_failure_context_keeps_booking_settlement_and_total_only() {
+        let context = check_out_failure_context(&CheckOutRequest {
+            booking_id: "booking-1".to_string(),
+            settlement_mode: CheckoutSettlementMode::Hourly,
+            final_total: 400000.0,
+        });
+
+        assert_eq!(
+            context,
+            json!({
+                "booking_id": "booking-1",
+                "settlement_mode": "hourly",
+                "final_total": 400000.0,
+            })
+        );
+    }
+
+    #[test]
+    fn system_check_out_failure_reuses_support_id_across_logs() {
+        let _guard = crate::runtime_config::env_lock().lock().unwrap();
+        let runtime_root = std::env::temp_dir().join(format!(
+            "capyinn-check-out-support-id-{}",
+            uuid::Uuid::new_v4()
+        ));
+
+        std::env::set_var("CAPYINN_RUNTIME_ROOT", &runtime_root);
+        let error = map_stay_error(
+            "check_out",
+            &frontend_correlation_id(),
+            BookingError::database("disk I/O failure"),
+            check_out_failure_context(&CheckOutRequest {
+                booking_id: "booking-1".to_string(),
+                settlement_mode: CheckoutSettlementMode::BookedNights,
+                final_total: 2500000.0,
+            }),
+        );
+        let support_id = error.support_id.clone().expect("system error support id");
+        record_command_failure(
+            "check_out",
+            &error,
+            "COR-1A2B3C4D",
+            check_out_failure_context(&CheckOutRequest {
+                booking_id: "booking-1".to_string(),
+                settlement_mode: CheckoutSettlementMode::BookedNights,
+                final_total: 2500000.0,
+            }),
+        );
+        std::env::remove_var("CAPYINN_RUNTIME_ROOT");
+
+        let support_log_path = runtime_root
+            .join("diagnostics")
+            .join("support-errors.jsonl");
+        let support_contents = fs::read_to_string(&support_log_path).expect("support log contents");
+        let support_records = parse_json_lines(&support_contents);
+
+        let command_log_path = runtime_root
+            .join("diagnostics")
+            .join("command-failures.jsonl");
+        let command_contents =
+            fs::read_to_string(&command_log_path).expect("command failure log contents");
+        let command_records = parse_json_lines(&command_contents);
+
+        assert!(support_records.iter().any(|record| {
+            record["support_id"] == support_id
+                && record["command"] == "check_out"
+                && record["code"] == codes::SYSTEM_INTERNAL_ERROR
+        }));
+        assert!(command_records.iter().any(|record| {
+            record["support_id"] == support_id
+                && record["command"] == "check_out"
+                && record["code"] == codes::SYSTEM_INTERNAL_ERROR
+        }));
+
+        let _ = fs::remove_dir_all(&runtime_root);
     }
 }
