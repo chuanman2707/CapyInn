@@ -4,6 +4,9 @@ use crate::{
         codes, correlation_context, log_system_error, normalize_correlation_id,
         record_command_failure, CommandError, CommandResult, EffectiveCorrelationId,
     },
+    db_error_monitoring::{
+        classify_db_failure, inject_db_error_group, DbErrorGroup, MonitoredDbFailure,
+    },
     domain::booking::BookingError,
     models::*,
 };
@@ -143,41 +146,87 @@ fn map_create_reservation_error(
     effective_correlation_id: &EffectiveCorrelationId,
     error: BookingError,
     context: Value,
-) -> CommandError {
+) -> (CommandError, Option<DbErrorGroup>) {
     match error {
         BookingError::Validation(message) if message == "Number of nights must be greater than 0" => {
-            map_create_reservation_user_error(
-                codes::BOOKING_INVALID_NIGHTS,
-                command_name,
-                effective_correlation_id,
-                "Số đêm phải lớn hơn 0",
-                &context,
+            (
+                map_create_reservation_user_error(
+                    codes::BOOKING_INVALID_NIGHTS,
+                    command_name,
+                    effective_correlation_id,
+                    "Số đêm phải lớn hơn 0",
+                    &context,
+                ),
+                None,
             )
         }
         BookingError::NotFound(message) if message.starts_with("Không tìm thấy phòng ") => {
-            map_create_reservation_user_error(
-                codes::ROOM_NOT_FOUND,
-                command_name,
-                effective_correlation_id,
-                message,
-                &context,
+            (
+                map_create_reservation_user_error(
+                    codes::ROOM_NOT_FOUND,
+                    command_name,
+                    effective_correlation_id,
+                    message,
+                    &context,
+                ),
+                Some(DbErrorGroup::NotFound),
             )
         }
         BookingError::Validation(message) | BookingError::Conflict(message) => {
-            map_create_reservation_user_error(
-                codes::BOOKING_INVALID_STATE,
-                command_name,
-                effective_correlation_id,
-                message,
-                &context,
+            (
+                map_create_reservation_user_error(
+                    codes::BOOKING_INVALID_STATE,
+                    command_name,
+                    effective_correlation_id,
+                    message,
+                    &context,
+                ),
+                None,
             )
         }
-        BookingError::NotFound(message)
-        | BookingError::Database(message)
-        | BookingError::DateTimeParse(message) => log_system_error(
-            command_name,
-            message,
-            correlation_context(&effective_correlation_id.value, context),
+        BookingError::DatabaseWrite(message) => {
+            let db_error_group = classify_db_failure(MonitoredDbFailure::DatabaseWrite(&message));
+            (
+                log_system_error(
+                    command_name,
+                    &message,
+                    inject_db_error_group(
+                        correlation_context(&effective_correlation_id.value, context),
+                        db_error_group,
+                    ),
+                ),
+                Some(db_error_group),
+            )
+        }
+        BookingError::Database(message) => {
+            let db_error_group = classify_db_failure(MonitoredDbFailure::DatabaseRead(&message));
+            (
+                log_system_error(
+                    command_name,
+                    &message,
+                    inject_db_error_group(
+                        correlation_context(&effective_correlation_id.value, context),
+                        db_error_group,
+                    ),
+                ),
+                Some(db_error_group),
+            )
+        }
+        BookingError::DateTimeParse(message) => (
+            log_system_error(
+                command_name,
+                message,
+                correlation_context(&effective_correlation_id.value, context),
+            ),
+            None,
+        ),
+        BookingError::NotFound(message) => (
+            log_system_error(
+                command_name,
+                message,
+                correlation_context(&effective_correlation_id.value, context),
+            ),
+            None,
         ),
     }
 }
@@ -242,7 +291,7 @@ pub async fn create_reservation(
     let booking = reservation_lifecycle::create_reservation(&state.db, req)
         .await
         .map_err(|error| {
-            let command_error = map_create_reservation_error(
+            let (command_error, _) = map_create_reservation_error(
                 "create_reservation",
                 &effective_correlation_id,
                 error,
@@ -473,6 +522,7 @@ mod tests {
         unauthenticated_create_reservation_error,
     };
     use crate::app_error::{codes, AppErrorKind, CorrelationIdSource, EffectiveCorrelationId};
+    use crate::db_error_monitoring::DbErrorGroup;
     use crate::domain::booking::BookingError;
     use crate::models::CreateReservationRequest;
     use serde_json::json;
@@ -503,7 +553,7 @@ mod tests {
 
     #[test]
     fn map_create_reservation_error_maps_invalid_nights_to_shared_code() {
-        let error = map_create_reservation_error(
+        let (error, db_error_group) = map_create_reservation_error(
             "create_reservation",
             &frontend_correlation_id(),
             BookingError::validation("Number of nights must be greater than 0".to_string()),
@@ -519,11 +569,33 @@ mod tests {
         assert_eq!(error.message, "Số đêm phải lớn hơn 0");
         assert_eq!(error.kind, AppErrorKind::User);
         assert!(error.support_id.is_none());
+        assert!(db_error_group.is_none());
+    }
+
+    #[test]
+    fn map_create_reservation_error_keeps_missing_room_under_existing_contract_and_not_found_group() {
+        let (error, db_error_group) = map_create_reservation_error(
+            "create_reservation",
+            &frontend_correlation_id(),
+            BookingError::not_found("Không tìm thấy phòng R101"),
+            json!({
+                "room_id": "R101",
+                "check_in_date": "2026-04-25",
+                "check_out_date": "2026-04-27",
+                "nights": 2,
+            }),
+        );
+
+        assert_eq!(error.code, codes::ROOM_NOT_FOUND);
+        assert_eq!(error.message, "Không tìm thấy phòng R101");
+        assert_eq!(error.kind, AppErrorKind::User);
+        assert!(error.support_id.is_none());
+        assert_eq!(db_error_group, Some(DbErrorGroup::NotFound));
     }
 
     #[test]
     fn map_create_reservation_error_keeps_date_range_mismatch_feedback_under_invalid_state() {
-        let error = map_create_reservation_error(
+        let (error, db_error_group) = map_create_reservation_error(
             "create_reservation",
             &frontend_correlation_id(),
             BookingError::validation(
@@ -544,6 +616,7 @@ mod tests {
         );
         assert_eq!(error.kind, AppErrorKind::User);
         assert!(error.support_id.is_none());
+        assert!(db_error_group.is_none());
     }
 
     #[test]

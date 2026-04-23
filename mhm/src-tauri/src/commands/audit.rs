@@ -5,6 +5,9 @@ use crate::{
         codes, correlation_context, log_system_error, normalize_correlation_id,
         record_command_failure, CommandError, CommandResult, EffectiveCorrelationId,
     },
+    db_error_monitoring::{
+        classify_db_failure, inject_db_error_group, DbErrorGroup, MonitoredDbFailure,
+    },
     domain::booking::BookingError,
     queries::booking::audit_queries,
     services::booking::audit_service,
@@ -79,43 +82,89 @@ fn map_audit_error(
     effective_correlation_id: &EffectiveCorrelationId,
     error: BookingError,
     context: Value,
-) -> CommandError {
+) -> (CommandError, Option<DbErrorGroup>) {
     match error {
         BookingError::Validation(message) if message == "Ngày audit không hợp lệ" => {
-            map_audit_user_error(
-                codes::AUDIT_INVALID_DATE,
-                command_name,
-                effective_correlation_id,
-                message,
-                &context,
+            (
+                map_audit_user_error(
+                    codes::AUDIT_INVALID_DATE,
+                    command_name,
+                    effective_correlation_id,
+                    message,
+                    &context,
+                ),
+                None,
             )
         }
         BookingError::Validation(message) | BookingError::Conflict(message)
             if message.starts_with("Đã audit ngày ") =>
         {
-            map_audit_user_error(
-                codes::AUDIT_DATE_ALREADY_RUN,
-                command_name,
-                effective_correlation_id,
-                message,
-                &context,
+            (
+                map_audit_user_error(
+                    codes::AUDIT_DATE_ALREADY_RUN,
+                    command_name,
+                    effective_correlation_id,
+                    message,
+                    &context,
+                ),
+                None,
             )
         }
         BookingError::Validation(message) | BookingError::Conflict(message) => {
-            map_audit_user_error(
-                codes::AUDIT_INVALID_DATE,
-                command_name,
-                effective_correlation_id,
-                message,
-                &context,
+            (
+                map_audit_user_error(
+                    codes::AUDIT_INVALID_DATE,
+                    command_name,
+                    effective_correlation_id,
+                    message,
+                    &context,
+                ),
+                None,
             )
         }
-        BookingError::NotFound(message)
-        | BookingError::Database(message)
-        | BookingError::DateTimeParse(message) => log_system_error(
-            command_name,
-            message,
-            correlation_context(&effective_correlation_id.value, context),
+        BookingError::DatabaseWrite(message) => {
+            let db_error_group = classify_db_failure(MonitoredDbFailure::DatabaseWrite(&message));
+            (
+                log_system_error(
+                    command_name,
+                    &message,
+                    inject_db_error_group(
+                        correlation_context(&effective_correlation_id.value, context),
+                        db_error_group,
+                    ),
+                ),
+                Some(db_error_group),
+            )
+        }
+        BookingError::Database(message) => {
+            let db_error_group = classify_db_failure(MonitoredDbFailure::DatabaseRead(&message));
+            (
+                log_system_error(
+                    command_name,
+                    &message,
+                    inject_db_error_group(
+                        correlation_context(&effective_correlation_id.value, context),
+                        db_error_group,
+                    ),
+                ),
+                Some(db_error_group),
+            )
+        }
+        BookingError::DateTimeParse(message) => (
+            log_system_error(
+                command_name,
+                message,
+                correlation_context(&effective_correlation_id.value, context),
+            ),
+            None,
+        ),
+        BookingError::NotFound(message) => (
+            log_system_error(
+                command_name,
+                message,
+                correlation_context(&effective_correlation_id.value, context),
+            ),
+            None,
         ),
     }
 }
@@ -153,7 +202,7 @@ pub async fn run_night_audit(
     let log = audit_service::run_night_audit(&state.db, &audit_date, notes, &user.id)
         .await
         .map_err(|error| {
-            let command_error = map_audit_error(
+            let (command_error, _) = map_audit_error(
                 "run_night_audit",
                 &effective_correlation_id,
                 error,
@@ -277,6 +326,7 @@ mod tests {
         codes, record_command_failure, AppErrorKind, CorrelationIdSource, EffectiveCorrelationId,
     };
     use crate::commands::require_admin_user;
+    use crate::db_error_monitoring::DbErrorGroup;
     use crate::domain::booking::BookingError;
     use crate::models::User;
     use serde_json::json;
@@ -309,7 +359,7 @@ mod tests {
 
     #[test]
     fn map_audit_error_maps_invalid_date_to_shared_code() {
-        let error = map_audit_error(
+        let (error, db_error_group) = map_audit_error(
             "run_night_audit",
             &frontend_correlation_id(),
             BookingError::validation("Ngày audit không hợp lệ"),
@@ -320,11 +370,12 @@ mod tests {
         assert_eq!(error.message, "Ngày audit không hợp lệ");
         assert_eq!(error.kind, AppErrorKind::User);
         assert!(error.support_id.is_none());
+        assert!(db_error_group.is_none());
     }
 
     #[test]
     fn map_audit_error_maps_duplicate_audit_to_shared_code() {
-        let error = map_audit_error(
+        let (error, db_error_group) = map_audit_error(
             "run_night_audit",
             &frontend_correlation_id(),
             BookingError::validation("Đã audit ngày 2026-04-20 rồi!"),
@@ -335,20 +386,22 @@ mod tests {
         assert_eq!(error.message, "Đã audit ngày 2026-04-20 rồi!");
         assert_eq!(error.kind, AppErrorKind::User);
         assert!(error.support_id.is_none());
+        assert!(db_error_group.is_none());
     }
 
     #[test]
-    fn map_audit_error_keeps_system_failures_in_system_contract() {
-        let error = map_audit_error(
+    fn map_audit_error_maps_database_write_to_system_contract_with_write_failed_group() {
+        let (error, db_error_group) = map_audit_error(
             "run_night_audit",
             &frontend_correlation_id(),
-            BookingError::database("disk I/O failure"),
+            BookingError::database_write("disk full"),
             json!({ "audit_date": "2026-04-20" }),
         );
 
         assert_eq!(error.code, codes::SYSTEM_INTERNAL_ERROR);
         assert_eq!(error.kind, AppErrorKind::System);
         assert!(error.support_id.is_some());
+        assert_eq!(db_error_group, Some(DbErrorGroup::WriteFailed));
     }
 
     #[test]
@@ -374,7 +427,7 @@ mod tests {
 
         std::env::set_var("CAPYINN_RUNTIME_ROOT", &runtime_root);
         let context = audit_failure_context("2026-04-20", Some("Đã kiểm tra kho"));
-        let error = map_audit_error(
+        let (error, _) = map_audit_error(
             "run_night_audit",
             &frontend_correlation_id(),
             BookingError::database("disk I/O failure"),
