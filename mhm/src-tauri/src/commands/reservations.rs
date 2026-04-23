@@ -559,6 +559,8 @@ mod tests {
     fn parse_json_lines(contents: &str) -> Vec<serde_json::Value> {
         contents
             .lines()
+            .map(str::trim)
+            .filter(|line| !line.is_empty())
             .map(|line| serde_json::from_str(line).expect("json line"))
             .collect()
     }
@@ -761,18 +763,15 @@ mod tests {
         let support_records = if support_log_path.exists() {
             let support_contents =
                 fs::read_to_string(&support_log_path).expect("support log contents");
-            if support_contents.trim().is_empty() {
-                Vec::new()
-            } else {
-                parse_json_lines(&support_contents)
-            }
+            parse_json_lines(&support_contents)
         } else {
             Vec::new()
         };
-        assert!(support_records.iter().all(|record| {
-            !(record["command"] == "create_reservation"
-                && record["code"] == codes::SYSTEM_INTERNAL_ERROR)
-        }));
+        assert!(
+            support_records.is_empty(),
+            "expected no support log records for missing-room failure, found: {:?}",
+            support_records
+        );
 
         let _ = fs::remove_dir_all(&runtime_root);
     }

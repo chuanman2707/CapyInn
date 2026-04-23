@@ -356,6 +356,8 @@ mod tests {
     fn parse_json_lines(contents: &str) -> Vec<serde_json::Value> {
         contents
             .lines()
+            .map(str::trim)
+            .filter(|line| !line.is_empty())
             .map(|line| serde_json::from_str(line).expect("json line"))
             .collect()
     }
