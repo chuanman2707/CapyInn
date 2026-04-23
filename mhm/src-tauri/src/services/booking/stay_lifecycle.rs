@@ -18,6 +18,13 @@ use super::{
     },
 };
 
+fn mark_write_db_error(error: BookingError) -> BookingError {
+    match error {
+        BookingError::Database(message) => BookingError::database_write(message),
+        other => other,
+    }
+}
+
 pub async fn check_in(
     pool: &Pool<Sqlite>,
     req: CheckInRequest,
@@ -35,7 +42,7 @@ pub async fn check_in(
         .clone()
         .unwrap_or_else(|| "nightly".to_string());
 
-    let mut tx = begin_tx(pool).await?;
+    let mut tx = begin_tx(pool).await.map_err(mark_write_db_error)?;
 
     let room = sqlx::query("SELECT id, status FROM rooms WHERE id = ?")
         .bind(&req.room_id)
@@ -89,7 +96,9 @@ pub async fn check_in(
     .await?;
 
     let booking_id = uuid::Uuid::new_v4().to_string();
-    let guest_manifest = create_guest_manifest(&mut tx, &req.guests, &check_in_at).await?;
+    let guest_manifest = create_guest_manifest(&mut tx, &req.guests, &check_in_at)
+        .await
+        .map_err(mark_write_db_error)?;
 
     sqlx::query(
         "INSERT INTO bookings (
@@ -112,9 +121,12 @@ pub async fn check_in(
     .bind(&pricing_type)
     .bind(&check_in_at)
     .execute(&mut *tx)
-    .await?;
+    .await
+    .map_err(|error| BookingError::database_write(error.to_string()))?;
 
-    link_booking_guests(&mut tx, &booking_id, &guest_manifest.guest_ids).await?;
+    link_booking_guests(&mut tx, &booking_id, &guest_manifest.guest_ids)
+        .await
+        .map_err(mark_write_db_error)?;
 
     record_charge_tx(
         &mut tx,
@@ -123,10 +135,13 @@ pub async fn check_in(
         "Tiền phòng",
         check_in_at.clone(),
     )
-    .await?;
+    .await
+    .map_err(mark_write_db_error)?;
 
     if let Some(paid_amount) = req.paid_amount.filter(|amount| *amount > 0.0) {
-        record_payment_tx(&mut tx, &booking_id, paid_amount, "Thanh toán khi check-in").await?;
+        record_payment_tx(&mut tx, &booking_id, paid_amount, "Thanh toán khi check-in")
+            .await
+            .map_err(mark_write_db_error)?;
     }
 
     insert_occupied_calendar_rows(
@@ -136,15 +151,19 @@ pub async fn check_in(
         checkin_date,
         checkout_date,
     )
-    .await?;
+    .await
+    .map_err(mark_write_db_error)?;
 
     sqlx::query("UPDATE rooms SET status = ? WHERE id = ?")
         .bind(status::room::OCCUPIED)
         .bind(&req.room_id)
         .execute(&mut *tx)
-        .await?;
+        .await
+        .map_err(|error| BookingError::database_write(error.to_string()))?;
 
-    tx.commit().await.map_err(BookingError::from)?;
+    tx.commit()
+        .await
+        .map_err(|error| BookingError::database_write(error.to_string()))?;
 
     fetch_booking(
         pool,
@@ -377,7 +396,7 @@ pub async fn check_out_at(
         ));
     }
 
-    let mut tx = begin_tx(pool).await?;
+    let mut tx = begin_tx(pool).await.map_err(mark_write_db_error)?;
     let preview_req = CheckoutSettlementPreviewRequest {
         booking_id: req.booking_id.clone(),
         settlement_mode: req.settlement_mode,
@@ -406,13 +425,15 @@ pub async fn check_out_at(
             adjustment_note,
             actual_checkout.clone(),
         )
-        .await?;
+        .await
+        .map_err(mark_write_db_error)?;
     }
 
     let payment_delta = req.final_total - settlement.already_paid;
     if payment_delta > f64::EPSILON {
         record_payment_tx(&mut tx, &req.booking_id, payment_delta, "Thanh toán khi check-out")
-            .await?;
+            .await
+            .map_err(mark_write_db_error)?;
     }
 
     let manual_override = (req.final_total - settlement.recommended_total).abs() > f64::EPSILON;
@@ -440,13 +461,15 @@ pub async fn check_out_at(
         .bind(pricing_snapshot)
         .bind(&req.booking_id)
         .execute(&mut *tx)
-        .await?;
+        .await
+        .map_err(|error| BookingError::database_write(error.to_string()))?;
 
     sqlx::query("UPDATE rooms SET status = ? WHERE id = ?")
         .bind(status::room::CLEANING)
         .bind(&settlement.room_id)
         .execute(&mut *tx)
-        .await?;
+        .await
+        .map_err(|error| BookingError::database_write(error.to_string()))?;
 
     sqlx::query(
         "INSERT INTO housekeeping (id, room_id, status, triggered_at, created_at)
@@ -457,14 +480,18 @@ pub async fn check_out_at(
     .bind(&actual_checkout)
     .bind(&actual_checkout)
     .execute(&mut *tx)
-    .await?;
+    .await
+    .map_err(|error| BookingError::database_write(error.to_string()))?;
 
     sqlx::query("DELETE FROM room_calendar WHERE booking_id = ?")
         .bind(&req.booking_id)
         .execute(&mut *tx)
-        .await?;
+        .await
+        .map_err(|error| BookingError::database_write(error.to_string()))?;
 
-    tx.commit().await.map_err(BookingError::from)?;
+    tx.commit()
+        .await
+        .map_err(|error| BookingError::database_write(error.to_string()))?;
 
     Ok(())
 }
@@ -610,4 +637,22 @@ async fn insert_occupied_calendar_rows(
         CalendarInsertMode::InsertOrReplace,
     )
     .await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::mark_write_db_error;
+    use crate::domain::booking::BookingError;
+
+    #[test]
+    fn mark_write_db_error_promotes_database_errors_but_preserves_missing_record() {
+        assert_eq!(
+            mark_write_db_error(BookingError::database("disk full")),
+            BookingError::database_write("disk full")
+        );
+        assert_eq!(
+            mark_write_db_error(BookingError::not_found("Booking not found: booking-1")),
+            BookingError::not_found("Booking not found: booking-1")
+        );
+    }
 }
