@@ -228,13 +228,10 @@ mod tests {
         assert_eq!(parsed["kind"], "user");
         assert_eq!(parsed["correlation_id"], "COR-CCCC0003");
         assert!(parsed["support_id"].is_null());
-        assert!(
-            parsed["timestamp"]
-                .as_str()
-                .expect("top-level timestamp")
-                .len()
-                > 0
-        );
+        assert!(!parsed["timestamp"]
+            .as_str()
+            .expect("top-level timestamp")
+            .is_empty());
         assert_eq!(parsed["context"]["audit_date"], "2026-04-22");
         assert_eq!(parsed["context"]["notes_present"], true);
         assert!(parsed["context"].get("correlation_id").is_none());
