@@ -720,6 +720,13 @@ mod tests {
             .collect()
     }
 
+    fn restore_runtime_root(previous: Option<std::ffi::OsString>) {
+        match previous {
+            Some(value) => std::env::set_var("CAPYINN_RUNTIME_ROOT", value),
+            None => std::env::remove_var("CAPYINN_RUNTIME_ROOT"),
+        }
+    }
+
     #[test]
     fn map_stay_error_maps_missing_room_to_room_not_found_contract() {
         let (error, db_error_group) = map_stay_error(
@@ -803,7 +810,7 @@ mod tests {
     }
 
     #[test]
-    fn map_stay_error_keeps_system_read_errors_under_locked_group_when_classified() {
+    fn map_stay_error_classifies_locked_database_reads_as_locked_group() {
         let (error, db_error_group) = map_stay_error(
             "check_out",
             &frontend_correlation_id(),
@@ -894,6 +901,7 @@ mod tests {
             uuid::Uuid::new_v4()
         ));
 
+        let previous_runtime_root = std::env::var_os("CAPYINN_RUNTIME_ROOT");
         std::env::set_var("CAPYINN_RUNTIME_ROOT", &runtime_root);
         let context = check_out_failure_context(&CheckOutRequest {
             booking_id: "booking-1".to_string(),
@@ -914,7 +922,7 @@ mod tests {
             db_error_group,
             context,
         );
-        std::env::remove_var("CAPYINN_RUNTIME_ROOT");
+        restore_runtime_root(previous_runtime_root);
 
         let support_log_path = runtime_root
             .join("diagnostics")

@@ -360,6 +360,13 @@ mod tests {
             .collect()
     }
 
+    fn restore_runtime_root(previous: Option<std::ffi::OsString>) {
+        match previous {
+            Some(value) => std::env::set_var("CAPYINN_RUNTIME_ROOT", value),
+            None => std::env::remove_var("CAPYINN_RUNTIME_ROOT"),
+        }
+    }
+
     #[test]
     fn map_audit_error_maps_invalid_date_to_shared_code() {
         let (error, db_error_group) = map_audit_error(
@@ -428,6 +435,7 @@ mod tests {
             uuid::Uuid::new_v4()
         ));
 
+        let previous_runtime_root = std::env::var_os("CAPYINN_RUNTIME_ROOT");
         std::env::set_var("CAPYINN_RUNTIME_ROOT", &runtime_root);
         let context = audit_failure_context("2026-04-20", Some("Đã kiểm tra kho"));
         let (error, db_error_group) = map_audit_error(
@@ -444,7 +452,7 @@ mod tests {
             db_error_group,
             context,
         );
-        std::env::remove_var("CAPYINN_RUNTIME_ROOT");
+        restore_runtime_root(previous_runtime_root);
 
         let support_log_path = runtime_root
             .join("diagnostics")

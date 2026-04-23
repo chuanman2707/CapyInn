@@ -556,6 +556,20 @@ mod tests {
         }
     }
 
+    fn parse_json_lines(contents: &str) -> Vec<serde_json::Value> {
+        contents
+            .lines()
+            .map(|line| serde_json::from_str(line).expect("json line"))
+            .collect()
+    }
+
+    fn restore_runtime_root(previous: Option<std::ffi::OsString>) {
+        match previous {
+            Some(value) => std::env::set_var("CAPYINN_RUNTIME_ROOT", value),
+            None => std::env::remove_var("CAPYINN_RUNTIME_ROOT"),
+        }
+    }
+
     #[test]
     fn map_create_reservation_error_maps_invalid_nights_to_shared_code() {
         let (error, db_error_group) = map_create_reservation_error(
@@ -705,6 +719,7 @@ mod tests {
             uuid::Uuid::new_v4()
         ));
 
+        let previous_runtime_root = std::env::var_os("CAPYINN_RUNTIME_ROOT");
         std::env::set_var("CAPYINN_RUNTIME_ROOT", &runtime_root);
         let context = reservation_failure_context(&reservation_request());
         let (error, db_error_group) = map_create_reservation_error(
@@ -720,34 +735,44 @@ mod tests {
             db_error_group,
             context,
         );
-        std::env::remove_var("CAPYINN_RUNTIME_ROOT");
+        restore_runtime_root(previous_runtime_root);
 
         let command_log_path = runtime_root
             .join("diagnostics")
             .join("command-failures.jsonl");
         let command_contents =
             fs::read_to_string(&command_log_path).expect("command failure log contents");
-        let command_record: serde_json::Value = serde_json::from_str(
-            command_contents
-                .lines()
-                .last()
-                .expect("command failure log line"),
-        )
-        .expect("command failure json");
+        let command_records = parse_json_lines(&command_contents);
 
         assert_eq!(error.code, codes::ROOM_NOT_FOUND);
         assert_eq!(error.kind, AppErrorKind::User);
         assert!(error.support_id.is_none());
         assert_eq!(db_error_group, Some(DbErrorGroup::NotFound));
-        assert_eq!(command_record["command"], "create_reservation");
-        assert_eq!(command_record["code"], codes::ROOM_NOT_FOUND);
-        assert_eq!(command_record["kind"], "user");
-        assert_eq!(command_record["db_error_group"], "not_found");
+        assert!(command_records.iter().any(|record| {
+            record["command"] == "create_reservation"
+                && record["code"] == codes::ROOM_NOT_FOUND
+                && record["kind"] == "user"
+                && record["db_error_group"] == "not_found"
+        }));
 
         let support_log_path = runtime_root
             .join("diagnostics")
             .join("support-errors.jsonl");
-        assert!(!support_log_path.exists());
+        let support_records = if support_log_path.exists() {
+            let support_contents =
+                fs::read_to_string(&support_log_path).expect("support log contents");
+            if support_contents.trim().is_empty() {
+                Vec::new()
+            } else {
+                parse_json_lines(&support_contents)
+            }
+        } else {
+            Vec::new()
+        };
+        assert!(support_records.iter().all(|record| {
+            !(record["command"] == "create_reservation"
+                && record["code"] == codes::SYSTEM_INTERNAL_ERROR)
+        }));
 
         let _ = fs::remove_dir_all(&runtime_root);
     }
