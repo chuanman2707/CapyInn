@@ -122,7 +122,8 @@ pub async fn check_in(
     .bind(&check_in_at)
     .execute(&mut *tx)
     .await
-    .map_err(|error| BookingError::database_write(error.to_string()))?;
+    .map_err(BookingError::from)
+    .map_err(mark_write_db_error)?;
 
     link_booking_guests(&mut tx, &booking_id, &guest_manifest.guest_ids)
         .await
@@ -159,11 +160,13 @@ pub async fn check_in(
         .bind(&req.room_id)
         .execute(&mut *tx)
         .await
-        .map_err(|error| BookingError::database_write(error.to_string()))?;
+        .map_err(BookingError::from)
+        .map_err(mark_write_db_error)?;
 
     tx.commit()
         .await
-        .map_err(|error| BookingError::database_write(error.to_string()))?;
+        .map_err(BookingError::from)
+        .map_err(mark_write_db_error)?;
 
     fetch_booking(
         pool,
@@ -462,14 +465,16 @@ pub async fn check_out_at(
         .bind(&req.booking_id)
         .execute(&mut *tx)
         .await
-        .map_err(|error| BookingError::database_write(error.to_string()))?;
+        .map_err(BookingError::from)
+        .map_err(mark_write_db_error)?;
 
     sqlx::query("UPDATE rooms SET status = ? WHERE id = ?")
         .bind(status::room::CLEANING)
         .bind(&settlement.room_id)
         .execute(&mut *tx)
         .await
-        .map_err(|error| BookingError::database_write(error.to_string()))?;
+        .map_err(BookingError::from)
+        .map_err(mark_write_db_error)?;
 
     sqlx::query(
         "INSERT INTO housekeeping (id, room_id, status, triggered_at, created_at)
@@ -481,17 +486,20 @@ pub async fn check_out_at(
     .bind(&actual_checkout)
     .execute(&mut *tx)
     .await
-    .map_err(|error| BookingError::database_write(error.to_string()))?;
+    .map_err(BookingError::from)
+    .map_err(mark_write_db_error)?;
 
     sqlx::query("DELETE FROM room_calendar WHERE booking_id = ?")
         .bind(&req.booking_id)
         .execute(&mut *tx)
         .await
-        .map_err(|error| BookingError::database_write(error.to_string()))?;
+        .map_err(BookingError::from)
+        .map_err(mark_write_db_error)?;
 
     tx.commit()
         .await
-        .map_err(|error| BookingError::database_write(error.to_string()))?;
+        .map_err(BookingError::from)
+        .map_err(mark_write_db_error)?;
 
     Ok(())
 }
