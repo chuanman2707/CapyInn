@@ -128,6 +128,7 @@ fn map_group_error(
         }
         BookingError::NotFound(message)
         | BookingError::Database(message)
+        | BookingError::DatabaseWrite(message)
         | BookingError::DateTimeParse(message) => log_system_error(
             command_name,
             message,

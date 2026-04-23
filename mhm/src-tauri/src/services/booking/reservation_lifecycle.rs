@@ -14,6 +14,13 @@ use super::{
     },
 };
 
+fn mark_write_db_error(error: BookingError) -> BookingError {
+    match error {
+        BookingError::Database(message) => BookingError::database_write(message),
+        other => other,
+    }
+}
+
 pub async fn create_reservation(
     pool: &Pool<Sqlite>,
     req: CreateReservationRequest,
@@ -21,7 +28,7 @@ pub async fn create_reservation(
     let derived_nights =
         validate_requested_nights(&req.check_in_date, &req.check_out_date, req.nights)?;
 
-    let mut tx = begin_tx(pool).await?;
+    let mut tx = begin_tx(pool).await.map_err(mark_write_db_error)?;
 
     let conflicts = sqlx::query(
         "SELECT date FROM room_calendar WHERE room_id = ? AND date >= ? AND date < ? ORDER BY date ASC",
@@ -58,7 +65,8 @@ pub async fn create_reservation(
         req.guest_phone.as_deref(),
         &now,
     )
-    .await?;
+    .await
+    .map_err(mark_write_db_error)?;
 
     let booking_id = uuid::Uuid::new_v4().to_string();
     sqlx::query(
@@ -85,9 +93,13 @@ pub async fn create_reservation(
     .bind(&req.check_out_date)
     .bind(&now)
     .execute(&mut *tx)
-    .await?;
+    .await
+    .map_err(BookingError::from)
+    .map_err(mark_write_db_error)?;
 
-    link_booking_guests(&mut tx, &booking_id, &guest_manifest.guest_ids).await?;
+    link_booking_guests(&mut tx, &booking_id, &guest_manifest.guest_ids)
+        .await
+        .map_err(mark_write_db_error)?;
 
     insert_booked_calendar_rows(
         &mut tx,
@@ -96,13 +108,19 @@ pub async fn create_reservation(
         &req.check_in_date,
         &req.check_out_date,
     )
-    .await?;
+    .await
+    .map_err(mark_write_db_error)?;
 
     if deposit_amount > 0.0 {
-        record_deposit_tx(&mut tx, &booking_id, deposit_amount, "Reservation deposit").await?;
+        record_deposit_tx(&mut tx, &booking_id, deposit_amount, "Reservation deposit")
+            .await
+            .map_err(mark_write_db_error)?;
     }
 
-    tx.commit().await.map_err(BookingError::from)?;
+    tx.commit()
+        .await
+        .map_err(BookingError::from)
+        .map_err(mark_write_db_error)?;
 
     fetch_booking(
         pool,
@@ -479,4 +497,26 @@ struct BookedReservation {
 fn parse_date(value: &str) -> BookingResult<NaiveDate> {
     NaiveDate::parse_from_str(value, "%Y-%m-%d")
         .map_err(|error| BookingError::datetime_parse(error.to_string()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::mark_write_db_error;
+    use crate::domain::booking::BookingError;
+
+    #[test]
+    fn mark_write_db_error_promotes_database_errors_but_preserves_missing_record() {
+        assert_eq!(
+            mark_write_db_error(BookingError::database("disk full")),
+            BookingError::database_write("disk full")
+        );
+        assert_eq!(
+            mark_write_db_error(BookingError::not_found("Booking not found: booking-1")),
+            BookingError::not_found("Booking not found: booking-1")
+        );
+        assert_eq!(
+            mark_write_db_error(BookingError::database_write("disk full")),
+            BookingError::database_write("disk full")
+        );
+    }
 }

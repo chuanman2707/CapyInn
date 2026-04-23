@@ -6,6 +6,7 @@ pub mod app_identity;
 mod backup;
 mod command_failure_log;
 mod commands;
+pub mod db_error_monitoring;
 mod db;
 mod diagnostics;
 mod domain;
