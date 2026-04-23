@@ -542,7 +542,7 @@ export default function App() {
         </header>
 
         {/* CONTENT AREA */}
-        <div className="flex-1 overflow-y-auto px-10 pb-10">
+        <div className="flex-1 overflow-y-auto px-10 pt-6 pb-10">
           <div className="animate-fade-up">
             {activeTab === "dashboard" && <Dashboard />}
             {activeTab === "rooms" && <Rooms />}
