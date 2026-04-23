@@ -646,6 +646,13 @@ mod tests {
         }
     }
 
+    fn parse_json_lines(contents: &str) -> Vec<serde_json::Value> {
+        contents
+            .lines()
+            .map(|line| serde_json::from_str(line).expect("json line"))
+            .collect()
+    }
+
     #[test]
     fn map_stay_error_maps_missing_room_to_room_not_found_contract() {
         let error = map_stay_error(
@@ -828,32 +835,25 @@ mod tests {
             .join("diagnostics")
             .join("support-errors.jsonl");
         let support_contents = fs::read_to_string(&support_log_path).expect("support log contents");
-        let support_record: serde_json::Value =
-            serde_json::from_str(
-                support_contents
-                    .lines()
-                    .last()
-                    .expect("support log line"),
-            )
-            .expect("support log json");
+        let support_records = parse_json_lines(&support_contents);
 
         let command_log_path = runtime_root
             .join("diagnostics")
             .join("command-failures.jsonl");
         let command_contents =
             fs::read_to_string(&command_log_path).expect("command failure log contents");
-        let command_record: serde_json::Value =
-            serde_json::from_str(
-                command_contents
-                    .lines()
-                    .last()
-                    .expect("command failure log line"),
-            )
-            .expect("command failure json");
+        let command_records = parse_json_lines(&command_contents);
 
-        assert_eq!(support_record["support_id"], support_id);
-        assert_eq!(command_record["support_id"], support_id);
-        assert_eq!(command_record["command"], "check_out");
+        assert!(support_records.iter().any(|record| {
+            record["support_id"] == support_id
+                && record["command"] == "check_out"
+                && record["code"] == codes::SYSTEM_INTERNAL_ERROR
+        }));
+        assert!(command_records.iter().any(|record| {
+            record["support_id"] == support_id
+                && record["command"] == "check_out"
+                && record["code"] == codes::SYSTEM_INTERNAL_ERROR
+        }));
 
         let _ = fs::remove_dir_all(&runtime_root);
     }
