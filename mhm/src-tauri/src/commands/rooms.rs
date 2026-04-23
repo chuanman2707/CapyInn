@@ -2,7 +2,7 @@ use super::{emit_db_update, get_f64, get_user_id, AppState};
 use crate::{
     app_error::{
         codes, correlation_context, log_system_error, normalize_correlation_id,
-        record_command_failure, CommandError, CommandResult, EffectiveCorrelationId,
+        record_command_failure_with_db_group, CommandError, CommandResult, EffectiveCorrelationId,
     },
     db_error_monitoring::{
         classify_db_failure, inject_db_error_group, DbErrorGroup, MonitoredDbFailure,
@@ -292,16 +292,17 @@ pub async fn check_in(
     let booking = stay_lifecycle::check_in(&state.db, req, get_user_id(&state))
         .await
         .map_err(|error| {
-            let (command_error, _) = map_stay_error(
+            let (command_error, db_error_group) = map_stay_error(
                 "check_in",
                 &effective_correlation_id,
                 error,
                 error_context.clone(),
             );
-            record_command_failure(
+            record_command_failure_with_db_group(
                 "check_in",
                 &command_error,
                 &effective_correlation_id.value,
+                db_error_group,
                 error_context.clone(),
             );
             command_error
@@ -432,16 +433,17 @@ pub async fn check_out(
     stay_lifecycle::check_out(&state.db, req)
         .await
         .map_err(|error| {
-            let (command_error, _) = map_stay_error(
+            let (command_error, db_error_group) = map_stay_error(
                 "check_out",
                 &effective_correlation_id,
                 error,
                 error_context.clone(),
             );
-            record_command_failure(
+            record_command_failure_with_db_group(
                 "check_out",
                 &command_error,
                 &effective_correlation_id.value,
+                db_error_group,
                 error_context.clone(),
             );
             command_error
@@ -694,13 +696,14 @@ pub async fn scan_image(path: String) -> Result<crate::ocr::CccdInfo, String> {
 mod tests {
     use super::{check_in_failure_context, check_out_failure_context, map_stay_error};
     use crate::app_error::{
-        codes, record_command_failure, AppErrorKind, CorrelationIdSource, EffectiveCorrelationId,
+        codes, record_command_failure_with_db_group, AppErrorKind, CorrelationIdSource,
+        EffectiveCorrelationId,
     };
     use crate::db_error_monitoring::DbErrorGroup;
     use crate::domain::booking::BookingError;
     use crate::models::{CheckInRequest, CheckOutRequest, CheckoutSettlementMode, CreateGuestRequest};
-    use std::fs;
     use serde_json::json;
+    use std::fs;
 
     fn frontend_correlation_id() -> EffectiveCorrelationId {
         EffectiveCorrelationId {
@@ -800,6 +803,21 @@ mod tests {
     }
 
     #[test]
+    fn map_stay_error_keeps_system_read_errors_under_locked_group_when_classified() {
+        let (error, db_error_group) = map_stay_error(
+            "check_out",
+            &frontend_correlation_id(),
+            BookingError::database("database is locked"),
+            json!({ "booking_id": "booking-1" }),
+        );
+
+        assert_eq!(error.code, codes::SYSTEM_INTERNAL_ERROR);
+        assert_eq!(error.kind, AppErrorKind::System);
+        assert!(error.support_id.is_some());
+        assert_eq!(db_error_group, Some(DbErrorGroup::Locked));
+    }
+
+    #[test]
     fn check_in_failure_context_uses_counts_and_flags_only() {
         let context = check_in_failure_context(&CheckInRequest {
             room_id: "R101".to_string(),
@@ -869,7 +887,7 @@ mod tests {
     }
 
     #[test]
-    fn system_check_out_failure_reuses_support_id_across_logs() {
+    fn system_check_out_failure_writes_same_db_error_group_to_both_logs() {
         let _guard = crate::runtime_config::env_lock().lock().unwrap();
         let runtime_root = std::env::temp_dir().join(format!(
             "capyinn-check-out-support-id-{}",
@@ -877,26 +895,24 @@ mod tests {
         ));
 
         std::env::set_var("CAPYINN_RUNTIME_ROOT", &runtime_root);
-        let (error, _) = map_stay_error(
+        let context = check_out_failure_context(&CheckOutRequest {
+            booking_id: "booking-1".to_string(),
+            settlement_mode: CheckoutSettlementMode::BookedNights,
+            final_total: 2500000.0,
+        });
+        let (error, db_error_group) = map_stay_error(
             "check_out",
             &frontend_correlation_id(),
             BookingError::database("disk I/O failure"),
-            check_out_failure_context(&CheckOutRequest {
-                booking_id: "booking-1".to_string(),
-                settlement_mode: CheckoutSettlementMode::BookedNights,
-                final_total: 2500000.0,
-            }),
+            context.clone(),
         );
         let support_id = error.support_id.clone().expect("system error support id");
-        record_command_failure(
+        record_command_failure_with_db_group(
             "check_out",
             &error,
             "COR-1A2B3C4D",
-            check_out_failure_context(&CheckOutRequest {
-                booking_id: "booking-1".to_string(),
-                settlement_mode: CheckoutSettlementMode::BookedNights,
-                final_total: 2500000.0,
-            }),
+            db_error_group,
+            context,
         );
         std::env::remove_var("CAPYINN_RUNTIME_ROOT");
 
@@ -917,12 +933,15 @@ mod tests {
             record["support_id"] == support_id
                 && record["command"] == "check_out"
                 && record["code"] == codes::SYSTEM_INTERNAL_ERROR
+                && record["context"]["db_error_group"] == "unknown"
         }));
         assert!(command_records.iter().any(|record| {
             record["support_id"] == support_id
                 && record["command"] == "check_out"
                 && record["code"] == codes::SYSTEM_INTERNAL_ERROR
+                && record["db_error_group"] == "unknown"
         }));
+        assert_eq!(db_error_group, Some(DbErrorGroup::Unknown));
 
         let _ = fs::remove_dir_all(&runtime_root);
     }

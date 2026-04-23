@@ -2,7 +2,8 @@ use super::{emit_db_update, get_f64, get_user, AppState};
 use crate::{
     app_error::{
         codes, correlation_context, log_system_error, normalize_correlation_id,
-        record_command_failure, CommandError, CommandResult, EffectiveCorrelationId,
+        record_command_failure, record_command_failure_with_db_group, CommandError, CommandResult,
+        EffectiveCorrelationId,
     },
     db_error_monitoring::{
         classify_db_failure, inject_db_error_group, DbErrorGroup, MonitoredDbFailure,
@@ -291,16 +292,17 @@ pub async fn create_reservation(
     let booking = reservation_lifecycle::create_reservation(&state.db, req)
         .await
         .map_err(|error| {
-            let (command_error, _) = map_create_reservation_error(
+            let (command_error, db_error_group) = map_create_reservation_error(
                 "create_reservation",
                 &effective_correlation_id,
                 error,
                 error_context.clone(),
             );
-            record_command_failure(
+            record_command_failure_with_db_group(
                 "create_reservation",
                 &command_error,
                 &effective_correlation_id.value,
+                db_error_group,
                 error_context.clone(),
             );
             command_error
@@ -521,7 +523,10 @@ mod tests {
         map_create_reservation_error, reservation_failure_context,
         unauthenticated_create_reservation_error,
     };
-    use crate::app_error::{codes, AppErrorKind, CorrelationIdSource, EffectiveCorrelationId};
+    use crate::app_error::{
+        codes, record_command_failure_with_db_group, AppErrorKind, CorrelationIdSource,
+        EffectiveCorrelationId,
+    };
     use crate::db_error_monitoring::DbErrorGroup;
     use crate::domain::booking::BookingError;
     use crate::models::CreateReservationRequest;
@@ -688,6 +693,61 @@ mod tests {
         assert!(parsed["context"].get("guest_phone").is_none());
         assert!(parsed["context"].get("guest_doc_number").is_none());
         assert!(parsed["context"].get("notes").is_none());
+
+        let _ = fs::remove_dir_all(&runtime_root);
+    }
+
+    #[test]
+    fn create_reservation_missing_room_failure_writes_not_found_group_without_support_log() {
+        let _guard = crate::runtime_config::env_lock().lock().unwrap();
+        let runtime_root = std::env::temp_dir().join(format!(
+            "capyinn-create-reservation-missing-room-{}",
+            uuid::Uuid::new_v4()
+        ));
+
+        std::env::set_var("CAPYINN_RUNTIME_ROOT", &runtime_root);
+        let context = reservation_failure_context(&reservation_request());
+        let (error, db_error_group) = map_create_reservation_error(
+            "create_reservation",
+            &frontend_correlation_id(),
+            BookingError::not_found("Không tìm thấy phòng R101"),
+            context.clone(),
+        );
+        record_command_failure_with_db_group(
+            "create_reservation",
+            &error,
+            "COR-1A2B3C4D",
+            db_error_group,
+            context,
+        );
+        std::env::remove_var("CAPYINN_RUNTIME_ROOT");
+
+        let command_log_path = runtime_root
+            .join("diagnostics")
+            .join("command-failures.jsonl");
+        let command_contents =
+            fs::read_to_string(&command_log_path).expect("command failure log contents");
+        let command_record: serde_json::Value = serde_json::from_str(
+            command_contents
+                .lines()
+                .last()
+                .expect("command failure log line"),
+        )
+        .expect("command failure json");
+
+        assert_eq!(error.code, codes::ROOM_NOT_FOUND);
+        assert_eq!(error.kind, AppErrorKind::User);
+        assert!(error.support_id.is_none());
+        assert_eq!(db_error_group, Some(DbErrorGroup::NotFound));
+        assert_eq!(command_record["command"], "create_reservation");
+        assert_eq!(command_record["code"], codes::ROOM_NOT_FOUND);
+        assert_eq!(command_record["kind"], "user");
+        assert_eq!(command_record["db_error_group"], "not_found");
+
+        let support_log_path = runtime_root
+            .join("diagnostics")
+            .join("support-errors.jsonl");
+        assert!(!support_log_path.exists());
 
         let _ = fs::remove_dir_all(&runtime_root);
     }

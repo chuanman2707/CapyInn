@@ -3,7 +3,8 @@ use crate::app_identity;
 use crate::{
     app_error::{
         codes, correlation_context, log_system_error, normalize_correlation_id,
-        record_command_failure, CommandError, CommandResult, EffectiveCorrelationId,
+        record_command_failure, record_command_failure_with_db_group, CommandError, CommandResult,
+        EffectiveCorrelationId,
     },
     db_error_monitoring::{
         classify_db_failure, inject_db_error_group, DbErrorGroup, MonitoredDbFailure,
@@ -202,16 +203,17 @@ pub async fn run_night_audit(
     let log = audit_service::run_night_audit(&state.db, &audit_date, notes, &user.id)
         .await
         .map_err(|error| {
-            let (command_error, _) = map_audit_error(
+            let (command_error, db_error_group) = map_audit_error(
                 "run_night_audit",
                 &effective_correlation_id,
                 error,
                 error_context.clone(),
             );
-            record_command_failure(
+            record_command_failure_with_db_group(
                 "run_night_audit",
                 &command_error,
                 &effective_correlation_id.value,
+                db_error_group,
                 error_context.clone(),
             );
             command_error
@@ -323,7 +325,8 @@ pub async fn export_bookings_csv(
 mod tests {
     use super::{audit_failure_context, map_audit_error, record_audit_auth_error};
     use crate::app_error::{
-        codes, record_command_failure, AppErrorKind, CorrelationIdSource, EffectiveCorrelationId,
+        codes, record_command_failure_with_db_group, AppErrorKind, CorrelationIdSource,
+        EffectiveCorrelationId,
     };
     use crate::commands::require_admin_user;
     use crate::db_error_monitoring::DbErrorGroup;
@@ -418,7 +421,7 @@ mod tests {
     }
 
     #[test]
-    fn system_run_night_audit_failure_reuses_support_id_across_logs() {
+    fn system_run_night_audit_failure_writes_write_failed_group_to_both_logs() {
         let _guard = crate::runtime_config::env_lock().lock().unwrap();
         let runtime_root = std::env::temp_dir().join(format!(
             "capyinn-night-audit-support-id-{}",
@@ -427,17 +430,18 @@ mod tests {
 
         std::env::set_var("CAPYINN_RUNTIME_ROOT", &runtime_root);
         let context = audit_failure_context("2026-04-20", Some("Đã kiểm tra kho"));
-        let (error, _) = map_audit_error(
+        let (error, db_error_group) = map_audit_error(
             "run_night_audit",
             &frontend_correlation_id(),
-            BookingError::database("disk I/O failure"),
+            BookingError::database_write("disk full"),
             context.clone(),
         );
         let support_id = error.support_id.clone().expect("system error support id");
-        record_command_failure(
+        record_command_failure_with_db_group(
             "run_night_audit",
             &error,
             "COR-1A2B3C4D",
+            db_error_group,
             context,
         );
         std::env::remove_var("CAPYINN_RUNTIME_ROOT");
@@ -459,12 +463,15 @@ mod tests {
             record["support_id"] == support_id
                 && record["command"] == "run_night_audit"
                 && record["code"] == codes::SYSTEM_INTERNAL_ERROR
+                && record["context"]["db_error_group"] == "write_failed"
         }));
         assert!(command_records.iter().any(|record| {
             record["support_id"] == support_id
                 && record["command"] == "run_night_audit"
                 && record["code"] == codes::SYSTEM_INTERNAL_ERROR
+                && record["db_error_group"] == "write_failed"
         }));
+        assert_eq!(db_error_group, Some(DbErrorGroup::WriteFailed));
 
         let _ = fs::remove_dir_all(&runtime_root);
     }
