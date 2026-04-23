@@ -4,6 +4,7 @@ use tauri::Manager;
 pub mod app_error;
 pub mod app_identity;
 mod backup;
+mod command_failure_log;
 mod commands;
 mod db;
 mod diagnostics;

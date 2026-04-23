@@ -20,8 +20,8 @@ export default function DiagnosticsSection() {
     try {
       await invoke("set_crash_reporting_preference", { enabled: nextValue });
       const message = nextValue
-        ? "Severe crash reports are enabled"
-        : "Severe crash reports are disabled";
+        ? "Diagnostics reports are enabled"
+        : "Diagnostics reports are disabled";
       setStatusMessage(message);
       toast.success(message);
     } catch {
@@ -36,22 +36,22 @@ export default function DiagnosticsSection() {
       <div>
         <h3 className="mb-1 text-lg font-bold">Diagnostics</h3>
         <p className="text-sm text-brand-muted">
-          Chỉ gửi báo cáo lỗi nghiêm trọng đã làm sạch dữ liệu nhạy cảm. Không theo dõi hành vi sử
-          dụng.
+          Chỉ gửi báo cáo sau khi bạn đồng ý, gồm sự cố nghiêm trọng và chẩn đoán lỗi lệnh đã làm
+          sạch dữ liệu nhạy cảm. Không theo dõi hành vi sử dụng.
         </p>
       </div>
 
       <label className="flex items-center justify-between rounded-xl border border-slate-200 p-4">
         <div className="pr-4">
-          <p className="text-sm font-medium">Send crash reports</p>
+          <p className="text-sm font-medium">Send diagnostics reports</p>
           <p className="text-xs text-brand-muted">
-            Báo cáo chỉ được gửi sau khi bạn đồng ý và không bao gồm dữ liệu khách hoặc session
-            replay.
+            Báo cáo chỉ được gửi sau khi bạn đồng ý, gồm sự cố nghiêm trọng và chẩn đoán lỗi lệnh
+            đã làm sạch, không bao gồm dữ liệu khách hoặc session replay.
           </p>
         </div>
         <input
           type="checkbox"
-          aria-label="Send crash reports"
+          aria-label="Send diagnostics reports"
           checked={enabled}
           disabled={loading}
           onChange={(event) => void handleToggle(event.target.checked)}

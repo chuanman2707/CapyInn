@@ -1,9 +1,9 @@
-use super::{emit_db_update, require_admin, AppState};
+use super::{emit_db_update, get_user, require_admin, require_admin_user, AppState};
 use crate::app_identity;
 use crate::{
     app_error::{
-        codes, correlation_context, log_system_error, normalize_correlation_id, CommandError,
-        CommandResult, EffectiveCorrelationId,
+        codes, correlation_context, log_system_error, normalize_correlation_id,
+        record_command_failure, CommandError, CommandResult, EffectiveCorrelationId,
     },
     domain::booking::BookingError,
     queries::booking::audit_queries,
@@ -54,6 +54,26 @@ fn map_audit_user_error(
     CommandError::user(code, message)
 }
 
+fn record_audit_auth_error(
+    effective_correlation_id: &EffectiveCorrelationId,
+    error: CommandError,
+    context: Value,
+) -> CommandError {
+    log_user_audit_error(
+        "run_night_audit",
+        effective_correlation_id,
+        error.message.as_str(),
+        &context,
+    );
+    record_command_failure(
+        "run_night_audit",
+        &error,
+        &effective_correlation_id.value,
+        context,
+    );
+    error
+}
+
 fn map_audit_error(
     command_name: &str,
     effective_correlation_id: &EffectiveCorrelationId,
@@ -100,6 +120,15 @@ fn map_audit_error(
     }
 }
 
+fn audit_failure_context(audit_date: &str, notes: Option<&str>) -> Value {
+    let notes_present = notes.map(|value| !value.trim().is_empty()).unwrap_or(false);
+
+    json!({
+        "audit_date": audit_date,
+        "notes_present": notes_present,
+    })
+}
+
 #[tauri::command]
 pub async fn run_night_audit(
     state: State<'_, AppState>,
@@ -109,14 +138,8 @@ pub async fn run_night_audit(
     correlation_id: Option<String>,
 ) -> CommandResult<crate::models::AuditLog> {
     let effective_correlation_id = normalize_correlation_id(correlation_id);
-    let notes_present = notes
-        .as_ref()
-        .map(|value| !value.trim().is_empty())
-        .unwrap_or(false);
-    let error_context = json!({
-        "audit_date": audit_date.clone(),
-        "notes_present": notes_present,
-    });
+    let error_context = audit_failure_context(&audit_date, notes.as_deref());
+    let notes_present = error_context["notes_present"].as_bool().unwrap_or(false);
     log::info!(
         "run_night_audit start correlation_id={} source={:?} audit_date={} notes_present={}",
         effective_correlation_id.value,
@@ -124,16 +147,25 @@ pub async fn run_night_audit(
         audit_date,
         notes_present
     );
-    let user = require_admin(&state)?;
+    let user = require_admin_user(get_user(&state)).map_err(|error| {
+        record_audit_auth_error(&effective_correlation_id, error, error_context.clone())
+    })?;
     let log = audit_service::run_night_audit(&state.db, &audit_date, notes, &user.id)
         .await
         .map_err(|error| {
-            map_audit_error(
+            let command_error = map_audit_error(
                 "run_night_audit",
                 &effective_correlation_id,
                 error,
-                error_context,
-            )
+                error_context.clone(),
+            );
+            record_command_failure(
+                "run_night_audit",
+                &command_error,
+                &effective_correlation_id.value,
+                error_context.clone(),
+            );
+            command_error
         })?;
 
     log::info!(
@@ -240,12 +272,15 @@ pub async fn export_bookings_csv(
 
 #[cfg(test)]
 mod tests {
-    use super::map_audit_error;
+    use super::{audit_failure_context, map_audit_error, record_audit_auth_error};
     use crate::app_error::{
-        codes, AppErrorKind, CorrelationIdSource, EffectiveCorrelationId,
+        codes, record_command_failure, AppErrorKind, CorrelationIdSource, EffectiveCorrelationId,
     };
+    use crate::commands::require_admin_user;
     use crate::domain::booking::BookingError;
+    use crate::models::User;
     use serde_json::json;
+    use std::fs;
 
     fn frontend_correlation_id() -> EffectiveCorrelationId {
         EffectiveCorrelationId {
@@ -253,6 +288,23 @@ mod tests {
             source: CorrelationIdSource::Frontend,
             rejected_length: None,
         }
+    }
+
+    fn mock_user(role: &str) -> User {
+        User {
+            id: "u1".to_string(),
+            name: "Test".to_string(),
+            role: role.to_string(),
+            active: true,
+            created_at: "2026-01-01T00:00:00Z".to_string(),
+        }
+    }
+
+    fn parse_json_lines(contents: &str) -> Vec<serde_json::Value> {
+        contents
+            .lines()
+            .map(|line| serde_json::from_str(line).expect("json line"))
+            .collect()
     }
 
     #[test]
@@ -297,5 +349,114 @@ mod tests {
         assert_eq!(error.code, codes::SYSTEM_INTERNAL_ERROR);
         assert_eq!(error.kind, AppErrorKind::System);
         assert!(error.support_id.is_some());
+    }
+
+    #[test]
+    fn audit_failure_context_keeps_only_date_and_notes_flag() {
+        let context = audit_failure_context("2026-04-20", Some("Đã kiểm tra kho"));
+
+        assert_eq!(
+            context,
+            json!({
+                "audit_date": "2026-04-20",
+                "notes_present": true,
+            })
+        );
+    }
+
+    #[test]
+    fn system_run_night_audit_failure_reuses_support_id_across_logs() {
+        let _guard = crate::runtime_config::env_lock().lock().unwrap();
+        let runtime_root = std::env::temp_dir().join(format!(
+            "capyinn-night-audit-support-id-{}",
+            uuid::Uuid::new_v4()
+        ));
+
+        std::env::set_var("CAPYINN_RUNTIME_ROOT", &runtime_root);
+        let context = audit_failure_context("2026-04-20", Some("Đã kiểm tra kho"));
+        let error = map_audit_error(
+            "run_night_audit",
+            &frontend_correlation_id(),
+            BookingError::database("disk I/O failure"),
+            context.clone(),
+        );
+        let support_id = error.support_id.clone().expect("system error support id");
+        record_command_failure(
+            "run_night_audit",
+            &error,
+            "COR-1A2B3C4D",
+            context,
+        );
+        std::env::remove_var("CAPYINN_RUNTIME_ROOT");
+
+        let support_log_path = runtime_root
+            .join("diagnostics")
+            .join("support-errors.jsonl");
+        let support_contents = fs::read_to_string(&support_log_path).expect("support log contents");
+        let support_records = parse_json_lines(&support_contents);
+
+        let command_log_path = runtime_root
+            .join("diagnostics")
+            .join("command-failures.jsonl");
+        let command_contents =
+            fs::read_to_string(&command_log_path).expect("command failure log contents");
+        let command_records = parse_json_lines(&command_contents);
+
+        assert!(support_records.iter().any(|record| {
+            record["support_id"] == support_id
+                && record["command"] == "run_night_audit"
+                && record["code"] == codes::SYSTEM_INTERNAL_ERROR
+        }));
+        assert!(command_records.iter().any(|record| {
+            record["support_id"] == support_id
+                && record["command"] == "run_night_audit"
+                && record["code"] == codes::SYSTEM_INTERNAL_ERROR
+        }));
+
+        let _ = fs::remove_dir_all(&runtime_root);
+    }
+
+    #[test]
+    fn forbidden_run_night_audit_auth_failure_is_recorded_with_scrubbed_context() {
+        let _guard = crate::runtime_config::env_lock().lock().unwrap();
+        let runtime_root =
+            std::env::temp_dir().join(format!("capyinn-night-audit-auth-{}", uuid::Uuid::new_v4()));
+
+        std::env::set_var("CAPYINN_RUNTIME_ROOT", &runtime_root);
+        let context = audit_failure_context("2026-04-20", Some("Đã kiểm tra kho"));
+        let auth_error =
+            require_admin_user(Some(mock_user("receptionist"))).expect_err("non-admin must fail");
+        let error = record_audit_auth_error(&frontend_correlation_id(), auth_error, context);
+        std::env::remove_var("CAPYINN_RUNTIME_ROOT");
+
+        let command_log_path = runtime_root
+            .join("diagnostics")
+            .join("command-failures.jsonl");
+        let command_contents =
+            fs::read_to_string(&command_log_path).expect("command failure log contents");
+        let command_record: serde_json::Value = serde_json::from_str(
+            command_contents
+                .lines()
+                .last()
+                .expect("command failure log line"),
+        )
+        .expect("command failure json");
+
+        assert_eq!(error.code, codes::AUTH_FORBIDDEN);
+        assert_eq!(error.kind, AppErrorKind::User);
+        assert!(error.support_id.is_none());
+        assert_eq!(command_record["command"], "run_night_audit");
+        assert_eq!(command_record["code"], codes::AUTH_FORBIDDEN);
+        assert_eq!(command_record["kind"], "user");
+        assert_eq!(command_record["correlation_id"], "COR-1A2B3C4D");
+        assert_eq!(
+            command_record["context"],
+            json!({
+                "audit_date": "2026-04-20",
+                "notes_present": true,
+            })
+        );
+
+        let _ = fs::remove_dir_all(&runtime_root);
     }
 }

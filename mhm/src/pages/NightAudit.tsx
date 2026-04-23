@@ -34,10 +34,19 @@ export default function NightAudit() {
         setRunning(true);
         try {
             const correlationId = createCorrelationId();
-            const result = await invokeCommand<AuditLog>("run_night_audit", {
-                auditDate,
-                notes: notes || null,
-            }, { correlationId });
+            const result = await invokeCommand<AuditLog>(
+                "run_night_audit",
+                {
+                    auditDate,
+                    notes: notes || null,
+                },
+                {
+                    correlationId,
+                    monitoringContext: {
+                        notes_present: Boolean(notes.trim()),
+                    },
+                },
+            );
             toast.success(`Night Audit ngày ${auditDate} hoàn tất!`);
             setLogs((prev) => [result, ...prev]);
             setNotes("");
