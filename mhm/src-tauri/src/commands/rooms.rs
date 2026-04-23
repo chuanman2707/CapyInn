@@ -2,7 +2,10 @@ use super::{emit_db_update, get_f64, get_user_id, AppState};
 use crate::{
     app_error::{
         codes, correlation_context, log_system_error, normalize_correlation_id,
-        record_command_failure, CommandError, CommandResult, EffectiveCorrelationId,
+        record_command_failure_with_db_group, CommandError, CommandResult, EffectiveCorrelationId,
+    },
+    db_error_monitoring::{
+        classify_db_failure, inject_db_error_group, DbErrorGroup, MonitoredDbFailure,
     },
     domain::booking::BookingError,
     models::*,
@@ -103,85 +106,145 @@ fn map_stay_error(
     effective_correlation_id: &EffectiveCorrelationId,
     error: BookingError,
     context: Value,
-) -> CommandError {
+) -> (CommandError, Option<DbErrorGroup>) {
     match error {
         BookingError::NotFound(message) if message.starts_with("Không tìm thấy phòng ") => {
-            map_stay_user_error(
-                codes::ROOM_NOT_FOUND,
-                command_name,
-                effective_correlation_id,
-                message,
-                &context,
+            (
+                map_stay_user_error(
+                    codes::ROOM_NOT_FOUND,
+                    command_name,
+                    effective_correlation_id,
+                    message,
+                    &context,
+                ),
+                Some(DbErrorGroup::NotFound),
             )
         }
         BookingError::NotFound(message)
             if message.starts_with("Không tìm thấy booking đang active ")
                 || message.starts_with("Không tìm thấy booking ") =>
         {
-            map_stay_user_error(
-                codes::BOOKING_NOT_FOUND,
-                command_name,
-                effective_correlation_id,
-                message,
-                &context,
+            (
+                map_stay_user_error(
+                    codes::BOOKING_NOT_FOUND,
+                    command_name,
+                    effective_correlation_id,
+                    message,
+                    &context,
+                ),
+                Some(DbErrorGroup::NotFound),
             )
         }
         BookingError::Validation(message) if message == "Phải có ít nhất 1 khách" => {
-            map_stay_user_error(
-                codes::BOOKING_GUEST_REQUIRED,
-                command_name,
-                effective_correlation_id,
-                message,
-                &context,
+            (
+                map_stay_user_error(
+                    codes::BOOKING_GUEST_REQUIRED,
+                    command_name,
+                    effective_correlation_id,
+                    message,
+                    &context,
+                ),
+                None,
             )
         }
         BookingError::Validation(message) if message == "Number of nights must be greater than 0" => {
-            map_stay_user_error(
-                codes::BOOKING_INVALID_NIGHTS,
-                command_name,
-                effective_correlation_id,
-                message,
-                &context,
+            (
+                map_stay_user_error(
+                    codes::BOOKING_INVALID_NIGHTS,
+                    command_name,
+                    effective_correlation_id,
+                    message,
+                    &context,
+                ),
+                None,
             )
         }
         BookingError::Validation(message)
             if message == "Tổng quyết toán phải lớn hơn hoặc bằng 0" =>
         {
-            map_stay_user_error(
-                codes::BOOKING_INVALID_SETTLEMENT_TOTAL,
-                command_name,
-                effective_correlation_id,
-                message,
-                &context,
+            (
+                map_stay_user_error(
+                    codes::BOOKING_INVALID_SETTLEMENT_TOTAL,
+                    command_name,
+                    effective_correlation_id,
+                    message,
+                    &context,
+                ),
+                None,
             )
         }
         BookingError::Validation(message)
             if message == "Overpaid booking requires refund handling before checkout" =>
         {
-            map_stay_user_error(
-                codes::BOOKING_INVALID_STATE,
-                command_name,
-                effective_correlation_id,
-                message,
-                &context,
+            (
+                map_stay_user_error(
+                    codes::BOOKING_INVALID_STATE,
+                    command_name,
+                    effective_correlation_id,
+                    message,
+                    &context,
+                ),
+                None,
             )
         }
         BookingError::Validation(message) | BookingError::Conflict(message) => {
-            map_stay_user_error(
-                codes::BOOKING_INVALID_STATE,
-                command_name,
-                effective_correlation_id,
-                message,
-                &context,
+            (
+                map_stay_user_error(
+                    codes::BOOKING_INVALID_STATE,
+                    command_name,
+                    effective_correlation_id,
+                    message,
+                    &context,
+                ),
+                None,
             )
         }
-        BookingError::NotFound(message)
-        | BookingError::Database(message)
-        | BookingError::DateTimeParse(message) => log_system_error(
-            command_name,
-            message,
-            correlation_context(&effective_correlation_id.value, context),
+        BookingError::DatabaseWrite(message) => {
+            let db_error_group = classify_db_failure(MonitoredDbFailure::DatabaseWrite(&message));
+            (
+                log_system_error(
+                    command_name,
+                    &message,
+                    inject_db_error_group(
+                        correlation_context(&effective_correlation_id.value, context),
+                        db_error_group,
+                    ),
+                ),
+                Some(db_error_group),
+            )
+        }
+        BookingError::Database(message) => {
+            let db_error_group = classify_db_failure(MonitoredDbFailure::DatabaseRead(&message));
+            (
+                log_system_error(
+                    command_name,
+                    &message,
+                    inject_db_error_group(
+                        correlation_context(&effective_correlation_id.value, context),
+                        db_error_group,
+                    ),
+                ),
+                Some(db_error_group),
+            )
+        }
+        BookingError::DateTimeParse(message) => (
+            log_system_error(
+                command_name,
+                message,
+                correlation_context(&effective_correlation_id.value, context),
+            ),
+            None,
         ),
+        BookingError::NotFound(message) => {
+            (
+                log_system_error(
+                    command_name,
+                    message,
+                    correlation_context(&effective_correlation_id.value, context),
+                ),
+                None,
+            )
+        }
     }
 }
 
@@ -229,16 +292,17 @@ pub async fn check_in(
     let booking = stay_lifecycle::check_in(&state.db, req, get_user_id(&state))
         .await
         .map_err(|error| {
-            let command_error = map_stay_error(
+            let (command_error, db_error_group) = map_stay_error(
                 "check_in",
                 &effective_correlation_id,
                 error,
                 error_context.clone(),
             );
-            record_command_failure(
+            record_command_failure_with_db_group(
                 "check_in",
                 &command_error,
                 &effective_correlation_id.value,
+                db_error_group,
                 error_context.clone(),
             );
             command_error
@@ -369,16 +433,17 @@ pub async fn check_out(
     stay_lifecycle::check_out(&state.db, req)
         .await
         .map_err(|error| {
-            let command_error = map_stay_error(
+            let (command_error, db_error_group) = map_stay_error(
                 "check_out",
                 &effective_correlation_id,
                 error,
                 error_context.clone(),
             );
-            record_command_failure(
+            record_command_failure_with_db_group(
                 "check_out",
                 &command_error,
                 &effective_correlation_id.value,
+                db_error_group,
                 error_context.clone(),
             );
             command_error
@@ -631,12 +696,14 @@ pub async fn scan_image(path: String) -> Result<crate::ocr::CccdInfo, String> {
 mod tests {
     use super::{check_in_failure_context, check_out_failure_context, map_stay_error};
     use crate::app_error::{
-        codes, record_command_failure, AppErrorKind, CorrelationIdSource, EffectiveCorrelationId,
+        codes, record_command_failure_with_db_group, AppErrorKind, CorrelationIdSource,
+        EffectiveCorrelationId,
     };
+    use crate::db_error_monitoring::DbErrorGroup;
     use crate::domain::booking::BookingError;
     use crate::models::{CheckInRequest, CheckOutRequest, CheckoutSettlementMode, CreateGuestRequest};
-    use std::fs;
     use serde_json::json;
+    use std::fs;
 
     fn frontend_correlation_id() -> EffectiveCorrelationId {
         EffectiveCorrelationId {
@@ -649,13 +716,22 @@ mod tests {
     fn parse_json_lines(contents: &str) -> Vec<serde_json::Value> {
         contents
             .lines()
+            .map(str::trim)
+            .filter(|line| !line.is_empty())
             .map(|line| serde_json::from_str(line).expect("json line"))
             .collect()
     }
 
+    fn restore_runtime_root(previous: Option<std::ffi::OsString>) {
+        match previous {
+            Some(value) => std::env::set_var("CAPYINN_RUNTIME_ROOT", value),
+            None => std::env::remove_var("CAPYINN_RUNTIME_ROOT"),
+        }
+    }
+
     #[test]
     fn map_stay_error_maps_missing_room_to_room_not_found_contract() {
-        let error = map_stay_error(
+        let (error, db_error_group) = map_stay_error(
             "check_in",
             &frontend_correlation_id(),
             BookingError::not_found("Không tìm thấy phòng R101"),
@@ -666,11 +742,12 @@ mod tests {
         assert_eq!(error.message, "Không tìm thấy phòng R101");
         assert_eq!(error.kind, AppErrorKind::User);
         assert!(error.support_id.is_none());
+        assert_eq!(db_error_group, Some(DbErrorGroup::NotFound));
     }
 
     #[test]
     fn map_stay_error_maps_guest_required_validation_to_shared_code() {
-        let error = map_stay_error(
+        let (error, db_error_group) = map_stay_error(
             "check_in",
             &frontend_correlation_id(),
             BookingError::validation("Phải có ít nhất 1 khách"),
@@ -681,11 +758,12 @@ mod tests {
         assert_eq!(error.message, "Phải có ít nhất 1 khách");
         assert_eq!(error.kind, AppErrorKind::User);
         assert!(error.support_id.is_none());
+        assert!(db_error_group.is_none());
     }
 
     #[test]
     fn map_stay_error_maps_invalid_settlement_total_to_shared_code() {
-        let error = map_stay_error(
+        let (error, db_error_group) = map_stay_error(
             "check_out",
             &frontend_correlation_id(),
             BookingError::validation("Tổng quyết toán phải lớn hơn hoặc bằng 0"),
@@ -696,11 +774,12 @@ mod tests {
         assert_eq!(error.message, "Tổng quyết toán phải lớn hơn hoặc bằng 0");
         assert_eq!(error.kind, AppErrorKind::User);
         assert!(error.support_id.is_none());
+        assert!(db_error_group.is_none());
     }
 
     #[test]
     fn map_stay_error_maps_invalid_checkout_state_to_shared_code() {
-        let error = map_stay_error(
+        let (error, db_error_group) = map_stay_error(
             "check_out",
             &frontend_correlation_id(),
             BookingError::validation("Overpaid booking requires refund handling before checkout"),
@@ -714,20 +793,37 @@ mod tests {
         );
         assert_eq!(error.kind, AppErrorKind::User);
         assert!(error.support_id.is_none());
+        assert!(db_error_group.is_none());
     }
 
     #[test]
-    fn map_stay_error_keeps_system_errors_in_system_contract() {
-        let error = map_stay_error(
+    fn map_stay_error_maps_database_write_to_system_contract_with_write_failed_group() {
+        let (error, db_error_group) = map_stay_error(
             "check_out",
             &frontend_correlation_id(),
-            BookingError::database("disk I/O failure"),
+            BookingError::database_write("disk full"),
             json!({ "booking_id": "booking-1" }),
         );
 
         assert_eq!(error.code, codes::SYSTEM_INTERNAL_ERROR);
         assert_eq!(error.kind, AppErrorKind::System);
         assert!(error.support_id.is_some());
+        assert_eq!(db_error_group, Some(DbErrorGroup::WriteFailed));
+    }
+
+    #[test]
+    fn map_stay_error_classifies_locked_database_reads_as_locked_group() {
+        let (error, db_error_group) = map_stay_error(
+            "check_out",
+            &frontend_correlation_id(),
+            BookingError::database("database is locked"),
+            json!({ "booking_id": "booking-1" }),
+        );
+
+        assert_eq!(error.code, codes::SYSTEM_INTERNAL_ERROR);
+        assert_eq!(error.kind, AppErrorKind::System);
+        assert!(error.support_id.is_some());
+        assert_eq!(db_error_group, Some(DbErrorGroup::Locked));
     }
 
     #[test]
@@ -800,36 +896,35 @@ mod tests {
     }
 
     #[test]
-    fn system_check_out_failure_reuses_support_id_across_logs() {
+    fn system_check_out_failure_writes_same_db_error_group_to_both_logs() {
         let _guard = crate::runtime_config::env_lock().lock().unwrap();
         let runtime_root = std::env::temp_dir().join(format!(
             "capyinn-check-out-support-id-{}",
             uuid::Uuid::new_v4()
         ));
 
+        let previous_runtime_root = std::env::var_os("CAPYINN_RUNTIME_ROOT");
         std::env::set_var("CAPYINN_RUNTIME_ROOT", &runtime_root);
-        let error = map_stay_error(
+        let context = check_out_failure_context(&CheckOutRequest {
+            booking_id: "booking-1".to_string(),
+            settlement_mode: CheckoutSettlementMode::BookedNights,
+            final_total: 2500000.0,
+        });
+        let (error, db_error_group) = map_stay_error(
             "check_out",
             &frontend_correlation_id(),
             BookingError::database("disk I/O failure"),
-            check_out_failure_context(&CheckOutRequest {
-                booking_id: "booking-1".to_string(),
-                settlement_mode: CheckoutSettlementMode::BookedNights,
-                final_total: 2500000.0,
-            }),
+            context.clone(),
         );
         let support_id = error.support_id.clone().expect("system error support id");
-        record_command_failure(
+        record_command_failure_with_db_group(
             "check_out",
             &error,
             "COR-1A2B3C4D",
-            check_out_failure_context(&CheckOutRequest {
-                booking_id: "booking-1".to_string(),
-                settlement_mode: CheckoutSettlementMode::BookedNights,
-                final_total: 2500000.0,
-            }),
+            db_error_group,
+            context,
         );
-        std::env::remove_var("CAPYINN_RUNTIME_ROOT");
+        restore_runtime_root(previous_runtime_root);
 
         let support_log_path = runtime_root
             .join("diagnostics")
@@ -848,12 +943,15 @@ mod tests {
             record["support_id"] == support_id
                 && record["command"] == "check_out"
                 && record["code"] == codes::SYSTEM_INTERNAL_ERROR
+                && record["context"]["db_error_group"] == "unknown"
         }));
         assert!(command_records.iter().any(|record| {
             record["support_id"] == support_id
                 && record["command"] == "check_out"
                 && record["code"] == codes::SYSTEM_INTERNAL_ERROR
+                && record["db_error_group"] == "unknown"
         }));
+        assert_eq!(db_error_group, Some(DbErrorGroup::Unknown));
 
         let _ = fs::remove_dir_all(&runtime_root);
     }

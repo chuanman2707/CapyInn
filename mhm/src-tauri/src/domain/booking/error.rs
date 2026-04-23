@@ -6,6 +6,7 @@ pub enum BookingError {
     NotFound(String),
     Validation(String),
     Database(String),
+    DatabaseWrite(String),
     DateTimeParse(String),
 }
 
@@ -28,6 +29,10 @@ impl BookingError {
         Self::Database(message.into())
     }
 
+    pub fn database_write(message: impl Into<String>) -> Self {
+        Self::DatabaseWrite(message.into())
+    }
+
     pub fn datetime_parse(message: impl Into<String>) -> Self {
         Self::DateTimeParse(message.into())
     }
@@ -40,6 +45,7 @@ impl fmt::Display for BookingError {
             | Self::NotFound(message)
             | Self::Validation(message)
             | Self::Database(message)
+            | Self::DatabaseWrite(message)
             | Self::DateTimeParse(message) => f.write_str(message),
         }
     }
@@ -62,5 +68,12 @@ mod tests {
         let error = BookingError::Conflict("room already occupied".to_string());
 
         assert_eq!(error.to_string(), "room already occupied");
+    }
+
+    #[test]
+    fn booking_error_formats_database_write_messages() {
+        let error = BookingError::database_write("disk full");
+
+        assert_eq!(error.to_string(), "disk full");
     }
 }

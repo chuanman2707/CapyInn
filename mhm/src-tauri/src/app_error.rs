@@ -4,6 +4,7 @@ use serde_json::Value;
 
 use crate::app_identity;
 use crate::command_failure_log::{self, CommandFailureRecord};
+use crate::db_error_monitoring::DbErrorGroup;
 use crate::support_log::{self, SupportErrorRecord};
 
 pub mod codes {
@@ -199,12 +200,23 @@ pub fn record_command_failure(
     correlation_id: &str,
     context: Value,
 ) {
+    record_command_failure_with_db_group(command_name, error, correlation_id, None, context);
+}
+
+pub fn record_command_failure_with_db_group(
+    command_name: &str,
+    error: &CommandError,
+    correlation_id: &str,
+    db_error_group: Option<DbErrorGroup>,
+    context: Value,
+) {
     let record = CommandFailureRecord::new(
         command_name,
         error.code.clone(),
         error.kind,
         correlation_id,
         error.support_id.clone(),
+        db_error_group,
         context,
     );
 
@@ -275,6 +287,7 @@ pub fn log_system_error(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::db_error_monitoring::DbErrorGroup;
     use serde_json::json;
     use std::fs;
     use std::path::Path;
@@ -529,12 +542,13 @@ mod tests {
         let parsed: serde_json::Value =
             serde_json::from_str(contents.trim()).expect("command failure json");
 
-        assert_eq!(parsed["schema_version"], 1);
+        assert_eq!(parsed["schema_version"], 2);
         assert_eq!(parsed["command"], "check_in");
         assert_eq!(parsed["code"], codes::BOOKING_GUEST_REQUIRED);
         assert_eq!(parsed["kind"], "user");
         assert_eq!(parsed["correlation_id"], "COR-1A2B3C4D");
         assert!(parsed["support_id"].is_null());
+        assert!(parsed.get("db_error_group").is_none());
         assert_eq!(parsed["context"]["room_id"], "R101");
         assert_eq!(parsed["context"]["guest_count"], 1);
         assert_eq!(parsed["context"]["nights"], 2);
@@ -579,12 +593,13 @@ mod tests {
         let parsed: serde_json::Value =
             serde_json::from_str(contents.trim()).expect("command failure json");
 
-        assert_eq!(parsed["schema_version"], 1);
+        assert_eq!(parsed["schema_version"], 2);
         assert_eq!(parsed["command"], "create_reservation");
         assert_eq!(parsed["code"], codes::SYSTEM_INTERNAL_ERROR);
         assert_eq!(parsed["kind"], "system");
         assert_eq!(parsed["correlation_id"], "COR-5A6B7C8D");
         assert_eq!(parsed["support_id"], support_id);
+        assert!(parsed.get("db_error_group").is_none());
         assert_eq!(parsed["context"]["room_id"], "R202");
         assert_eq!(parsed["context"]["check_in_date"], "2026-04-22");
         assert_eq!(parsed["context"]["check_out_date"], "2026-04-24");
@@ -593,6 +608,51 @@ mod tests {
         assert_eq!(parsed["context"]["source"], "phone");
         assert_eq!(parsed["context"]["notes_present"], false);
         assert!(parsed["context"].get("correlation_id").is_none());
+        assert!(parsed.get("room_id").is_none());
+        assert!(parsed.get("root_cause").is_none());
+
+        let _ = fs::remove_dir_all(&runtime_root);
+    }
+
+    #[test]
+    fn record_command_failure_with_db_group_writes_group_without_touching_existing_shape() {
+        let _guard = crate::runtime_config::env_lock().lock().unwrap();
+        let runtime_root = std::env::temp_dir().join(format!(
+            "capyinn-command-failure-grouped-{}",
+            uuid::Uuid::new_v4()
+        ));
+
+        std::env::set_var("CAPYINN_RUNTIME_ROOT", &runtime_root);
+        let error = CommandError::system(codes::SYSTEM_INTERNAL_ERROR, "database offline");
+        let support_id = error.support_id.clone().expect("system error support id");
+        record_command_failure_with_db_group(
+            "create_reservation",
+            &error,
+            "COR-9A8B7C6D",
+            Some(DbErrorGroup::Locked),
+            json!({
+                "room_id": "R303",
+                "source": "walk_in",
+            }),
+        );
+        std::env::remove_var("CAPYINN_RUNTIME_ROOT");
+
+        let log_path = runtime_root
+            .join("diagnostics")
+            .join("command-failures.jsonl");
+        let contents = fs::read_to_string(&log_path).expect("command failure log contents");
+        let parsed: serde_json::Value =
+            serde_json::from_str(contents.trim()).expect("command failure json");
+
+        assert_eq!(parsed["schema_version"], 2);
+        assert_eq!(parsed["command"], "create_reservation");
+        assert_eq!(parsed["code"], codes::SYSTEM_INTERNAL_ERROR);
+        assert_eq!(parsed["kind"], "system");
+        assert_eq!(parsed["correlation_id"], "COR-9A8B7C6D");
+        assert_eq!(parsed["support_id"], support_id);
+        assert_eq!(parsed["db_error_group"], "locked");
+        assert_eq!(parsed["context"]["room_id"], "R303");
+        assert_eq!(parsed["context"]["source"], "walk_in");
         assert!(parsed.get("room_id").is_none());
         assert!(parsed.get("root_cause").is_none());
 

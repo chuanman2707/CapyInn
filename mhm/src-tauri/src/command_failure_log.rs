@@ -8,6 +8,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::app_error::AppErrorKind;
+use crate::db_error_monitoring::DbErrorGroup;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CommandFailureRecord {
@@ -18,6 +19,8 @@ pub struct CommandFailureRecord {
     pub kind: AppErrorKind,
     pub correlation_id: String,
     pub support_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub db_error_group: Option<DbErrorGroup>,
     pub context: Value,
 }
 
@@ -28,16 +31,18 @@ impl CommandFailureRecord {
         kind: AppErrorKind,
         correlation_id: impl Into<String>,
         support_id: Option<impl Into<String>>,
+        db_error_group: Option<DbErrorGroup>,
         context: Value,
     ) -> Self {
         Self {
-            schema_version: 1,
+            schema_version: 2,
             timestamp: Utc::now().to_rfc3339(),
             command: command.into(),
             code: code.into(),
             kind,
             correlation_id: correlation_id.into(),
             support_id: support_id.map(Into::into),
+            db_error_group,
             context,
         }
     }
@@ -83,6 +88,7 @@ pub fn append_command_failure_record(
 mod tests {
     use super::*;
     use crate::app_error::codes;
+    use crate::db_error_monitoring::DbErrorGroup;
     use serde_json::json;
     use std::fs;
     use std::path::PathBuf;
@@ -117,6 +123,7 @@ mod tests {
             AppErrorKind::User,
             "COR-AAAA0001",
             None::<String>,
+            None,
             json!({
                 "room_id": "R101",
                 "guest_count": 0,
@@ -129,6 +136,7 @@ mod tests {
             AppErrorKind::System,
             "COR-BBBB0002",
             Some("SUP-BBBB0002"),
+            Some(DbErrorGroup::Locked),
             json!({ "booking_id": "B202" }),
         );
 
@@ -171,13 +179,19 @@ mod tests {
             .map(|line| serde_json::from_str::<serde_json::Value>(line).expect("json line"))
             .collect::<Vec<_>>();
 
-        assert!(parsed.iter().all(|line| line["schema_version"] == 1));
+        assert!(parsed.iter().all(|line| line["schema_version"] == 2));
         assert!(parsed
             .iter()
             .any(|line| line["command"] == "check_in" && line["support_id"].is_null()));
         assert!(parsed
             .iter()
             .any(|line| line["command"] == "check_out" && line["support_id"] == "SUP-BBBB0002"));
+        assert!(parsed
+            .iter()
+            .any(|line| line["command"] == "check_in" && line.get("db_error_group").is_none()));
+        assert!(parsed.iter().any(
+            |line| line["command"] == "check_out" && line["db_error_group"] == "locked"
+        ));
         assert!(parsed
             .iter()
             .all(|line| line["context"].get("correlation_id").is_none()));
@@ -200,7 +214,7 @@ mod tests {
     }
 
     #[test]
-    fn append_command_failure_record_keeps_context_nested_and_schema_version_is_one() {
+    fn append_command_failure_record_keeps_context_nested_and_schema_version_is_two() {
         let runtime_root = test_runtime_root("nested");
         let _ = fs::remove_dir_all(&runtime_root);
 
@@ -210,6 +224,7 @@ mod tests {
             AppErrorKind::User,
             "COR-CCCC0003",
             None::<String>,
+            None,
             json!({
                 "audit_date": "2026-04-22",
                 "notes_present": true,
@@ -222,12 +237,13 @@ mod tests {
             .expect("command failure log should exist");
         let parsed: serde_json::Value = serde_json::from_str(contents.trim()).expect("json line");
 
-        assert_eq!(parsed["schema_version"], 1);
+        assert_eq!(parsed["schema_version"], 2);
         assert_eq!(parsed["command"], "run_night_audit");
         assert_eq!(parsed["code"], codes::AUDIT_INVALID_DATE);
         assert_eq!(parsed["kind"], "user");
         assert_eq!(parsed["correlation_id"], "COR-CCCC0003");
         assert!(parsed["support_id"].is_null());
+        assert!(parsed.get("db_error_group").is_none());
         assert!(!parsed["timestamp"]
             .as_str()
             .expect("top-level timestamp")
@@ -238,5 +254,25 @@ mod tests {
         assert_eq!(parsed.get("audit_date"), None);
 
         let _ = fs::remove_dir_all(&runtime_root);
+    }
+
+    #[test]
+    fn command_failure_record_serializes_db_error_group_when_present() {
+        let record = CommandFailureRecord::new(
+            "sync_inventory",
+            codes::SYSTEM_INTERNAL_ERROR,
+            AppErrorKind::System,
+            "COR-DDDD0004",
+            Some("SUP-DDDD0004"),
+            Some(DbErrorGroup::Constraint),
+            json!({ "attempt": 1 }),
+        );
+
+        let serialized = serde_json::to_value(&record).expect("serialize record");
+
+        assert_eq!(serialized["schema_version"], 2);
+        assert_eq!(serialized["db_error_group"], "constraint");
+        assert_eq!(serialized["command"], "sync_inventory");
+        assert_eq!(serialized["support_id"], "SUP-DDDD0004");
     }
 }
