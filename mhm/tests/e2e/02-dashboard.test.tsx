@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach } from "vitest";
-import { render, screen, waitFor } from "../helpers/render-app";
+import { act, render, screen, waitFor } from "../helpers/render-app";
 import userEvent from "@testing-library/user-event";
 import Dashboard from "@/pages/Dashboard";
 import { setMockResponse, clearMockResponses, invoke } from "@test-mocks/tauri-core";
@@ -17,6 +17,7 @@ describe("02 — Dashboard", () => {
         useHotelStore.setState({
             rooms: mockRooms,
             stats: mockStats,
+            dashboardRefreshVersion: 0,
             activeTab: "dashboard",
             roomDetail: null,
             housekeepingTasks: [],
@@ -132,5 +133,60 @@ describe("02 — Dashboard", () => {
         expect(screen.getByText("Ghi nhận lúc")).toBeInTheDocument();
         expect(screen.getByText("Điều hướng")).toBeInTheDocument();
         expect(screen.getByRole("button", { name: /mở phòng 2a/i })).toBeInTheDocument();
+    });
+
+    it("refreshes activity immediately after a successful check-in", async () => {
+        let activityCalls = 0;
+        setMockResponse("get_recent_activity", () => {
+            activityCalls += 1;
+            return activityCalls === 1
+                ? [
+                    {
+                        icon: "🔑",
+                        text: "Check-in phòng 2A — Nguyễn Văn A",
+                        time: "10:30",
+                        color: "green",
+                        kind: "check_in",
+                        room_id: "2A",
+                        guest_name: "Nguyễn Văn A",
+                        occurred_at: "2026-03-15T10:30:00",
+                        status_label: "Đã check-in",
+                    },
+                ]
+                : [
+                    {
+                        icon: "🔑",
+                        text: "Check-in phòng 1A — Trần Thị Mới",
+                        time: "15:40",
+                        color: "green",
+                        kind: "check_in",
+                        room_id: "1A",
+                        guest_name: "Trần Thị Mới",
+                        occurred_at: "2026-04-24T15:40:00+07:00",
+                        status_label: "Đã check-in",
+                    },
+                ];
+        });
+        setMockResponse("check_in", () => createBookingWithGuest({ room_id: "1A", guest_name: "Trần Thị Mới" }));
+
+        render(<Dashboard />);
+
+        expect(await screen.findByText("Check-in phòng 2A — Nguyễn Văn A")).toBeInTheDocument();
+
+        await act(async () => {
+            await useHotelStore.getState().checkIn(
+                "1A",
+                [{ full_name: "Trần Thị Mới", doc_number: "012345678901" }],
+                1,
+                400000,
+                "walk-in",
+                "",
+            );
+        });
+
+        await waitFor(() => {
+            expect(screen.getByText("Check-in phòng 1A — Trần Thị Mới")).toBeInTheDocument();
+        });
+        expect(activityCalls).toBeGreaterThanOrEqual(2);
     });
 });

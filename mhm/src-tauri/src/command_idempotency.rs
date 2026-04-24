@@ -455,9 +455,10 @@ mod tests {
             SET_CRASH_REPORTING_PREFERENCE_COMMAND,
         );
         let intent = serde_json::json!({ "enabled": true });
-        let now = ctx.issued_at.to_rfc3339();
+        let now = Utc::now();
+        let now_string = now.to_rfc3339();
         let lease_expires_at =
-            (ctx.issued_at + chrono::Duration::seconds(CLAIM_LEASE_SECONDS)).to_rfc3339();
+            (now + chrono::Duration::seconds(CLAIM_LEASE_SECONDS)).to_rfc3339();
 
         sqlx::query(
             "INSERT INTO command_idempotency (
@@ -484,9 +485,9 @@ mod tests {
         .bind("other-claim-token")
         .bind(0_i64)
         .bind(&lease_expires_at)
-        .bind(&now)
-        .bind(&now)
-        .bind(&now)
+        .bind(&now_string)
+        .bind(&now_string)
+        .bind(&now_string)
         .execute(&pool)
         .await
         .expect("seeds committed in-progress idempotency row");

@@ -23,6 +23,7 @@ import type {
 interface HotelStore {
   rooms: Room[];
   stats: DashboardStats | null;
+  dashboardRefreshVersion: number;
   roomDetail: RoomWithBooking | null;
   activeTab: HotelTab;
   housekeepingTasks: HousekeepingTask[];
@@ -34,6 +35,7 @@ interface HotelStore {
 
   fetchRooms: () => Promise<void>;
   fetchStats: () => Promise<void>;
+  markDashboardDataChanged: () => void;
   setTab: (tab: HotelTab) => void;
   setCheckinOpen: (open: boolean, roomId?: string | null) => void;
   checkIn: (roomId: string, guests: CheckInGuestInput[], nights: number, paidAmount?: number, source?: string, notes?: string) => Promise<void>;
@@ -73,6 +75,7 @@ export const useHotelStore = create<HotelStore>((set, get) => {
   return {
     rooms: [],
     stats: null,
+    dashboardRefreshVersion: 0,
     roomDetail: null,
     activeTab: "dashboard",
     housekeepingTasks: [],
@@ -91,6 +94,11 @@ export const useHotelStore = create<HotelStore>((set, get) => {
       const stats = await invoke<DashboardStats>("get_dashboard_stats");
       set({ stats });
     },
+
+    markDashboardDataChanged: () =>
+      set((state) => ({
+        dashboardRefreshVersion: state.dashboardRefreshVersion + 1,
+      })),
 
     setTab: (tab) => set({ activeTab: tab }),
     setCheckinOpen: (open, roomId = null) =>
@@ -120,7 +128,10 @@ export const useHotelStore = create<HotelStore>((set, get) => {
         );
         await get().fetchRooms();
         await get().fetchStats();
-        set({ activeTab: "dashboard" });
+        set((state) => ({
+          activeTab: "dashboard",
+          dashboardRefreshVersion: state.dashboardRefreshVersion + 1,
+        }));
       } catch (err) {
         console.error("check_in error:", err);
         throw err;
@@ -151,7 +162,10 @@ export const useHotelStore = create<HotelStore>((set, get) => {
         );
         await get().fetchRooms();
         await get().fetchStats();
-        set({ activeTab: "dashboard" });
+        set((state) => ({
+          activeTab: "dashboard",
+          dashboardRefreshVersion: state.dashboardRefreshVersion + 1,
+        }));
       } catch (err) {
         console.error("check_out error:", err);
         throw err;
@@ -166,6 +180,7 @@ export const useHotelStore = create<HotelStore>((set, get) => {
         await invoke("extend_stay", { bookingId });
         await get().fetchRooms();
         await get().fetchStats();
+        get().markDashboardDataChanged();
       } catch (err) {
         console.error("extend_stay error:", err);
         throw err;
@@ -201,6 +216,7 @@ export const useHotelStore = create<HotelStore>((set, get) => {
         await get().fetchRooms();
         await get().fetchStats();
         await get().fetchGroups();
+        get().markDashboardDataChanged();
         set({ isGroupCheckinOpen: false });
       } catch (err) {
         console.error("group_checkin error:", err);
@@ -218,6 +234,7 @@ export const useHotelStore = create<HotelStore>((set, get) => {
         await get().fetchRooms();
         await get().fetchStats();
         await get().fetchGroups();
+        get().markDashboardDataChanged();
       } catch (err) {
         console.error("group_checkout error:", err);
         throw err;

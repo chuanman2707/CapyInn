@@ -21,14 +21,34 @@ type BookingBar = BookingWithGuest & {
     isBooked: boolean;
 };
 
+const DAY_MS = 24 * 60 * 60 * 1000;
+
+function startOfLocalDay(date: Date): Date {
+    return new Date(date.getFullYear(), date.getMonth(), date.getDate());
+}
+
+function formatLocalDate(date: Date): string {
+    const year = date.getFullYear();
+    const month = String(date.getMonth() + 1).padStart(2, "0");
+    const day = String(date.getDate()).padStart(2, "0");
+    return `${year}-${month}-${day}`;
+}
+
+function differenceInCalendarDays(left: Date, right: Date): number {
+    const leftUtc = Date.UTC(left.getFullYear(), left.getMonth(), left.getDate());
+    const rightUtc = Date.UTC(right.getFullYear(), right.getMonth(), right.getDate());
+    return Math.round((leftUtc - rightUtc) / DAY_MS);
+}
+
 function getDateRange(offset: number) {
+    const today = startOfLocalDay(new Date());
     return Array.from({ length: 16 }, (_, i) => {
-        const d = new Date();
-        d.setDate(d.getDate() + i - 3 + offset);
+        const d = new Date(today);
+        d.setDate(today.getDate() + i - 3 + offset);
         return {
             day: d.toLocaleDateString("vi-VN", { weekday: "short" }).replace(".", ""),
             date: d.getDate(),
-            fullDate: d.toISOString().split("T")[0],
+            fullDate: formatLocalDate(d),
             isToday: i === 3 && offset === 0,
             dateObj: d,
         };
@@ -36,9 +56,13 @@ function getDateRange(offset: number) {
 }
 
 function parseDate(s: string): Date {
-    // Handle both ISO datetime and YYYY-MM-DD format
-    if (s.includes("T")) return new Date(s);
-    return new Date(s + "T12:00:00");
+    const dateOnly = /^(\d{4})-(\d{2})-(\d{2})$/.exec(s);
+    if (dateOnly) {
+        return new Date(Number(dateOnly[1]), Number(dateOnly[2]) - 1, Number(dateOnly[3]));
+    }
+
+    const parsed = new Date(s);
+    return Number.isNaN(parsed.getTime()) ? parsed : startOfLocalDay(parsed);
 }
 
 function getBookingBarColor(status: BookingStatus): string {
@@ -121,8 +145,8 @@ export default function Reservations() {
                 const checkOut = parseDate(b.scheduled_checkout || b.expected_checkout);
                 const startDay = DAYS[0].dateObj;
 
-                const startCol = Math.max(0, Math.floor((checkIn.getTime() - startDay.getTime()) / (1000 * 60 * 60 * 24)));
-                const endCol = Math.max(startCol + 1, Math.ceil((checkOut.getTime() - startDay.getTime()) / (1000 * 60 * 60 * 24)));
+                const startCol = Math.max(0, differenceInCalendarDays(checkIn, startDay));
+                const endCol = Math.max(startCol + 1, differenceInCalendarDays(checkOut, startDay));
                 const length = endCol - startCol;
 
                 if (startCol >= 16 || endCol <= 0) return [];

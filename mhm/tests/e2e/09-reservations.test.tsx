@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { render, screen, waitFor } from "../helpers/render-app";
 import userEvent from "@testing-library/user-event";
 import Reservations from "@/pages/Reservations";
@@ -61,6 +61,10 @@ describe("09 — Reservations", () => {
         })));
     });
 
+    afterEach(() => {
+        vi.useRealTimers();
+    });
+
     it("loads and displays booking list", async () => {
         render(<Reservations />);
 
@@ -116,5 +120,28 @@ describe("09 — Reservations", () => {
 
         expect(screen.queryByText("Nguyễn Văn A")).not.toBeInTheDocument();
         expect(screen.queryByText("Lê Văn C")).not.toBeInTheDocument();
+    });
+
+    it("positions same-day check-ins on the local calendar day column", async () => {
+        vi.useFakeTimers({ toFake: ["Date"] });
+        vi.setSystemTime(new Date("2026-04-24T15:36:12+07:00"));
+        setMockResponse("get_all_bookings", () => [
+            createBookingWithGuest({
+                id: "same-day-checkin",
+                room_id: "2A",
+                guest_name: "Khách ngày 24",
+                status: "active",
+                check_in_at: "2026-04-24T08:00:00+07:00",
+                expected_checkout: "2026-04-25T08:00:00+07:00",
+            }),
+        ]);
+
+        render(<Reservations />);
+
+        const guestName = await screen.findByText("Khách ngày 24");
+        const bookingBar = guestName.closest(".absolute");
+
+        expect(bookingBar).toHaveStyle({ left: "240px" });
+        expect(bookingBar).not.toHaveStyle({ left: "160px" });
     });
 });
