@@ -16,7 +16,7 @@ import type { ActivityItem, BookingWithGuest, ChartDataPoint, ExpenseItem, RoomA
 const DAY_NAMES = ["CN", "T2", "T3", "T4", "T5", "T6", "T7"];
 
 export default function Dashboard() {
-  const { rooms, stats, fetchRooms, fetchStats, setTab } = useHotelStore();
+  const { rooms, stats, dashboardRefreshVersion, fetchRooms, fetchStats, setTab } = useHotelStore();
   const [activities, setActivities] = useState<ActivityItem[]>([]);
   const [recentBookings, setRecentBookings] = useState<BookingWithGuest[]>([]);
   const [expenses, setExpenses] = useState<ExpenseItem[]>([]);
@@ -59,7 +59,7 @@ export default function Dashboard() {
         }, {});
         setExpenses(Object.entries(grouped).map(([category, amount]) => ({ category, amount })));
       }).catch(() => { });
-  }, []);
+  }, [dashboardRefreshVersion]);
 
   const maxExpense = Math.max(...expenses.map(e => e.amount), 1);
 

@@ -43,6 +43,7 @@ describe("useHotelStore monitoring context", () => {
     useHotelStore.setState({
       rooms: [],
       stats: null,
+      dashboardRefreshVersion: 0,
       roomDetail: null,
       activeTab: "dashboard",
       housekeepingTasks: [],
