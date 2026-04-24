@@ -1,5 +1,6 @@
 pub mod auth;
 pub mod models;
+pub mod policy;
 pub mod proxy;
 pub mod server;
 pub mod tools;
