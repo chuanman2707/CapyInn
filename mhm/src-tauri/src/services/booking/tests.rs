@@ -2119,10 +2119,13 @@ async fn check_out_keeps_active_booking_values_for_booked_nights_mode() {
         "2026-04-25T12:00:00+07:00",
         5,
         2_500_000.0,
-        Some(1_000_000.0),
+        Some(0.0),
     )
     .await
     .unwrap();
+    record_payment(&pool, "B411", 1_000_000.0, "prior payment")
+        .await
+        .unwrap();
 
     let preview = stay_lifecycle::preview_checkout_settlement_at(
         &pool,
@@ -2398,10 +2401,13 @@ async fn check_out_persists_manual_override_when_final_total_differs_from_recomm
         "2026-04-25T12:00:00+07:00",
         5,
         2_500_000.0,
-        Some(300_000.0),
+        Some(0.0),
     )
     .await
     .unwrap();
+    record_payment(&pool, "B416", 300_000.0, "prior payment")
+        .await
+        .unwrap();
 
     let preview = stay_lifecycle::preview_checkout_settlement_at(
         &pool,
@@ -2473,10 +2479,13 @@ async fn check_out_writes_charge_adjustment_ledger_when_settled_total_drops() {
         "2026-04-25T12:00:00+07:00",
         5,
         2_500_000.0,
-        Some(800_000.0),
+        Some(0.0),
     )
     .await
     .unwrap();
+    record_payment(&pool, "B417", 800_000.0, "prior payment")
+        .await
+        .unwrap();
 
     stay_lifecycle::check_out_at(
         &pool,
@@ -2505,7 +2514,7 @@ async fn check_out_writes_charge_adjustment_ledger_when_settled_total_drops() {
 
     let payment_count: (i64,) = sqlx::query_as(
         "SELECT COUNT(*) FROM transactions
-         WHERE booking_id = ? AND type = 'payment'"
+         WHERE booking_id = ? AND type = 'payment' AND note = 'Thanh toán khi check-out'"
     )
     .bind("B417")
     .fetch_one(&pool)
@@ -2532,10 +2541,13 @@ async fn check_out_writes_payment_delta_ledger_when_collecting_extra_payment() {
         "2026-04-25T12:00:00+07:00",
         5,
         2_500_000.0,
-        Some(1_000_000.0),
+        Some(0.0),
     )
     .await
     .unwrap();
+    record_payment(&pool, "B418", 1_000_000.0, "prior payment")
+        .await
+        .unwrap();
 
     stay_lifecycle::check_out_at(
         &pool,
@@ -2554,8 +2566,7 @@ async fn check_out_writes_payment_delta_ledger_when_collecting_extra_payment() {
 
     let payment = sqlx::query(
         "SELECT amount, note FROM transactions
-         WHERE booking_id = ? AND type = 'payment'
-         ORDER BY created_at DESC
+         WHERE booking_id = ? AND type = 'payment' AND note = 'Thanh toán khi check-out'
          LIMIT 1",
     )
     .bind("B418")
@@ -2588,6 +2599,73 @@ async fn check_out_writes_payment_delta_ledger_when_collecting_extra_payment() {
 }
 
 #[tokio::test]
+async fn checkout_paid_amount_is_ledger_projection_not_direct_overwrite() {
+    let pool = test_pool().await;
+    seed_room(&pool, "R420").await.unwrap();
+    seed_pricing_rule(&pool, "standard", 75_000.0)
+        .await
+        .unwrap();
+    seed_active_booking_with_terms(
+        &pool,
+        "B420",
+        "R420",
+        "2026-04-20T08:00:00+07:00",
+        "2026-04-21T12:00:00+07:00",
+        1,
+        75_000.0,
+        Some(0.0),
+    )
+    .await
+    .unwrap();
+    record_payment(&pool, "B420", 75_000.0, "prior payment")
+        .await
+        .unwrap();
+    sqlx::query(
+        "CREATE TRIGGER forbid_paid_amount_direct_update_in_checkout_test
+         BEFORE UPDATE OF paid_amount ON bookings
+         BEGIN
+             SELECT RAISE(ABORT, 'paid_amount direct update forbidden in checkout test');
+         END",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    stay_lifecycle::check_out_at(
+        &pool,
+        CheckOutRequest {
+            booking_id: "B420".to_string(),
+            settlement_mode: CheckoutSettlementMode::ActualNights,
+            final_total: 75_000.0,
+        },
+        chrono::Local
+            .with_ymd_and_hms(2026, 4, 21, 9, 0, 0)
+            .single()
+            .unwrap(),
+    )
+    .await
+    .unwrap();
+
+    let booking = sqlx::query("SELECT paid_amount FROM bookings WHERE id = ?")
+        .bind("B420")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    let ledger_total: f64 = sqlx::query_scalar(
+        "SELECT COALESCE(SUM(amount), 0)
+         FROM transactions
+         WHERE booking_id = ? AND type IN ('payment', 'deposit')",
+    )
+    .bind("B420")
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+
+    assert_eq!(ledger_total, 75_000.0);
+    assert_eq!(booking.get::<f64, _>("paid_amount"), ledger_total);
+}
+
+#[tokio::test]
 async fn check_out_rejects_overpaid_booking_until_refund_flow_exists() {
     let pool = test_pool().await;
     seed_room(&pool, "R412").await.unwrap();
@@ -2599,10 +2677,13 @@ async fn check_out_rejects_overpaid_booking_until_refund_flow_exists() {
         "2026-04-25T12:00:00+07:00",
         5,
         2_500_000.0,
-        Some(700_000.0),
+        Some(0.0),
     )
     .await
     .unwrap();
+    record_payment(&pool, "B412", 700_000.0, "prior payment")
+        .await
+        .unwrap();
 
     let error = stay_lifecycle::check_out_at(
         &pool,
@@ -3215,4 +3296,37 @@ async fn billing_and_export_queries_preserve_canonical_revenue_columns() {
     assert_eq!(export_rows[0].cancellation_fee_total, 0.0);
     assert_eq!(export_rows[0].folio_total, 35_000.0);
     assert_eq!(export_rows[0].recognized_revenue, 285_000.0);
+}
+
+#[tokio::test]
+async fn folio_line_insert_rolls_back_with_parent_transaction() {
+    let pool = test_pool().await;
+    seed_room(&pool, "FOLIO-1").await.unwrap();
+    seed_active_booking(&pool, "B-FOLIO-1", "FOLIO-1")
+        .await
+        .unwrap();
+
+    let mut tx = crate::services::booking::support::begin_tx(&pool)
+        .await
+        .unwrap();
+    crate::repositories::booking::folio_repository::insert_folio_line_tx(
+        &mut tx,
+        "B-FOLIO-1",
+        "laundry",
+        "Rollback laundry",
+        25_000.0,
+        Some("staff-1"),
+        "2026-04-15T12:00:00+07:00",
+    )
+    .await
+    .unwrap();
+    tx.rollback().await.unwrap();
+
+    let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM folio_lines WHERE booking_id = ?")
+        .bind("B-FOLIO-1")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+
+    assert_eq!(count, 0);
 }

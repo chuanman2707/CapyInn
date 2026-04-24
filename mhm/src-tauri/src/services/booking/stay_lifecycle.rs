@@ -457,13 +457,12 @@ pub async fn check_out_at(
 
     sqlx::query(
         "UPDATE bookings
-         SET status = ?, actual_checkout = ?, nights = ?, total_price = ?, paid_amount = ?, pricing_snapshot = ?
+         SET status = ?, actual_checkout = ?, nights = ?, total_price = ?, pricing_snapshot = ?
          WHERE id = ?",
     )
         .bind(status::booking::CHECKED_OUT)
         .bind(&actual_checkout)
         .bind(settlement.settled_nights)
-        .bind(req.final_total)
         .bind(req.final_total)
         .bind(pricing_snapshot)
         .bind(&req.booking_id)

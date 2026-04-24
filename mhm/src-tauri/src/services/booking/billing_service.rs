@@ -20,16 +20,22 @@ pub async fn add_folio_line(
         ));
     }
 
-    folio_repository::insert_folio_line(
-        pool,
+    let mut tx = begin_tx(pool).await?;
+    let created_at = rfc3339_now();
+    let line = folio_repository::insert_folio_line_tx(
+        &mut tx,
         booking_id,
         category,
         description,
         amount,
         created_by,
-        &rfc3339_now(),
+        &created_at,
     )
-    .await
+    .await?;
+
+    tx.commit().await.map_err(BookingError::from)?;
+
+    Ok(line)
 }
 
 #[allow(dead_code)]
