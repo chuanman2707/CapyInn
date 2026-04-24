@@ -1,7 +1,16 @@
 use log::warn;
-use sqlx::{Pool, Row, Sqlite, SqlitePool, Transaction};
+use sqlx::{
+    sqlite::{
+        SqliteConnectOptions, SqliteConnection, SqliteJournalMode, SqlitePoolOptions,
+        SqliteSynchronous,
+    },
+    Pool, Row, Sqlite, Transaction,
+};
+use std::{str::FromStr, time::Duration};
 
 use crate::app_identity;
+
+const SQLITE_BUSY_TIMEOUT_MS: u64 = 5000;
 
 pub async fn init_db() -> Result<Pool<Sqlite>, sqlx::Error> {
     let db_dir = app_identity::runtime_root();
@@ -12,20 +21,81 @@ pub async fn init_db() -> Result<Pool<Sqlite>, sqlx::Error> {
     let db_path = app_identity::database_path();
     let db_url = format!("sqlite:{}?mode=rwc", db_path.display());
 
-    let pool = SqlitePool::connect(&db_url).await?;
-
-    sqlx::query("PRAGMA journal_mode=WAL;")
-        .execute(&pool)
-        .await?;
-    sqlx::query("PRAGMA foreign_keys=ON;")
-        .execute(&pool)
-        .await?;
+    let pool = connect_configured_sqlite_pool(&db_url).await?;
 
     run_migrations(&pool).await?;
     ensure_setting_default(&pool, "setup_completed", "false").await?;
     ensure_setting_default(&pool, "send_crash_reports", "false").await?;
 
     Ok(pool)
+}
+
+pub(crate) async fn connect_configured_sqlite_pool(
+    db_url: &str,
+) -> Result<Pool<Sqlite>, sqlx::Error> {
+    let options = SqliteConnectOptions::from_str(db_url)?
+        .journal_mode(SqliteJournalMode::Wal)
+        .foreign_keys(true)
+        .busy_timeout(Duration::from_millis(SQLITE_BUSY_TIMEOUT_MS))
+        .synchronous(SqliteSynchronous::Normal);
+
+    SqlitePoolOptions::new()
+        .after_connect(|connection, _metadata| {
+            Box::pin(async move {
+                configure_sqlite_connection(connection).await?;
+                verify_sqlite_connection_pragmas(connection).await
+            })
+        })
+        .connect_with(options)
+        .await
+}
+
+async fn configure_sqlite_connection(connection: &mut SqliteConnection) -> Result<(), sqlx::Error> {
+    sqlx::query("PRAGMA foreign_keys=ON;")
+        .execute(&mut *connection)
+        .await?;
+    sqlx::query("PRAGMA busy_timeout=5000;")
+        .execute(&mut *connection)
+        .await?;
+    sqlx::query("PRAGMA synchronous=NORMAL;")
+        .execute(&mut *connection)
+        .await?;
+
+    Ok(())
+}
+
+async fn verify_sqlite_connection_pragmas(
+    connection: &mut SqliteConnection,
+) -> Result<(), sqlx::Error> {
+    let foreign_keys: i64 = sqlx::query_scalar("PRAGMA foreign_keys;")
+        .fetch_one(&mut *connection)
+        .await?;
+    if foreign_keys != 1 {
+        return Err(sqlite_pragma_mismatch("foreign_keys", "1", foreign_keys));
+    }
+
+    let busy_timeout: i64 = sqlx::query_scalar("PRAGMA busy_timeout;")
+        .fetch_one(&mut *connection)
+        .await?;
+    if busy_timeout != SQLITE_BUSY_TIMEOUT_MS as i64 {
+        return Err(sqlite_pragma_mismatch("busy_timeout", "5000", busy_timeout));
+    }
+
+    let synchronous: i64 = sqlx::query_scalar("PRAGMA synchronous;")
+        .fetch_one(&mut *connection)
+        .await?;
+    if synchronous != 1 {
+        return Err(sqlite_pragma_mismatch("synchronous", "1", synchronous));
+    }
+
+    Ok(())
+}
+
+fn sqlite_pragma_mismatch(name: &str, expected: &str, actual: i64) -> sqlx::Error {
+    sqlx::Error::Protocol(format!(
+        "SQLite PRAGMA {} expected {}, got {}",
+        name, expected, actual
+    ))
 }
 
 async fn ensure_setting_default(
@@ -604,13 +674,93 @@ pub(crate) async fn run_migrations(pool: &Pool<Sqlite>) -> Result<(), sqlx::Erro
         tx.commit().await?;
     }
 
+    // ── V10: Command Idempotency ──
+    if current < 10 {
+        let mut tx = pool.begin().await?;
+
+        sqlx::query(
+            "CREATE TABLE IF NOT EXISTS command_idempotency (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                idempotency_key TEXT NOT NULL,
+                command_name TEXT NOT NULL,
+                request_hash TEXT NOT NULL,
+                intent_json TEXT NOT NULL,
+                primary_aggregate_key TEXT,
+                lock_keys_json TEXT NOT NULL,
+                status TEXT NOT NULL,
+                claim_token TEXT NOT NULL,
+                response_json TEXT,
+                error_code TEXT,
+                retryable INTEGER NOT NULL DEFAULT 0,
+                lease_expires_at TEXT,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                completed_at TEXT,
+                last_attempt_at TEXT,
+                UNIQUE(command_name, idempotency_key)
+            )",
+        )
+        .execute(&mut *tx)
+        .await?;
+
+        sqlx::query(
+            "CREATE INDEX IF NOT EXISTS command_idempotency_lease_idx
+             ON command_idempotency(lease_expires_at)
+             WHERE status = 'in_progress'",
+        )
+        .execute(&mut *tx)
+        .await?;
+
+        sqlx::query(
+            "CREATE INDEX IF NOT EXISTS command_idempotency_completed_idx
+             ON command_idempotency(completed_at)
+             WHERE status IN ('completed', 'failed_terminal')",
+        )
+        .execute(&mut *tx)
+        .await?;
+
+        set_schema_version(&mut tx, 10).await?;
+        tx.commit().await?;
+    }
+
     Ok(())
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{execute_compat_alter, get_schema_version, run_migrations};
+    use super::{
+        connect_configured_sqlite_pool, execute_compat_alter, get_schema_version, run_migrations,
+    };
     use sqlx::{Row, SqlitePool};
+
+    #[tokio::test]
+    async fn configured_pool_applies_connection_pragmas() {
+        let pool = connect_configured_sqlite_pool("sqlite::memory:")
+            .await
+            .expect("connects configured in-memory sqlite pool");
+
+        let mut first = pool.acquire().await.expect("acquires first connection");
+        let mut second = pool.acquire().await.expect("acquires second connection");
+
+        for connection in [&mut first, &mut second] {
+            let foreign_keys: i64 = sqlx::query_scalar("PRAGMA foreign_keys;")
+                .fetch_one(&mut **connection)
+                .await
+                .expect("reads foreign_keys pragma");
+            let busy_timeout: i64 = sqlx::query_scalar("PRAGMA busy_timeout;")
+                .fetch_one(&mut **connection)
+                .await
+                .expect("reads busy_timeout pragma");
+            let synchronous: i64 = sqlx::query_scalar("PRAGMA synchronous;")
+                .fetch_one(&mut **connection)
+                .await
+                .expect("reads synchronous pragma");
+
+            assert_eq!(foreign_keys, 1);
+            assert_eq!(busy_timeout, 5000);
+            assert_eq!(synchronous, 1);
+        }
+    }
 
     #[tokio::test]
     async fn migrations_bootstrap_schema_version_row() {
@@ -665,6 +815,27 @@ mod tests {
             .expect("reads final schema version")
             .get("version");
 
-        assert_eq!(version, 9);
+        assert_eq!(version, 10);
+    }
+
+    #[tokio::test]
+    async fn migration_v10_creates_command_idempotency_table() {
+        let pool = SqlitePool::connect("sqlite::memory:")
+            .await
+            .expect("connects in-memory sqlite");
+
+        run_migrations(&pool).await.expect("runs migrations");
+
+        let table_count: i64 = sqlx::query(
+            "SELECT COUNT(*) AS count
+             FROM sqlite_master
+             WHERE type = 'table' AND name = 'command_idempotency'",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("reads sqlite_master")
+        .get("count");
+
+        assert_eq!(table_count, 1);
     }
 }

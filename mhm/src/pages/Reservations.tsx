@@ -6,6 +6,7 @@ import { Button } from "@/components/ui/button";
 import { useHotelStore } from "@/stores/useHotelStore";
 import { invoke } from "@tauri-apps/api/core";
 import { getRoomTypeLabel } from "@/lib/constants";
+import { formatAppError } from "@/lib/appError";
 import { fmtNumber } from "@/lib/format";
 import { toast } from "sonner";
 import ReservationSheet from "@/components/ReservationSheet";
@@ -157,7 +158,7 @@ export default function Reservations() {
             fetchRooms();
             setSelectedBooking(null);
         } catch (e) {
-            toast.error(String(e));
+            toast.error(formatAppError(e));
         }
     }
 

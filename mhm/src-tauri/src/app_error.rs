@@ -29,6 +29,12 @@ pub mod codes {
     pub const BOOKING_INVALID_SETTLEMENT_TOTAL: &str = "BOOKING_INVALID_SETTLEMENT_TOTAL";
     pub const AUDIT_INVALID_DATE: &str = "AUDIT_INVALID_DATE";
     pub const AUDIT_DATE_ALREADY_RUN: &str = "AUDIT_DATE_ALREADY_RUN";
+    pub const WRITE_TOOL_DISABLED: &str = "WRITE_TOOL_DISABLED";
+    pub const APPROVAL_REQUIRED: &str = "APPROVAL_REQUIRED";
+    pub const DB_LOCKED_RETRYABLE: &str = "DB_LOCKED_RETRYABLE";
+    pub const CONFLICT_ROOM_UNAVAILABLE: &str = "CONFLICT_ROOM_UNAVAILABLE";
+    pub const CONFLICT_IDEMPOTENCY_HASH_MISMATCH: &str = "CONFLICT_IDEMPOTENCY_HASH_MISMATCH";
+    pub const CONFLICT_DUPLICATE_IN_FLIGHT: &str = "CONFLICT_DUPLICATE_IN_FLIGHT";
     pub const SYSTEM_INTERNAL_ERROR: &str = "SYSTEM_INTERNAL_ERROR";
 
     pub const ALL: &[&str] = &[
@@ -53,6 +59,12 @@ pub mod codes {
         BOOKING_INVALID_SETTLEMENT_TOTAL,
         AUDIT_INVALID_DATE,
         AUDIT_DATE_ALREADY_RUN,
+        WRITE_TOOL_DISABLED,
+        APPROVAL_REQUIRED,
+        DB_LOCKED_RETRYABLE,
+        CONFLICT_ROOM_UNAVAILABLE,
+        CONFLICT_IDEMPOTENCY_HASH_MISMATCH,
+        CONFLICT_DUPLICATE_IN_FLIGHT,
         SYSTEM_INTERNAL_ERROR,
     ];
 }
@@ -72,6 +84,8 @@ pub struct CommandError {
     pub message: String,
     pub kind: AppErrorKind,
     pub support_id: Option<String>,
+    pub retryable: bool,
+    pub request_id: Option<String>,
 }
 
 pub type CommandResult<T> = Result<T, CommandError>;
@@ -106,6 +120,8 @@ impl CommandError {
             message: message.into(),
             kind: AppErrorKind::User,
             support_id: None,
+            retryable: false,
+            request_id: None,
         }
     }
 
@@ -116,6 +132,8 @@ impl CommandError {
             message: message.into(),
             kind: AppErrorKind::System,
             support_id: Some(generate_support_id()),
+            retryable: false,
+            request_id: None,
         }
     }
 
@@ -130,7 +148,19 @@ impl CommandError {
             message: message.into(),
             kind: AppErrorKind::System,
             support_id: Some(support_id.into()),
+            retryable: false,
+            request_id: None,
         }
+    }
+
+    pub fn retryable(mut self, retryable: bool) -> Self {
+        self.retryable = retryable;
+        self
+    }
+
+    pub fn with_request_id(mut self, request_id: impl Into<String>) -> Self {
+        self.request_id = Some(request_id.into());
+        self
     }
 }
 
@@ -304,8 +334,21 @@ mod tests {
                 "message": "Mã PIN không đúng",
                 "kind": "user",
                 "support_id": null,
+                "retryable": false,
+                "request_id": null,
             })
         );
+    }
+
+    #[test]
+    fn command_error_builders_set_retryable_and_request_id() {
+        let error = CommandError::user(codes::DB_LOCKED_RETRYABLE, "Database is locked")
+            .retryable(true)
+            .with_request_id("REQ-1234");
+
+        assert!(error.retryable);
+        assert_eq!(error.request_id.as_deref(), Some("REQ-1234"));
+        assert_eq!(error.support_id, None);
     }
 
     #[test]
@@ -456,6 +499,36 @@ mod tests {
                 codes::AUDIT_DATE_ALREADY_RUN,
                 AppErrorKind::User,
                 "Ngày kiểm toán này đã được chạy",
+            ),
+            (
+                codes::WRITE_TOOL_DISABLED,
+                AppErrorKind::User,
+                "Thao tác ghi qua MCP đang bị tắt.",
+            ),
+            (
+                codes::APPROVAL_REQUIRED,
+                AppErrorKind::User,
+                "Thao tác này cần phê duyệt.",
+            ),
+            (
+                codes::DB_LOCKED_RETRYABLE,
+                AppErrorKind::System,
+                "Database đang bận, vui lòng thử lại.",
+            ),
+            (
+                codes::CONFLICT_ROOM_UNAVAILABLE,
+                AppErrorKind::User,
+                "Phòng không còn trống trong khoảng ngày đã chọn.",
+            ),
+            (
+                codes::CONFLICT_IDEMPOTENCY_HASH_MISMATCH,
+                AppErrorKind::User,
+                "Idempotency key đã được dùng cho payload khác.",
+            ),
+            (
+                codes::CONFLICT_DUPLICATE_IN_FLIGHT,
+                AppErrorKind::User,
+                "Lệnh đang được xử lý.",
             ),
             (
                 codes::SYSTEM_INTERNAL_ERROR,

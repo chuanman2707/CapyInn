@@ -1,9 +1,37 @@
-use sqlx::{Pool, Sqlite};
+use sqlx::{Pool, Sqlite, Transaction};
 
 use crate::{domain::booking::BookingResult, models::FolioLine};
 
+// Retained as the public pool-based compatibility API; composed flows use insert_folio_line_tx.
+#[allow(dead_code)]
 pub async fn insert_folio_line(
     pool: &Pool<Sqlite>,
+    booking_id: &str,
+    category: &str,
+    description: &str,
+    amount: f64,
+    created_by: Option<&str>,
+    created_at: &str,
+) -> BookingResult<FolioLine> {
+    let mut tx = pool.begin().await?;
+    let line = insert_folio_line_tx(
+        &mut tx,
+        booking_id,
+        category,
+        description,
+        amount,
+        created_by,
+        created_at,
+    )
+    .await?;
+
+    tx.commit().await?;
+
+    Ok(line)
+}
+
+pub async fn insert_folio_line_tx(
+    tx: &mut Transaction<'_, Sqlite>,
     booking_id: &str,
     category: &str,
     description: &str,
@@ -24,7 +52,7 @@ pub async fn insert_folio_line(
     .bind(amount)
     .bind(created_by)
     .bind(created_at)
-    .execute(pool)
+    .execute(&mut **tx)
     .await?;
 
     Ok(FolioLine {

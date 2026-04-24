@@ -6,6 +6,9 @@ use sqlx::{Pool, Sqlite};
 use tauri::AppHandle;
 
 use super::models::*;
+use super::policy::{
+    guard_write_tool, CANCEL_RESERVATION_META, CREATE_RESERVATION_META, MODIFY_RESERVATION_META,
+};
 use crate::app_identity;
 use crate::commands;
 use crate::models::{BookingFilter, CreateReservationRequest, InvoiceData};
@@ -106,11 +109,14 @@ mod tests {
         CancelReservationInput, CreateReservationInput, GetInvoiceInput, GetSettingsInput,
         HotelTools, ModifyReservationInput,
     };
+    use crate::app_error::codes;
     use crate::app_identity;
     use crate::commands::invoices;
     use rmcp::handler::server::wrapper::Parameters;
     use serde_json::Value;
     use sqlx::{sqlite::SqlitePoolOptions, Pool, Row, Sqlite};
+    use std::ffi::OsString;
+    use std::sync::OnceLock;
 
     async fn test_pool() -> Pool<Sqlite> {
         let pool = SqlitePoolOptions::new()
@@ -285,6 +291,39 @@ mod tests {
         .expect("seed invoice booking");
     }
 
+    struct EnvVarGuard {
+        key: &'static str,
+        previous: Option<OsString>,
+    }
+
+    fn async_env_lock() -> &'static tokio::sync::Mutex<()> {
+        static LOCK: OnceLock<tokio::sync::Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| tokio::sync::Mutex::new(()))
+    }
+
+    impl EnvVarGuard {
+        fn set(key: &'static str, value: &str) -> Self {
+            let previous = std::env::var_os(key);
+            std::env::set_var(key, value);
+            Self { key, previous }
+        }
+
+        fn remove(key: &'static str) -> Self {
+            let previous = std::env::var_os(key);
+            std::env::remove_var(key);
+            Self { key, previous }
+        }
+    }
+
+    impl Drop for EnvVarGuard {
+        fn drop(&mut self) {
+            match &self.previous {
+                Some(value) => std::env::set_var(self.key, value),
+                None => std::env::remove_var(self.key),
+            }
+        }
+    }
+
     #[tokio::test]
     async fn get_hotel_context_falls_back_when_hotel_info_is_missing() {
         let pool = test_pool().await;
@@ -427,7 +466,66 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn create_reservation_is_default_denied_without_creating_booking() {
+        let _env_lock = async_env_lock().lock().await;
+        let _env = EnvVarGuard::remove("CAPYINN_ENABLE_HIGH_RISK_MCP_WRITES");
+
+        let pool = test_pool().await;
+        seed_room(&pool, "R199", "standard").await;
+        seed_pricing_rule(&pool, "standard", 600_000.0).await;
+        let tools = HotelTools::new(pool.clone(), None);
+
+        let output = tools
+            .create_reservation(Parameters(CreateReservationInput {
+                room_id: "R199".to_string(),
+                guest_name: "Nguyen Van A".to_string(),
+                guest_phone: Some("0900000000".to_string()),
+                guest_doc_number: Some("079123456789".to_string()),
+                check_in_date: "2026-04-20".to_string(),
+                check_out_date: "2026-04-22".to_string(),
+                nights: 2,
+                deposit_amount: Some(50_000.0),
+                source: Some("phone".to_string()),
+                notes: Some("test reservation".to_string()),
+            }))
+            .await;
+
+        let envelope: Value = serde_json::from_str(&output).expect("error envelope json");
+        assert_eq!(envelope["ok"].as_bool(), Some(false));
+        assert_eq!(
+            envelope["error"]["code"].as_str(),
+            Some(codes::WRITE_TOOL_DISABLED)
+        );
+        assert_eq!(envelope["error"]["kind"].as_str(), Some("policy"));
+
+        let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM bookings WHERE room_id = ?")
+            .bind("R199")
+            .fetch_one(&pool)
+            .await
+            .expect("booking count");
+        assert_eq!(count, 0);
+    }
+
+    #[tokio::test]
+    async fn get_hotel_context_still_works_when_high_risk_writes_are_disabled() {
+        let _env_lock = async_env_lock().lock().await;
+        let _env = EnvVarGuard::remove("CAPYINN_ENABLE_HIGH_RISK_MCP_WRITES");
+
+        let pool = test_pool().await;
+        let tools = HotelTools::new(pool, None);
+
+        let context: Value = serde_json::from_str(&tools.get_hotel_context().await)
+            .expect("context should be valid json");
+
+        assert_eq!(context["hotel_name"].as_str(), Some(app_identity::APP_NAME));
+        assert!(context["current_date"].as_str().is_some());
+    }
+
+    #[tokio::test]
     async fn create_reservation_tool_returns_booking_json() {
+        let _env_lock = async_env_lock().lock().await;
+        let _env = EnvVarGuard::set("CAPYINN_ENABLE_HIGH_RISK_MCP_WRITES", "1");
+
         let pool = test_pool().await;
         seed_room(&pool, "R200", "standard").await;
         seed_pricing_rule(&pool, "standard", 600_000.0).await;
@@ -463,6 +561,9 @@ mod tests {
 
     #[tokio::test]
     async fn cancel_reservation_tool_returns_success_message_and_updates_status() {
+        let _env_lock = async_env_lock().lock().await;
+        let _env = EnvVarGuard::set("CAPYINN_ENABLE_HIGH_RISK_MCP_WRITES", "1");
+
         let pool = test_pool().await;
         seed_room(&pool, "R201", "standard").await;
         seed_booked_reservation(&pool, "B201", "R201").await;
@@ -487,6 +588,9 @@ mod tests {
 
     #[tokio::test]
     async fn modify_reservation_tool_returns_updated_booking_json() {
+        let _env_lock = async_env_lock().lock().await;
+        let _env = EnvVarGuard::set("CAPYINN_ENABLE_HIGH_RISK_MCP_WRITES", "1");
+
         let pool = test_pool().await;
         seed_room(&pool, "R202", "standard").await;
         seed_pricing_rule(&pool, "standard", 600_000.0).await;
@@ -743,6 +847,10 @@ impl HotelTools {
         &self,
         Parameters(input): Parameters<CreateReservationInput>,
     ) -> String {
+        if let Err(envelope) = guard_write_tool(&CREATE_RESERVATION_META) {
+            return envelope.to_json_string();
+        }
+
         let req = CreateReservationRequest {
             room_id: input.room_id,
             guest_name: input.guest_name,
@@ -782,6 +890,10 @@ impl HotelTools {
         &self,
         Parameters(input): Parameters<CancelReservationInput>,
     ) -> String {
+        if let Err(envelope) = guard_write_tool(&CANCEL_RESERVATION_META) {
+            return envelope.to_json_string();
+        }
+
         match commands::do_cancel_reservation(
             &self.pool,
             self.app_handle.as_ref(),
@@ -801,6 +913,10 @@ impl HotelTools {
         &self,
         Parameters(input): Parameters<ModifyReservationInput>,
     ) -> String {
+        if let Err(envelope) = guard_write_tool(&MODIFY_RESERVATION_META) {
+            return envelope.to_json_string();
+        }
+
         let req = crate::models::ModifyReservationRequest {
             booking_id: input.booking_id,
             new_check_in_date: input.new_check_in_date,

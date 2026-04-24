@@ -13,8 +13,8 @@ use super::{
     billing_service::{record_charge_tx, record_payment_tx},
     guest_service::{create_guest_manifest, link_booking_guests},
     support::{
-        begin_tx, fetch_booking, insert_room_calendar_rows, parse_booking_datetime,
-        read_f64_or_zero, CalendarInsertMode,
+        begin_immediate_tx, begin_tx, fetch_booking, insert_room_calendar_rows,
+        map_room_calendar_insert_error, parse_booking_datetime, read_f64_or_zero,
     },
 };
 
@@ -42,7 +42,9 @@ pub async fn check_in(
         .clone()
         .unwrap_or_else(|| "nightly".to_string());
 
-    let mut tx = begin_tx(pool).await.map_err(mark_write_db_error)?;
+    let mut tx = begin_immediate_tx(pool)
+        .await
+        .map_err(mark_write_db_error)?;
 
     let room = sqlx::query("SELECT id, status FROM rooms WHERE id = ?")
         .bind(&req.room_id)
@@ -399,7 +401,9 @@ pub async fn check_out_at(
         ));
     }
 
-    let mut tx = begin_tx(pool).await.map_err(mark_write_db_error)?;
+    let mut tx = begin_immediate_tx(pool)
+        .await
+        .map_err(mark_write_db_error)?;
     let preview_req = CheckoutSettlementPreviewRequest {
         booking_id: req.booking_id.clone(),
         settlement_mode: req.settlement_mode,
@@ -453,13 +457,12 @@ pub async fn check_out_at(
 
     sqlx::query(
         "UPDATE bookings
-         SET status = ?, actual_checkout = ?, nights = ?, total_price = ?, paid_amount = ?, pricing_snapshot = ?
+         SET status = ?, actual_checkout = ?, nights = ?, total_price = ?, pricing_snapshot = ?
          WHERE id = ?",
     )
         .bind(status::booking::CHECKED_OUT)
         .bind(&actual_checkout)
         .bind(settlement.settled_nights)
-        .bind(req.final_total)
         .bind(req.final_total)
         .bind(pricing_snapshot)
         .bind(&req.booking_id)
@@ -505,7 +508,7 @@ pub async fn check_out_at(
 }
 
 pub async fn extend_stay(pool: &Pool<Sqlite>, booking_id: &str) -> BookingResult<Booking> {
-    let mut tx = begin_tx(pool).await?;
+    let mut tx = begin_immediate_tx(pool).await?;
 
     let booking = sqlx::query(
         "SELECT room_id, nights, total_price, expected_checkout, pricing_type
@@ -583,7 +586,7 @@ pub async fn extend_stay(pool: &Pool<Sqlite>, booking_id: &str) -> BookingResult
     .await?;
 
     sqlx::query(
-        "INSERT OR REPLACE INTO room_calendar (room_id, date, booking_id, status)
+        "INSERT INTO room_calendar (room_id, date, booking_id, status)
          VALUES (?, ?, ?, ?)",
     )
     .bind(&room_id)
@@ -591,7 +594,8 @@ pub async fn extend_stay(pool: &Pool<Sqlite>, booking_id: &str) -> BookingResult
     .bind(booking_id)
     .bind(status::calendar::OCCUPIED)
     .execute(&mut *tx)
-    .await?;
+    .await
+    .map_err(|error| map_room_calendar_insert_error(error, extension_date))?;
 
     record_charge_tx(
         &mut tx,
@@ -642,7 +646,6 @@ async fn insert_occupied_calendar_rows(
         start_date,
         end_date,
         status::calendar::OCCUPIED,
-        CalendarInsertMode::InsertOrReplace,
     )
     .await
 }

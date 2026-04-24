@@ -141,7 +141,7 @@ export default function ReservationSheet({ open, onOpenChange, preSelectedRoomId
             onOpenChange(false);
             fetchRooms();
         } catch (e) {
-            toast.error(isEditMode ? String(e) : formatAppError(e));
+            toast.error(formatAppError(e));
         }
         setLoading(false);
     }

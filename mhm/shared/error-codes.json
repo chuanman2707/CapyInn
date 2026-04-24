@@ -105,6 +105,36 @@
     "defaultMessage": "Ngày kiểm toán này đã được chạy"
   },
   {
+    "code": "WRITE_TOOL_DISABLED",
+    "kind": "user",
+    "defaultMessage": "Thao tác ghi qua MCP đang bị tắt."
+  },
+  {
+    "code": "APPROVAL_REQUIRED",
+    "kind": "user",
+    "defaultMessage": "Thao tác này cần phê duyệt."
+  },
+  {
+    "code": "DB_LOCKED_RETRYABLE",
+    "kind": "system",
+    "defaultMessage": "Database đang bận, vui lòng thử lại."
+  },
+  {
+    "code": "CONFLICT_ROOM_UNAVAILABLE",
+    "kind": "user",
+    "defaultMessage": "Phòng không còn trống trong khoảng ngày đã chọn."
+  },
+  {
+    "code": "CONFLICT_IDEMPOTENCY_HASH_MISMATCH",
+    "kind": "user",
+    "defaultMessage": "Idempotency key đã được dùng cho payload khác."
+  },
+  {
+    "code": "CONFLICT_DUPLICATE_IN_FLIGHT",
+    "kind": "user",
+    "defaultMessage": "Lệnh đang được xử lý."
+  },
+  {
     "code": "SYSTEM_INTERNAL_ERROR",
     "kind": "system",
     "defaultMessage": "Có lỗi hệ thống, vui lòng thử lại"

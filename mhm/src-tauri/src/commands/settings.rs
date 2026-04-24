@@ -1,4 +1,8 @@
 use super::{require_admin, AppState};
+use crate::command_idempotency::{
+    set_crash_reporting_preference_idempotent, WriteCommandContext,
+    SET_CRASH_REPORTING_PREFERENCE_COMMAND,
+};
 use crate::services::settings_store;
 use tauri::State;
 
@@ -48,10 +52,9 @@ pub async fn set_crash_reporting_preference(
     state: State<'_, AppState>,
     enabled: bool,
 ) -> Result<(), String> {
-    settings_store::save_setting(
-        &state.db,
-        SEND_CRASH_REPORTS_KEY,
-        if enabled { "true" } else { "false" },
-    )
-    .await
+    let ctx = WriteCommandContext::new_internal(SET_CRASH_REPORTING_PREFERENCE_COMMAND);
+    set_crash_reporting_preference_idempotent(&state.db, &ctx, enabled)
+        .await
+        .map(|_| ())
+        .map_err(String::from)
 }
