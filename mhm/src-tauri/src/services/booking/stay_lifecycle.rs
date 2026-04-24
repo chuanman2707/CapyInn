@@ -14,7 +14,7 @@ use super::{
     guest_service::{create_guest_manifest, link_booking_guests},
     support::{
         begin_immediate_tx, begin_tx, fetch_booking, insert_room_calendar_rows,
-        parse_booking_datetime, read_f64_or_zero, CalendarInsertMode,
+        map_room_calendar_insert_error, parse_booking_datetime, read_f64_or_zero,
     },
 };
 
@@ -587,7 +587,7 @@ pub async fn extend_stay(pool: &Pool<Sqlite>, booking_id: &str) -> BookingResult
     .await?;
 
     sqlx::query(
-        "INSERT OR REPLACE INTO room_calendar (room_id, date, booking_id, status)
+        "INSERT INTO room_calendar (room_id, date, booking_id, status)
          VALUES (?, ?, ?, ?)",
     )
     .bind(&room_id)
@@ -595,7 +595,8 @@ pub async fn extend_stay(pool: &Pool<Sqlite>, booking_id: &str) -> BookingResult
     .bind(booking_id)
     .bind(status::calendar::OCCUPIED)
     .execute(&mut *tx)
-    .await?;
+    .await
+    .map_err(|error| map_room_calendar_insert_error(error, extension_date))?;
 
     record_charge_tx(
         &mut tx,
@@ -646,7 +647,6 @@ async fn insert_occupied_calendar_rows(
         start_date,
         end_date,
         status::calendar::OCCUPIED,
-        CalendarInsertMode::InsertOrReplace,
     )
     .await
 }

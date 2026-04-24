@@ -1,4 +1,4 @@
-use chrono::{Duration, Local, TimeZone};
+use chrono::{Duration, Local, NaiveDate, TimeZone};
 use sqlx::{sqlite::SqlitePoolOptions, Pool, Row, Sqlite, Transaction};
 
 use crate::{
@@ -711,6 +711,34 @@ pub fn minimal_group_checkin_request(room_ids: &[&str]) -> GroupCheckinRequest {
         notes: Some("group test".to_string()),
         paid_amount: Some(100_000.0),
     }
+}
+
+#[tokio::test]
+async fn calendar_insert_conflict_returns_room_unavailable_without_overwrite() {
+    let pool = test_pool().await;
+    seed_room(&pool, "CAL-1").await.unwrap();
+    seed_booked_reservation(&pool, "existing-booking", "CAL-1")
+        .await
+        .unwrap();
+    seed_active_booking(&pool, "new-booking", "CAL-1")
+        .await
+        .unwrap();
+
+    let mut tx = pool.begin().await.unwrap();
+    let error = crate::services::booking::support::insert_room_calendar_rows(
+        &mut tx,
+        "CAL-1",
+        "new-booking",
+        NaiveDate::from_ymd_opt(2026, 4, 20).unwrap(),
+        NaiveDate::from_ymd_opt(2026, 4, 21).unwrap(),
+        crate::models::status::calendar::BOOKED,
+    )
+    .await
+    .unwrap_err();
+
+    assert!(error
+        .to_string()
+        .contains(crate::app_error::codes::CONFLICT_ROOM_UNAVAILABLE));
 }
 
 #[tokio::test]

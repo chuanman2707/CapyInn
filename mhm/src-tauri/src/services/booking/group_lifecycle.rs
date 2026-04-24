@@ -9,7 +9,7 @@ use crate::{
 use super::{
     billing_service::{record_charge_tx, record_payment_tx},
     guest_service::{create_group_guest_manifest, link_booking_guests},
-    support::{begin_immediate_tx, insert_room_calendar_rows, CalendarInsertMode},
+    support::{begin_immediate_tx, insert_room_calendar_rows},
 };
 
 const GROUP_ACTIVE: &str = "active";
@@ -498,16 +498,7 @@ async fn insert_group_calendar_rows(
     to: NaiveDate,
     calendar_status: &str,
 ) -> BookingResult<()> {
-    insert_room_calendar_rows(
-        tx,
-        room_id,
-        booking_id,
-        from,
-        to,
-        calendar_status,
-        CalendarInsertMode::InsertOrReplace,
-    )
-    .await
+    insert_room_calendar_rows(tx, room_id, booking_id, from, to, calendar_status).await
 }
 
 async fn fetch_group(pool: &Pool<Sqlite>, group_id: &str) -> BookingResult<BookingGroup> {

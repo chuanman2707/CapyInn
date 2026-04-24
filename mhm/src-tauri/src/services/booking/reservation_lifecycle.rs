@@ -9,10 +9,7 @@ use crate::{
 use super::{
     billing_service::{record_cancellation_fee_tx, record_charge_tx, record_deposit_tx},
     guest_service::{create_reservation_guest_manifest, link_booking_guests},
-    support::{
-        begin_immediate_tx, fetch_booking, insert_room_calendar_rows, read_f64_strict,
-        CalendarInsertMode,
-    },
+    support::{begin_immediate_tx, fetch_booking, insert_room_calendar_rows, read_f64_strict},
 };
 
 fn mark_write_db_error(error: BookingError) -> BookingError {
@@ -417,16 +414,7 @@ async fn insert_calendar_rows(
     to: NaiveDate,
     calendar_status: &str,
 ) -> BookingResult<()> {
-    insert_room_calendar_rows(
-        tx,
-        room_id,
-        booking_id,
-        from,
-        to,
-        calendar_status,
-        CalendarInsertMode::Insert,
-    )
-    .await
+    insert_room_calendar_rows(tx, room_id, booking_id, from, to, calendar_status).await
 }
 
 async fn load_booked_reservation(
