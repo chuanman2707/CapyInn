@@ -5,6 +5,7 @@ pub mod app_error;
 pub mod app_identity;
 mod backup;
 mod command_failure_log;
+pub mod command_idempotency;
 mod commands;
 pub mod db_error_monitoring;
 mod db;

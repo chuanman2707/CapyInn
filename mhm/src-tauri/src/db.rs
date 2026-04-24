@@ -674,6 +674,55 @@ pub(crate) async fn run_migrations(pool: &Pool<Sqlite>) -> Result<(), sqlx::Erro
         tx.commit().await?;
     }
 
+    // ── V10: Command Idempotency ──
+    if current < 10 {
+        let mut tx = pool.begin().await?;
+
+        sqlx::query(
+            "CREATE TABLE IF NOT EXISTS command_idempotency (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                idempotency_key TEXT NOT NULL,
+                command_name TEXT NOT NULL,
+                request_hash TEXT NOT NULL,
+                intent_json TEXT NOT NULL,
+                primary_aggregate_key TEXT,
+                lock_keys_json TEXT NOT NULL,
+                status TEXT NOT NULL,
+                claim_token TEXT NOT NULL,
+                response_json TEXT,
+                error_code TEXT,
+                retryable INTEGER NOT NULL DEFAULT 0,
+                lease_expires_at TEXT,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                completed_at TEXT,
+                last_attempt_at TEXT,
+                UNIQUE(command_name, idempotency_key)
+            )",
+        )
+        .execute(&mut *tx)
+        .await?;
+
+        sqlx::query(
+            "CREATE INDEX IF NOT EXISTS command_idempotency_lease_idx
+             ON command_idempotency(lease_expires_at)
+             WHERE status = 'in_progress'",
+        )
+        .execute(&mut *tx)
+        .await?;
+
+        sqlx::query(
+            "CREATE INDEX IF NOT EXISTS command_idempotency_completed_idx
+             ON command_idempotency(completed_at)
+             WHERE status IN ('completed', 'failed_terminal')",
+        )
+        .execute(&mut *tx)
+        .await?;
+
+        set_schema_version(&mut tx, 10).await?;
+        tx.commit().await?;
+    }
+
     Ok(())
 }
 
@@ -766,6 +815,27 @@ mod tests {
             .expect("reads final schema version")
             .get("version");
 
-        assert_eq!(version, 9);
+        assert_eq!(version, 10);
+    }
+
+    #[tokio::test]
+    async fn migration_v10_creates_command_idempotency_table() {
+        let pool = SqlitePool::connect("sqlite::memory:")
+            .await
+            .expect("connects in-memory sqlite");
+
+        run_migrations(&pool).await.expect("runs migrations");
+
+        let table_count: i64 = sqlx::query(
+            "SELECT COUNT(*) AS count
+             FROM sqlite_master
+             WHERE type = 'table' AND name = 'command_idempotency'",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("reads sqlite_master")
+        .get("count");
+
+        assert_eq!(table_count, 1);
     }
 }
