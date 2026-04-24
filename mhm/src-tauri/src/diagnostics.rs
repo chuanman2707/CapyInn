@@ -226,6 +226,23 @@ pub fn write_pending_bundle_for(root: &Path, bundle: &CrashBundle) -> Result<Pat
     Ok(path)
 }
 
+fn write_pending_bundle_and_refresh_index_for(
+    root: &Path,
+    bundle: &CrashBundle,
+) -> Result<PathBuf, String> {
+    let path = write_pending_bundle_for(root, bundle)?;
+
+    if let Err(error) = crate::crash_index::rebuild_crash_index_for(root) {
+        log::warn!(
+            "failed to rebuild crash index after writing pending bundle {}: {}",
+            bundle.bundle_id,
+            error
+        );
+    }
+
+    Ok(path)
+}
+
 pub fn read_oldest_pending_bundle_for(root: &Path) -> Result<Option<CrashBundle>, String> {
     for entry in json_file_entries(&pending_dir_for(root))? {
         match read_bundle_from_path(&entry.path()) {
@@ -293,6 +310,26 @@ pub fn prune_handled_bundles_for(root: &Path, max_entries: usize) -> Result<(), 
     Ok(())
 }
 
+fn mark_bundle_handled_and_refresh_index_for(
+    root: &Path,
+    bundle_id: &str,
+    disposition: &str,
+) -> Result<(), String> {
+    mark_bundle_handled_for(root, bundle_id, disposition)?;
+    prune_handled_bundles_for(root, 20)?;
+
+    if let Err(error) = crate::crash_index::rebuild_crash_index_for(root) {
+        log::warn!(
+            "failed to rebuild crash index after marking bundle {} as {}: {}",
+            bundle_id,
+            disposition,
+            error
+        );
+    }
+
+    Ok(())
+}
+
 pub fn install_panic_hook(app_version: &'static str, environment: &'static str) {
     PANIC_HOOK_INIT.call_once(|| {
         let previous = std::panic::take_hook();
@@ -312,7 +349,7 @@ pub fn install_panic_hook(app_version: &'static str, environment: &'static str) 
             let bundle = build_rust_panic_bundle(app_version, environment, &full_message);
 
             if let Some(root) = app_identity::runtime_root_opt() {
-                let _ = write_pending_bundle_for(&root, &bundle);
+                let _ = write_pending_bundle_and_refresh_index_for(&root, &bundle);
             }
 
             previous(panic_info);
@@ -323,7 +360,7 @@ pub fn install_panic_hook(app_version: &'static str, environment: &'static str) 
 pub fn record_js_crash(report: JsCrashReportInput) -> Result<(), String> {
     let root = app_identity::runtime_root();
     let bundle = build_js_crash_bundle(&root, report)?;
-    write_pending_bundle_for(&root, &bundle)?;
+    write_pending_bundle_and_refresh_index_for(&root, &bundle)?;
     Ok(())
 }
 
@@ -333,14 +370,12 @@ pub fn get_pending_crash_report() -> Result<Option<CrashBundle>, String> {
 
 pub fn mark_crash_report_submitted(bundle_id: &str) -> Result<(), String> {
     let root = app_identity::runtime_root();
-    mark_bundle_handled_for(&root, bundle_id, "submitted")?;
-    prune_handled_bundles_for(&root, 20)
+    mark_bundle_handled_and_refresh_index_for(&root, bundle_id, "submitted")
 }
 
 pub fn mark_crash_report_dismissed(bundle_id: &str) -> Result<(), String> {
     let root = app_identity::runtime_root();
-    mark_bundle_handled_for(&root, bundle_id, "dismissed")?;
-    prune_handled_bundles_for(&root, 20)
+    mark_bundle_handled_and_refresh_index_for(&root, bundle_id, "dismissed")
 }
 
 pub fn mark_crash_report_send_failed(bundle_id: &str) -> Result<(), String> {
@@ -354,6 +389,31 @@ pub fn export_crash_report(bundle_id: &str) -> Result<PathBuf, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::crash_index::{
+        crash_index_path, rebuild_crash_index_for, CrashIndexRow, CrashIndexState,
+    };
+    use std::ffi::OsString;
+
+    struct RuntimeRootOverrideGuard {
+        previous: Option<OsString>,
+    }
+
+    impl RuntimeRootOverrideGuard {
+        fn set(root: &Path) -> Self {
+            let previous = std::env::var_os("CAPYINN_RUNTIME_ROOT");
+            std::env::set_var("CAPYINN_RUNTIME_ROOT", root);
+            Self { previous }
+        }
+    }
+
+    impl Drop for RuntimeRootOverrideGuard {
+        fn drop(&mut self) {
+            match self.previous.take() {
+                Some(value) => std::env::set_var("CAPYINN_RUNTIME_ROOT", value),
+                None => std::env::remove_var("CAPYINN_RUNTIME_ROOT"),
+            }
+        }
+    }
 
     fn temp_root(name: &str) -> PathBuf {
         let root = std::env::temp_dir().join(format!(
@@ -379,6 +439,40 @@ mod tests {
             module_hint: Some("Dashboard".to_string()),
             attempt_count: 0,
         }
+    }
+
+    fn read_crash_index_rows(root: &Path) -> Vec<CrashIndexRow> {
+        std::fs::read_to_string(crash_index_path(root))
+            .expect("read crash index")
+            .lines()
+            .map(|line| serde_json::from_str(line).expect("parse crash index row"))
+            .collect()
+    }
+
+    fn assert_handled_transition_rebuilds_crash_index(
+        disposition: &str,
+        expected_state: CrashIndexState,
+    ) {
+        let _guard = crate::runtime_config::env_lock().lock().unwrap();
+        let root = temp_root(disposition);
+        let bundle = sample_bundle();
+        let _runtime_root = RuntimeRootOverrideGuard::set(&root);
+
+        write_pending_bundle_for(&root, &bundle).expect("write pending bundle");
+        rebuild_crash_index_for(&root).expect("seed crash index");
+
+        match disposition {
+            "submitted" => mark_crash_report_submitted(&bundle.bundle_id),
+            "dismissed" => mark_crash_report_dismissed(&bundle.bundle_id),
+            _ => panic!("unsupported disposition"),
+        }
+        .expect("mark crash report handled");
+
+        let rows = read_crash_index_rows(&root);
+
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].bundle_id, bundle.bundle_id);
+        assert_eq!(rows[0].state, expected_state);
     }
 
     #[test]
@@ -448,6 +542,120 @@ mod tests {
         prune_handled_bundles_for(&root, 0).expect("prune handled bundles");
 
         assert!(handled_dir_for(&root).exists());
+    }
+
+    #[test]
+    fn submitted_transition_refreshes_crash_index_state() {
+        assert_handled_transition_rebuilds_crash_index("submitted", CrashIndexState::Submitted);
+    }
+
+    #[test]
+    fn dismissed_transition_refreshes_crash_index_state() {
+        assert_handled_transition_rebuilds_crash_index("dismissed", CrashIndexState::Dismissed);
+    }
+
+    #[test]
+    fn record_js_crash_refreshes_pending_crash_index() {
+        let _guard = crate::runtime_config::env_lock().lock().unwrap();
+        let root = temp_root("record-js-refresh-index");
+        let _runtime_root = RuntimeRootOverrideGuard::set(&root);
+
+        record_js_crash(JsCrashReportInput {
+            crash_type: "js_unhandled_error".to_string(),
+            message: "render pipeline exploded".to_string(),
+            stacktrace: vec!["frame-a".to_string(), "frame-b".to_string()],
+            module_hint: Some("Dashboard".to_string()),
+        })
+        .expect("record js crash");
+
+        let rows = read_crash_index_rows(&root);
+
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].state, CrashIndexState::Pending);
+        assert_eq!(rows[0].crash_type, "js_unhandled_error");
+        assert_eq!(rows[0].message, "render pipeline exploded");
+        assert_eq!(rows[0].module_hint.as_deref(), Some("Dashboard"));
+    }
+
+    #[test]
+    fn write_pending_bundle_refreshes_crash_index() {
+        let _guard = crate::runtime_config::env_lock().lock().unwrap();
+        let root = temp_root("write-refresh-index");
+        let bundle = sample_bundle();
+
+        write_pending_bundle_and_refresh_index_for(&root, &bundle)
+            .expect("write pending bundle and refresh crash index");
+
+        let rows = read_crash_index_rows(&root);
+
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].bundle_id, bundle.bundle_id);
+        assert_eq!(rows[0].state, CrashIndexState::Pending);
+    }
+
+    #[test]
+    fn write_pending_bundle_keeps_bundle_when_crash_index_rebuild_fails() {
+        let _guard = crate::runtime_config::env_lock().lock().unwrap();
+        let root = temp_root("write-refresh-failure");
+        let bundle = sample_bundle();
+
+        std::fs::create_dir_all(crash_index_path(&root)).expect("block crash index file");
+
+        write_pending_bundle_and_refresh_index_for(&root, &bundle)
+            .expect("pending bundle write should succeed");
+
+        assert!(bundle_path(&root, &bundle.bundle_id)
+            .expect("pending bundle path")
+            .exists());
+    }
+
+    #[test]
+    fn submitted_transition_prunes_handled_bundles_to_twenty() {
+        let _guard = crate::runtime_config::env_lock().lock().unwrap();
+        let root = temp_root("submit-prune");
+        let _runtime_root = RuntimeRootOverrideGuard::set(&root);
+
+        for index in 0..21 {
+            let mut bundle = sample_bundle();
+            bundle.bundle_id = format!("bundle-{index}");
+            write_pending_bundle_for(&root, &bundle).expect("write pending bundle");
+            mark_crash_report_submitted(&bundle.bundle_id).expect("submit handled bundle");
+        }
+
+        let handled_entries = json_file_entries(&handled_dir_for(&root)).expect("read handled dir");
+        let crash_index_rows = read_crash_index_rows(&root);
+
+        assert_eq!(handled_entries.len(), 20);
+        assert_eq!(crash_index_rows.len(), 20);
+        assert!(!handled_bundle_path(&root, "bundle-0", "submitted")
+            .expect("oldest handled bundle path")
+            .exists());
+        assert!(handled_bundle_path(&root, "bundle-20", "submitted")
+            .expect("newest handled bundle path")
+            .exists());
+        assert!(!crash_index_rows
+            .iter()
+            .any(|row| row.bundle_id == "bundle-0"));
+    }
+
+    #[test]
+    fn handled_transition_succeeds_when_crash_index_rebuild_fails() {
+        let _guard = crate::runtime_config::env_lock().lock().unwrap();
+        let root = temp_root("rebuild-failure");
+        let bundle = sample_bundle();
+
+        write_pending_bundle_for(&root, &bundle).expect("write pending bundle");
+        std::fs::create_dir_all(crash_index_path(&root)).expect("block crash index file");
+
+        mark_bundle_handled_and_refresh_index_for(&root, &bundle.bundle_id, "submitted")
+            .expect("bundle handling should succeed");
+
+        assert!(!bundle_path(&root, &bundle.bundle_id)
+            .expect("pending bundle path")
+            .exists());
+        assert!(handled_bundle_path(&root, &bundle.bundle_id, "submitted")
+            .expect("handled bundle path")
+            .exists());
     }
 
     #[test]

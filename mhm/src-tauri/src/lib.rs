@@ -5,6 +5,7 @@ pub mod app_error;
 pub mod app_identity;
 mod backup;
 mod command_failure_log;
+mod crash_index;
 mod commands;
 pub mod db_error_monitoring;
 mod db;
@@ -113,6 +114,14 @@ fn updater_enabled() -> bool {
         runtime_config::env_flag("CAPYINN_ENABLE_UPDATER"),
     )
 }
+
+fn spawn_crash_index_rebuild() {
+    std::thread::spawn(|| {
+        if let Err(error) = crash_index::rebuild_current_runtime_root() {
+            error!("Failed to rebuild crash index: {}", error);
+        }
+    });
+}
 /// Run the Tauri GUI application with MCP Gateway
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
@@ -175,6 +184,7 @@ pub fn run() {
             app.manage(GatewayRuntimeState::new(rt, gateway_runtime));
 
             let _ = std::fs::create_dir_all(app_identity::models_dir());
+            spawn_crash_index_rebuild();
 
             if runtime_config::env_flag("CAPYINN_DISABLE_WATCHER") {
                 info!("File watcher disabled by CAPYINN_DISABLE_WATCHER");
