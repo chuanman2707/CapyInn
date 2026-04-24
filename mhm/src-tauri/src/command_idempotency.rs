@@ -2,12 +2,13 @@ use crate::{
     app_error::{codes, CommandError, CommandResult},
     services::settings_store,
 };
-use chrono::{DateTime, FixedOffset};
+use chrono::{DateTime, FixedOffset, Utc};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use sqlx::{sqlite::SqliteRow, Pool, Row, Sqlite};
 
 pub const SET_CRASH_REPORTING_PREFERENCE_COMMAND: &str = "settings.set_crash_reporting_preference";
+const CLAIM_LEASE_SECONDS: i64 = 30;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -53,11 +54,7 @@ impl WriteCommandContext {
     }
 
     #[cfg(test)]
-    pub fn for_internal_test(
-        request_id: &str,
-        idempotency_key: &str,
-        command_name: &str,
-    ) -> Self {
+    pub fn for_internal_test(request_id: &str, idempotency_key: &str, command_name: &str) -> Self {
         let issued_at = DateTime::parse_from_rfc3339("2026-04-24T10:00:00+07:00")
             .expect("fixed test timestamp parses");
 
@@ -83,12 +80,39 @@ pub async fn set_crash_reporting_preference_idempotent(
     let intent = serde_json::json!({ "enabled": enabled });
     let intent_json = stable_json_string(&intent)?;
     let request_hash = stable_request_hash(&intent)?;
-    let now = chrono::Utc::now().to_rfc3339();
+    let now = Utc::now();
+    let now_string = now.to_rfc3339();
+    let lease_expires_at = (now + chrono::Duration::seconds(CLAIM_LEASE_SECONDS)).to_rfc3339();
     let response = serde_json::json!({ "ok": true });
     let response_json = stable_json_string(&response)?;
     let claim_token = uuid::Uuid::new_v4().to_string();
 
     if let Some(row) = fetch_existing_claim(pool, ctx).await? {
+        if existing_claim_is_reclaimable(&row, &request_hash, now)? {
+            if reclaim_expired_claim(
+                pool,
+                ctx,
+                &request_hash,
+                &intent_json,
+                &claim_token,
+                &now_string,
+                &lease_expires_at,
+            )
+            .await?
+            {
+                return complete_claimed_crash_reporting_preference(
+                    pool,
+                    ctx,
+                    enabled,
+                    &claim_token,
+                    response,
+                    &response_json,
+                )
+                .await;
+            }
+
+            return resolve_existing_claim(pool, ctx, &request_hash).await;
+        }
         return resolve_existing_claim_row(ctx, &request_hash, row);
     }
 
@@ -124,11 +148,11 @@ pub async fn set_crash_reporting_preference_idempotent(
     .bind(Option::<String>::None)
     .bind(Option::<String>::None)
     .bind(0_i64)
+    .bind(&lease_expires_at)
+    .bind(&now_string)
+    .bind(&now_string)
     .bind(Option::<String>::None)
-    .bind(&now)
-    .bind(&now)
-    .bind(Option::<String>::None)
-    .bind(&now)
+    .bind(&now_string)
     .execute(&mut *claim_tx)
     .await
     .map_err(system_error)?;
@@ -139,6 +163,25 @@ pub async fn set_crash_reporting_preference_idempotent(
         return resolve_existing_claim(pool, ctx, &request_hash).await;
     }
 
+    complete_claimed_crash_reporting_preference(
+        pool,
+        ctx,
+        enabled,
+        &claim_token,
+        response,
+        &response_json,
+    )
+    .await
+}
+
+async fn complete_claimed_crash_reporting_preference(
+    pool: &Pool<Sqlite>,
+    ctx: &WriteCommandContext,
+    enabled: bool,
+    claim_token: &str,
+    response: serde_json::Value,
+    response_json: &str,
+) -> CommandResult<IdempotentCommandResult<serde_json::Value>> {
     let mut tx = pool.begin().await.map_err(system_error)?;
 
     settings_store::save_setting_tx(
@@ -154,6 +197,7 @@ pub async fn set_crash_reporting_preference_idempotent(
         "UPDATE command_idempotency
          SET status = 'completed',
              response_json = ?,
+             lease_expires_at = NULL,
              updated_at = ?,
              completed_at = ?
          WHERE command_name = ? AND idempotency_key = ? AND claim_token = ?",
@@ -163,7 +207,7 @@ pub async fn set_crash_reporting_preference_idempotent(
     .bind(&completed_at)
     .bind(&ctx.command_name)
     .bind(&ctx.idempotency_key)
-    .bind(&claim_token)
+    .bind(claim_token)
     .execute(&mut *tx)
     .await
     .map_err(system_error)?;
@@ -205,12 +249,60 @@ async fn resolve_existing_claim(
     resolve_existing_claim_row(ctx, request_hash, row)
 }
 
+async fn reclaim_expired_claim(
+    pool: &Pool<Sqlite>,
+    ctx: &WriteCommandContext,
+    request_hash: &str,
+    intent_json: &str,
+    claim_token: &str,
+    now: &str,
+    lease_expires_at: &str,
+) -> CommandResult<bool> {
+    let mut tx = pool.begin().await.map_err(system_error)?;
+    let result = sqlx::query(
+        "UPDATE command_idempotency
+         SET request_hash = ?,
+             intent_json = ?,
+             status = 'in_progress',
+             claim_token = ?,
+             response_json = NULL,
+             error_code = NULL,
+             retryable = 0,
+             lease_expires_at = ?,
+             updated_at = ?,
+             completed_at = NULL,
+             last_attempt_at = ?
+         WHERE command_name = ?
+           AND idempotency_key = ?
+           AND request_hash = ?
+           AND status = 'in_progress'
+           AND (lease_expires_at IS NULL OR lease_expires_at <= ?)",
+    )
+    .bind(request_hash)
+    .bind(intent_json)
+    .bind(claim_token)
+    .bind(lease_expires_at)
+    .bind(now)
+    .bind(now)
+    .bind(&ctx.command_name)
+    .bind(&ctx.idempotency_key)
+    .bind(request_hash)
+    .bind(now)
+    .execute(&mut *tx)
+    .await
+    .map_err(system_error)?;
+
+    tx.commit().await.map_err(system_error)?;
+
+    Ok(result.rows_affected() == 1)
+}
+
 async fn fetch_existing_claim(
     pool: &Pool<Sqlite>,
     ctx: &WriteCommandContext,
 ) -> CommandResult<Option<SqliteRow>> {
     sqlx::query(
-        "SELECT request_hash, status, response_json
+        "SELECT request_hash, status, response_json, lease_expires_at
          FROM command_idempotency
          WHERE command_name = ? AND idempotency_key = ?",
     )
@@ -219,6 +311,33 @@ async fn fetch_existing_claim(
     .fetch_optional(pool)
     .await
     .map_err(system_error)
+}
+
+fn existing_claim_is_reclaimable(
+    row: &SqliteRow,
+    request_hash: &str,
+    now: DateTime<Utc>,
+) -> CommandResult<bool> {
+    let stored_hash: String = row.get("request_hash");
+    if stored_hash != request_hash {
+        return Ok(false);
+    }
+
+    let status: String = row.get("status");
+    if status != "in_progress" {
+        return Ok(false);
+    }
+
+    let lease_expires_at: Option<String> = row.try_get("lease_expires_at").map_err(system_error)?;
+    let Some(lease_expires_at) = lease_expires_at else {
+        return Ok(true);
+    };
+
+    let lease_expires_at = DateTime::parse_from_rfc3339(&lease_expires_at)
+        .map_err(system_error)?
+        .with_timezone(&Utc);
+
+    Ok(lease_expires_at <= now)
 }
 
 fn resolve_existing_claim_row(
@@ -337,6 +456,8 @@ mod tests {
         );
         let intent = serde_json::json!({ "enabled": true });
         let now = ctx.issued_at.to_rfc3339();
+        let lease_expires_at =
+            (ctx.issued_at + chrono::Duration::seconds(CLAIM_LEASE_SECONDS)).to_rfc3339();
 
         sqlx::query(
             "INSERT INTO command_idempotency (
@@ -348,10 +469,11 @@ mod tests {
                 status,
                 claim_token,
                 retryable,
+                lease_expires_at,
                 created_at,
                 updated_at,
                 last_attempt_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         )
         .bind(&ctx.idempotency_key)
         .bind(&ctx.command_name)
@@ -361,6 +483,7 @@ mod tests {
         .bind("in_progress")
         .bind("other-claim-token")
         .bind(0_i64)
+        .bind(&lease_expires_at)
         .bind(&now)
         .bind(&now)
         .bind(&now)
@@ -374,5 +497,82 @@ mod tests {
 
         assert_eq!(error.code, codes::CONFLICT_DUPLICATE_IN_FLIGHT);
         assert_eq!(error.request_id.as_deref(), Some(ctx.request_id.as_str()));
+    }
+
+    #[tokio::test]
+    async fn set_crash_reporting_preference_reclaims_expired_in_progress_claim() {
+        let pool = test_pool().await;
+        let ctx = WriteCommandContext::for_internal_test(
+            "test-request-expired",
+            "idem-crash-pref-expired",
+            SET_CRASH_REPORTING_PREFERENCE_COMMAND,
+        );
+        let intent = serde_json::json!({ "enabled": true });
+        let now = ctx.issued_at.to_rfc3339();
+        let expired_lease = (Utc::now() - chrono::Duration::seconds(1)).to_rfc3339();
+
+        sqlx::query(
+            "INSERT INTO command_idempotency (
+                idempotency_key,
+                command_name,
+                request_hash,
+                intent_json,
+                lock_keys_json,
+                status,
+                claim_token,
+                retryable,
+                lease_expires_at,
+                created_at,
+                updated_at,
+                last_attempt_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        )
+        .bind(&ctx.idempotency_key)
+        .bind(&ctx.command_name)
+        .bind(stable_request_hash(&intent).expect("intent hashes"))
+        .bind(stable_json_string(&intent).expect("intent serializes"))
+        .bind("[]")
+        .bind("in_progress")
+        .bind("expired-claim-token")
+        .bind(0_i64)
+        .bind(&expired_lease)
+        .bind(&now)
+        .bind(&now)
+        .bind(&now)
+        .execute(&pool)
+        .await
+        .expect("seeds expired in-progress idempotency row");
+
+        let result = set_crash_reporting_preference_idempotent(&pool, &ctx, true)
+            .await
+            .expect("expired claim is reclaimed");
+
+        assert!(!result.replayed);
+        assert_eq!(result.response, serde_json::json!({ "ok": true }));
+
+        let row = sqlx::query(
+            "SELECT status, response_json, lease_expires_at
+             FROM command_idempotency
+             WHERE command_name = ? AND idempotency_key = ?",
+        )
+        .bind(&ctx.command_name)
+        .bind(&ctx.idempotency_key)
+        .fetch_one(&pool)
+        .await
+        .expect("reads reclaimed row");
+
+        assert_eq!(row.get::<String, _>("status"), "completed");
+        assert_eq!(
+            row.get::<Option<String>, _>("response_json"),
+            Some(serde_json::json!({ "ok": true }).to_string())
+        );
+        assert_eq!(row.get::<Option<String>, _>("lease_expires_at"), None);
+
+        let setting: String =
+            sqlx::query_scalar("SELECT value FROM settings WHERE key = 'send_crash_reports'")
+                .fetch_one(&pool)
+                .await
+                .expect("reads crash reporting setting");
+        assert_eq!(setting, "true");
     }
 }

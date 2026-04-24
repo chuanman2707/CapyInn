@@ -5,7 +5,8 @@ use crate::{
         record_command_failure_with_db_group, CommandError, CommandResult, EffectiveCorrelationId,
     },
     db_error_monitoring::{
-        classify_db_failure, inject_db_error_group, DbErrorGroup, MonitoredDbFailure,
+        classify_db_error_code, classify_db_failure, inject_db_error_group,
+        is_room_unavailable_conflict_message, DbErrorGroup, MonitoredDbFailure,
     },
     domain::booking::BookingError,
     models::*,
@@ -101,6 +102,34 @@ fn map_stay_user_error(
     CommandError::user(code, message)
 }
 
+fn map_known_stay_error_code(
+    command_name: &str,
+    effective_correlation_id: &EffectiveCorrelationId,
+    message: &str,
+    context: &Value,
+) -> Option<(CommandError, Option<DbErrorGroup>)> {
+    if is_room_unavailable_conflict_message(message) {
+        return Some((
+            map_stay_user_error(
+                codes::CONFLICT_ROOM_UNAVAILABLE,
+                command_name,
+                effective_correlation_id,
+                message.to_string(),
+                context,
+            ),
+            Some(DbErrorGroup::Constraint),
+        ));
+    }
+
+    match classify_db_error_code(message) {
+        Some(codes::DB_LOCKED_RETRYABLE) => Some((
+            CommandError::system(codes::DB_LOCKED_RETRYABLE, message.to_string()).retryable(true),
+            Some(DbErrorGroup::Locked),
+        )),
+        _ => None,
+    }
+}
+
 fn map_stay_error(
     command_name: &str,
     effective_correlation_id: &EffectiveCorrelationId,
@@ -108,18 +137,16 @@ fn map_stay_error(
     context: Value,
 ) -> (CommandError, Option<DbErrorGroup>) {
     match error {
-        BookingError::NotFound(message) if message.starts_with("Không tìm thấy phòng ") => {
-            (
-                map_stay_user_error(
-                    codes::ROOM_NOT_FOUND,
-                    command_name,
-                    effective_correlation_id,
-                    message,
-                    &context,
-                ),
-                Some(DbErrorGroup::NotFound),
-            )
-        }
+        BookingError::NotFound(message) if message.starts_with("Không tìm thấy phòng ") => (
+            map_stay_user_error(
+                codes::ROOM_NOT_FOUND,
+                command_name,
+                effective_correlation_id,
+                message,
+                &context,
+            ),
+            Some(DbErrorGroup::NotFound),
+        ),
         BookingError::NotFound(message)
             if message.starts_with("Không tìm thấy booking đang active ")
                 || message.starts_with("Không tìm thấy booking ") =>
@@ -135,19 +162,19 @@ fn map_stay_error(
                 Some(DbErrorGroup::NotFound),
             )
         }
-        BookingError::Validation(message) if message == "Phải có ít nhất 1 khách" => {
-            (
-                map_stay_user_error(
-                    codes::BOOKING_GUEST_REQUIRED,
-                    command_name,
-                    effective_correlation_id,
-                    message,
-                    &context,
-                ),
-                None,
-            )
-        }
-        BookingError::Validation(message) if message == "Number of nights must be greater than 0" => {
+        BookingError::Validation(message) if message == "Phải có ít nhất 1 khách" => (
+            map_stay_user_error(
+                codes::BOOKING_GUEST_REQUIRED,
+                command_name,
+                effective_correlation_id,
+                message,
+                &context,
+            ),
+            None,
+        ),
+        BookingError::Validation(message)
+            if message == "Number of nights must be greater than 0" =>
+        {
             (
                 map_stay_user_error(
                     codes::BOOKING_INVALID_NIGHTS,
@@ -188,6 +215,14 @@ fn map_stay_error(
             )
         }
         BookingError::Validation(message) | BookingError::Conflict(message) => {
+            if let Some(mapped) = map_known_stay_error_code(
+                command_name,
+                effective_correlation_id,
+                &message,
+                &context,
+            ) {
+                return mapped;
+            }
             (
                 map_stay_user_error(
                     codes::BOOKING_INVALID_STATE,
@@ -201,6 +236,14 @@ fn map_stay_error(
         }
         BookingError::DatabaseWrite(message) => {
             let db_error_group = classify_db_failure(MonitoredDbFailure::DatabaseWrite(&message));
+            if let Some(mapped) = map_known_stay_error_code(
+                command_name,
+                effective_correlation_id,
+                &message,
+                &context,
+            ) {
+                return mapped;
+            }
             (
                 log_system_error(
                     command_name,
@@ -215,6 +258,14 @@ fn map_stay_error(
         }
         BookingError::Database(message) => {
             let db_error_group = classify_db_failure(MonitoredDbFailure::DatabaseRead(&message));
+            if let Some(mapped) = map_known_stay_error_code(
+                command_name,
+                effective_correlation_id,
+                &message,
+                &context,
+            ) {
+                return mapped;
+            }
             (
                 log_system_error(
                     command_name,
@@ -235,16 +286,14 @@ fn map_stay_error(
             ),
             None,
         ),
-        BookingError::NotFound(message) => {
-            (
-                log_system_error(
-                    command_name,
-                    message,
-                    correlation_context(&effective_correlation_id.value, context),
-                ),
-                None,
-            )
-        }
+        BookingError::NotFound(message) => (
+            log_system_error(
+                command_name,
+                message,
+                correlation_context(&effective_correlation_id.value, context),
+            ),
+            None,
+        ),
     }
 }
 
@@ -701,7 +750,9 @@ mod tests {
     };
     use crate::db_error_monitoring::DbErrorGroup;
     use crate::domain::booking::BookingError;
-    use crate::models::{CheckInRequest, CheckOutRequest, CheckoutSettlementMode, CreateGuestRequest};
+    use crate::models::{
+        CheckInRequest, CheckOutRequest, CheckoutSettlementMode, CreateGuestRequest,
+    };
     use serde_json::json;
     use std::fs;
 
@@ -797,6 +848,24 @@ mod tests {
     }
 
     #[test]
+    fn map_stay_error_maps_legacy_calendar_conflict_to_stable_code() {
+        let (error, db_error_group) = map_stay_error(
+            "check_in",
+            &frontend_correlation_id(),
+            BookingError::conflict(
+                "Room R101 has a reservation starting 2026-04-20 (Guest). Max 2 nights.",
+            ),
+            json!({ "room_id": "R101" }),
+        );
+
+        assert_eq!(error.code, codes::CONFLICT_ROOM_UNAVAILABLE);
+        assert!(error.message.contains("has a reservation starting"));
+        assert_eq!(error.kind, AppErrorKind::User);
+        assert!(error.support_id.is_none());
+        assert_eq!(db_error_group, Some(DbErrorGroup::Constraint));
+    }
+
+    #[test]
     fn map_stay_error_maps_database_write_to_system_contract_with_write_failed_group() {
         let (error, db_error_group) = map_stay_error(
             "check_out",
@@ -812,7 +881,7 @@ mod tests {
     }
 
     #[test]
-    fn map_stay_error_classifies_locked_database_reads_as_locked_group() {
+    fn map_stay_error_maps_locked_database_reads_to_retryable_code() {
         let (error, db_error_group) = map_stay_error(
             "check_out",
             &frontend_correlation_id(),
@@ -820,9 +889,10 @@ mod tests {
             json!({ "booking_id": "booking-1" }),
         );
 
-        assert_eq!(error.code, codes::SYSTEM_INTERNAL_ERROR);
+        assert_eq!(error.code, codes::DB_LOCKED_RETRYABLE);
         assert_eq!(error.kind, AppErrorKind::System);
         assert!(error.support_id.is_some());
+        assert!(error.retryable);
         assert_eq!(db_error_group, Some(DbErrorGroup::Locked));
     }
 

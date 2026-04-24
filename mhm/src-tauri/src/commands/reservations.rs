@@ -1,4 +1,5 @@
 use super::{emit_db_update, get_f64, get_user, AppState};
+use crate::services::booking::reservation_lifecycle;
 use crate::{
     app_error::{
         codes, correlation_context, log_system_error, normalize_correlation_id,
@@ -6,12 +7,12 @@ use crate::{
         EffectiveCorrelationId,
     },
     db_error_monitoring::{
-        classify_db_failure, inject_db_error_group, DbErrorGroup, MonitoredDbFailure,
+        classify_db_error_code, classify_db_failure, inject_db_error_group,
+        is_room_unavailable_conflict_message, DbErrorGroup, MonitoredDbFailure,
     },
-    domain::booking::BookingError,
+    domain::booking::{BookingError, BookingResult},
     models::*,
 };
-use crate::services::booking::reservation_lifecycle;
 use serde_json::{json, Value};
 use sqlx::{Pool, Row, Sqlite};
 use tauri::State;
@@ -91,10 +92,8 @@ pub async fn do_create_reservation(
     pool: &Pool<Sqlite>,
     app_handle: Option<&tauri::AppHandle>,
     req: CreateReservationRequest,
-) -> Result<Booking, String> {
-    let booking = reservation_lifecycle::create_reservation(pool, req)
-        .await
-        .map_err(|error| error.to_string())?;
+) -> BookingResult<Booking> {
+    let booking = reservation_lifecycle::create_reservation(pool, req).await?;
 
     if let Some(app) = app_handle {
         emit_db_update(app, "rooms");
@@ -142,14 +141,44 @@ fn map_create_reservation_user_error(
     CommandError::user(code, message)
 }
 
-fn map_create_reservation_error(
+fn map_known_reservation_error_code(
+    command_name: &str,
+    effective_correlation_id: &EffectiveCorrelationId,
+    message: &str,
+    context: &Value,
+) -> Option<(CommandError, Option<DbErrorGroup>)> {
+    if is_room_unavailable_conflict_message(message) {
+        return Some((
+            map_create_reservation_user_error(
+                codes::CONFLICT_ROOM_UNAVAILABLE,
+                command_name,
+                effective_correlation_id,
+                message,
+                context,
+            ),
+            Some(DbErrorGroup::Constraint),
+        ));
+    }
+
+    match classify_db_error_code(message) {
+        Some(codes::DB_LOCKED_RETRYABLE) => Some((
+            CommandError::system(codes::DB_LOCKED_RETRYABLE, message.to_string()).retryable(true),
+            Some(DbErrorGroup::Locked),
+        )),
+        _ => None,
+    }
+}
+
+fn map_reservation_write_error(
     command_name: &str,
     effective_correlation_id: &EffectiveCorrelationId,
     error: BookingError,
     context: Value,
 ) -> (CommandError, Option<DbErrorGroup>) {
     match error {
-        BookingError::Validation(message) if message == "Number of nights must be greater than 0" => {
+        BookingError::Validation(message)
+            if message == "Number of nights must be greater than 0" =>
+        {
             (
                 map_create_reservation_user_error(
                     codes::BOOKING_INVALID_NIGHTS,
@@ -161,19 +190,35 @@ fn map_create_reservation_error(
                 None,
             )
         }
-        BookingError::NotFound(message) if message.starts_with("Không tìm thấy phòng ") => {
-            (
-                map_create_reservation_user_error(
-                    codes::ROOM_NOT_FOUND,
-                    command_name,
-                    effective_correlation_id,
-                    message,
-                    &context,
-                ),
-                Some(DbErrorGroup::NotFound),
-            )
-        }
+        BookingError::NotFound(message) if message.starts_with("Không tìm thấy phòng ") => (
+            map_create_reservation_user_error(
+                codes::ROOM_NOT_FOUND,
+                command_name,
+                effective_correlation_id,
+                message,
+                &context,
+            ),
+            Some(DbErrorGroup::NotFound),
+        ),
+        BookingError::NotFound(message) if message.starts_with("Booking not found: ") => (
+            map_create_reservation_user_error(
+                codes::BOOKING_NOT_FOUND,
+                command_name,
+                effective_correlation_id,
+                message,
+                &context,
+            ),
+            Some(DbErrorGroup::NotFound),
+        ),
         BookingError::Validation(message) | BookingError::Conflict(message) => {
+            if let Some(mapped) = map_known_reservation_error_code(
+                command_name,
+                effective_correlation_id,
+                &message,
+                &context,
+            ) {
+                return mapped;
+            }
             (
                 map_create_reservation_user_error(
                     codes::BOOKING_INVALID_STATE,
@@ -187,6 +232,14 @@ fn map_create_reservation_error(
         }
         BookingError::DatabaseWrite(message) => {
             let db_error_group = classify_db_failure(MonitoredDbFailure::DatabaseWrite(&message));
+            if let Some(mapped) = map_known_reservation_error_code(
+                command_name,
+                effective_correlation_id,
+                &message,
+                &context,
+            ) {
+                return mapped;
+            }
             (
                 log_system_error(
                     command_name,
@@ -201,6 +254,14 @@ fn map_create_reservation_error(
         }
         BookingError::Database(message) => {
             let db_error_group = classify_db_failure(MonitoredDbFailure::DatabaseRead(&message));
+            if let Some(mapped) = map_known_reservation_error_code(
+                command_name,
+                effective_correlation_id,
+                &message,
+                &context,
+            ) {
+                return mapped;
+            }
             (
                 log_system_error(
                     command_name,
@@ -232,6 +293,15 @@ fn map_create_reservation_error(
     }
 }
 
+fn map_create_reservation_error(
+    command_name: &str,
+    effective_correlation_id: &EffectiveCorrelationId,
+    error: BookingError,
+    context: Value,
+) -> (CommandError, Option<DbErrorGroup>) {
+    map_reservation_write_error(command_name, effective_correlation_id, error, context)
+}
+
 fn reservation_failure_context(req: &CreateReservationRequest) -> Value {
     let notes_present = req
         .notes
@@ -247,6 +317,21 @@ fn reservation_failure_context(req: &CreateReservationRequest) -> Value {
         "deposit_present": req.deposit_amount.is_some(),
         "source": req.source.clone(),
         "notes_present": notes_present,
+    })
+}
+
+fn reservation_booking_failure_context(booking_id: &str) -> Value {
+    json!({
+        "booking_id": booking_id,
+    })
+}
+
+fn modify_reservation_failure_context(req: &ModifyReservationRequest) -> Value {
+    json!({
+        "booking_id": req.booking_id.clone(),
+        "check_in_date": req.new_check_in_date.clone(),
+        "check_out_date": req.new_check_out_date.clone(),
+        "nights": req.new_nights,
     })
 }
 
@@ -344,10 +429,8 @@ pub async fn do_cancel_reservation(
     pool: &Pool<Sqlite>,
     app_handle: Option<&tauri::AppHandle>,
     booking_id: &str,
-) -> Result<(), String> {
-    reservation_lifecycle::cancel_reservation(pool, booking_id)
-        .await
-        .map_err(|error| error.to_string())?;
+) -> BookingResult<()> {
+    reservation_lifecycle::cancel_reservation(pool, booking_id).await?;
 
     if let Some(app) = app_handle {
         emit_db_update(app, "rooms");
@@ -361,9 +444,40 @@ pub async fn cancel_reservation(
     state: State<'_, AppState>,
     app: tauri::AppHandle,
     booking_id: String,
-) -> Result<(), String> {
-    get_user(&state).ok_or_else(|| "Chưa đăng nhập".to_string())?;
-    do_cancel_reservation(&state.db, Some(&app), &booking_id).await
+    correlation_id: Option<String>,
+) -> CommandResult<()> {
+    let effective_correlation_id = normalize_correlation_id(correlation_id);
+    let error_context = reservation_booking_failure_context(&booking_id);
+
+    if get_user(&state).is_none() {
+        let command_error = CommandError::user(codes::AUTH_NOT_AUTHENTICATED, "Chưa đăng nhập");
+        record_command_failure(
+            "cancel_reservation",
+            &command_error,
+            &effective_correlation_id.value,
+            error_context,
+        );
+        return Err(command_error);
+    }
+
+    do_cancel_reservation(&state.db, Some(&app), &booking_id)
+        .await
+        .map_err(|error| {
+            let (command_error, db_error_group) = map_reservation_write_error(
+                "cancel_reservation",
+                &effective_correlation_id,
+                error,
+                error_context.clone(),
+            );
+            record_command_failure_with_db_group(
+                "cancel_reservation",
+                &command_error,
+                &effective_correlation_id.value,
+                db_error_group,
+                error_context.clone(),
+            );
+            command_error
+        })
 }
 
 // ─── Modify Reservation ───
@@ -372,10 +486,8 @@ pub async fn do_modify_reservation(
     pool: &Pool<Sqlite>,
     app_handle: Option<&tauri::AppHandle>,
     req: ModifyReservationRequest,
-) -> Result<Booking, String> {
-    let booking = reservation_lifecycle::modify_reservation(pool, req)
-        .await
-        .map_err(|error| error.to_string())?;
+) -> BookingResult<Booking> {
+    let booking = reservation_lifecycle::modify_reservation(pool, req).await?;
     if let Some(app) = app_handle {
         emit_db_update(app, "rooms");
     }
@@ -388,9 +500,40 @@ pub async fn modify_reservation(
     state: State<'_, AppState>,
     app: tauri::AppHandle,
     req: ModifyReservationRequest,
-) -> Result<Booking, String> {
-    get_user(&state).ok_or_else(|| "Chưa đăng nhập".to_string())?;
-    do_modify_reservation(&state.db, Some(&app), req).await
+    correlation_id: Option<String>,
+) -> CommandResult<Booking> {
+    let effective_correlation_id = normalize_correlation_id(correlation_id);
+    let error_context = modify_reservation_failure_context(&req);
+
+    if get_user(&state).is_none() {
+        let command_error = CommandError::user(codes::AUTH_NOT_AUTHENTICATED, "Chưa đăng nhập");
+        record_command_failure(
+            "modify_reservation",
+            &command_error,
+            &effective_correlation_id.value,
+            error_context,
+        );
+        return Err(command_error);
+    }
+
+    do_modify_reservation(&state.db, Some(&app), req)
+        .await
+        .map_err(|error| {
+            let (command_error, db_error_group) = map_reservation_write_error(
+                "modify_reservation",
+                &effective_correlation_id,
+                error,
+                error_context.clone(),
+            );
+            record_command_failure_with_db_group(
+                "modify_reservation",
+                &command_error,
+                &effective_correlation_id.value,
+                db_error_group,
+                error_context.clone(),
+            );
+            command_error
+        })
 }
 
 // ─── Get Room Calendar ───
@@ -594,7 +737,8 @@ mod tests {
     }
 
     #[test]
-    fn map_create_reservation_error_keeps_missing_room_under_existing_contract_and_not_found_group() {
+    fn map_create_reservation_error_keeps_missing_room_under_existing_contract_and_not_found_group()
+    {
         let (error, db_error_group) = map_create_reservation_error(
             "create_reservation",
             &frontend_correlation_id(),
@@ -638,6 +782,63 @@ mod tests {
         assert_eq!(error.kind, AppErrorKind::User);
         assert!(error.support_id.is_none());
         assert!(db_error_group.is_none());
+    }
+
+    #[test]
+    fn map_create_reservation_error_maps_legacy_calendar_conflict_to_stable_code() {
+        let (error, db_error_group) = map_create_reservation_error(
+            "create_reservation",
+            &frontend_correlation_id(),
+            BookingError::conflict("Room R101 is booked on 2026-04-20. Cannot create reservation."),
+            json!({
+                "room_id": "R101",
+                "check_in_date": "2026-04-20",
+                "check_out_date": "2026-04-21",
+                "nights": 1,
+            }),
+        );
+
+        assert_eq!(error.code, codes::CONFLICT_ROOM_UNAVAILABLE);
+        assert!(error.message.contains("is booked on"));
+        assert_eq!(error.kind, AppErrorKind::User);
+        assert!(error.support_id.is_none());
+        assert_eq!(db_error_group, Some(DbErrorGroup::Constraint));
+    }
+
+    #[test]
+    fn map_create_reservation_error_maps_booking_not_found_to_shared_code() {
+        let (error, db_error_group) = map_create_reservation_error(
+            "modify_reservation",
+            &frontend_correlation_id(),
+            BookingError::not_found("Booking not found: B101"),
+            json!({ "booking_id": "B101" }),
+        );
+
+        assert_eq!(error.code, codes::BOOKING_NOT_FOUND);
+        assert_eq!(error.kind, AppErrorKind::User);
+        assert!(error.support_id.is_none());
+        assert_eq!(db_error_group, Some(DbErrorGroup::NotFound));
+    }
+
+    #[test]
+    fn map_create_reservation_error_maps_locked_writes_to_retryable_code() {
+        let (error, db_error_group) = map_create_reservation_error(
+            "create_reservation",
+            &frontend_correlation_id(),
+            BookingError::database_write("database is locked"),
+            json!({
+                "room_id": "R101",
+                "check_in_date": "2026-04-20",
+                "check_out_date": "2026-04-21",
+                "nights": 1,
+            }),
+        );
+
+        assert_eq!(error.code, codes::DB_LOCKED_RETRYABLE);
+        assert_eq!(error.kind, AppErrorKind::System);
+        assert!(error.support_id.is_some());
+        assert!(error.retryable);
+        assert_eq!(db_error_group, Some(DbErrorGroup::Locked));
     }
 
     #[test]

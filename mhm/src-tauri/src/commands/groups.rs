@@ -1,13 +1,14 @@
 use super::{emit_db_update, get_f64, get_user_id, AppState};
+use crate::services::booking::group_lifecycle;
 use crate::{
     app_error::{
         codes, correlation_context, log_system_error, normalize_correlation_id, CommandError,
         CommandResult, EffectiveCorrelationId,
     },
+    db_error_monitoring::{classify_db_error_code, is_room_unavailable_conflict_message},
     domain::booking::BookingError,
     models::*,
 };
-use crate::services::booking::group_lifecycle;
 use serde_json::{json, Value};
 use sqlx::{Pool, Row, Sqlite};
 use tauri::State;
@@ -52,6 +53,30 @@ fn map_group_user_error(
     CommandError::user(code, message)
 }
 
+fn map_known_group_error_code(
+    command_name: &str,
+    effective_correlation_id: &EffectiveCorrelationId,
+    message: &str,
+    context: &Value,
+) -> Option<CommandError> {
+    if is_room_unavailable_conflict_message(message) {
+        return Some(map_group_user_error(
+            codes::CONFLICT_ROOM_UNAVAILABLE,
+            command_name,
+            effective_correlation_id,
+            message.to_string(),
+            context,
+        ));
+    }
+
+    match classify_db_error_code(message) {
+        Some(codes::DB_LOCKED_RETRYABLE) => Some(
+            CommandError::system(codes::DB_LOCKED_RETRYABLE, message.to_string()).retryable(true),
+        ),
+        _ => None,
+    }
+}
+
 fn map_group_error(
     command_name: &str,
     effective_correlation_id: &EffectiveCorrelationId,
@@ -88,15 +113,13 @@ fn map_group_error(
                 &context,
             )
         }
-        BookingError::NotFound(message) if message.starts_with("Phòng ") => {
-            map_group_user_error(
-                codes::ROOM_NOT_FOUND,
-                command_name,
-                effective_correlation_id,
-                message,
-                &context,
-            )
-        }
+        BookingError::NotFound(message) if message.starts_with("Phòng ") => map_group_user_error(
+            codes::ROOM_NOT_FOUND,
+            command_name,
+            effective_correlation_id,
+            message,
+            &context,
+        ),
         BookingError::NotFound(message) if message.starts_with("Không tìm thấy group ") => {
             map_group_user_error(
                 codes::GROUP_NOT_FOUND,
@@ -118,6 +141,14 @@ fn map_group_error(
             )
         }
         BookingError::Validation(message) | BookingError::Conflict(message) => {
+            if let Some(error) = map_known_group_error_code(
+                command_name,
+                effective_correlation_id,
+                &message,
+                &context,
+            ) {
+                return error;
+            }
             map_group_user_error(
                 codes::BOOKING_INVALID_STATE,
                 command_name,
@@ -129,11 +160,21 @@ fn map_group_error(
         BookingError::NotFound(message)
         | BookingError::Database(message)
         | BookingError::DatabaseWrite(message)
-        | BookingError::DateTimeParse(message) => log_system_error(
-            command_name,
-            message,
-            correlation_context(&effective_correlation_id.value, context),
-        ),
+        | BookingError::DateTimeParse(message) => {
+            if let Some(error) = map_known_group_error_code(
+                command_name,
+                effective_correlation_id,
+                &message,
+                &context,
+            ) {
+                return error;
+            }
+            log_system_error(
+                command_name,
+                message,
+                correlation_context(&effective_correlation_id.value, context),
+            )
+        }
     }
 }
 
@@ -187,7 +228,12 @@ pub async fn group_checkin(
     let group = group_lifecycle::group_checkin(&state.db, get_user_id(&state), req)
         .await
         .map_err(|error| {
-            map_group_error("group_checkin", &effective_correlation_id, error, error_context)
+            map_group_error(
+                "group_checkin",
+                &effective_correlation_id,
+                error,
+                error_context,
+            )
         })?;
     log::info!(
         "group_checkin success correlation_id={} source={:?} group_id={} total_rooms={}",
@@ -228,7 +274,12 @@ pub async fn group_checkout(
     group_lifecycle::group_checkout(&state.db, req)
         .await
         .map_err(|error| {
-            map_group_error("group_checkout", &effective_correlation_id, error, error_context)
+            map_group_error(
+                "group_checkout",
+                &effective_correlation_id,
+                error,
+                error_context,
+            )
         })?;
     log::info!(
         "group_checkout success correlation_id={} source={:?} group_id={} booking_count={}",
@@ -645,9 +696,7 @@ pub async fn generate_group_invoice(
 #[cfg(test)]
 mod tests {
     use super::{map_auto_assign_error, map_group_detail_error, map_group_error};
-    use crate::app_error::{
-        codes, AppErrorKind, CorrelationIdSource, EffectiveCorrelationId,
-    };
+    use crate::app_error::{codes, AppErrorKind, CorrelationIdSource, EffectiveCorrelationId};
     use crate::domain::booking::BookingError;
     use serde_json::json;
 
@@ -705,6 +754,38 @@ mod tests {
         assert_eq!(error.message, "Phải chọn ít nhất 1 phòng");
         assert_eq!(error.kind, AppErrorKind::User);
         assert!(error.support_id.is_none());
+    }
+
+    #[test]
+    fn map_group_error_maps_legacy_calendar_conflict_to_stable_code() {
+        let effective_correlation_id = frontend_correlation_id();
+        let error = map_group_error(
+            "group_checkin",
+            &effective_correlation_id,
+            BookingError::conflict("Phòng R101 có lịch trùng trong khoảng ngày đã chọn"),
+            json!({ "group_id": "group-1" }),
+        );
+
+        assert_eq!(error.code, codes::CONFLICT_ROOM_UNAVAILABLE);
+        assert!(error.message.contains("lịch trùng"));
+        assert_eq!(error.kind, AppErrorKind::User);
+        assert!(error.support_id.is_none());
+    }
+
+    #[test]
+    fn map_group_error_maps_locked_database_to_retryable_code() {
+        let effective_correlation_id = frontend_correlation_id();
+        let error = map_group_error(
+            "group_checkout",
+            &effective_correlation_id,
+            BookingError::database_write("database is busy"),
+            json!({ "group_id": "group-1" }),
+        );
+
+        assert_eq!(error.code, codes::DB_LOCKED_RETRYABLE);
+        assert_eq!(error.kind, AppErrorKind::System);
+        assert!(error.retryable);
+        assert!(error.support_id.is_some());
     }
 
     #[test]
