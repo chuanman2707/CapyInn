@@ -202,7 +202,7 @@ async fn complete_claimed_crash_reporting_preference(
              completed_at = ?
          WHERE command_name = ? AND idempotency_key = ? AND claim_token = ?",
     )
-    .bind(&response_json)
+    .bind(response_json)
     .bind(&completed_at)
     .bind(&completed_at)
     .bind(&ctx.command_name)

@@ -116,6 +116,7 @@ mod tests {
     use serde_json::Value;
     use sqlx::{sqlite::SqlitePoolOptions, Pool, Row, Sqlite};
     use std::ffi::OsString;
+    use std::sync::OnceLock;
 
     async fn test_pool() -> Pool<Sqlite> {
         let pool = SqlitePoolOptions::new()
@@ -295,6 +296,11 @@ mod tests {
         previous: Option<OsString>,
     }
 
+    fn async_env_lock() -> &'static tokio::sync::Mutex<()> {
+        static LOCK: OnceLock<tokio::sync::Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| tokio::sync::Mutex::new(()))
+    }
+
     impl EnvVarGuard {
         fn set(key: &'static str, value: &str) -> Self {
             let previous = std::env::var_os(key);
@@ -461,7 +467,7 @@ mod tests {
 
     #[tokio::test]
     async fn create_reservation_is_default_denied_without_creating_booking() {
-        let _env_lock = crate::runtime_config::env_lock().lock().unwrap();
+        let _env_lock = async_env_lock().lock().await;
         let _env = EnvVarGuard::remove("CAPYINN_ENABLE_HIGH_RISK_MCP_WRITES");
 
         let pool = test_pool().await;
@@ -502,7 +508,7 @@ mod tests {
 
     #[tokio::test]
     async fn get_hotel_context_still_works_when_high_risk_writes_are_disabled() {
-        let _env_lock = crate::runtime_config::env_lock().lock().unwrap();
+        let _env_lock = async_env_lock().lock().await;
         let _env = EnvVarGuard::remove("CAPYINN_ENABLE_HIGH_RISK_MCP_WRITES");
 
         let pool = test_pool().await;
@@ -517,7 +523,7 @@ mod tests {
 
     #[tokio::test]
     async fn create_reservation_tool_returns_booking_json() {
-        let _env_lock = crate::runtime_config::env_lock().lock().unwrap();
+        let _env_lock = async_env_lock().lock().await;
         let _env = EnvVarGuard::set("CAPYINN_ENABLE_HIGH_RISK_MCP_WRITES", "1");
 
         let pool = test_pool().await;
@@ -555,7 +561,7 @@ mod tests {
 
     #[tokio::test]
     async fn cancel_reservation_tool_returns_success_message_and_updates_status() {
-        let _env_lock = crate::runtime_config::env_lock().lock().unwrap();
+        let _env_lock = async_env_lock().lock().await;
         let _env = EnvVarGuard::set("CAPYINN_ENABLE_HIGH_RISK_MCP_WRITES", "1");
 
         let pool = test_pool().await;
@@ -582,7 +588,7 @@ mod tests {
 
     #[tokio::test]
     async fn modify_reservation_tool_returns_updated_booking_json() {
-        let _env_lock = crate::runtime_config::env_lock().lock().unwrap();
+        let _env_lock = async_env_lock().lock().await;
         let _env = EnvVarGuard::set("CAPYINN_ENABLE_HIGH_RISK_MCP_WRITES", "1");
 
         let pool = test_pool().await;
