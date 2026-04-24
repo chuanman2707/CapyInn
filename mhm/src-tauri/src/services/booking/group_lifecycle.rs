@@ -9,7 +9,7 @@ use crate::{
 use super::{
     billing_service::{record_charge_tx, record_payment_tx},
     guest_service::{create_group_guest_manifest, link_booking_guests},
-    support::{begin_tx, insert_room_calendar_rows, CalendarInsertMode},
+    support::{begin_immediate_tx, insert_room_calendar_rows, CalendarInsertMode},
 };
 
 const GROUP_ACTIVE: &str = "active";
@@ -37,7 +37,7 @@ pub async fn group_checkin(
     let checkout_naive = checkin_naive + Duration::days(req.nights as i64);
     let checkout_date = checkout_naive.format("%Y-%m-%d").to_string();
 
-    let mut tx = begin_tx(pool).await?;
+    let mut tx = begin_immediate_tx(pool).await?;
     validate_rooms_for_group(
         &mut tx,
         &req.room_ids,
@@ -244,7 +244,7 @@ pub async fn group_checkout(pool: &Pool<Sqlite>, req: GroupCheckoutRequest) -> B
     }
 
     let now = Local::now().to_rfc3339();
-    let mut tx = begin_tx(pool).await?;
+    let mut tx = begin_immediate_tx(pool).await?;
 
     let mut query_builder: sqlx::QueryBuilder<Sqlite> = sqlx::QueryBuilder::new(
         "SELECT id, room_id FROM bookings WHERE status = "

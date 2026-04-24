@@ -8,6 +8,14 @@ pub async fn begin_tx<'a>(pool: &'a Pool<Sqlite>) -> BookingResult<Transaction<'
     pool.begin().await.map_err(BookingError::from)
 }
 
+pub async fn begin_immediate_tx<'a>(
+    pool: &'a Pool<Sqlite>,
+) -> BookingResult<Transaction<'a, Sqlite>> {
+    pool.begin_with("BEGIN IMMEDIATE")
+        .await
+        .map_err(BookingError::from)
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum CalendarInsertMode {
     Insert,
@@ -110,4 +118,41 @@ pub fn read_f64_or_zero(row: &SqliteRow, column: &str) -> f64 {
 pub fn read_f64_strict(row: &SqliteRow, column: &str) -> f64 {
     row.try_get::<f64, _>(column)
         .unwrap_or_else(|_| row.get::<i64, _>(column) as f64)
+}
+
+#[cfg(test)]
+pub mod tests {
+    use super::begin_immediate_tx;
+    use sqlx::{sqlite::SqlitePoolOptions, Row};
+
+    #[tokio::test]
+    async fn begin_immediate_tx_starts_transaction_that_can_write() {
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .expect("connects in-memory sqlite");
+
+        sqlx::query("CREATE TABLE sample (id INTEGER PRIMARY KEY, value TEXT NOT NULL)")
+            .execute(&pool)
+            .await
+            .expect("creates sample table");
+
+        let mut tx = begin_immediate_tx(&pool)
+            .await
+            .expect("starts immediate transaction");
+        sqlx::query("INSERT INTO sample (value) VALUES ('written')")
+            .execute(&mut *tx)
+            .await
+            .expect("writes inside immediate transaction");
+        tx.commit().await.expect("commits immediate transaction");
+
+        let count: i64 = sqlx::query("SELECT COUNT(*) AS count FROM sample")
+            .fetch_one(&pool)
+            .await
+            .expect("reads sample rows")
+            .get("count");
+
+        assert_eq!(count, 1);
+    }
 }

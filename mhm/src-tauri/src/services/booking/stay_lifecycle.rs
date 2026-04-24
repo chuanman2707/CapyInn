@@ -13,8 +13,8 @@ use super::{
     billing_service::{record_charge_tx, record_payment_tx},
     guest_service::{create_guest_manifest, link_booking_guests},
     support::{
-        begin_tx, fetch_booking, insert_room_calendar_rows, parse_booking_datetime,
-        read_f64_or_zero, CalendarInsertMode,
+        begin_immediate_tx, begin_tx, fetch_booking, insert_room_calendar_rows,
+        parse_booking_datetime, read_f64_or_zero, CalendarInsertMode,
     },
 };
 
@@ -42,7 +42,9 @@ pub async fn check_in(
         .clone()
         .unwrap_or_else(|| "nightly".to_string());
 
-    let mut tx = begin_tx(pool).await.map_err(mark_write_db_error)?;
+    let mut tx = begin_immediate_tx(pool)
+        .await
+        .map_err(mark_write_db_error)?;
 
     let room = sqlx::query("SELECT id, status FROM rooms WHERE id = ?")
         .bind(&req.room_id)
@@ -399,7 +401,9 @@ pub async fn check_out_at(
         ));
     }
 
-    let mut tx = begin_tx(pool).await.map_err(mark_write_db_error)?;
+    let mut tx = begin_immediate_tx(pool)
+        .await
+        .map_err(mark_write_db_error)?;
     let preview_req = CheckoutSettlementPreviewRequest {
         booking_id: req.booking_id.clone(),
         settlement_mode: req.settlement_mode,
@@ -505,7 +509,7 @@ pub async fn check_out_at(
 }
 
 pub async fn extend_stay(pool: &Pool<Sqlite>, booking_id: &str) -> BookingResult<Booking> {
-    let mut tx = begin_tx(pool).await?;
+    let mut tx = begin_immediate_tx(pool).await?;
 
     let booking = sqlx::query(
         "SELECT room_id, nights, total_price, expected_checkout, pricing_type

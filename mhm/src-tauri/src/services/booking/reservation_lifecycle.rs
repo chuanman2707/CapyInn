@@ -10,7 +10,8 @@ use super::{
     billing_service::{record_cancellation_fee_tx, record_charge_tx, record_deposit_tx},
     guest_service::{create_reservation_guest_manifest, link_booking_guests},
     support::{
-        begin_tx, fetch_booking, insert_room_calendar_rows, read_f64_strict, CalendarInsertMode,
+        begin_immediate_tx, fetch_booking, insert_room_calendar_rows, read_f64_strict,
+        CalendarInsertMode,
     },
 };
 
@@ -28,7 +29,9 @@ pub async fn create_reservation(
     let derived_nights =
         validate_requested_nights(&req.check_in_date, &req.check_out_date, req.nights)?;
 
-    let mut tx = begin_tx(pool).await.map_err(mark_write_db_error)?;
+    let mut tx = begin_immediate_tx(pool)
+        .await
+        .map_err(mark_write_db_error)?;
 
     let conflicts = sqlx::query(
         "SELECT date FROM room_calendar WHERE room_id = ? AND date >= ? AND date < ? ORDER BY date ASC",
@@ -132,7 +135,7 @@ pub async fn create_reservation(
 }
 
 pub async fn cancel_reservation(pool: &Pool<Sqlite>, booking_id: &str) -> BookingResult<()> {
-    let mut tx = begin_tx(pool).await?;
+    let mut tx = begin_immediate_tx(pool).await?;
 
     let booking = sqlx::query(
         "SELECT room_id, status, COALESCE(deposit_amount, 0) AS deposit_amount
@@ -205,7 +208,7 @@ pub async fn cancel_reservation(pool: &Pool<Sqlite>, booking_id: &str) -> Bookin
 }
 
 pub async fn confirm_reservation(pool: &Pool<Sqlite>, booking_id: &str) -> BookingResult<Booking> {
-    let mut tx = begin_tx(pool).await?;
+    let mut tx = begin_immediate_tx(pool).await?;
     let reservation = load_booked_reservation(&mut tx, booking_id).await?;
     reject_no_show_confirmation(&mut tx, booking_id).await?;
 
@@ -295,7 +298,7 @@ pub async fn modify_reservation(
         req.new_nights,
     )? as i64;
 
-    let mut tx = begin_tx(pool).await?;
+    let mut tx = begin_immediate_tx(pool).await?;
     let reservation = load_booked_reservation(&mut tx, &req.booking_id).await?;
 
     sqlx::query("DELETE FROM room_calendar WHERE booking_id = ? AND status = ?")
