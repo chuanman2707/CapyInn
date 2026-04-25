@@ -8,6 +8,7 @@ pub enum BackupReason {
     NightAudit,
     AppExit,
     Manual,
+    Scheduled,
 }
 
 impl BackupReason {
@@ -19,6 +20,7 @@ impl BackupReason {
             Self::NightAudit => "night_audit",
             Self::AppExit => "app_exit",
             Self::Manual => "manual",
+            Self::Scheduled => "scheduled",
         }
     }
 }
@@ -131,6 +133,7 @@ mod tests {
         assert_eq!(BackupReason::NightAudit.as_str(), "night_audit");
         assert_eq!(BackupReason::AppExit.as_str(), "app_exit");
         assert_eq!(BackupReason::Manual.as_str(), "manual");
+        assert_eq!(BackupReason::Scheduled.as_str(), "scheduled");
     }
 
     #[test]

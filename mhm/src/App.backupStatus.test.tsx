@@ -179,4 +179,34 @@ describe("App backup status integration", () => {
     });
     expect(screen.getByText("Đang sao lưu dữ liệu...")).toBeInTheDocument();
   });
+
+  it("handles scheduled backup status events", async () => {
+    render(<App />);
+
+    await act(async () => {
+      await Promise.resolve();
+    });
+    expect(screen.getByText("Overview")).toBeInTheDocument();
+
+    await act(async () => {
+      await emitTestEvent("backup-status", {
+        job_id: "scheduled-1",
+        state: "started",
+        reason: "scheduled",
+        pending_jobs: 1,
+      });
+    });
+    expect(screen.getByText("Đang sao lưu dữ liệu...")).toBeInTheDocument();
+
+    await act(async () => {
+      await emitTestEvent("backup-status", {
+        job_id: "scheduled-1",
+        state: "completed",
+        reason: "scheduled",
+        pending_jobs: 0,
+        path: "/tmp/scheduled-1.db",
+      });
+    });
+    expect(screen.getByText("Đã sao lưu")).toBeInTheDocument();
+  });
 });

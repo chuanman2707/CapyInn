@@ -240,7 +240,8 @@ export type BackupReason =
   | "group_checkout"
   | "night_audit"
   | "app_exit"
-  | "manual";
+  | "manual"
+  | "scheduled";
 
 export type BackupStatusState = "started" | "completed" | "failed";
 
