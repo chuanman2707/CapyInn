@@ -20,6 +20,10 @@ import CrashReportPrompt from "./components/CrashReportPrompt";
 import AppUpdateBadge from "./components/AppUpdateBadge";
 import AppUpdateRestartModal from "./components/AppUpdateRestartModal";
 import { BackupStatusIndicator } from "./components/BackupStatusIndicator";
+import {
+  BackupFailureAlert,
+  type BackupFailureAlertState,
+} from "./components/BackupFailureAlert";
 import { Home, Calendar, BedDouble, Users, Sparkles, BarChart3, Settings as SettingsIcon, ChevronsLeft, ChevronsRight, LogOut, Moon, UsersRound } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -87,6 +91,10 @@ export default function App() {
   const [bootstrap, setBootstrap] = useState<BootstrapStatus | null>(null);
   const [bootstrapLoading, setBootstrapLoading] = useState(true);
   const [backupUi, setBackupUi] = useState<BackupUiState>(INITIAL_BACKUP_UI);
+  const [backupFailure, setBackupFailure] = useState<BackupFailureAlertState | null>(null);
+  const [dismissedBackupFailureJobId, setDismissedBackupFailureJobId] = useState<string | null>(
+    null,
+  );
   const [pendingCrashReport, setPendingCrashReport] = useState<CrashReportSummary | null>(null);
   const [crashPromptBusy, setCrashPromptBusy] = useState(false);
   const [crashExportPath, setCrashExportPath] = useState<string | null>(null);
@@ -173,6 +181,14 @@ export default function App() {
 
         if (payload.state === "failed") {
           toast.error(payload.message ?? "Sao lưu dữ liệu thất bại");
+          setDismissedBackupFailureJobId((current) =>
+            current === payload.job_id ? current : null,
+          );
+          setBackupFailure({
+            jobId: payload.job_id,
+            reason: payload.reason,
+            message: payload.message,
+          });
           setBackupUi({
             visible: true,
             phase: "failed",
@@ -192,6 +208,8 @@ export default function App() {
           return;
         }
 
+        setBackupFailure(null);
+        setDismissedBackupFailureJobId(null);
         setBackupUi({
           visible: true,
           phase: "saved",
@@ -411,6 +429,13 @@ export default function App() {
     }
   };
 
+  const visibleBackupFailure =
+    backupFailure && backupFailure.jobId !== dismissedBackupFailureJobId ? backupFailure : null;
+
+  const handleDismissBackupFailure = (jobId: string) => {
+    setDismissedBackupFailureJobId(jobId);
+  };
+
   return (
     <AppUpdateProvider value={appUpdate}>
       <div className="flex h-screen w-screen bg-brand-bg font-sans text-brand-text overflow-hidden select-none">
@@ -540,6 +565,15 @@ export default function App() {
             </Button>
           </div>
         </header>
+
+        {visibleBackupFailure && (
+          <div className="shrink-0 px-10 pb-4 pt-16">
+            <BackupFailureAlert
+              failure={visibleBackupFailure}
+              onDismiss={handleDismissBackupFailure}
+            />
+          </div>
+        )}
 
         {/* CONTENT AREA */}
         <div className="flex-1 overflow-y-auto px-10 pb-10">
