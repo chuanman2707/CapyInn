@@ -16,7 +16,9 @@ fn scheduled_backup_interval_chrono() -> ChronoDuration {
 }
 
 fn scheduler_now() -> NaiveDateTime {
-    Utc::now().naive_utc()
+    crate::runtime_config::test_now()
+        .map(|value| value.naive_local())
+        .unwrap_or_else(|| Utc::now().naive_utc())
 }
 
 pub struct BackupSchedulerHandle {
@@ -169,11 +171,10 @@ async fn request_scheduled_backup(
 ) -> Result<(), BackupRequestError> {
     request_backup(app, BackupReason::Scheduled)
         .await
-        .map(|_| ())
-        .map_err(|error| {
-            log_backup_request_error(context, &error);
-            error
+        .inspect_err(|error| {
+            log_backup_request_error(context, error);
         })
+        .map(|_| ())
 }
 
 #[cfg(test)]
@@ -251,6 +252,17 @@ mod tests {
             "capyinn_backup_scheduled_20260425_090000.db"
         );
         assert_eq!(latest, Some(scheduled));
+    }
+
+    #[test]
+    fn scheduler_now_uses_frozen_backup_clock_when_present() {
+        let _guard = crate::runtime_config::env_lock().lock().unwrap();
+
+        std::env::set_var("CAPYINN_TEST_NOW", "2026-04-21T09:15:00+07:00");
+        let timestamp = scheduler_now();
+        std::env::remove_var("CAPYINN_TEST_NOW");
+
+        assert_eq!(timestamp, fixed_time(2026, 4, 21, 9, 15, 0));
     }
 
     #[tokio::test]
