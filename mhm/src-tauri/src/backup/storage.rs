@@ -61,6 +61,43 @@ pub fn is_managed_backup_file(name: &str) -> bool {
     parse_backup_filename(name).is_some()
 }
 
+#[allow(dead_code)]
+pub(crate) fn latest_backup_timestamp_for_reason(
+    backup_dir: &Path,
+    reason: BackupReason,
+) -> Result<Option<NaiveDateTime>, BackupError> {
+    let entries = match fs::read_dir(backup_dir) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error.into()),
+    };
+    let mut latest: Option<(NaiveDateTime, u64, String)> = None;
+
+    for entry in entries {
+        let entry = entry?;
+        let file_name = entry.file_name().to_string_lossy().into_owned();
+        let Some(metadata) = parse_backup_filename(&file_name) else {
+            continue;
+        };
+
+        if metadata.reason != reason {
+            continue;
+        }
+
+        let candidate = (metadata.timestamp, metadata.collision_index, file_name);
+        let should_replace = match &latest {
+            Some(current) => candidate > *current,
+            None => true,
+        };
+
+        if should_replace {
+            latest = Some(candidate);
+        }
+    }
+
+    Ok(latest.map(|(timestamp, _, _)| timestamp))
+}
+
 pub(crate) struct BackupReservation {
     pub(crate) final_path: PathBuf,
     pub(crate) temp_path: PathBuf,
@@ -350,6 +387,64 @@ mod tests {
             "capyinn_backup_checkout_20260418_231500-abc.db"
         ));
         assert!(!is_managed_backup_file("notes.db"));
+    }
+
+    #[test]
+    fn latest_backup_timestamp_for_reason_finds_newest_matching_reason() {
+        let temp = make_temp_dir("backup-latest-reason");
+        let backup_dir = temp.join("backups");
+        fs::create_dir_all(&backup_dir).unwrap();
+
+        let older_scheduled = fixed_time(2026, 4, 25, 7, 0, 0);
+        let newest_scheduled = fixed_time(2026, 4, 25, 9, 0, 0);
+        let newer_manual = fixed_time(2026, 4, 25, 10, 0, 0);
+
+        write_backup_at(&backup_dir, BackupReason::Scheduled, older_scheduled);
+        write_backup_at(&backup_dir, BackupReason::Scheduled, newest_scheduled);
+        write_backup_at(&backup_dir, BackupReason::Manual, newer_manual);
+        write_named_backup(&backup_dir, "notes.db");
+
+        let latest =
+            latest_backup_timestamp_for_reason(&backup_dir, BackupReason::Scheduled).unwrap();
+
+        assert_eq!(latest, Some(newest_scheduled));
+    }
+
+    #[test]
+    fn latest_backup_timestamp_for_reason_uses_collision_suffix_for_same_second() {
+        let temp = make_temp_dir("backup-latest-collision");
+        let backup_dir = temp.join("backups");
+        fs::create_dir_all(&backup_dir).unwrap();
+
+        write_named_backup(&backup_dir, "capyinn_backup_scheduled_20260425_090000.db");
+        write_named_backup(&backup_dir, "capyinn_backup_scheduled_20260425_090000-1.db");
+
+        let latest =
+            latest_backup_timestamp_for_reason(&backup_dir, BackupReason::Scheduled).unwrap();
+
+        assert_eq!(latest, Some(fixed_time(2026, 4, 25, 9, 0, 0)));
+    }
+
+    #[test]
+    fn latest_backup_timestamp_for_reason_returns_none_for_missing_directory() {
+        let temp = make_temp_dir("backup-latest-missing");
+        let backup_dir = temp.join("missing-backups");
+
+        let latest =
+            latest_backup_timestamp_for_reason(&backup_dir, BackupReason::Scheduled).unwrap();
+
+        assert_eq!(latest, None);
+    }
+
+    #[test]
+    fn latest_backup_timestamp_for_reason_returns_read_errors() {
+        let temp = make_temp_dir("backup-latest-read-error");
+        let backup_dir = temp.join("backups");
+        fs::write(&backup_dir, b"not a directory").unwrap();
+
+        let result = latest_backup_timestamp_for_reason(&backup_dir, BackupReason::Scheduled);
+
+        assert!(result.is_err());
     }
 
     #[test]
