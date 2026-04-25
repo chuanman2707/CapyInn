@@ -55,7 +55,7 @@ pub(crate) async fn run_backup_once_at(
     sync_directory(&backup_dir)?;
     drop(reservation);
 
-    let prune = prune_old_backups(&backup_dir, 30);
+    let prune = prune_old_backups(&backup_dir, timestamp);
 
     Ok(BackupOutcome {
         path: final_path,
