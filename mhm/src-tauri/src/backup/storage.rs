@@ -26,7 +26,8 @@ impl BackupRetentionGroup {
             | BackupReason::Checkout
             | BackupReason::GroupCheckout
             | BackupReason::NightAudit
-            | BackupReason::AppExit => Self::Automatic,
+            | BackupReason::AppExit
+            | BackupReason::Scheduled => Self::Automatic,
         }
     }
 
@@ -247,6 +248,7 @@ fn parse_backup_reason(reason: &str) -> Option<BackupReason> {
         "night_audit" => Some(BackupReason::NightAudit),
         "app_exit" => Some(BackupReason::AppExit),
         "manual" => Some(BackupReason::Manual),
+        "scheduled" => Some(BackupReason::Scheduled),
         _ => None,
     }
 }
@@ -321,9 +323,13 @@ mod tests {
         assert_eq!(BackupReason::NightAudit.as_str(), "night_audit");
         assert_eq!(BackupReason::AppExit.as_str(), "app_exit");
         assert_eq!(BackupReason::Manual.as_str(), "manual");
+        assert_eq!(BackupReason::Scheduled.as_str(), "scheduled");
 
         assert!(is_managed_backup_file(
             "capyinn_backup_settings_20260418_231500.db"
+        ));
+        assert!(is_managed_backup_file(
+            "capyinn_backup_scheduled_20260418_231500.db"
         ));
         assert!(is_managed_backup_file(
             "capyinn_backup_app_exit_20260419_000102.db"
@@ -459,6 +465,39 @@ mod tests {
         assert_eq!(
             sorted_backup_file_names(&outcome.removed_files),
             sorted_backup_file_names(&[older_manual, older_auto])
+        );
+        assert!(outcome.error.is_none());
+    }
+
+    #[test]
+    fn prune_old_backups_treats_scheduled_as_automatic() {
+        let temp = make_temp_dir("backup-scheduled-retention");
+        let backup_dir = temp.join("backups");
+        fs::create_dir_all(&backup_dir).unwrap();
+
+        let now = fixed_time(2026, 4, 25, 8, 0, 0);
+        let scheduled_at_boundary = write_backup_at(
+            &backup_dir,
+            BackupReason::Scheduled,
+            now - Duration::days(7),
+        );
+        let scheduled_expired = write_backup_at(
+            &backup_dir,
+            BackupReason::Scheduled,
+            now - Duration::days(8),
+        );
+        let manual_recent =
+            write_backup_at(&backup_dir, BackupReason::Manual, now - Duration::days(1));
+
+        let outcome = prune_old_backups(&backup_dir, now);
+
+        assert_eq!(
+            sorted_backup_file_names(&outcome.kept_files),
+            sorted_backup_file_names(&[scheduled_at_boundary, manual_recent])
+        );
+        assert_eq!(
+            sorted_backup_file_names(&outcome.removed_files),
+            sorted_backup_file_names(&[scheduled_expired])
         );
         assert!(outcome.error.is_none());
     }
