@@ -11,6 +11,7 @@ pub use coordinator::{drain_and_backup_on_exit, request_backup, BackupCoordinato
 pub(crate) use events::emit_backup_status;
 pub use events::BackupStatusPayload;
 pub use runner::run_backup_once;
+pub use scheduler::{start_backup_scheduler, BackupSchedulerHandle};
 #[allow(unused_imports)]
 pub use storage::{build_backup_filename, is_managed_backup_file, prune_old_backups};
 #[allow(unused_imports)]

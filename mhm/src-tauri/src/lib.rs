@@ -182,6 +182,7 @@ pub fn run() {
                 current_user: Arc::new(Mutex::new(None)),
             });
             app.manage(backup::BackupCoordinator::new());
+            app.manage(backup::start_backup_scheduler(app.handle().clone()));
             app.manage(GatewayRuntimeState::new(rt, gateway_runtime));
 
             let _ = std::fs::create_dir_all(app_identity::models_dir());
@@ -305,6 +306,9 @@ pub fn run() {
             {
                 return;
             }
+            app_handle
+                .state::<backup::BackupSchedulerHandle>()
+                .shutdown();
             let handle = app_handle.clone();
             tauri::async_runtime::spawn(async move {
                 if let Err(error) = backup::drain_and_backup_on_exit(&handle).await {

@@ -1,29 +1,72 @@
-use super::{storage::latest_backup_timestamp_for_reason, BackupError, BackupReason};
+use super::{
+    log_backup_request_error, request_backup, storage::latest_backup_timestamp_for_reason,
+    BackupError, BackupReason, BackupRequestError,
+};
 use chrono::{Duration as ChronoDuration, NaiveDateTime, Utc};
-use std::{path::Path, time::Duration};
+use log::{error, info, warn};
+use std::{future::Future, path::Path, sync::Mutex, time::Duration};
+use tauri::AppHandle;
+use tokio::sync::oneshot;
 
-#[allow(dead_code)]
 const SCHEDULED_BACKUP_INTERVAL: Duration = Duration::from_secs(60 * 60);
 
-#[allow(dead_code)]
 fn scheduled_backup_interval_chrono() -> ChronoDuration {
     ChronoDuration::from_std(SCHEDULED_BACKUP_INTERVAL)
         .expect("scheduled backup interval must fit in chrono duration")
 }
 
-#[allow(dead_code)]
 fn scheduler_now() -> NaiveDateTime {
     Utc::now().naive_utc()
 }
 
-#[allow(dead_code)]
+pub struct BackupSchedulerHandle {
+    task: Mutex<Option<tauri::async_runtime::JoinHandle<()>>>,
+    shutdown_tx: Mutex<Option<oneshot::Sender<()>>>,
+}
+
+impl BackupSchedulerHandle {
+    pub(crate) fn new(
+        task: tauri::async_runtime::JoinHandle<()>,
+        shutdown_tx: oneshot::Sender<()>,
+    ) -> Self {
+        Self {
+            task: Mutex::new(Some(task)),
+            shutdown_tx: Mutex::new(Some(shutdown_tx)),
+        }
+    }
+
+    pub fn shutdown(&self) {
+        let shutdown_tx = self
+            .shutdown_tx
+            .lock()
+            .ok()
+            .and_then(|mut guard| guard.take());
+
+        if let Some(shutdown_tx) = shutdown_tx {
+            let _ = shutdown_tx.send(());
+        }
+
+        // Do not abort: the task may be inside BackupCoordinator. Dropping the
+        // join handle detaches it so any active backup can finish and drain.
+        let _task = self.task.lock().ok().and_then(|mut guard| guard.take());
+    }
+}
+
+pub fn start_backup_scheduler(app: AppHandle) -> BackupSchedulerHandle {
+    let (shutdown_tx, shutdown_rx) = oneshot::channel();
+    let task = tauri::async_runtime::spawn(async move {
+        run_backup_scheduler(app, shutdown_rx).await;
+    });
+
+    BackupSchedulerHandle::new(task, shutdown_tx)
+}
+
 #[derive(Debug)]
 pub(crate) enum StartupCatchUpError<ScanError, RequestError> {
     Scan(ScanError),
     Request(RequestError),
 }
 
-#[allow(dead_code)]
 pub(crate) fn should_run_startup_catch_up(
     latest_scheduled: Option<NaiveDateTime>,
     now: NaiveDateTime,
@@ -34,14 +77,12 @@ pub(crate) fn should_run_startup_catch_up(
     }
 }
 
-#[allow(dead_code)]
 pub(crate) fn latest_scheduled_backup_timestamp(
     backup_dir: &Path,
 ) -> Result<Option<NaiveDateTime>, BackupError> {
     latest_backup_timestamp_for_reason(backup_dir, BackupReason::Scheduled)
 }
 
-#[allow(dead_code)]
 pub(crate) async fn run_startup_catch_up_with<
     Scan,
     Request,
@@ -65,6 +106,74 @@ where
             .map_err(StartupCatchUpError::Request)?;
     }
     Ok(())
+}
+
+async fn run_backup_scheduler(app: AppHandle, shutdown_rx: oneshot::Receiver<()>) {
+    run_startup_catch_up(&app).await;
+    run_interval_loop_with(
+        || request_scheduled_backup(&app, "scheduled backup interval"),
+        shutdown_rx,
+        SCHEDULED_BACKUP_INTERVAL,
+    )
+    .await;
+}
+
+async fn run_interval_loop_with<Request, RequestFuture>(
+    mut request_backup: Request,
+    mut shutdown_rx: oneshot::Receiver<()>,
+    interval: Duration,
+) where
+    Request: FnMut() -> RequestFuture,
+    RequestFuture: Future<Output = Result<(), BackupRequestError>>,
+{
+    loop {
+        tokio::select! {
+            biased;
+            _ = &mut shutdown_rx => {
+                break;
+            }
+            _ = tokio::time::sleep(interval) => {
+                let _ = request_backup().await;
+            }
+        }
+    }
+}
+
+async fn run_startup_catch_up(app: &AppHandle) {
+    let Some(runtime_root) = crate::app_identity::runtime_root_opt() else {
+        warn!("scheduled backup startup catch-up skipped: cannot find home directory");
+        return;
+    };
+
+    let backup_dir = runtime_root.join("backups");
+    match run_startup_catch_up_with(
+        || latest_scheduled_backup_timestamp(&backup_dir),
+        || request_scheduled_backup(app, "scheduled backup startup catch-up"),
+        scheduler_now(),
+    )
+    .await
+    {
+        Ok(()) => {
+            info!("scheduled backup startup catch-up completed");
+        }
+        Err(StartupCatchUpError::Scan(error)) => {
+            error!("scheduled backup startup catch-up scan failed: {error}");
+        }
+        Err(StartupCatchUpError::Request(_)) => {}
+    }
+}
+
+async fn request_scheduled_backup(
+    app: &AppHandle,
+    context: &str,
+) -> Result<(), BackupRequestError> {
+    request_backup(app, BackupReason::Scheduled)
+        .await
+        .map(|_| ())
+        .map_err(|error| {
+            log_backup_request_error(context, &error);
+            error
+        })
 }
 
 #[cfg(test)]
@@ -221,5 +330,80 @@ mod tests {
 
         assert!(matches!(result, Err(StartupCatchUpError::Request(_))));
         assert!(requested.load(std::sync::atomic::Ordering::SeqCst));
+    }
+
+    #[tokio::test]
+    async fn scheduler_shutdown_is_idempotent() {
+        let (shutdown_tx, _shutdown_rx) = oneshot::channel();
+        let handle = BackupSchedulerHandle::new(
+            tauri::async_runtime::spawn(async {
+                std::future::pending::<()>().await;
+            }),
+            shutdown_tx,
+        );
+
+        handle.shutdown();
+        handle.shutdown();
+    }
+
+    #[tokio::test]
+    async fn scheduler_shutdown_does_not_abort_in_flight_task() {
+        let (shutdown_tx, _shutdown_rx) = oneshot::channel();
+        let completed = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let completed_for_task = completed.clone();
+        let handle = BackupSchedulerHandle::new(
+            tauri::async_runtime::spawn(async move {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+                completed_for_task.store(true, std::sync::atomic::Ordering::SeqCst);
+            }),
+            shutdown_tx,
+        );
+
+        handle.shutdown();
+        tokio::time::sleep(Duration::from_millis(30)).await;
+
+        assert!(completed.load(std::sync::atomic::Ordering::SeqCst));
+    }
+
+    #[tokio::test]
+    async fn scheduler_interval_shutdown_waits_for_in_flight_request() {
+        let (shutdown_tx, shutdown_rx) = oneshot::channel();
+        let request_started = std::sync::Arc::new(tokio::sync::Notify::new());
+        let release_request = std::sync::Arc::new(tokio::sync::Notify::new());
+        let request_completed = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+
+        let request_started_for_loop = request_started.clone();
+        let release_request_for_loop = release_request.clone();
+        let request_completed_for_loop = request_completed.clone();
+        let scheduler_task = tokio::spawn(async move {
+            run_interval_loop_with(
+                move || {
+                    let request_started = request_started_for_loop.clone();
+                    let release_request = release_request_for_loop.clone();
+                    let request_completed = request_completed_for_loop.clone();
+                    async move {
+                        request_started.notify_one();
+                        release_request.notified().await;
+                        request_completed.store(true, std::sync::atomic::Ordering::SeqCst);
+                        Ok::<(), BackupRequestError>(())
+                    }
+                },
+                shutdown_rx,
+                Duration::from_millis(1),
+            )
+            .await;
+        });
+
+        request_started.notified().await;
+        let _ = shutdown_tx.send(());
+        tokio::time::sleep(Duration::from_millis(10)).await;
+
+        assert!(!scheduler_task.is_finished());
+        assert!(!request_completed.load(std::sync::atomic::Ordering::SeqCst));
+
+        release_request.notify_one();
+        scheduler_task.await.unwrap();
+
+        assert!(request_completed.load(std::sync::atomic::Ordering::SeqCst));
     }
 }
