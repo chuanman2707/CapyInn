@@ -1,6 +1,7 @@
 mod coordinator;
 mod events;
 mod runner;
+mod scheduler;
 mod storage;
 #[cfg(test)]
 mod test_support;
