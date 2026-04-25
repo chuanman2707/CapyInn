@@ -11,6 +11,10 @@ fn backup_timestamp_now() -> NaiveDateTime {
         .unwrap_or_else(|| Utc::now().naive_utc())
 }
 
+fn retention_timestamp_now() -> NaiveDateTime {
+    Utc::now().naive_utc()
+}
+
 pub async fn run_backup_once(
     db_path: &Path,
     runtime_root: &Path,
@@ -55,7 +59,7 @@ pub(crate) async fn run_backup_once_at(
     sync_directory(&backup_dir)?;
     drop(reservation);
 
-    let prune = prune_old_backups(&backup_dir, 30);
+    let prune = prune_old_backups(&backup_dir, retention_timestamp_now());
 
     Ok(BackupOutcome {
         path: final_path,
@@ -70,7 +74,7 @@ mod tests {
         build_backup_filename, is_managed_backup_file,
         test_support::{backup_file_name, BackupFixture},
     };
-    use chrono::NaiveDate;
+    use chrono::{Duration as ChronoDuration, NaiveDate};
     use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
     use std::fs;
 
@@ -168,7 +172,44 @@ mod tests {
             backup_file_name(&second.path)
         );
         assert!(backup_file_name(&first.path).starts_with("capyinn_backup_manual_20260418_231500"));
-        assert!(backup_file_name(&second.path)
-            .starts_with("capyinn_backup_manual_20260418_231500"));
+        assert!(backup_file_name(&second.path).starts_with("capyinn_backup_manual_20260418_231500"));
+    }
+
+    #[tokio::test]
+    async fn run_backup_once_prunes_against_current_time_not_backup_filename_time() {
+        let fixture = BackupFixture::new().await;
+        fixture.insert_demo_row("guest-001").await;
+
+        let backup_dir = fixture.runtime_root.join("backups");
+        fs::create_dir_all(&backup_dir).unwrap();
+
+        let real_now = Utc::now().naive_utc();
+        let recent_auto = backup_dir.join(build_backup_filename(
+            BackupReason::Settings,
+            real_now - ChronoDuration::days(1),
+        ));
+        let older_recent_auto = backup_dir.join(build_backup_filename(
+            BackupReason::Checkout,
+            real_now - ChronoDuration::days(2),
+        ));
+        fs::write(&recent_auto, b"db").unwrap();
+        fs::write(&older_recent_auto, b"db").unwrap();
+
+        let future_filename_timestamp = real_now + ChronoDuration::days(365);
+        let outcome = run_backup_once_at(
+            &fixture.db_path,
+            &fixture.runtime_root,
+            BackupReason::Manual,
+            future_filename_timestamp,
+            None,
+        )
+        .await
+        .expect("backup should succeed");
+
+        assert!(outcome.path.exists());
+        assert!(recent_auto.exists());
+        assert!(older_recent_auto.exists());
+        assert!(!outcome.prune.removed_files.contains(&recent_auto));
+        assert!(!outcome.prune.removed_files.contains(&older_recent_auto));
     }
 }

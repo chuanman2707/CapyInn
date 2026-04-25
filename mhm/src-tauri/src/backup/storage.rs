@@ -1,5 +1,5 @@
 use super::types::{BackupError, BackupPruneOutcome, BackupReason};
-use chrono::NaiveDateTime;
+use chrono::{Duration, NaiveDateTime};
 use std::{
     fs, io,
     path::{Path, PathBuf},
@@ -7,8 +7,45 @@ use std::{
 
 #[derive(Clone, Debug)]
 struct BackupMetadata {
+    reason: BackupReason,
     timestamp: NaiveDateTime,
     collision_index: u64,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum BackupRetentionGroup {
+    Manual,
+    Automatic,
+}
+
+impl BackupRetentionGroup {
+    fn for_reason(reason: BackupReason) -> Self {
+        match reason {
+            BackupReason::Manual => Self::Manual,
+            BackupReason::Settings
+            | BackupReason::Checkout
+            | BackupReason::GroupCheckout
+            | BackupReason::NightAudit
+            | BackupReason::AppExit => Self::Automatic,
+        }
+    }
+
+    fn retention_window(self) -> Duration {
+        match self {
+            Self::Manual => Duration::days(30),
+            Self::Automatic => Duration::days(7),
+        }
+    }
+}
+
+impl BackupMetadata {
+    fn retention_group(&self) -> BackupRetentionGroup {
+        BackupRetentionGroup::for_reason(self.reason)
+    }
+
+    fn is_expired_at(&self, now: NaiveDateTime) -> bool {
+        now - self.timestamp > self.retention_group().retention_window()
+    }
 }
 
 pub fn build_backup_filename(reason: BackupReason, timestamp: NaiveDateTime) -> String {
@@ -86,7 +123,7 @@ impl Drop for BackupReservation {
     }
 }
 
-pub fn prune_old_backups(backup_dir: &Path, keep: usize) -> BackupPruneOutcome {
+pub fn prune_old_backups(backup_dir: &Path, now: NaiveDateTime) -> BackupPruneOutcome {
     let mut outcome = BackupPruneOutcome::default();
     if !backup_dir.exists() {
         return outcome;
@@ -131,13 +168,26 @@ pub fn prune_old_backups(backup_dir: &Path, keep: usize) -> BackupPruneOutcome {
             .then_with(|| right.1.cmp(&left.1))
     });
 
-    outcome.kept_files = backups
+    let newest_manual = backups
         .iter()
-        .take(keep)
-        .map(|(_, _, path)| path.clone())
-        .collect();
+        .find(|(metadata, _, _)| metadata.retention_group() == BackupRetentionGroup::Manual)
+        .map(|(_, _, path)| path.clone());
+    let newest_automatic = backups
+        .iter()
+        .find(|(metadata, _, _)| metadata.retention_group() == BackupRetentionGroup::Automatic)
+        .map(|(_, _, path)| path.clone());
 
-    for (_, _, path) in backups.into_iter().skip(keep) {
+    for (metadata, _, path) in backups {
+        let is_safety_floor = match metadata.retention_group() {
+            BackupRetentionGroup::Manual => newest_manual.as_ref() == Some(&path),
+            BackupRetentionGroup::Automatic => newest_automatic.as_ref() == Some(&path),
+        };
+
+        if !metadata.is_expired_at(now) || is_safety_floor {
+            outcome.kept_files.push(path);
+            continue;
+        }
+
         if let Err(error) = fs::remove_file(&path) {
             outcome.error = Some(error.into());
             break;
@@ -178,11 +228,12 @@ fn parse_backup_filename(name: &str) -> Option<BackupMetadata> {
         Some((time, suffix)) => (time, suffix.parse().ok()?),
         None => (time_or_suffix, 0),
     };
-    parse_backup_reason(reason)?;
+    let reason = parse_backup_reason(reason)?;
     let timestamp =
         NaiveDateTime::parse_from_str(&format!("{}_{}", date, time), "%Y%m%d_%H%M%S").ok()?;
 
     Some(BackupMetadata {
+        reason,
         timestamp,
         collision_index,
     })
@@ -203,7 +254,7 @@ fn parse_backup_reason(reason: &str) -> Option<BackupReason> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use chrono::NaiveDate;
+    use chrono::{Duration, NaiveDate, NaiveDateTime};
     use std::{
         env, fs,
         time::{SystemTime, UNIX_EPOCH},
@@ -221,6 +272,45 @@ mod tests {
         let path = env::temp_dir().join(format!("{}_{}_{}", prefix, std::process::id(), now));
         fs::create_dir_all(&path).unwrap();
         path
+    }
+
+    fn fixed_time(
+        year: i32,
+        month: u32,
+        day: u32,
+        hour: u32,
+        minute: u32,
+        second: u32,
+    ) -> NaiveDateTime {
+        NaiveDate::from_ymd_opt(year, month, day)
+            .unwrap()
+            .and_hms_opt(hour, minute, second)
+            .unwrap()
+    }
+
+    fn write_backup_at(
+        backup_dir: &Path,
+        reason: BackupReason,
+        timestamp: NaiveDateTime,
+    ) -> PathBuf {
+        let path = backup_dir.join(build_backup_filename(reason, timestamp));
+        fs::write(&path, b"db").unwrap();
+        path
+    }
+
+    fn write_named_backup(backup_dir: &Path, name: &str) -> PathBuf {
+        let path = backup_dir.join(name);
+        fs::write(&path, b"db").unwrap();
+        path
+    }
+
+    fn sorted_backup_file_names(paths: &[PathBuf]) -> Vec<String> {
+        let mut names = paths
+            .iter()
+            .map(|path| backup_file_name(path))
+            .collect::<Vec<_>>();
+        names.sort();
+        names
     }
 
     #[test]
@@ -308,42 +398,92 @@ mod tests {
     }
 
     #[test]
-    fn prune_old_backups_keeps_newest_thirty_files() {
-        let temp = make_temp_dir("backup-prune");
+    fn prune_old_backups_applies_manual_thirty_day_and_auto_seven_day_windows() {
+        let temp = make_temp_dir("backup-retention-window");
         let backup_dir = temp.join("backups");
         fs::create_dir_all(&backup_dir).unwrap();
 
-        for index in 0..32 {
-            let filename = format!("capyinn_backup_manual_20260418_{index:06}.db");
-            fs::write(backup_dir.join(filename), b"db").unwrap();
-        }
+        let now = fixed_time(2026, 4, 25, 8, 0, 0);
+        let manual_at_boundary =
+            write_backup_at(&backup_dir, BackupReason::Manual, now - Duration::days(30));
+        let manual_expired =
+            write_backup_at(&backup_dir, BackupReason::Manual, now - Duration::days(31));
+        let auto_at_boundary =
+            write_backup_at(&backup_dir, BackupReason::Checkout, now - Duration::days(7));
+        let auto_expired =
+            write_backup_at(&backup_dir, BackupReason::Settings, now - Duration::days(8));
         fs::write(backup_dir.join("notes.db"), b"keep").unwrap();
 
-        let outcome = prune_old_backups(&backup_dir, 30);
+        let outcome = prune_old_backups(&backup_dir, now);
 
-        let expected_kept = (2..32)
-            .rev()
-            .map(|index| format!("capyinn_backup_manual_20260418_{index:06}.db"))
-            .collect::<Vec<_>>();
-        let expected_removed = vec![
-            "capyinn_backup_manual_20260418_000001.db".to_string(),
-            "capyinn_backup_manual_20260418_000000.db".to_string(),
-        ];
-
-        let kept = outcome
-            .kept_files
-            .iter()
-            .map(|path| backup_file_name(path))
-            .collect::<Vec<_>>();
-        let removed = outcome
-            .removed_files
-            .iter()
-            .map(|path| backup_file_name(path))
-            .collect::<Vec<_>>();
-
-        assert_eq!(kept, expected_kept);
-        assert_eq!(removed, expected_removed);
+        assert_eq!(
+            sorted_backup_file_names(&outcome.kept_files),
+            sorted_backup_file_names(&[manual_at_boundary, auto_at_boundary])
+        );
+        assert_eq!(
+            sorted_backup_file_names(&outcome.removed_files),
+            sorted_backup_file_names(&[manual_expired, auto_expired])
+        );
         assert!(outcome.error.is_none());
         assert!(backup_dir.join("notes.db").exists());
+    }
+
+    #[test]
+    fn prune_old_backups_keeps_newest_expired_backup_per_retention_group() {
+        let temp = make_temp_dir("backup-retention-floor");
+        let backup_dir = temp.join("backups");
+        fs::create_dir_all(&backup_dir).unwrap();
+
+        let now = fixed_time(2026, 4, 25, 8, 0, 0);
+        let newest_manual =
+            write_backup_at(&backup_dir, BackupReason::Manual, now - Duration::days(45));
+        let older_manual =
+            write_backup_at(&backup_dir, BackupReason::Manual, now - Duration::days(60));
+        let newest_auto = write_backup_at(
+            &backup_dir,
+            BackupReason::NightAudit,
+            now - Duration::days(10),
+        );
+        let older_auto = write_backup_at(
+            &backup_dir,
+            BackupReason::Checkout,
+            now - Duration::days(12),
+        );
+
+        let outcome = prune_old_backups(&backup_dir, now);
+
+        assert_eq!(
+            sorted_backup_file_names(&outcome.kept_files),
+            sorted_backup_file_names(&[newest_manual, newest_auto])
+        );
+        assert_eq!(
+            sorted_backup_file_names(&outcome.removed_files),
+            sorted_backup_file_names(&[older_manual, older_auto])
+        );
+        assert!(outcome.error.is_none());
+    }
+
+    #[test]
+    fn prune_old_backups_uses_collision_suffix_when_selecting_safety_floor() {
+        let temp = make_temp_dir("backup-retention-collision");
+        let backup_dir = temp.join("backups");
+        fs::create_dir_all(&backup_dir).unwrap();
+
+        let now = fixed_time(2026, 4, 25, 8, 0, 0);
+        let base = write_named_backup(&backup_dir, "capyinn_backup_checkout_20260401_080000.db");
+        let collision =
+            write_named_backup(&backup_dir, "capyinn_backup_checkout_20260401_080000-1.db");
+
+        let outcome = prune_old_backups(&backup_dir, now);
+
+        assert_eq!(
+            sorted_backup_file_names(&outcome.kept_files),
+            sorted_backup_file_names(&[collision])
+        );
+        assert_eq!(
+            sorted_backup_file_names(&outcome.removed_files),
+            sorted_backup_file_names(&[base])
+        );
+        assert!(outcome.error.is_none());
     }
 }

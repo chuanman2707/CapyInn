@@ -81,6 +81,10 @@ export default function DataSection() {
           <div>
             <p className="font-medium text-sm">Sao lưu Database</p>
             <p className="text-xs text-brand-muted">Tạo bản sao lưu file SQLite</p>
+            <p className="text-xs text-brand-muted mt-1">
+              Backup thủ công được giữ 30 ngày; backup tự động được giữ 7 ngày. Luôn giữ bản mới
+              nhất để khôi phục.
+            </p>
             {backupPath && (
               <p className="text-xs text-emerald-600 mt-1 flex items-center gap-1">
                 <FolderOpen size={12} /> {backupPath}
