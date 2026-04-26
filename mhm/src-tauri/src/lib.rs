@@ -248,6 +248,9 @@ pub fn run() {
             commands::diagnostics::mark_crash_report_dismissed,
             commands::diagnostics::mark_crash_report_send_failed,
             commands::diagnostics::export_crash_report,
+            commands::command_ledger::list_command_ledger,
+            commands::command_ledger::list_command_ledger_attention,
+            commands::command_ledger::get_command_ledger_detail,
             commands::onboarding::get_bootstrap_status,
             commands::onboarding::complete_onboarding,
             // Auth & RBAC
