@@ -18,6 +18,7 @@ mod ocr;
 mod pricing;
 mod queries;
 mod repositories;
+pub mod restore_drill;
 mod runtime_config;
 mod services;
 pub mod support_log;
