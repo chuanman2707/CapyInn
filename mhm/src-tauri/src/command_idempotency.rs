@@ -75,6 +75,7 @@ pub struct CommandLedgerErrorSummary {
 }
 
 const SAFE_TEXT_MAX_CHARS: usize = 160;
+const SENSITIVE_NUMERIC_MIN_DIGITS: usize = 10;
 const FORBIDDEN_SAFE_FIELD_PARTS: &[&str] = &[
     "phone",
     "email",
@@ -256,6 +257,7 @@ fn validate_safe_text(value: String) -> CommandResult<String> {
     let trimmed = value.trim().to_string();
     if trimmed.len() > SAFE_TEXT_MAX_CHARS
         || trimmed.contains('@')
+        || contains_sensitive_numeric_sequence(&trimmed)
         || contains_forbidden_safe_term(&trimmed)
     {
         return Err(system_error("unsafe ledger text"));
@@ -301,12 +303,20 @@ fn split_case_boundaries(value: &str) -> String {
     normalized
 }
 
+fn contains_sensitive_numeric_sequence(value: &str) -> bool {
+    value.chars().filter(|ch| ch.is_ascii_digit()).count() >= SENSITIVE_NUMERIC_MIN_DIGITS
+}
+
 fn validate_safe_value(value: serde_json::Value) -> CommandResult<serde_json::Value> {
     match value {
         serde_json::Value::String(text) => Ok(serde_json::Value::String(validate_safe_text(text)?)),
-        serde_json::Value::Number(_) | serde_json::Value::Bool(_) | serde_json::Value::Null => {
-            Ok(value)
+        serde_json::Value::Number(number) => {
+            if contains_sensitive_numeric_sequence(&number.to_string()) {
+                return Err(system_error("unsafe ledger value"));
+            }
+            Ok(serde_json::Value::Number(number))
         }
+        serde_json::Value::Bool(_) | serde_json::Value::Null => Ok(value),
         serde_json::Value::Array(values) => values
             .into_iter()
             .map(validate_safe_value)
@@ -1087,6 +1097,19 @@ mod tests {
     }
 
     #[test]
+    fn sanitized_ledger_intent_rejects_numeric_pii_values() {
+        for value in [
+            serde_json::json!("0900000000"),
+            serde_json::json!("4111 1111 1111 1111"),
+            serde_json::json!(4111111111111111_u64),
+        ] {
+            let error = SanitizedLedgerIntent::from_pairs([("safe_label", value)])
+                .expect_err("numeric PII value must be rejected");
+            assert_eq!(error.code, codes::SYSTEM_INTERNAL_ERROR);
+        }
+    }
+
+    #[test]
     fn command_ledger_summary_to_value_revalidates_direct_construction() {
         let mut safe_fields = BTreeMap::new();
         safe_fields.insert(
@@ -1103,6 +1126,15 @@ mod tests {
         let error = summary
             .to_value()
             .expect_err("directly constructed unsafe summary must be rejected");
+        assert_eq!(error.code, codes::SYSTEM_INTERNAL_ERROR);
+    }
+
+    #[test]
+    fn command_ledger_summary_rejects_phone_like_values() {
+        let error = CommandLedgerSummary::new("Safe label")
+            .and_then(|summary| summary.with_safe_field("room_label", "0900000000"))
+            .expect_err("phone-like value must be rejected");
+
         assert_eq!(error.code, codes::SYSTEM_INTERNAL_ERROR);
     }
 

@@ -4,6 +4,11 @@ use sqlx::{sqlite::SqliteRow, Pool, QueryBuilder, Row, Sqlite};
 
 const DEFAULT_LIMIT: i64 = 50;
 const MAX_LIMIT: i64 = 200;
+const SAFE_ACTOR_LABEL_MAX_CHARS: usize = 160;
+const SENSITIVE_NUMERIC_MIN_DIGITS: usize = 10;
+const FORBIDDEN_SOURCE_LABEL_PARTS: &[&str] = &[
+    "phone", "email", "payment", "card", "token", "secret", "password", "raw", "payload",
+];
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
 pub struct CommandLedgerListOptions {
@@ -261,7 +266,7 @@ fn source_from_row(row: &SqliteRow) -> CommandLedgerSource {
         .try_get::<Option<String>, _>("actor_id")
         .ok()
         .flatten()
-        .filter(|value| !value.is_empty());
+        .and_then(safe_actor_label);
 
     CommandLedgerSource {
         request_id: row.try_get("request_id").ok().flatten(),
@@ -270,6 +275,55 @@ fn source_from_row(row: &SqliteRow) -> CommandLedgerSource {
             .unwrap_or_else(|_| "system".to_string()),
         actor_label,
     }
+}
+
+fn safe_actor_label(value: String) -> Option<String> {
+    let trimmed = value.trim().to_string();
+    if trimmed.is_empty()
+        || trimmed.len() > SAFE_ACTOR_LABEL_MAX_CHARS
+        || trimmed.contains('@')
+        || contains_sensitive_numeric_sequence(&trimmed)
+        || contains_forbidden_source_label_term(&trimmed)
+    {
+        return None;
+    }
+    Some(trimmed)
+}
+
+fn contains_sensitive_numeric_sequence(value: &str) -> bool {
+    value.chars().filter(|ch| ch.is_ascii_digit()).count() >= SENSITIVE_NUMERIC_MIN_DIGITS
+}
+
+fn contains_forbidden_source_label_term(value: &str) -> bool {
+    let with_case_boundaries = split_source_case_boundaries(value);
+    let lower = with_case_boundaries.to_ascii_lowercase();
+    let parts = lower
+        .split(|ch: char| !ch.is_ascii_alphanumeric())
+        .filter(|part| !part.is_empty())
+        .collect::<Vec<_>>();
+    let compact = parts.join("");
+
+    parts
+        .iter()
+        .any(|part| FORBIDDEN_SOURCE_LABEL_PARTS.contains(part))
+        || FORBIDDEN_SOURCE_LABEL_PARTS
+            .iter()
+            .any(|part| compact.contains(part))
+}
+
+fn split_source_case_boundaries(value: &str) -> String {
+    let mut normalized = String::with_capacity(value.len());
+    let mut previous_was_lower_or_digit = false;
+
+    for ch in value.chars() {
+        if ch.is_ascii_uppercase() && previous_was_lower_or_digit {
+            normalized.push('_');
+        }
+        normalized.push(ch);
+        previous_was_lower_or_digit = ch.is_ascii_lowercase() || ch.is_ascii_digit();
+    }
+
+    normalized
 }
 
 fn conflict_refs_from_summary(summary: &serde_json::Value) -> Vec<serde_json::Value> {
@@ -678,6 +732,42 @@ mod tests {
         .expect("clamps oversized limits");
 
         assert_eq!(rows.len(), MAX_LIMIT as usize);
+    }
+
+    #[test]
+    fn safe_actor_label_rejects_sensitive_shapes() {
+        assert_eq!(
+            safe_actor_label("admin-1".to_string()).as_deref(),
+            Some("admin-1")
+        );
+        assert!(safe_actor_label("operator@example.com".to_string()).is_none());
+        assert!(safe_actor_label("0900000000".to_string()).is_none());
+        assert!(safe_actor_label("paymentToken".to_string()).is_none());
+    }
+
+    #[tokio::test]
+    async fn source_actor_label_redacts_unsafe_actor_ids() {
+        let pool = test_pool().await;
+        let id = seed_row(&pool, "failed_retryable", None, None).await;
+        sqlx::query("UPDATE command_idempotency SET actor_id = ? WHERE id = ?")
+            .bind("operator@example.com")
+            .bind(id)
+            .execute(&pool)
+            .await
+            .expect("updates actor id");
+
+        let rows = list_command_ledger(&pool, CommandLedgerListOptions::default())
+            .await
+            .expect("lists row");
+        let detail = get_command_ledger_detail(&pool, id)
+            .await
+            .expect("gets detail");
+        let serialized = serde_json::to_string(&detail).expect("serializes detail");
+
+        assert_eq!(rows.len(), 1);
+        assert!(rows[0].source.actor_label.is_none());
+        assert!(detail.source.actor_label.is_none());
+        assert!(!serialized.contains("operator@example.com"));
     }
 
     #[tokio::test]
