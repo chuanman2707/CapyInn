@@ -273,6 +273,13 @@ fn select_newest_managed_backup(runtime_root: &Path) -> Result<ManagedBackup, St
     for entry in entries {
         let entry =
             entry.map_err(|error| format!("cannot read backup directory entry: {error}"))?;
+        let file_type = entry
+            .file_type()
+            .map_err(|error| format!("cannot inspect backup directory entry: {error}"))?;
+        if !file_type.is_file() {
+            continue;
+        }
+
         let file_name = entry.file_name().to_string_lossy().into_owned();
         let Some(metadata) = parse_managed_backup_file_name(&file_name) else {
             continue;
@@ -669,9 +676,7 @@ fn render_report(
 }
 
 fn escape_markdown_table(value: &str) -> String {
-    value
-        .replace(['\n', '\r'], " ")
-        .replace('|', "\\|")
+    value.replace(['\n', '\r'], " ").replace('|', "\\|")
 }
 
 fn pass_check(name: impl Into<String>, detail: impl Into<String>) -> RestoreDrillCheck {
@@ -831,6 +836,26 @@ mod tests {
         )
         .unwrap();
         fs::write(backup_dir.join("notes.db"), b"ignore").unwrap();
+
+        let selected = select_newest_managed_backup(temp.path()).unwrap();
+
+        assert_eq!(
+            selected.path.file_name().unwrap().to_string_lossy(),
+            "capyinn_backup_scheduled_20260426_110000.db"
+        );
+    }
+
+    #[test]
+    fn select_newest_managed_backup_ignores_managed_name_directories() {
+        let temp = make_temp_dir("restore-drill-select-directory");
+        let backup_dir = temp.path().join("backups");
+        fs::create_dir_all(&backup_dir).unwrap();
+        fs::write(
+            backup_dir.join("capyinn_backup_scheduled_20260426_110000.db"),
+            b"real backup",
+        )
+        .unwrap();
+        fs::create_dir(backup_dir.join("capyinn_backup_scheduled_20260426_120000.db")).unwrap();
 
         let selected = select_newest_managed_backup(temp.path()).unwrap();
 
