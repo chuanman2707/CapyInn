@@ -6,7 +6,7 @@ use chrono::{DateTime, FixedOffset, Utc};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use sqlx::{sqlite::SqliteRow, Pool, Row, Sqlite, Transaction};
-use std::{future::Future, pin::Pin};
+use std::{collections::BTreeMap, future::Future, pin::Pin};
 
 pub const SET_CRASH_REPORTING_PREFERENCE_COMMAND: &str = "settings.set_crash_reporting_preference";
 const CLAIM_LEASE_SECONDS: i64 = 30;
@@ -37,6 +37,278 @@ pub struct WriteCommandContext {
 pub struct IdempotentCommandResult<T> {
     pub response: T,
     pub replayed: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct LedgerAggregateRef {
+    #[serde(rename = "type")]
+    ref_type: String,
+    id: String,
+    label: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct CommandLedgerSummary {
+    label: String,
+    aggregate_refs: Vec<LedgerAggregateRef>,
+    business_dates: Vec<String>,
+    safe_fields: BTreeMap<String, String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct SanitizedLedgerIntent {
+    fields: BTreeMap<String, serde_json::Value>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct CommandLedgerResultSummary {
+    label: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct CommandLedgerErrorSummary {
+    code: String,
+    kind: String,
+    retryable: bool,
+    message: String,
+    support_id: Option<String>,
+}
+
+const SAFE_TEXT_MAX_CHARS: usize = 160;
+const FORBIDDEN_SAFE_FIELD_PARTS: &[&str] = &[
+    "phone",
+    "email",
+    "payment",
+    "card",
+    "token",
+    "secret",
+    "password",
+    "guest_note",
+    "prompt",
+    "raw",
+    "payload",
+];
+
+impl CommandLedgerSummary {
+    pub fn new(label: impl Into<String>) -> CommandResult<Self> {
+        Ok(Self {
+            label: validate_safe_text(label.into())?,
+            aggregate_refs: Vec::new(),
+            business_dates: Vec::new(),
+            safe_fields: BTreeMap::new(),
+        })
+    }
+
+    pub fn with_aggregate_ref(
+        mut self,
+        ref_type: impl Into<String>,
+        id: impl Into<String>,
+        label: Option<impl Into<String>>,
+    ) -> CommandResult<Self> {
+        self.aggregate_refs.push(LedgerAggregateRef {
+            ref_type: validate_safe_key(ref_type.into())?,
+            id: validate_safe_text(id.into())?,
+            label: label.map(Into::into).map(validate_safe_text).transpose()?,
+        });
+        Ok(self)
+    }
+
+    pub fn with_business_date(mut self, business_date: impl Into<String>) -> CommandResult<Self> {
+        self.business_dates
+            .push(validate_safe_text(business_date.into())?);
+        Ok(self)
+    }
+
+    pub fn with_safe_field(
+        mut self,
+        key: impl Into<String>,
+        value: impl Into<String>,
+    ) -> CommandResult<Self> {
+        self.safe_fields.insert(
+            validate_safe_key(key.into())?,
+            validate_safe_text(value.into())?,
+        );
+        Ok(self)
+    }
+
+    pub fn to_value(&self) -> CommandResult<serde_json::Value> {
+        serde_json::to_value(self.validated()?).map_err(system_error)
+    }
+
+    fn validated(&self) -> CommandResult<Self> {
+        let mut summary = Self::new(self.label.clone())?;
+
+        for aggregate_ref in &self.aggregate_refs {
+            summary = summary.with_aggregate_ref(
+                aggregate_ref.ref_type.clone(),
+                aggregate_ref.id.clone(),
+                aggregate_ref.label.clone(),
+            )?;
+        }
+
+        for business_date in &self.business_dates {
+            summary = summary.with_business_date(business_date.clone())?;
+        }
+
+        for (key, value) in &self.safe_fields {
+            summary = summary.with_safe_field(key.clone(), value.clone())?;
+        }
+
+        Ok(summary)
+    }
+}
+
+impl SanitizedLedgerIntent {
+    pub fn from_pairs<K, V, I>(pairs: I) -> CommandResult<Self>
+    where
+        K: Into<String>,
+        V: Into<serde_json::Value>,
+        I: IntoIterator<Item = (K, V)>,
+    {
+        let mut fields = BTreeMap::new();
+        for (key, value) in pairs {
+            fields.insert(
+                validate_safe_key(key.into())?,
+                validate_safe_value(value.into())?,
+            );
+        }
+        Ok(Self { fields })
+    }
+
+    pub fn to_value(&self) -> CommandResult<serde_json::Value> {
+        serde_json::to_value(self.validated()?).map_err(system_error)
+    }
+
+    fn validated(&self) -> CommandResult<Self> {
+        Self::from_pairs(
+            self.fields
+                .iter()
+                .map(|(key, value)| (key.clone(), value.clone())),
+        )
+    }
+}
+
+impl CommandLedgerResultSummary {
+    pub fn success(label: impl Into<String>) -> CommandResult<Self> {
+        Ok(Self {
+            label: validate_safe_text(label.into())?,
+        })
+    }
+
+    #[allow(dead_code)]
+    fn to_json_string(&self) -> CommandResult<String> {
+        let summary = Self::success(self.label.clone())?;
+        stable_json_string(&serde_json::to_value(summary).map_err(system_error)?)
+    }
+}
+
+impl CommandLedgerErrorSummary {
+    #[allow(dead_code)]
+    fn from_error(error: &CommandError) -> Self {
+        Self {
+            code: error.code.clone(),
+            kind: serde_json::to_value(error.kind)
+                .ok()
+                .and_then(|value| value.as_str().map(ToString::to_string))
+                .unwrap_or_else(|| "system".to_string()),
+            retryable: error.retryable,
+            message: error.message.clone(),
+            support_id: error.support_id.clone(),
+        }
+    }
+
+    #[allow(dead_code)]
+    fn to_json_string(&self) -> CommandResult<String> {
+        let summary = Self {
+            code: validate_safe_key(self.code.clone())?,
+            kind: validate_safe_key(self.kind.clone())?,
+            retryable: self.retryable,
+            message: validate_safe_text(self.message.clone())?,
+            support_id: self
+                .support_id
+                .clone()
+                .map(validate_safe_text)
+                .transpose()?,
+        };
+        stable_json_string(&serde_json::to_value(summary).map_err(system_error)?)
+    }
+}
+
+fn validate_safe_key(value: String) -> CommandResult<String> {
+    if value.is_empty() || contains_forbidden_safe_term(&value) {
+        return Err(system_error(format!("unsafe ledger key: {value}")));
+    }
+    Ok(value)
+}
+
+fn validate_safe_text(value: String) -> CommandResult<String> {
+    let trimmed = value.trim().to_string();
+    if trimmed.len() > SAFE_TEXT_MAX_CHARS
+        || trimmed.contains('@')
+        || contains_forbidden_safe_term(&trimmed)
+    {
+        return Err(system_error("unsafe ledger text"));
+    }
+    Ok(trimmed)
+}
+
+fn contains_forbidden_safe_term(value: &str) -> bool {
+    let with_case_boundaries = split_case_boundaries(value);
+    let lower = with_case_boundaries.to_ascii_lowercase();
+    let parts = lower
+        .split(|ch: char| !ch.is_ascii_alphanumeric())
+        .filter(|part| !part.is_empty())
+        .collect::<Vec<_>>();
+    let normalized = parts.join("_");
+    let compact = parts.join("");
+
+    parts
+        .iter()
+        .any(|part| FORBIDDEN_SAFE_FIELD_PARTS.contains(part))
+        || FORBIDDEN_SAFE_FIELD_PARTS
+            .iter()
+            .filter(|part| part.contains('_'))
+            .any(|part| normalized.contains(part))
+        || FORBIDDEN_SAFE_FIELD_PARTS
+            .iter()
+            .filter(|part| !part.contains('_'))
+            .any(|part| compact.contains(part))
+}
+
+fn split_case_boundaries(value: &str) -> String {
+    let mut normalized = String::with_capacity(value.len());
+    let mut previous_was_lower_or_digit = false;
+
+    for ch in value.chars() {
+        if ch.is_ascii_uppercase() && previous_was_lower_or_digit {
+            normalized.push('_');
+        }
+        normalized.push(ch);
+        previous_was_lower_or_digit = ch.is_ascii_lowercase() || ch.is_ascii_digit();
+    }
+
+    normalized
+}
+
+fn validate_safe_value(value: serde_json::Value) -> CommandResult<serde_json::Value> {
+    match value {
+        serde_json::Value::String(text) => Ok(serde_json::Value::String(validate_safe_text(text)?)),
+        serde_json::Value::Number(_) | serde_json::Value::Bool(_) | serde_json::Value::Null => {
+            Ok(value)
+        }
+        serde_json::Value::Array(values) => values
+            .into_iter()
+            .map(validate_safe_value)
+            .collect::<CommandResult<Vec<_>>>()
+            .map(serde_json::Value::Array),
+        serde_json::Value::Object(object) => {
+            let mut safe = serde_json::Map::new();
+            for (key, value) in object {
+                safe.insert(validate_safe_key(key)?, validate_safe_value(value)?);
+            }
+            Ok(serde_json::Value::Object(safe))
+        }
+    }
 }
 
 pub type LockKeyDeriver = fn(&serde_json::Value) -> CommandResult<Vec<String>>;
@@ -651,6 +923,117 @@ mod tests {
             .expect("failed to run migrations");
 
         pool
+    }
+
+    #[test]
+    fn sanitized_ledger_intent_rejects_sensitive_keys() {
+        for key in [
+            "phone",
+            "email",
+            "payment_token",
+            "card_data",
+            "access_token",
+            "secret",
+            "password",
+            "guest_note",
+            "prompt",
+            "raw_external_payload",
+            "paymentToken",
+            "cardNumber",
+            "phoneNumber",
+            "rawPayload",
+            "guestEmail",
+        ] {
+            let error = SanitizedLedgerIntent::from_pairs([(key, serde_json::json!("value"))])
+                .expect_err("sensitive key must be rejected");
+            assert_eq!(error.code, codes::SYSTEM_INTERNAL_ERROR);
+        }
+    }
+
+    #[test]
+    fn command_ledger_summary_rejects_sensitive_safe_fields() {
+        let error = CommandLedgerSummary::new("Safe label")
+            .and_then(|summary| summary.with_safe_field("email", "guest@example.com"))
+            .expect_err("email safe field must be rejected");
+
+        assert_eq!(error.code, codes::SYSTEM_INTERNAL_ERROR);
+    }
+
+    #[test]
+    fn command_ledger_summary_rejects_email_like_values() {
+        let error = CommandLedgerSummary::new("Safe label")
+            .and_then(|summary| summary.with_safe_field("room_label", "guest@example.com"))
+            .expect_err("email-like value must be rejected");
+
+        assert_eq!(error.code, codes::SYSTEM_INTERNAL_ERROR);
+    }
+
+    #[test]
+    fn sanitized_ledger_intent_rejects_sensitive_values() {
+        for value in [
+            "phone number",
+            "email address",
+            "payment token captured",
+            "card_data",
+            "access_token",
+            "secret",
+            "password",
+            "guest_note",
+            "prompt",
+            "raw",
+            "payload",
+            "paymentToken",
+            "cardNumber",
+            "phoneNumber",
+            "rawPayload",
+            "guestEmail",
+        ] {
+            let error =
+                SanitizedLedgerIntent::from_pairs([("safe_label", serde_json::json!(value))])
+                    .expect_err("sensitive value must be rejected");
+            assert_eq!(error.code, codes::SYSTEM_INTERNAL_ERROR);
+        }
+    }
+
+    #[test]
+    fn command_ledger_summary_to_value_revalidates_direct_construction() {
+        let mut safe_fields = BTreeMap::new();
+        safe_fields.insert(
+            "room_label".to_string(),
+            "payment token captured".to_string(),
+        );
+        let summary = CommandLedgerSummary {
+            label: "Safe label".to_string(),
+            aggregate_refs: Vec::new(),
+            business_dates: Vec::new(),
+            safe_fields,
+        };
+
+        let error = summary
+            .to_value()
+            .expect_err("directly constructed unsafe summary must be rejected");
+        assert_eq!(error.code, codes::SYSTEM_INTERNAL_ERROR);
+    }
+
+    #[test]
+    fn command_ledger_summary_serializes_safe_fields() {
+        let summary = CommandLedgerSummary::new("Check-in booking #123")
+            .expect("summary builds")
+            .with_aggregate_ref("booking", "123", Some("Booking #123"))
+            .expect("booking ref is safe")
+            .with_aggregate_ref("room", "205", Some("Room 205"))
+            .expect("room ref is safe")
+            .with_business_date("2026-04-26")
+            .expect("date is safe")
+            .with_safe_field("room_label", "205")
+            .expect("safe field is accepted");
+
+        let value = summary.to_value().expect("summary serializes");
+        assert_eq!(value["label"], "Check-in booking #123");
+        assert_eq!(value["aggregate_refs"][0]["type"], "booking");
+        assert_eq!(value["aggregate_refs"][1]["id"], "205");
+        assert_eq!(value["business_dates"][0], "2026-04-26");
+        assert_eq!(value["safe_fields"]["room_label"], "205");
     }
 
     #[tokio::test]
