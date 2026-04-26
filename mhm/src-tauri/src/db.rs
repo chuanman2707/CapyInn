@@ -341,8 +341,11 @@ pub(crate) async fn run_migrations(pool: &Pool<Sqlite>) -> Result<(), sqlx::Erro
             "ALTER TABLE transactions ADD COLUMN payment_method TEXT DEFAULT 'cash'",
         )
         .await?;
-        execute_compat_alter(&mut tx, "ALTER TABLE transactions ADD COLUMN created_by TEXT")
-            .await?;
+        execute_compat_alter(
+            &mut tx,
+            "ALTER TABLE transactions ADD COLUMN created_by TEXT",
+        )
+        .await?;
 
         // Add created_by to bookings
         execute_compat_alter(&mut tx, "ALTER TABLE bookings ADD COLUMN created_by TEXT").await?;
@@ -393,8 +396,11 @@ pub(crate) async fn run_migrations(pool: &Pool<Sqlite>) -> Result<(), sqlx::Erro
         .await?;
 
         // Add pricing_snapshot to bookings (JSON)
-        execute_compat_alter(&mut tx, "ALTER TABLE bookings ADD COLUMN pricing_snapshot TEXT")
-            .await?;
+        execute_compat_alter(
+            &mut tx,
+            "ALTER TABLE bookings ADD COLUMN pricing_snapshot TEXT",
+        )
+        .await?;
 
         // Add pricing_type to bookings
         execute_compat_alter(
@@ -448,8 +454,11 @@ pub(crate) async fn run_migrations(pool: &Pool<Sqlite>) -> Result<(), sqlx::Erro
         .await?;
 
         // Add is_audited flag to bookings
-        execute_compat_alter(&mut tx, "ALTER TABLE bookings ADD COLUMN is_audited INTEGER DEFAULT 0")
-            .await?;
+        execute_compat_alter(
+            &mut tx,
+            "ALTER TABLE bookings ADD COLUMN is_audited INTEGER DEFAULT 0",
+        )
+        .await?;
 
         set_schema_version(&mut tx, 4).await?;
         tx.commit().await?;
@@ -662,8 +671,8 @@ pub(crate) async fn run_migrations(pool: &Pool<Sqlite>) -> Result<(), sqlx::Erro
 
         // Indexes
         sqlx::query("CREATE INDEX IF NOT EXISTS idx_bookings_group ON bookings(group_id)")
-        .execute(&mut *tx)
-        .await?;
+            .execute(&mut *tx)
+            .await?;
         sqlx::query(
             "CREATE INDEX IF NOT EXISTS idx_group_services_group ON group_services(group_id)",
         )
@@ -720,6 +729,20 @@ pub(crate) async fn run_migrations(pool: &Pool<Sqlite>) -> Result<(), sqlx::Erro
         .await?;
 
         set_schema_version(&mut tx, 10).await?;
+        tx.commit().await?;
+    }
+
+    // ── V11: Command terminal error replay payload ──
+    if current < 11 {
+        let mut tx = pool.begin().await?;
+
+        execute_compat_alter(
+            &mut tx,
+            "ALTER TABLE command_idempotency ADD COLUMN error_json TEXT",
+        )
+        .await?;
+
+        set_schema_version(&mut tx, 11).await?;
         tx.commit().await?;
     }
 
@@ -801,6 +824,17 @@ mod tests {
         tx.commit().await.expect("commits tx");
     }
 
+    async fn command_idempotency_error_json_column_count(pool: &SqlitePool) -> i64 {
+        sqlx::query_scalar(
+            "SELECT COUNT(*)
+             FROM pragma_table_info('command_idempotency')
+             WHERE name = 'error_json'",
+        )
+        .fetch_one(pool)
+        .await
+        .expect("checks command_idempotency error_json column")
+    }
+
     #[tokio::test]
     async fn migrations_run_to_latest_schema_version() {
         let pool = SqlitePool::connect("sqlite::memory:")
@@ -815,7 +849,7 @@ mod tests {
             .expect("reads final schema version")
             .get("version");
 
-        assert_eq!(version, 10);
+        assert_eq!(version, 11);
     }
 
     #[tokio::test]
@@ -837,5 +871,70 @@ mod tests {
         .get("count");
 
         assert_eq!(table_count, 1);
+    }
+
+    #[tokio::test]
+    async fn migration_v11_adds_command_error_json_on_fresh_migration() {
+        let pool = SqlitePool::connect("sqlite::memory:")
+            .await
+            .expect("connects in-memory sqlite");
+
+        run_migrations(&pool).await.expect("runs migrations");
+
+        assert_eq!(command_idempotency_error_json_column_count(&pool).await, 1);
+    }
+
+    #[tokio::test]
+    async fn migration_v11_upgrades_existing_v10_command_idempotency_table() {
+        let pool = SqlitePool::connect("sqlite::memory:")
+            .await
+            .expect("connects in-memory sqlite");
+
+        get_schema_version(&pool)
+            .await
+            .expect("bootstraps schema version state");
+
+        sqlx::query(
+            "CREATE TABLE command_idempotency (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                idempotency_key TEXT NOT NULL,
+                command_name TEXT NOT NULL,
+                request_hash TEXT NOT NULL,
+                intent_json TEXT NOT NULL,
+                primary_aggregate_key TEXT,
+                lock_keys_json TEXT NOT NULL,
+                status TEXT NOT NULL,
+                claim_token TEXT NOT NULL,
+                response_json TEXT,
+                error_code TEXT,
+                retryable INTEGER NOT NULL DEFAULT 0,
+                lease_expires_at TEXT,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                completed_at TEXT,
+                last_attempt_at TEXT,
+                UNIQUE(command_name, idempotency_key)
+            )",
+        )
+        .execute(&pool)
+        .await
+        .expect("creates v10 command_idempotency table");
+
+        sqlx::query("UPDATE schema_version SET version = 10")
+            .execute(&pool)
+            .await
+            .expect("sets schema version to v10");
+
+        run_migrations(&pool).await.expect("runs migrations");
+
+        assert_eq!(command_idempotency_error_json_column_count(&pool).await, 1);
+
+        let version: i32 = sqlx::query("SELECT version FROM schema_version LIMIT 1")
+            .fetch_one(&pool)
+            .await
+            .expect("reads final schema version")
+            .get("version");
+
+        assert_eq!(version, 11);
     }
 }
