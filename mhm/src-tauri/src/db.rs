@@ -746,6 +746,45 @@ pub(crate) async fn run_migrations(pool: &Pool<Sqlite>) -> Result<(), sqlx::Erro
         tx.commit().await?;
     }
 
+    // ── V12: Operator-ready command ledger metadata ──
+    if current < 12 {
+        let mut tx = pool.begin().await?;
+
+        for alter in [
+            "ALTER TABLE command_idempotency ADD COLUMN request_id TEXT",
+            "ALTER TABLE command_idempotency ADD COLUMN actor_type TEXT NOT NULL DEFAULT 'system'",
+            "ALTER TABLE command_idempotency ADD COLUMN actor_id TEXT",
+            "ALTER TABLE command_idempotency ADD COLUMN client_id TEXT",
+            "ALTER TABLE command_idempotency ADD COLUMN session_id TEXT",
+            "ALTER TABLE command_idempotency ADD COLUMN channel_id TEXT",
+            "ALTER TABLE command_idempotency ADD COLUMN issued_at TEXT",
+            "ALTER TABLE command_idempotency ADD COLUMN summary_json TEXT NOT NULL DEFAULT '{}'",
+            "ALTER TABLE command_idempotency ADD COLUMN result_summary_json TEXT",
+            "ALTER TABLE command_idempotency ADD COLUMN error_summary_json TEXT",
+        ] {
+            execute_compat_alter(&mut tx, alter).await?;
+        }
+
+        sqlx::query(
+            "CREATE INDEX IF NOT EXISTS command_idempotency_attention_status_idx
+             ON command_idempotency(status, updated_at)
+             WHERE status IN ('failed_retryable', 'failed_terminal')",
+        )
+        .execute(&mut *tx)
+        .await?;
+
+        sqlx::query(
+            "CREATE INDEX IF NOT EXISTS command_idempotency_primary_aggregate_idx
+             ON command_idempotency(primary_aggregate_key, updated_at)
+             WHERE primary_aggregate_key IS NOT NULL",
+        )
+        .execute(&mut *tx)
+        .await?;
+
+        set_schema_version(&mut tx, 12).await?;
+        tx.commit().await?;
+    }
+
     Ok(())
 }
 
@@ -824,15 +863,58 @@ mod tests {
         tx.commit().await.expect("commits tx");
     }
 
-    async fn command_idempotency_error_json_column_count(pool: &SqlitePool) -> i64 {
+    async fn command_idempotency_column_count(pool: &SqlitePool, name: &str) -> i64 {
         sqlx::query_scalar(
             "SELECT COUNT(*)
              FROM pragma_table_info('command_idempotency')
-             WHERE name = 'error_json'",
+             WHERE name = ?",
         )
+        .bind(name)
         .fetch_one(pool)
         .await
-        .expect("checks command_idempotency error_json column")
+        .expect("checks command_idempotency column")
+    }
+
+    async fn sqlite_index_count(pool: &SqlitePool, name: &str) -> i64 {
+        sqlx::query_scalar(
+            "SELECT COUNT(*)
+             FROM sqlite_master
+             WHERE type = 'index' AND name = ?",
+        )
+        .bind(name)
+        .fetch_one(pool)
+        .await
+        .expect("checks sqlite index")
+    }
+
+    async fn assert_command_ledger_v12_shape(pool: &SqlitePool) {
+        for column in [
+            "request_id",
+            "actor_type",
+            "actor_id",
+            "client_id",
+            "session_id",
+            "channel_id",
+            "issued_at",
+            "summary_json",
+            "result_summary_json",
+            "error_summary_json",
+        ] {
+            assert_eq!(
+                command_idempotency_column_count(pool, column).await,
+                1,
+                "missing command_idempotency column {column}"
+            );
+        }
+
+        assert_eq!(
+            sqlite_index_count(pool, "command_idempotency_attention_status_idx").await,
+            1
+        );
+        assert_eq!(
+            sqlite_index_count(pool, "command_idempotency_primary_aggregate_idx").await,
+            1
+        );
     }
 
     #[tokio::test]
@@ -849,7 +931,7 @@ mod tests {
             .expect("reads final schema version")
             .get("version");
 
-        assert_eq!(version, 11);
+        assert_eq!(version, 12);
     }
 
     #[tokio::test]
@@ -881,7 +963,10 @@ mod tests {
 
         run_migrations(&pool).await.expect("runs migrations");
 
-        assert_eq!(command_idempotency_error_json_column_count(&pool).await, 1);
+        assert_eq!(
+            command_idempotency_column_count(&pool, "error_json").await,
+            1
+        );
     }
 
     #[tokio::test]
@@ -927,7 +1012,10 @@ mod tests {
 
         run_migrations(&pool).await.expect("runs migrations");
 
-        assert_eq!(command_idempotency_error_json_column_count(&pool).await, 1);
+        assert_eq!(
+            command_idempotency_column_count(&pool, "error_json").await,
+            1
+        );
 
         let version: i32 = sqlx::query("SELECT version FROM schema_version LIMIT 1")
             .fetch_one(&pool)
@@ -935,6 +1023,72 @@ mod tests {
             .expect("reads final schema version")
             .get("version");
 
-        assert_eq!(version, 11);
+        assert_eq!(version, 12);
+    }
+
+    #[tokio::test]
+    async fn migration_v12_adds_command_ledger_metadata_on_fresh_migration() {
+        let pool = SqlitePool::connect("sqlite::memory:")
+            .await
+            .expect("connects in-memory sqlite");
+
+        run_migrations(&pool).await.expect("runs migrations");
+
+        assert_command_ledger_v12_shape(&pool).await;
+    }
+
+    #[tokio::test]
+    async fn migration_v12_upgrades_existing_v11_command_idempotency_table() {
+        let pool = SqlitePool::connect("sqlite::memory:")
+            .await
+            .expect("connects in-memory sqlite");
+
+        get_schema_version(&pool)
+            .await
+            .expect("bootstraps schema version state");
+
+        sqlx::query(
+            "CREATE TABLE command_idempotency (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                idempotency_key TEXT NOT NULL,
+                command_name TEXT NOT NULL,
+                request_hash TEXT NOT NULL,
+                intent_json TEXT NOT NULL,
+                primary_aggregate_key TEXT,
+                lock_keys_json TEXT NOT NULL,
+                status TEXT NOT NULL,
+                claim_token TEXT NOT NULL,
+                response_json TEXT,
+                error_code TEXT,
+                error_json TEXT,
+                retryable INTEGER NOT NULL DEFAULT 0,
+                lease_expires_at TEXT,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                completed_at TEXT,
+                last_attempt_at TEXT,
+                UNIQUE(command_name, idempotency_key)
+            )",
+        )
+        .execute(&pool)
+        .await
+        .expect("creates v11 command_idempotency table");
+
+        sqlx::query("UPDATE schema_version SET version = 11")
+            .execute(&pool)
+            .await
+            .expect("sets schema version to v11");
+
+        run_migrations(&pool).await.expect("runs migrations");
+
+        assert_command_ledger_v12_shape(&pool).await;
+
+        let version: i32 = sqlx::query("SELECT version FROM schema_version LIMIT 1")
+            .fetch_one(&pool)
+            .await
+            .expect("reads final schema version")
+            .get("version");
+
+        assert_eq!(version, 12);
     }
 }

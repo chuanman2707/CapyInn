@@ -6,7 +6,7 @@ use chrono::{DateTime, FixedOffset, Utc};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use sqlx::{sqlite::SqliteRow, Pool, Row, Sqlite, Transaction};
-use std::{future::Future, pin::Pin};
+use std::{collections::BTreeMap, future::Future, pin::Pin};
 
 pub const SET_CRASH_REPORTING_PREFERENCE_COMMAND: &str = "settings.set_crash_reporting_preference";
 const CLAIM_LEASE_SECONDS: i64 = 30;
@@ -39,6 +39,299 @@ pub struct IdempotentCommandResult<T> {
     pub replayed: bool,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct LedgerAggregateRef {
+    #[serde(rename = "type")]
+    ref_type: String,
+    id: String,
+    label: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct CommandLedgerSummary {
+    label: String,
+    aggregate_refs: Vec<LedgerAggregateRef>,
+    business_dates: Vec<String>,
+    safe_fields: BTreeMap<String, String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct SanitizedLedgerIntent {
+    fields: BTreeMap<String, serde_json::Value>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct CommandLedgerResultSummary {
+    label: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct CommandLedgerErrorSummary {
+    code: String,
+    kind: String,
+    retryable: bool,
+    message: String,
+    support_id: Option<String>,
+}
+
+const SAFE_TEXT_MAX_CHARS: usize = 160;
+const SENSITIVE_NUMERIC_MIN_DIGITS: usize = 10;
+const FORBIDDEN_SAFE_FIELD_PARTS: &[&str] = &[
+    "phone",
+    "email",
+    "payment",
+    "card",
+    "token",
+    "secret",
+    "password",
+    "guest_note",
+    "prompt",
+    "raw",
+    "payload",
+];
+
+impl CommandLedgerSummary {
+    pub fn new(label: impl Into<String>) -> CommandResult<Self> {
+        Ok(Self {
+            label: validate_safe_text(label.into())?,
+            aggregate_refs: Vec::new(),
+            business_dates: Vec::new(),
+            safe_fields: BTreeMap::new(),
+        })
+    }
+
+    pub fn with_aggregate_ref(
+        mut self,
+        ref_type: impl Into<String>,
+        id: impl Into<String>,
+        label: Option<impl Into<String>>,
+    ) -> CommandResult<Self> {
+        self.aggregate_refs.push(LedgerAggregateRef {
+            ref_type: validate_safe_key(ref_type.into())?,
+            id: validate_safe_text(id.into())?,
+            label: label.map(Into::into).map(validate_safe_text).transpose()?,
+        });
+        Ok(self)
+    }
+
+    pub fn with_business_date(mut self, business_date: impl Into<String>) -> CommandResult<Self> {
+        self.business_dates
+            .push(validate_safe_text(business_date.into())?);
+        Ok(self)
+    }
+
+    pub fn with_safe_field(
+        mut self,
+        key: impl Into<String>,
+        value: impl Into<String>,
+    ) -> CommandResult<Self> {
+        self.safe_fields.insert(
+            validate_safe_key(key.into())?,
+            validate_safe_text(value.into())?,
+        );
+        Ok(self)
+    }
+
+    pub fn to_value(&self) -> CommandResult<serde_json::Value> {
+        serde_json::to_value(self.validated()?).map_err(system_error)
+    }
+
+    fn validated(&self) -> CommandResult<Self> {
+        let mut summary = Self::new(self.label.clone())?;
+
+        for aggregate_ref in &self.aggregate_refs {
+            summary = summary.with_aggregate_ref(
+                aggregate_ref.ref_type.clone(),
+                aggregate_ref.id.clone(),
+                aggregate_ref.label.clone(),
+            )?;
+        }
+
+        for business_date in &self.business_dates {
+            summary = summary.with_business_date(business_date.clone())?;
+        }
+
+        for (key, value) in &self.safe_fields {
+            summary = summary.with_safe_field(key.clone(), value.clone())?;
+        }
+
+        Ok(summary)
+    }
+}
+
+impl SanitizedLedgerIntent {
+    pub fn from_pairs<K, V, I>(pairs: I) -> CommandResult<Self>
+    where
+        K: Into<String>,
+        V: Into<serde_json::Value>,
+        I: IntoIterator<Item = (K, V)>,
+    {
+        let mut fields = BTreeMap::new();
+        for (key, value) in pairs {
+            fields.insert(
+                validate_safe_key(key.into())?,
+                validate_safe_value(value.into())?,
+            );
+        }
+        Ok(Self { fields })
+    }
+
+    pub fn to_value(&self) -> CommandResult<serde_json::Value> {
+        serde_json::to_value(self.validated()?).map_err(system_error)
+    }
+
+    fn validated(&self) -> CommandResult<Self> {
+        Self::from_pairs(
+            self.fields
+                .iter()
+                .map(|(key, value)| (key.clone(), value.clone())),
+        )
+    }
+}
+
+impl CommandLedgerResultSummary {
+    pub fn success(label: impl Into<String>) -> CommandResult<Self> {
+        Ok(Self {
+            label: validate_safe_text(label.into())?,
+        })
+    }
+
+    #[allow(dead_code)]
+    fn to_json_string(&self) -> CommandResult<String> {
+        let summary = Self::success(self.label.clone())?;
+        stable_json_string(&serde_json::to_value(summary).map_err(system_error)?)
+    }
+}
+
+impl CommandLedgerErrorSummary {
+    #[allow(dead_code)]
+    fn from_error(error: &CommandError) -> Self {
+        let message = validate_safe_text(error.message.clone())
+            .unwrap_or_else(|_| "Command failed".to_string());
+        let support_id = error
+            .support_id
+            .clone()
+            .and_then(|support_id| validate_safe_text(support_id).ok());
+        let code = validate_safe_key(error.code.clone())
+            .unwrap_or_else(|_| codes::SYSTEM_INTERNAL_ERROR.to_string());
+        let kind = serde_json::to_value(error.kind)
+            .ok()
+            .and_then(|value| value.as_str().map(ToString::to_string))
+            .and_then(|kind| validate_safe_key(kind).ok())
+            .unwrap_or_else(|| "system".to_string());
+
+        Self {
+            code,
+            kind,
+            retryable: error.retryable,
+            message,
+            support_id,
+        }
+    }
+
+    #[allow(dead_code)]
+    fn to_json_string(&self) -> CommandResult<String> {
+        let summary = Self {
+            code: validate_safe_key(self.code.clone())?,
+            kind: validate_safe_key(self.kind.clone())?,
+            retryable: self.retryable,
+            message: validate_safe_text(self.message.clone())?,
+            support_id: self
+                .support_id
+                .clone()
+                .map(validate_safe_text)
+                .transpose()?,
+        };
+        stable_json_string(&serde_json::to_value(summary).map_err(system_error)?)
+    }
+}
+
+fn validate_safe_key(value: String) -> CommandResult<String> {
+    if value.is_empty() || contains_forbidden_safe_term(&value) {
+        return Err(system_error(format!("unsafe ledger key: {value}")));
+    }
+    Ok(value)
+}
+
+fn validate_safe_text(value: String) -> CommandResult<String> {
+    let trimmed = value.trim().to_string();
+    if trimmed.len() > SAFE_TEXT_MAX_CHARS
+        || trimmed.contains('@')
+        || contains_sensitive_numeric_sequence(&trimmed)
+        || contains_forbidden_safe_term(&trimmed)
+    {
+        return Err(system_error("unsafe ledger text"));
+    }
+    Ok(trimmed)
+}
+
+fn contains_forbidden_safe_term(value: &str) -> bool {
+    let with_case_boundaries = split_case_boundaries(value);
+    let lower = with_case_boundaries.to_ascii_lowercase();
+    let parts = lower
+        .split(|ch: char| !ch.is_ascii_alphanumeric())
+        .filter(|part| !part.is_empty())
+        .collect::<Vec<_>>();
+    let normalized = parts.join("_");
+    let compact = parts.join("");
+
+    parts
+        .iter()
+        .any(|part| FORBIDDEN_SAFE_FIELD_PARTS.contains(part))
+        || FORBIDDEN_SAFE_FIELD_PARTS
+            .iter()
+            .filter(|part| part.contains('_'))
+            .any(|part| normalized.contains(part))
+        || FORBIDDEN_SAFE_FIELD_PARTS
+            .iter()
+            .filter(|part| !part.contains('_'))
+            .any(|part| compact.contains(part))
+}
+
+fn split_case_boundaries(value: &str) -> String {
+    let mut normalized = String::with_capacity(value.len());
+    let mut previous_was_lower_or_digit = false;
+
+    for ch in value.chars() {
+        if ch.is_ascii_uppercase() && previous_was_lower_or_digit {
+            normalized.push('_');
+        }
+        normalized.push(ch);
+        previous_was_lower_or_digit = ch.is_ascii_lowercase() || ch.is_ascii_digit();
+    }
+
+    normalized
+}
+
+fn contains_sensitive_numeric_sequence(value: &str) -> bool {
+    value.chars().filter(|ch| ch.is_ascii_digit()).count() >= SENSITIVE_NUMERIC_MIN_DIGITS
+}
+
+fn validate_safe_value(value: serde_json::Value) -> CommandResult<serde_json::Value> {
+    match value {
+        serde_json::Value::String(text) => Ok(serde_json::Value::String(validate_safe_text(text)?)),
+        serde_json::Value::Number(number) => {
+            if contains_sensitive_numeric_sequence(&number.to_string()) {
+                return Err(system_error("unsafe ledger value"));
+            }
+            Ok(serde_json::Value::Number(number))
+        }
+        serde_json::Value::Bool(_) | serde_json::Value::Null => Ok(value),
+        serde_json::Value::Array(values) => values
+            .into_iter()
+            .map(validate_safe_value)
+            .collect::<CommandResult<Vec<_>>>()
+            .map(serde_json::Value::Array),
+        serde_json::Value::Object(object) => {
+            let mut safe = serde_json::Map::new();
+            for (key, value) in object {
+                safe.insert(validate_safe_key(key)?, validate_safe_value(value)?);
+            }
+            Ok(serde_json::Value::Object(safe))
+        }
+    }
+}
+
 pub type LockKeyDeriver = fn(&serde_json::Value) -> CommandResult<Vec<String>>;
 
 pub type WriteCommandServiceFuture<'tx> =
@@ -46,9 +339,12 @@ pub type WriteCommandServiceFuture<'tx> =
 
 #[derive(Debug, Clone)]
 pub struct WriteCommandRequest {
-    pub intent: serde_json::Value,
-    pub primary_aggregate_key: Option<String>,
-    pub lock_key_deriver: LockKeyDeriver,
+    hash_payload: serde_json::Value,
+    ledger_intent: SanitizedLedgerIntent,
+    summary: CommandLedgerSummary,
+    success_summary: CommandLedgerResultSummary,
+    primary_aggregate_key: Option<String>,
+    lock_key_deriver: LockKeyDeriver,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -84,12 +380,33 @@ impl CommandStatus {
 }
 
 impl WriteCommandRequest {
-    pub fn new(intent: serde_json::Value) -> Self {
-        Self {
-            intent,
+    pub fn new_sanitized(
+        hash_payload: serde_json::Value,
+        ledger_intent: SanitizedLedgerIntent,
+        summary: CommandLedgerSummary,
+    ) -> CommandResult<Self> {
+        Ok(Self {
+            hash_payload,
+            ledger_intent: SanitizedLedgerIntent::from_pairs(
+                ledger_intent
+                    .fields
+                    .iter()
+                    .map(|(key, value)| (key.clone(), value.clone())),
+            )?,
+            summary: summary.validated()?,
+            success_summary: CommandLedgerResultSummary::success("Command completed")?,
             primary_aggregate_key: None,
             lock_key_deriver: default_lock_key_deriver,
-        }
+        })
+    }
+
+    pub fn new_low_risk(
+        intent: serde_json::Value,
+        label: impl Into<String>,
+    ) -> CommandResult<Self> {
+        let ledger_intent = sanitized_intent_from_value(intent.clone())?;
+        let summary = CommandLedgerSummary::new(label)?;
+        Self::new_sanitized(intent, ledger_intent, summary)
     }
 
     pub fn with_primary_aggregate_key(mut self, primary_aggregate_key: impl Into<String>) -> Self {
@@ -101,10 +418,31 @@ impl WriteCommandRequest {
         self.lock_key_deriver = lock_key_deriver;
         self
     }
+
+    pub fn with_success_summary(mut self, success_summary: CommandLedgerResultSummary) -> Self {
+        self.success_summary = success_summary;
+        self
+    }
 }
 
 pub fn default_lock_key_deriver(_intent: &serde_json::Value) -> CommandResult<Vec<String>> {
     Ok(Vec::new())
+}
+
+fn actor_type_as_str(actor_type: ActorType) -> &'static str {
+    match actor_type {
+        ActorType::Human => "human",
+        ActorType::AiAgent => "ai_agent",
+        ActorType::System => "system",
+        ActorType::Integration => "integration",
+    }
+}
+
+fn sanitized_intent_from_value(value: serde_json::Value) -> CommandResult<SanitizedLedgerIntent> {
+    match value {
+        serde_json::Value::Object(object) => SanitizedLedgerIntent::from_pairs(object),
+        value => SanitizedLedgerIntent::from_pairs([("value", value)]),
+    }
 }
 
 pub struct WriteCommandExecutor {
@@ -119,6 +457,8 @@ enum ClaimOutcome {
 struct PreparedWriteCommandRequest {
     request_hash: String,
     intent_json: String,
+    summary_json: String,
+    result_summary_json: String,
     lock_keys_json: String,
     primary_aggregate_key: Option<String>,
 }
@@ -142,7 +482,8 @@ impl WriteCommandExecutor {
 
         match claim {
             ClaimOutcome::Claimed { claim_token } => {
-                self.run_claimed(ctx, &claim_token, service).await
+                self.run_claimed(ctx, &claim_token, &prepared, service)
+                    .await
             }
             ClaimOutcome::Replayed(result) => Ok(result),
         }
@@ -185,31 +526,51 @@ impl WriteCommandExecutor {
             "INSERT OR IGNORE INTO command_idempotency (
                 idempotency_key,
                 command_name,
+                request_id,
+                actor_type,
+                actor_id,
+                client_id,
+                session_id,
+                channel_id,
+                issued_at,
                 request_hash,
                 intent_json,
+                summary_json,
                 primary_aggregate_key,
                 lock_keys_json,
                 status,
                 claim_token,
                 response_json,
+                result_summary_json,
                 error_code,
                 error_json,
+                error_summary_json,
                 retryable,
                 lease_expires_at,
                 created_at,
                 updated_at,
                 completed_at,
                 last_attempt_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         )
         .bind(&ctx.idempotency_key)
         .bind(&ctx.command_name)
+        .bind(&ctx.request_id)
+        .bind(actor_type_as_str(ctx.actor_type))
+        .bind(&ctx.actor_id)
+        .bind(&ctx.client_id)
+        .bind(&ctx.session_id)
+        .bind(&ctx.channel_id)
+        .bind(ctx.issued_at.to_rfc3339())
         .bind(&prepared.request_hash)
         .bind(&prepared.intent_json)
+        .bind(&prepared.summary_json)
         .bind(&prepared.primary_aggregate_key)
         .bind(&prepared.lock_keys_json)
         .bind(CommandStatus::InProgress.as_str())
         .bind(&claim_token)
+        .bind(Option::<String>::None)
+        .bind(Option::<String>::None)
         .bind(Option::<String>::None)
         .bind(Option::<String>::None)
         .bind(Option::<String>::None)
@@ -236,6 +597,7 @@ impl WriteCommandExecutor {
         &self,
         ctx: &WriteCommandContext,
         claim_token: &str,
+        prepared: &PreparedWriteCommandRequest,
         service: F,
     ) -> CommandResult<IdempotentCommandResult<serde_json::Value>>
     where
@@ -263,8 +625,10 @@ impl WriteCommandExecutor {
             "UPDATE command_idempotency
              SET status = ?,
                  response_json = ?,
+                 result_summary_json = ?,
                  error_code = NULL,
                  error_json = NULL,
+                 error_summary_json = NULL,
                  retryable = 0,
                  lease_expires_at = NULL,
                  updated_at = ?,
@@ -276,6 +640,7 @@ impl WriteCommandExecutor {
         )
         .bind(CommandStatus::Completed.as_str())
         .bind(&response_json)
+        .bind(&prepared.result_summary_json)
         .bind(&completed_at)
         .bind(&completed_at)
         .bind(&ctx.command_name)
@@ -323,6 +688,7 @@ impl WriteCommandExecutor {
         };
         let retryable = if error.retryable { 1_i64 } else { 0_i64 };
         let error_json = serde_json::to_string(error).map_err(system_error)?;
+        let error_summary_json = CommandLedgerErrorSummary::from_error(error).to_json_string()?;
         let now = chrono::Utc::now().to_rfc3339();
         let completed_at = if status == CommandStatus::FailedTerminal {
             Some(now.clone())
@@ -335,8 +701,10 @@ impl WriteCommandExecutor {
             "UPDATE command_idempotency
              SET status = ?,
                  response_json = NULL,
+                 result_summary_json = NULL,
                  error_code = ?,
                  error_json = ?,
+                 error_summary_json = ?,
                  retryable = ?,
                  lease_expires_at = NULL,
                  updated_at = ?,
@@ -349,6 +717,7 @@ impl WriteCommandExecutor {
         .bind(status.as_str())
         .bind(&error.code)
         .bind(&error_json)
+        .bind(&error_summary_json)
         .bind(retryable)
         .bind(&now)
         .bind(&completed_at)
@@ -413,8 +782,13 @@ pub async fn set_crash_reporting_preference_idempotent(
     enabled: bool,
 ) -> CommandResult<IdempotentCommandResult<serde_json::Value>> {
     let intent = serde_json::json!({ "enabled": enabled });
+    let request = WriteCommandRequest::new_low_risk(intent, "Set crash reporting preference")?
+        .with_success_summary(CommandLedgerResultSummary::success(
+            "Crash reporting preference saved",
+        )?);
+
     WriteCommandExecutor::new(pool.clone())
-        .execute(ctx, WriteCommandRequest::new(intent), move |tx| {
+        .execute(ctx, request, move |tx| {
             Box::pin(async move {
                 settings_store::save_setting_tx(
                     tx,
@@ -448,17 +822,22 @@ fn stable_request_hash_from_json(intent_json: &str) -> CommandResult<String> {
 fn prepare_write_command_request(
     request: WriteCommandRequest,
 ) -> CommandResult<PreparedWriteCommandRequest> {
-    let mut lock_keys = (request.lock_key_deriver)(&request.intent)?;
+    let mut lock_keys = (request.lock_key_deriver)(&request.hash_payload)?;
     lock_keys.sort();
     lock_keys.dedup();
 
     let lock_keys_json = stable_json_string(&serde_json::json!(lock_keys))?;
-    let intent_json = stable_json_string(&request.intent)?;
-    let request_hash = stable_request_hash_from_json(&intent_json)?;
+    let hash_payload_json = stable_json_string(&request.hash_payload)?;
+    let request_hash = stable_request_hash_from_json(&hash_payload_json)?;
+    let intent_json = stable_json_string(&request.ledger_intent.to_value()?)?;
+    let summary_json = stable_json_string(&request.summary.to_value()?)?;
+    let result_summary_json = request.success_summary.to_json_string()?;
 
     Ok(PreparedWriteCommandRequest {
         request_hash,
         intent_json,
+        summary_json,
+        result_summary_json,
         lock_keys_json,
         primary_aggregate_key: request.primary_aggregate_key,
     })
@@ -487,15 +866,13 @@ async fn reclaim_claim(
     let mut tx = pool.begin().await.map_err(system_error)?;
     let result = sqlx::query(
         "UPDATE command_idempotency
-         SET request_hash = ?,
-             intent_json = ?,
-             primary_aggregate_key = ?,
-             lock_keys_json = ?,
-             status = 'in_progress',
+         SET status = 'in_progress',
              claim_token = ?,
              response_json = NULL,
+             result_summary_json = NULL,
              error_code = NULL,
              error_json = NULL,
+             error_summary_json = NULL,
              retryable = 0,
              lease_expires_at = ?,
              updated_at = ?,
@@ -512,10 +889,6 @@ async fn reclaim_claim(
                 )
            )",
     )
-    .bind(&prepared.request_hash)
-    .bind(&prepared.intent_json)
-    .bind(&prepared.primary_aggregate_key)
-    .bind(&prepared.lock_keys_json)
     .bind(claim_token)
     .bind(lease_expires_at)
     .bind(now)
@@ -651,6 +1024,454 @@ mod tests {
             .expect("failed to run migrations");
 
         pool
+    }
+
+    #[test]
+    fn sanitized_ledger_intent_rejects_sensitive_keys() {
+        for key in [
+            "phone",
+            "email",
+            "payment_token",
+            "card_data",
+            "access_token",
+            "secret",
+            "password",
+            "guest_note",
+            "prompt",
+            "raw_external_payload",
+            "paymentToken",
+            "cardNumber",
+            "phoneNumber",
+            "rawPayload",
+            "guestEmail",
+        ] {
+            let error = SanitizedLedgerIntent::from_pairs([(key, serde_json::json!("value"))])
+                .expect_err("sensitive key must be rejected");
+            assert_eq!(error.code, codes::SYSTEM_INTERNAL_ERROR);
+        }
+    }
+
+    #[test]
+    fn command_ledger_summary_rejects_sensitive_safe_fields() {
+        let error = CommandLedgerSummary::new("Safe label")
+            .and_then(|summary| summary.with_safe_field("email", "guest@example.com"))
+            .expect_err("email safe field must be rejected");
+
+        assert_eq!(error.code, codes::SYSTEM_INTERNAL_ERROR);
+    }
+
+    #[test]
+    fn command_ledger_summary_rejects_email_like_values() {
+        let error = CommandLedgerSummary::new("Safe label")
+            .and_then(|summary| summary.with_safe_field("room_label", "guest@example.com"))
+            .expect_err("email-like value must be rejected");
+
+        assert_eq!(error.code, codes::SYSTEM_INTERNAL_ERROR);
+    }
+
+    #[test]
+    fn sanitized_ledger_intent_rejects_sensitive_values() {
+        for value in [
+            "phone number",
+            "email address",
+            "payment token captured",
+            "card_data",
+            "access_token",
+            "secret",
+            "password",
+            "guest_note",
+            "prompt",
+            "raw",
+            "payload",
+            "paymentToken",
+            "cardNumber",
+            "phoneNumber",
+            "rawPayload",
+            "guestEmail",
+        ] {
+            let error =
+                SanitizedLedgerIntent::from_pairs([("safe_label", serde_json::json!(value))])
+                    .expect_err("sensitive value must be rejected");
+            assert_eq!(error.code, codes::SYSTEM_INTERNAL_ERROR);
+        }
+    }
+
+    #[test]
+    fn sanitized_ledger_intent_rejects_numeric_pii_values() {
+        for value in [
+            serde_json::json!("0900000000"),
+            serde_json::json!("4111 1111 1111 1111"),
+            serde_json::json!(4111111111111111_u64),
+        ] {
+            let error = SanitizedLedgerIntent::from_pairs([("safe_label", value)])
+                .expect_err("numeric PII value must be rejected");
+            assert_eq!(error.code, codes::SYSTEM_INTERNAL_ERROR);
+        }
+    }
+
+    #[test]
+    fn command_ledger_summary_to_value_revalidates_direct_construction() {
+        let mut safe_fields = BTreeMap::new();
+        safe_fields.insert(
+            "room_label".to_string(),
+            "payment token captured".to_string(),
+        );
+        let summary = CommandLedgerSummary {
+            label: "Safe label".to_string(),
+            aggregate_refs: Vec::new(),
+            business_dates: Vec::new(),
+            safe_fields,
+        };
+
+        let error = summary
+            .to_value()
+            .expect_err("directly constructed unsafe summary must be rejected");
+        assert_eq!(error.code, codes::SYSTEM_INTERNAL_ERROR);
+    }
+
+    #[test]
+    fn command_ledger_summary_rejects_phone_like_values() {
+        let error = CommandLedgerSummary::new("Safe label")
+            .and_then(|summary| summary.with_safe_field("room_label", "0900000000"))
+            .expect_err("phone-like value must be rejected");
+
+        assert_eq!(error.code, codes::SYSTEM_INTERNAL_ERROR);
+    }
+
+    #[test]
+    fn command_ledger_summary_serializes_safe_fields() {
+        let summary = CommandLedgerSummary::new("Check-in booking #123")
+            .expect("summary builds")
+            .with_aggregate_ref("booking", "123", Some("Booking #123"))
+            .expect("booking ref is safe")
+            .with_aggregate_ref("room", "205", Some("Room 205"))
+            .expect("room ref is safe")
+            .with_business_date("2026-04-26")
+            .expect("date is safe")
+            .with_safe_field("room_label", "205")
+            .expect("safe field is accepted");
+
+        let value = summary.to_value().expect("summary serializes");
+        assert_eq!(value["label"], "Check-in booking #123");
+        assert_eq!(value["aggregate_refs"][0]["type"], "booking");
+        assert_eq!(value["aggregate_refs"][1]["id"], "205");
+        assert_eq!(value["business_dates"][0], "2026-04-26");
+        assert_eq!(value["safe_fields"]["room_label"], "205");
+    }
+
+    fn test_summary(label: &str) -> CommandLedgerSummary {
+        CommandLedgerSummary::new(label)
+            .expect("summary builds")
+            .with_aggregate_ref("booking", "123", Some("Booking #123"))
+            .expect("aggregate ref builds")
+            .with_safe_field("room_label", "205")
+            .expect("safe field builds")
+    }
+
+    fn test_intent() -> SanitizedLedgerIntent {
+        SanitizedLedgerIntent::from_pairs([
+            ("booking_id", serde_json::json!("123")),
+            ("room_id", serde_json::json!("205")),
+        ])
+        .expect("intent builds")
+    }
+
+    fn original_test_lock_keys(_intent: &serde_json::Value) -> CommandResult<Vec<String>> {
+        Ok(vec!["booking:123".to_string()])
+    }
+
+    fn retry_test_lock_keys(_intent: &serde_json::Value) -> CommandResult<Vec<String>> {
+        Ok(vec!["booking:999".to_string()])
+    }
+
+    #[tokio::test]
+    async fn write_command_executor_persists_operator_safe_metadata() {
+        let pool = test_pool().await;
+        let issued_at =
+            DateTime::parse_from_rfc3339("2026-04-26T09:30:00+07:00").expect("issued_at parses");
+        let ctx = WriteCommandContext {
+            request_id: "req-ledger-metadata".to_string(),
+            idempotency_key: "idem-ledger-metadata".to_string(),
+            command_name: "test.ledger_metadata".to_string(),
+            actor_id: Some("admin-1".to_string()),
+            actor_type: ActorType::Human,
+            client_id: Some("client-opaque".to_string()),
+            session_id: Some("session-opaque".to_string()),
+            channel_id: Some("tauri".to_string()),
+            issued_at,
+        };
+        let request = WriteCommandRequest::new_sanitized(
+            serde_json::json!({
+                "booking_id": "123",
+                "room_id": "205",
+                "guest_phone": "0900000000"
+            }),
+            test_intent(),
+            test_summary("Check-in booking #123"),
+        )
+        .expect("request builds")
+        .with_primary_aggregate_key("booking:123")
+        .with_success_summary(CommandLedgerResultSummary::success("Command completed").unwrap());
+
+        let result = WriteCommandExecutor::new(pool.clone())
+            .execute(&ctx, request, |_tx| {
+                Box::pin(
+                    async move { Ok(serde_json::json!({ "ok": true, "internal": "raw replay" })) },
+                )
+            })
+            .await
+            .expect("command succeeds");
+
+        assert!(!result.replayed);
+
+        let row = sqlx::query(
+            "SELECT request_id, actor_type, actor_id, client_id, session_id, channel_id,
+                    issued_at, intent_json, summary_json, result_summary_json, response_json
+             FROM command_idempotency
+             WHERE command_name = ? AND idempotency_key = ?",
+        )
+        .bind(&ctx.command_name)
+        .bind(&ctx.idempotency_key)
+        .fetch_one(&pool)
+        .await
+        .expect("reads command row");
+
+        assert_eq!(
+            row.get::<Option<String>, _>("request_id"),
+            Some(ctx.request_id)
+        );
+        assert_eq!(row.get::<String, _>("actor_type"), "human");
+        assert_eq!(
+            row.get::<Option<String>, _>("actor_id"),
+            Some("admin-1".to_string())
+        );
+        assert_eq!(
+            row.get::<Option<String>, _>("client_id"),
+            Some("client-opaque".to_string())
+        );
+        assert_eq!(
+            row.get::<Option<String>, _>("session_id"),
+            Some("session-opaque".to_string())
+        );
+        assert_eq!(
+            row.get::<Option<String>, _>("channel_id"),
+            Some("tauri".to_string())
+        );
+        assert_eq!(
+            row.get::<Option<String>, _>("issued_at"),
+            Some(issued_at.to_rfc3339())
+        );
+
+        let intent_json = row.get::<String, _>("intent_json");
+        assert!(intent_json.contains("booking_id"));
+        assert!(!intent_json.contains("guest_phone"));
+
+        let summary_json = row.get::<String, _>("summary_json");
+        assert!(summary_json.contains("Check-in booking #123"));
+        assert!(!summary_json.contains("0900000000"));
+
+        let result_summary_json = row
+            .get::<Option<String>, _>("result_summary_json")
+            .expect("result summary is stored");
+        assert!(result_summary_json.contains("Command completed"));
+
+        assert!(row
+            .get::<Option<String>, _>("response_json")
+            .expect("raw replay response is stored")
+            .contains("raw replay"));
+    }
+
+    #[tokio::test]
+    async fn write_command_executor_hashes_full_payload_but_stores_sanitized_intent() {
+        let pool = test_pool().await;
+        let ctx = WriteCommandContext::for_internal_test(
+            "req-hash-split",
+            "idem-hash-split",
+            "test.hash_split",
+        );
+        let first = WriteCommandRequest::new_sanitized(
+            serde_json::json!({
+                "booking_id": "123",
+                "room_id": "205",
+                "guest_phone": "0900000000"
+            }),
+            test_intent(),
+            test_summary("Hash split"),
+        )
+        .expect("first request builds");
+        let second = WriteCommandRequest::new_sanitized(
+            serde_json::json!({
+                "booking_id": "123",
+                "room_id": "205",
+                "guest_phone": "0911111111"
+            }),
+            test_intent(),
+            test_summary("Hash split"),
+        )
+        .expect("second request builds");
+
+        WriteCommandExecutor::new(pool.clone())
+            .execute(&ctx, first, |_tx| {
+                Box::pin(async move { Ok(serde_json::json!({ "ok": true })) })
+            })
+            .await
+            .expect("first request succeeds");
+
+        let error = WriteCommandExecutor::new(pool.clone())
+            .execute(&ctx, second, |_tx| {
+                Box::pin(async move { Ok(serde_json::json!({ "unexpected": true })) })
+            })
+            .await
+            .expect_err("different hash payload conflicts");
+
+        assert_eq!(error.code, codes::CONFLICT_IDEMPOTENCY_HASH_MISMATCH);
+
+        let intent_json: String = sqlx::query_scalar(
+            "SELECT intent_json FROM command_idempotency
+             WHERE command_name = ? AND idempotency_key = ?",
+        )
+        .bind(&ctx.command_name)
+        .bind(&ctx.idempotency_key)
+        .fetch_one(&pool)
+        .await
+        .expect("reads intent");
+        assert!(!intent_json.contains("guest_phone"));
+        assert!(!intent_json.contains("0900000000"));
+    }
+
+    #[tokio::test]
+    async fn write_command_executor_retry_reclaim_preserves_original_operator_metadata() {
+        let pool = test_pool().await;
+        let mut original_ctx = WriteCommandContext::for_internal_test(
+            "req-original",
+            "idem-reclaim-preserve",
+            "test.reclaim_preserve",
+        );
+        original_ctx.actor_id = Some("original-actor".to_string());
+        let mut retry_ctx = original_ctx.clone();
+        retry_ctx.request_id = "req-retry".to_string();
+        retry_ctx.actor_id = Some("retry-actor".to_string());
+
+        let hash_payload = serde_json::json!({ "booking_id": "123" });
+        let original_request = WriteCommandRequest::new_sanitized(
+            hash_payload.clone(),
+            test_intent(),
+            test_summary("Original summary"),
+        )
+        .expect("original request builds")
+        .with_primary_aggregate_key("booking:123")
+        .with_lock_key_deriver(original_test_lock_keys);
+        let retry_request = WriteCommandRequest::new_sanitized(
+            hash_payload,
+            SanitizedLedgerIntent::from_pairs([
+                ("booking_id", serde_json::json!("999")),
+                ("room_id", serde_json::json!("999")),
+            ])
+            .expect("retry intent builds"),
+            test_summary("Retry summary"),
+        )
+        .expect("retry request builds")
+        .with_primary_aggregate_key("booking:999")
+        .with_lock_key_deriver(retry_test_lock_keys);
+
+        WriteCommandExecutor::new(pool.clone())
+            .execute(&original_ctx, original_request, |_tx| {
+                Box::pin(async move {
+                    Err(CommandError::system(codes::DB_LOCKED_RETRYABLE, "locked").retryable(true))
+                })
+            })
+            .await
+            .expect_err("first attempt is retryable");
+
+        WriteCommandExecutor::new(pool.clone())
+            .execute(&retry_ctx, retry_request, |_tx| {
+                Box::pin(async move { Ok(serde_json::json!({ "ok": true })) })
+            })
+            .await
+            .expect("retry succeeds");
+
+        let row = sqlx::query(
+            "SELECT request_id, actor_id, intent_json, summary_json, primary_aggregate_key,
+                    lock_keys_json, result_summary_json, error_summary_json
+             FROM command_idempotency
+             WHERE command_name = ? AND idempotency_key = ?",
+        )
+        .bind(&original_ctx.command_name)
+        .bind(&original_ctx.idempotency_key)
+        .fetch_one(&pool)
+        .await
+        .expect("reads row");
+
+        assert_eq!(
+            row.get::<Option<String>, _>("request_id"),
+            Some("req-original".to_string())
+        );
+        assert_eq!(
+            row.get::<Option<String>, _>("actor_id"),
+            Some("original-actor".to_string())
+        );
+
+        let intent_json = row.get::<String, _>("intent_json");
+        assert!(intent_json.contains("\"booking_id\":\"123\""));
+        assert!(intent_json.contains("\"room_id\":\"205\""));
+        assert!(!intent_json.contains("\"booking_id\":\"999\""));
+        assert!(!intent_json.contains("\"room_id\":\"999\""));
+
+        assert!(row
+            .get::<String, _>("summary_json")
+            .contains("Original summary"));
+        assert_eq!(
+            row.get::<Option<String>, _>("primary_aggregate_key"),
+            Some("booking:123".to_string())
+        );
+        assert_eq!(row.get::<String, _>("lock_keys_json"), "[\"booking:123\"]");
+        assert!(row
+            .get::<Option<String>, _>("result_summary_json")
+            .is_some());
+        assert_eq!(row.get::<Option<String>, _>("error_summary_json"), None);
+    }
+
+    #[tokio::test]
+    async fn write_command_executor_failure_summary_falls_back_for_unsafe_error_message() {
+        let pool = test_pool().await;
+        let ctx = WriteCommandContext::for_internal_test(
+            "req-unsafe-error-summary",
+            "idem-unsafe-error-summary",
+            "test.unsafe_error_summary",
+        );
+        let request = WriteCommandRequest::new_sanitized(
+            serde_json::json!({ "case": "unsafe_error" }),
+            SanitizedLedgerIntent::from_pairs([("case", serde_json::json!("safe"))]).unwrap(),
+            CommandLedgerSummary::new("Unsafe error summary test").unwrap(),
+        )
+        .expect("request builds");
+
+        let error = WriteCommandExecutor::new(pool.clone())
+            .execute(&ctx, request, |_tx| {
+                Box::pin(async move {
+                    Err(CommandError::system(
+                        codes::SYSTEM_INTERNAL_ERROR,
+                        "payment token leaked in raw error",
+                    ))
+                })
+            })
+            .await
+            .expect_err("command fails");
+        assert_eq!(error.code, codes::SYSTEM_INTERNAL_ERROR);
+
+        let error_summary_json: Option<String> = sqlx::query_scalar(
+            "SELECT error_summary_json FROM command_idempotency
+             WHERE command_name = ? AND idempotency_key = ?",
+        )
+        .bind(&ctx.command_name)
+        .bind(&ctx.idempotency_key)
+        .fetch_one(&pool)
+        .await
+        .expect("reads error summary");
+        let error_summary_json = error_summary_json.expect("safe error summary is stored");
+        assert!(!error_summary_json.contains("payment"));
+        assert!(!error_summary_json.contains("token"));
+        assert!(error_summary_json.contains("Command failed"));
     }
 
     #[tokio::test]
@@ -834,7 +1655,11 @@ mod tests {
             "idem-terminal-failure",
             "test.terminal_failure",
         );
-        let request = WriteCommandRequest::new(serde_json::json!({ "case": "terminal" }));
+        let request = WriteCommandRequest::new_low_risk(
+            serde_json::json!({ "case": "terminal" }),
+            "Terminal failure",
+        )
+        .expect("request builds");
         let attempts = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
 
         let first_attempts = attempts.clone();
@@ -910,7 +1735,11 @@ mod tests {
             "idem-retryable-failure",
             "test.retryable_failure",
         );
-        let request = WriteCommandRequest::new(serde_json::json!({ "case": "retryable" }));
+        let request = WriteCommandRequest::new_low_risk(
+            serde_json::json!({ "case": "retryable" }),
+            "Retryable failure",
+        )
+        .expect("request builds");
         let attempts = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
 
         let first_attempts = attempts.clone();
@@ -986,7 +1815,11 @@ mod tests {
             "idem-stale-claimant",
             "test.stale_claimant",
         );
-        let request = WriteCommandRequest::new(serde_json::json!({ "case": "stale" }));
+        let request = WriteCommandRequest::new_low_risk(
+            serde_json::json!({ "case": "stale" }),
+            "Stale claim",
+        )
+        .expect("request builds");
         let command_name = ctx.command_name.clone();
         let idempotency_key = ctx.idempotency_key.clone();
 
