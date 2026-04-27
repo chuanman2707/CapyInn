@@ -833,7 +833,6 @@ pub(crate) async fn run_migrations(pool: &Pool<Sqlite>) -> Result<(), sqlx::Erro
         set_schema_version(&mut tx, 13).await?;
         tx.commit().await?;
     }
-
     Ok(())
 }
 
