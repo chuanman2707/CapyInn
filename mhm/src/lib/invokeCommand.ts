@@ -3,6 +3,14 @@ import { invoke } from "@tauri-apps/api/core";
 import { createAppErrorException, normalizeAppError } from "./appError";
 import { captureCommandFailure, type MonitoringContext } from "./crashReporting/commandFailure";
 
+export function createIdempotencyKey(command: string): string {
+  const random =
+    typeof crypto !== "undefined" && "randomUUID" in crypto
+      ? crypto.randomUUID()
+      : `${Date.now()}-${Math.random().toString(16).slice(2)}`;
+  return `${command}:${random}`;
+}
+
 export async function invokeCommand<TResponse>(
   command: string,
   args?: Record<string, unknown>,

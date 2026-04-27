@@ -2,6 +2,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const invoke = vi.hoisted(() => vi.fn());
 const invokeCommand = vi.hoisted(() => vi.fn());
+const createIdempotencyKey = vi.hoisted(() => vi.fn());
 const createCorrelationId = vi.hoisted(() => vi.fn());
 
 vi.mock("@tauri-apps/api/core", () => ({
@@ -9,6 +10,7 @@ vi.mock("@tauri-apps/api/core", () => ({
 }));
 
 vi.mock("@/lib/invokeCommand", () => ({
+  createIdempotencyKey,
   invokeCommand,
 }));
 
@@ -22,6 +24,7 @@ describe("useHotelStore monitoring context", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     createCorrelationId.mockReturnValue("COR-1A2B3C4D");
+    createIdempotencyKey.mockReturnValue("group_checkin:IDEM-1");
     invokeCommand.mockResolvedValue(undefined);
     invoke.mockImplementation(async (command: string) => {
       if (command === "get_rooms") {
@@ -36,6 +39,10 @@ describe("useHotelStore monitoring context", () => {
           cleaning: 0,
           revenue_today: 0,
         };
+      }
+
+      if (command === "get_all_groups") {
+        return [];
       }
 
       throw new Error(`Unhandled invoke ${command}`);
@@ -146,6 +153,33 @@ describe("useHotelStore monitoring context", () => {
         monitoringContext: {
           settlement_mode: "hourly",
         },
+      },
+    );
+  });
+
+  it("passes an idempotency key for groupCheckIn", async () => {
+    const req = {
+      group_name: "Retry Group",
+      organizer_name: "Organizer",
+      room_ids: ["101", "102"],
+      master_room_id: "101",
+      guests_per_room: {},
+      nights: 1,
+      source: "walk-in",
+      paid_amount: 100000,
+    };
+
+    await useHotelStore.getState().groupCheckIn(req);
+
+    expect(createIdempotencyKey).toHaveBeenCalledWith("group_checkin");
+    expect(invokeCommand).toHaveBeenCalledWith(
+      "group_checkin",
+      {
+        req,
+        idempotencyKey: "group_checkin:IDEM-1",
+      },
+      {
+        correlationId: "COR-1A2B3C4D",
       },
     );
   });

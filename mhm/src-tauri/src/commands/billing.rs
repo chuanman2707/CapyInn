@@ -1,5 +1,10 @@
 use super::{emit_db_update, get_user_id, AppState};
-use crate::{queries::booking::billing_queries, services::booking::billing_service};
+use crate::{
+    app_error::{codes, CommandError, CommandResult},
+    command_idempotency::WriteCommandContext,
+    queries::booking::billing_queries,
+    services::booking::billing_service,
+};
 use tauri::State;
 
 // ═══════════════════════════════════════════════
@@ -14,18 +19,32 @@ pub async fn add_folio_line(
     category: String,
     description: String,
     amount: f64,
-) -> Result<crate::models::FolioLine, String> {
+    idempotency_key: String,
+) -> CommandResult<crate::models::FolioLine> {
     let user_id = get_user_id(&state);
-    let line = billing_service::add_folio_line(
+    let write_command_context = WriteCommandContext::for_scoped_command(
+        uuid::Uuid::new_v4().to_string(),
+        idempotency_key,
+        "add_folio_line",
+    )?;
+    let result = billing_service::add_folio_line_idempotent(
         &state.db,
+        &write_command_context,
         &booking_id,
         &category,
         &description,
         amount,
         user_id.as_deref(),
     )
-    .await
-    .map_err(|error| error.to_string())?;
+    .await?;
+    let line: crate::models::FolioLine =
+        serde_json::from_value(result.response).map_err(|error| {
+            CommandError::system(
+                codes::SYSTEM_INTERNAL_ERROR,
+                format!("Invalid add_folio_line idempotent response: {error}"),
+            )
+            .with_request_id(write_command_context.request_id.clone())
+        })?;
 
     emit_db_update(&app, "folio");
 

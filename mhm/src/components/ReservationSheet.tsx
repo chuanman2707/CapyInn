@@ -9,7 +9,7 @@ import { useInvoiceDialog } from "@/hooks/useInvoiceDialog";
 import { formatAppError } from "@/lib/appError";
 import { createCorrelationId } from "@/lib/correlationId";
 import { fmtNumber } from "@/lib/format";
-import { invokeCommand } from "@/lib/invokeCommand";
+import { createIdempotencyKey, invokeCommand } from "@/lib/invokeCommand";
 import { toast } from "sonner";
 import InvoiceDialog from "./InvoiceDialog";
 import type { EditableBooking } from "@/types";
@@ -126,6 +126,7 @@ export default function ReservationSheet({ open, onOpenChange, preSelectedRoomId
                         source,
                         notes: notes || null,
                     },
+                    idempotencyKey: createIdempotencyKey("create_reservation"),
                 }, {
                     correlationId,
                     monitoringContext: {

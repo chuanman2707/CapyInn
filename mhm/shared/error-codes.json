@@ -115,6 +115,11 @@
     "defaultMessage": "Thao tác này cần phê duyệt."
   },
   {
+    "code": "IDEMPOTENCY_KEY_REQUIRED",
+    "kind": "user",
+    "defaultMessage": "Idempotency key là bắt buộc."
+  },
+  {
     "code": "DB_LOCKED_RETRYABLE",
     "kind": "system",
     "defaultMessage": "Database đang bận, vui lòng thử lại."

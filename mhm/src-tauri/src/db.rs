@@ -785,6 +785,55 @@ pub(crate) async fn run_migrations(pool: &Pool<Sqlite>) -> Result<(), sqlx::Erro
         tx.commit().await?;
     }
 
+    // ── V13: Origin idempotency on ledger and folio rows ──
+    if current < 13 {
+        let mut tx = pool.begin().await?;
+
+        for alter in [
+            "ALTER TABLE transactions ADD COLUMN origin_idempotency_key TEXT",
+            "ALTER TABLE transactions ADD COLUMN origin_transaction_ordinal INTEGER NOT NULL DEFAULT 0",
+            "ALTER TABLE folio_lines ADD COLUMN origin_idempotency_key TEXT",
+            "ALTER TABLE folio_lines ADD COLUMN origin_line_ordinal INTEGER NOT NULL DEFAULT 0",
+        ] {
+            execute_compat_alter(&mut tx, alter).await?;
+        }
+
+        sqlx::query(
+            "CREATE UNIQUE INDEX IF NOT EXISTS transactions_origin_idem_uq
+             ON transactions (booking_id, origin_idempotency_key, origin_transaction_ordinal)
+             WHERE origin_idempotency_key IS NOT NULL AND origin_idempotency_key != ''",
+        )
+        .execute(&mut *tx)
+        .await?;
+
+        sqlx::query(
+            "CREATE UNIQUE INDEX IF NOT EXISTS folio_lines_origin_idem_uq
+             ON folio_lines (booking_id, origin_idempotency_key, origin_line_ordinal)
+             WHERE origin_idempotency_key IS NOT NULL AND origin_idempotency_key != ''",
+        )
+        .execute(&mut *tx)
+        .await?;
+
+        sqlx::query(
+            "CREATE UNIQUE INDEX IF NOT EXISTS transactions_origin_command_uq
+             ON transactions (origin_idempotency_key, origin_transaction_ordinal)
+             WHERE origin_idempotency_key IS NOT NULL AND origin_idempotency_key != ''",
+        )
+        .execute(&mut *tx)
+        .await?;
+
+        sqlx::query(
+            "CREATE UNIQUE INDEX IF NOT EXISTS folio_lines_origin_command_uq
+             ON folio_lines (origin_idempotency_key, origin_line_ordinal)
+             WHERE origin_idempotency_key IS NOT NULL AND origin_idempotency_key != ''",
+        )
+        .execute(&mut *tx)
+        .await?;
+
+        set_schema_version(&mut tx, 13).await?;
+        tx.commit().await?;
+    }
+
     Ok(())
 }
 
@@ -875,6 +924,22 @@ mod tests {
         .expect("checks command_idempotency column")
     }
 
+    async fn table_column_count(pool: &SqlitePool, table: &str, name: &str) -> i64 {
+        let sql = match table {
+            "transactions" => {
+                "SELECT COUNT(*) FROM pragma_table_info('transactions') WHERE name = ?"
+            }
+            "folio_lines" => "SELECT COUNT(*) FROM pragma_table_info('folio_lines') WHERE name = ?",
+            _ => panic!("unsupported table {table}"),
+        };
+
+        sqlx::query_scalar(sql)
+            .bind(name)
+            .fetch_one(pool)
+            .await
+            .expect("checks table column")
+    }
+
     async fn sqlite_index_count(pool: &SqlitePool, name: &str) -> i64 {
         sqlx::query_scalar(
             "SELECT COUNT(*)
@@ -917,6 +982,37 @@ mod tests {
         );
     }
 
+    async fn create_legacy_billing_tables_for_partial_upgrade(pool: &SqlitePool) {
+        sqlx::query(
+            "CREATE TABLE transactions (
+                id          TEXT PRIMARY KEY,
+                booking_id  TEXT NOT NULL,
+                amount      REAL NOT NULL,
+                type        TEXT NOT NULL,
+                note        TEXT,
+                created_at  TEXT NOT NULL
+            )",
+        )
+        .execute(pool)
+        .await
+        .expect("creates legacy transactions table");
+
+        sqlx::query(
+            "CREATE TABLE folio_lines (
+                id          TEXT PRIMARY KEY,
+                booking_id  TEXT NOT NULL,
+                category    TEXT NOT NULL,
+                description TEXT NOT NULL,
+                amount      REAL NOT NULL,
+                created_by  TEXT,
+                created_at  TEXT NOT NULL
+            )",
+        )
+        .execute(pool)
+        .await
+        .expect("creates legacy folio_lines table");
+    }
+
     #[tokio::test]
     async fn migrations_run_to_latest_schema_version() {
         let pool = SqlitePool::connect("sqlite::memory:")
@@ -931,7 +1027,7 @@ mod tests {
             .expect("reads final schema version")
             .get("version");
 
-        assert_eq!(version, 12);
+        assert_eq!(version, 13);
     }
 
     #[tokio::test]
@@ -1004,6 +1100,7 @@ mod tests {
         .execute(&pool)
         .await
         .expect("creates v10 command_idempotency table");
+        create_legacy_billing_tables_for_partial_upgrade(&pool).await;
 
         sqlx::query("UPDATE schema_version SET version = 10")
             .execute(&pool)
@@ -1023,7 +1120,7 @@ mod tests {
             .expect("reads final schema version")
             .get("version");
 
-        assert_eq!(version, 12);
+        assert_eq!(version, 13);
     }
 
     #[tokio::test]
@@ -1073,6 +1170,7 @@ mod tests {
         .execute(&pool)
         .await
         .expect("creates v11 command_idempotency table");
+        create_legacy_billing_tables_for_partial_upgrade(&pool).await;
 
         sqlx::query("UPDATE schema_version SET version = 11")
             .execute(&pool)
@@ -1089,6 +1187,101 @@ mod tests {
             .expect("reads final schema version")
             .get("version");
 
-        assert_eq!(version, 12);
+        assert_eq!(version, 13);
+    }
+
+    #[tokio::test]
+    async fn migration_v13_adds_origin_idempotency_columns_and_indexes() {
+        let pool = SqlitePool::connect("sqlite::memory:")
+            .await
+            .expect("connects in-memory sqlite");
+
+        run_migrations(&pool).await.expect("runs migrations");
+
+        assert_eq!(
+            table_column_count(&pool, "transactions", "origin_idempotency_key").await,
+            1
+        );
+        assert_eq!(
+            table_column_count(&pool, "transactions", "origin_transaction_ordinal").await,
+            1
+        );
+        assert_eq!(
+            table_column_count(&pool, "folio_lines", "origin_idempotency_key").await,
+            1
+        );
+        assert_eq!(
+            table_column_count(&pool, "folio_lines", "origin_line_ordinal").await,
+            1
+        );
+        assert_eq!(
+            sqlite_index_count(&pool, "transactions_origin_idem_uq").await,
+            1
+        );
+        assert_eq!(
+            sqlite_index_count(&pool, "folio_lines_origin_idem_uq").await,
+            1
+        );
+        assert_eq!(
+            sqlite_index_count(&pool, "transactions_origin_command_uq").await,
+            1
+        );
+        assert_eq!(
+            sqlite_index_count(&pool, "folio_lines_origin_command_uq").await,
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn migration_v13_keeps_legacy_null_origin_rows_valid() {
+        let pool = SqlitePool::connect("sqlite::memory:")
+            .await
+            .expect("connects in-memory sqlite");
+
+        run_migrations(&pool).await.expect("runs migrations");
+
+        sqlx::query(
+            "INSERT INTO rooms (id, name, type, floor, has_balcony, base_price, max_guests, extra_person_fee, status)
+             VALUES ('R1', 'Room R1', 'standard', 1, 0, 250000, 2, 0, 'vacant')",
+        )
+        .execute(&pool)
+        .await
+        .expect("seeds room");
+        sqlx::query(
+            "INSERT INTO guests (id, guest_type, full_name, doc_number, created_at)
+             VALUES ('G1', 'domestic', 'Legacy Guest', 'DOC1', '2026-04-27T08:00:00+07:00')",
+        )
+        .execute(&pool)
+        .await
+        .expect("seeds guest");
+        sqlx::query(
+            "INSERT INTO bookings (id, room_id, primary_guest_id, check_in_at, expected_checkout, nights, total_price, status, created_at)
+             VALUES ('B1', 'R1', 'G1', '2026-04-27', '2026-04-28', 1, 250000, 'active', '2026-04-27T08:00:00+07:00')",
+        )
+        .execute(&pool)
+        .await
+        .expect("seeds booking");
+
+        for id in ["T1", "T2"] {
+            sqlx::query(
+                "INSERT INTO transactions (id, booking_id, amount, type, note, created_at)
+                 VALUES (?, 'B1', 100000, 'payment', 'legacy', '2026-04-27T08:00:00+07:00')",
+            )
+            .bind(id)
+            .execute(&pool)
+            .await
+            .expect("legacy transaction with NULL origin remains valid");
+        }
+
+        for id in ["F1", "F2"] {
+            sqlx::query(
+                "INSERT INTO folio_lines (id, booking_id, category, description, amount, created_at)
+                 VALUES (?, 'B1', 'laundry', 'legacy', 20000, '2026-04-27T08:00:00+07:00')",
+            )
+            .bind(id)
+            .execute(&pool)
+            .await
+            .expect("legacy folio line with NULL origin remains valid");
+        }
     }
 }
