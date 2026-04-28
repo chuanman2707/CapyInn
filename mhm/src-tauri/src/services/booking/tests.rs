@@ -2316,6 +2316,29 @@ async fn cancel_reservation_releases_calendar_and_keeps_fee_record() {
 }
 
 #[tokio::test]
+async fn cancel_reservation_returns_invalid_state_when_booking_is_not_booked() {
+    let pool = test_pool().await;
+    seed_room(&pool, "R-CAS-CANCEL").await.unwrap();
+    seed_booked_reservation(&pool, "B-CAS-CANCEL", "R-CAS-CANCEL")
+        .await
+        .unwrap();
+
+    sqlx::query("UPDATE bookings SET status = 'active' WHERE id = ?")
+        .bind("B-CAS-CANCEL")
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    let error = reservation_lifecycle::cancel_reservation(&pool, "B-CAS-CANCEL")
+        .await
+        .expect_err("stale reservation should fail");
+
+    assert!(error
+        .to_string()
+        .contains(crate::app_error::codes::CONFLICT_INVALID_STATE_TRANSITION));
+}
+
+#[tokio::test]
 async fn do_create_reservation_returns_service_booking_and_leaves_room_vacant() {
     let pool = test_pool().await;
     seed_room(&pool, "R162").await.unwrap();
@@ -2516,6 +2539,29 @@ async fn confirm_reservation_rejects_no_show_calendar_rows() {
 }
 
 #[tokio::test]
+async fn confirm_reservation_returns_invalid_state_when_booking_is_not_booked() {
+    let pool = test_pool().await;
+    seed_room(&pool, "R-CAS-CONFIRM").await.unwrap();
+    seed_booked_reservation(&pool, "B-CAS-CONFIRM", "R-CAS-CONFIRM")
+        .await
+        .unwrap();
+
+    sqlx::query("UPDATE bookings SET status = 'cancelled' WHERE id = ?")
+        .bind("B-CAS-CONFIRM")
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    let error = reservation_lifecycle::confirm_reservation(&pool, "B-CAS-CONFIRM")
+        .await
+        .expect_err("stale reservation should fail");
+
+    assert!(error
+        .to_string()
+        .contains(crate::app_error::codes::CONFLICT_INVALID_STATE_TRANSITION));
+}
+
+#[tokio::test]
 async fn confirm_reservation_late_arrival_persists_effective_checkout() {
     let pool = test_pool().await;
     seed_room(&pool, "R165A").await.unwrap();
@@ -2708,6 +2754,37 @@ async fn modify_reservation_rejects_inconsistent_nights_input() {
         error,
         crate::domain::booking::BookingError::Validation(_)
     ));
+}
+
+#[tokio::test]
+async fn modify_reservation_returns_invalid_state_when_booking_is_not_booked() {
+    let pool = test_pool().await;
+    seed_room(&pool, "R-CAS-MOD").await.unwrap();
+    seed_booked_reservation(&pool, "B-CAS-MOD", "R-CAS-MOD")
+        .await
+        .unwrap();
+
+    sqlx::query("UPDATE bookings SET status = 'cancelled' WHERE id = ?")
+        .bind("B-CAS-MOD")
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    let error = reservation_lifecycle::modify_reservation(
+        &pool,
+        crate::models::ModifyReservationRequest {
+            booking_id: "B-CAS-MOD".to_string(),
+            new_check_in_date: "2026-04-24".to_string(),
+            new_check_out_date: "2026-04-26".to_string(),
+            new_nights: 2,
+        },
+    )
+    .await
+    .expect_err("stale reservation should fail");
+
+    assert!(error
+        .to_string()
+        .contains(crate::app_error::codes::CONFLICT_INVALID_STATE_TRANSITION));
 }
 
 #[tokio::test]
