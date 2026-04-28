@@ -489,6 +489,160 @@ impl WriteCommandExecutor {
         }
     }
 
+    pub async fn execute_atomic<F>(
+        &self,
+        ctx: &WriteCommandContext,
+        request: WriteCommandRequest,
+        service: F,
+    ) -> CommandResult<IdempotentCommandResult<serde_json::Value>>
+    where
+        F: for<'tx> FnOnce(&'tx mut Transaction<'_, Sqlite>) -> WriteCommandServiceFuture<'tx>,
+    {
+        let prepared = prepare_write_command_request(request)?;
+        let now = Utc::now();
+        let now_string = now.to_rfc3339();
+        let lease_expires_at = (now + chrono::Duration::seconds(CLAIM_LEASE_SECONDS)).to_rfc3339();
+        let claim_token = uuid::Uuid::new_v4().to_string();
+
+        let mut tx = self
+            .pool
+            .begin_with("BEGIN IMMEDIATE")
+            .await
+            .map_err(system_error)?;
+
+        if let Some(row) = fetch_existing_claim_tx(&mut tx, ctx).await? {
+            let outcome = resolve_existing_claim_row(ctx, &prepared.request_hash, row);
+            tx.rollback().await.map_err(system_error)?;
+            return outcome;
+        }
+
+        sqlx::query(
+            "INSERT INTO command_idempotency (
+                idempotency_key,
+                command_name,
+                request_id,
+                actor_type,
+                actor_id,
+                client_id,
+                session_id,
+                channel_id,
+                issued_at,
+                request_hash,
+                intent_json,
+                summary_json,
+                primary_aggregate_key,
+                lock_keys_json,
+                status,
+                claim_token,
+                response_json,
+                result_summary_json,
+                error_code,
+                error_json,
+                error_summary_json,
+                retryable,
+                lease_expires_at,
+                created_at,
+                updated_at,
+                completed_at,
+                last_attempt_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        )
+        .bind(&ctx.idempotency_key)
+        .bind(&ctx.command_name)
+        .bind(&ctx.request_id)
+        .bind(actor_type_as_str(ctx.actor_type))
+        .bind(&ctx.actor_id)
+        .bind(&ctx.client_id)
+        .bind(&ctx.session_id)
+        .bind(&ctx.channel_id)
+        .bind(ctx.issued_at.to_rfc3339())
+        .bind(&prepared.request_hash)
+        .bind(&prepared.intent_json)
+        .bind(&prepared.summary_json)
+        .bind(&prepared.primary_aggregate_key)
+        .bind(&prepared.lock_keys_json)
+        .bind(CommandStatus::InProgress.as_str())
+        .bind(&claim_token)
+        .bind(Option::<String>::None)
+        .bind(Option::<String>::None)
+        .bind(Option::<String>::None)
+        .bind(Option::<String>::None)
+        .bind(Option::<String>::None)
+        .bind(0_i64)
+        .bind(&lease_expires_at)
+        .bind(&now_string)
+        .bind(&now_string)
+        .bind(Option::<String>::None)
+        .bind(&now_string)
+        .execute(&mut *tx)
+        .await
+        .map_err(system_error)?;
+
+        let response = match service(&mut tx).await {
+            Ok(response) => response,
+            Err(mut error) => {
+                tx.rollback().await.map_err(system_error)?;
+                error.request_id = Some(ctx.request_id.clone());
+                return Err(error);
+            }
+        };
+
+        let response_json = stable_json_string(&response)?;
+        let completed_at = chrono::Utc::now().to_rfc3339();
+        let completion_result = sqlx::query(
+            "UPDATE command_idempotency
+             SET status = ?,
+                 response_json = ?,
+                 result_summary_json = ?,
+                 error_code = NULL,
+                 error_json = NULL,
+                 error_summary_json = NULL,
+                 retryable = 0,
+                 lease_expires_at = NULL,
+                 updated_at = ?,
+                 completed_at = ?
+             WHERE command_name = ?
+               AND idempotency_key = ?
+               AND status = ?
+               AND claim_token = ?",
+        )
+        .bind(CommandStatus::Completed.as_str())
+        .bind(&response_json)
+        .bind(&prepared.result_summary_json)
+        .bind(&completed_at)
+        .bind(&completed_at)
+        .bind(&ctx.command_name)
+        .bind(&ctx.idempotency_key)
+        .bind(CommandStatus::InProgress.as_str())
+        .bind(&claim_token)
+        .execute(&mut *tx)
+        .await;
+
+        let completion_result = match completion_result {
+            Ok(result) => result,
+            Err(error) => {
+                let _ = tx.rollback().await;
+                return Err(system_error(error).with_request_id(ctx.request_id.clone()));
+            }
+        };
+
+        if completion_result.rows_affected() != 1 {
+            tx.rollback().await.map_err(system_error)?;
+            return Err(CommandError::system(
+                codes::SYSTEM_INTERNAL_ERROR,
+                "Failed to complete claimed idempotency row",
+            )
+            .with_request_id(ctx.request_id.clone()));
+        }
+
+        tx.commit().await.map_err(system_error)?;
+
+        Ok(IdempotentCommandResult {
+            response,
+            replayed: false,
+        })
+    }
+
     async fn claim_or_reclaim(
         &self,
         ctx: &WriteCommandContext,
@@ -743,6 +897,34 @@ impl WriteCommandExecutor {
 }
 
 impl WriteCommandContext {
+    pub fn for_scoped_command(
+        request_id: impl Into<String>,
+        idempotency_key: impl Into<String>,
+        command_name: impl Into<String>,
+    ) -> CommandResult<Self> {
+        let request_id = request_id.into();
+        let idempotency_key = idempotency_key.into().trim().to_string();
+        if idempotency_key.is_empty() {
+            return Err(CommandError::user(
+                codes::IDEMPOTENCY_KEY_REQUIRED,
+                "Idempotency key is required",
+            )
+            .with_request_id(request_id.clone()));
+        }
+
+        Ok(Self {
+            request_id,
+            idempotency_key,
+            command_name: command_name.into(),
+            actor_id: None,
+            actor_type: ActorType::Human,
+            client_id: None,
+            session_id: None,
+            channel_id: None,
+            issued_at: chrono::Local::now().fixed_offset(),
+        })
+    }
+
     pub fn new_internal(command_name: &str) -> Self {
         Self {
             request_id: uuid::Uuid::new_v4().to_string(),
@@ -804,8 +986,31 @@ pub async fn set_crash_reporting_preference_idempotent(
         .await
 }
 
+fn canonicalize_json_value(value: serde_json::Value) -> serde_json::Value {
+    match value {
+        serde_json::Value::Object(map) => {
+            let mut entries = map.into_iter().collect::<Vec<_>>();
+            entries.sort_by(|(left, _), (right, _)| left.cmp(right));
+
+            let mut canonical = serde_json::Map::new();
+            for (key, value) in entries {
+                canonical.insert(key, canonicalize_json_value(value));
+            }
+
+            serde_json::Value::Object(canonical)
+        }
+        serde_json::Value::Array(values) => serde_json::Value::Array(
+            values
+                .into_iter()
+                .map(canonicalize_json_value)
+                .collect::<Vec<_>>(),
+        ),
+        primitive => primitive,
+    }
+}
+
 fn stable_json_string(value: &serde_json::Value) -> CommandResult<String> {
-    serde_json::to_string(value).map_err(system_error)
+    serde_json::to_string(&canonicalize_json_value(value.clone())).map_err(system_error)
 }
 
 #[cfg(test)]
@@ -922,6 +1127,22 @@ async fn fetch_existing_claim(
     .map_err(system_error)
 }
 
+async fn fetch_existing_claim_tx(
+    tx: &mut Transaction<'_, Sqlite>,
+    ctx: &WriteCommandContext,
+) -> CommandResult<Option<SqliteRow>> {
+    sqlx::query(
+        "SELECT request_hash, status, response_json, error_json, lease_expires_at
+         FROM command_idempotency
+         WHERE command_name = ? AND idempotency_key = ?",
+    )
+    .bind(&ctx.command_name)
+    .bind(&ctx.idempotency_key)
+    .fetch_optional(&mut **tx)
+    .await
+    .map_err(system_error)
+}
+
 fn existing_claim_is_reclaimable(
     row: &SqliteRow,
     request_hash: &str,
@@ -997,7 +1218,7 @@ fn resolve_existing_claim_row(
     }
 }
 
-fn system_error(error: impl std::fmt::Display) -> CommandError {
+pub(crate) fn system_error(error: impl std::fmt::Display) -> CommandError {
     CommandError::system(codes::SYSTEM_INTERNAL_ERROR, error.to_string())
 }
 
@@ -1024,6 +1245,147 @@ mod tests {
             .expect("failed to run migrations");
 
         pool
+    }
+
+    #[test]
+    fn write_command_context_rejects_blank_idempotency_key() {
+        let error =
+            WriteCommandContext::for_scoped_command("req-blank", "   ", "create_reservation")
+                .expect_err("blank key should be rejected");
+
+        assert_eq!(error.code, codes::IDEMPOTENCY_KEY_REQUIRED);
+    }
+
+    #[test]
+    fn canonical_request_hash_sorts_object_keys_recursively() {
+        let first = serde_json::json!({
+            "schema": "reservation.create.v1",
+            "payload": {
+                "room_id": "R1",
+                "dates": {
+                    "check_out": "2026-04-28",
+                    "check_in": "2026-04-27"
+                }
+            }
+        });
+        let second = serde_json::json!({
+            "payload": {
+                "dates": {
+                    "check_in": "2026-04-27",
+                    "check_out": "2026-04-28"
+                },
+                "room_id": "R1"
+            },
+            "schema": "reservation.create.v1"
+        });
+
+        assert_eq!(
+            stable_request_hash(&first).expect("hashes first payload"),
+            stable_request_hash(&second).expect("hashes second payload")
+        );
+    }
+
+    #[test]
+    fn canonical_request_hash_keeps_array_order_meaningful() {
+        let first = serde_json::json!({
+            "schema": "example.v1",
+            "room_ids": ["R1", "R2"]
+        });
+        let second = serde_json::json!({
+            "schema": "example.v1",
+            "room_ids": ["R2", "R1"]
+        });
+
+        assert_ne!(
+            stable_request_hash(&first).expect("hashes first payload"),
+            stable_request_hash(&second).expect("hashes second payload")
+        );
+    }
+
+    #[tokio::test]
+    async fn execute_atomic_rolls_back_claim_when_service_fails() {
+        let pool = test_pool().await;
+        let ctx = WriteCommandContext::for_internal_test(
+            "req-atomic-fail",
+            "idem-atomic-fail",
+            "test.atomic_fail",
+        );
+        let request = WriteCommandRequest::new_low_risk(
+            serde_json::json!({ "schema": "test.atomic.v1", "value": "fail" }),
+            "Atomic failure test",
+        )
+        .expect("builds request");
+
+        let error = WriteCommandExecutor::new(pool.clone())
+            .execute_atomic(&ctx, request, |_tx| {
+                Box::pin(async move {
+                    Err(CommandError::system(
+                        codes::SYSTEM_INTERNAL_ERROR,
+                        "forced failure",
+                    ))
+                })
+            })
+            .await
+            .expect_err("service failure should return error");
+
+        assert_eq!(error.code, codes::SYSTEM_INTERNAL_ERROR);
+
+        let count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM command_idempotency
+             WHERE command_name = ? AND idempotency_key = ?",
+        )
+        .bind(&ctx.command_name)
+        .bind(&ctx.idempotency_key)
+        .fetch_one(&pool)
+        .await
+        .expect("counts command rows");
+
+        assert_eq!(count, 0);
+    }
+
+    #[tokio::test]
+    async fn execute_atomic_replay_does_not_run_service_twice() {
+        let pool = test_pool().await;
+        sqlx::query("CREATE TABLE atomic_counter (id INTEGER PRIMARY KEY)")
+            .execute(&pool)
+            .await
+            .expect("creates counter table");
+        let ctx = WriteCommandContext::for_internal_test(
+            "req-atomic-replay",
+            "idem-atomic-replay",
+            "test.atomic_replay",
+        );
+        let request = WriteCommandRequest::new_low_risk(
+            serde_json::json!({ "schema": "test.atomic.v1", "value": "ok" }),
+            "Atomic replay test",
+        )
+        .expect("builds request");
+
+        let first = WriteCommandExecutor::new(pool.clone())
+            .execute_atomic(&ctx, request.clone(), |tx| {
+                Box::pin(async move {
+                    sqlx::query("INSERT INTO atomic_counter (id) VALUES (1)")
+                        .execute(&mut **tx)
+                        .await
+                        .map_err(system_error)?;
+                    Ok(serde_json::json!({ "ok": true }))
+                })
+            })
+            .await
+            .expect("first command completes");
+
+        let second = WriteCommandExecutor::new(pool.clone())
+            .execute_atomic(&ctx, request, |_tx| {
+                Box::pin(async move {
+                    panic!("business logic must not run on replay");
+                })
+            })
+            .await
+            .expect("second command replays");
+
+        assert!(!first.replayed);
+        assert!(second.replayed);
+        assert_eq!(first.response, second.response);
     }
 
     #[test]

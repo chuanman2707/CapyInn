@@ -6,6 +6,7 @@ use crate::{
         record_command_failure, record_command_failure_with_db_group, CommandError, CommandResult,
         EffectiveCorrelationId,
     },
+    command_idempotency::WriteCommandContext,
     db_error_monitoring::{
         classify_db_error_code, classify_db_failure, inject_db_error_group,
         is_room_unavailable_conflict_message, DbErrorGroup, MonitoredDbFailure,
@@ -293,6 +294,7 @@ fn map_reservation_write_error(
     }
 }
 
+#[allow(dead_code)]
 fn map_create_reservation_error(
     command_name: &str,
     effective_correlation_id: &EffectiveCorrelationId,
@@ -349,11 +351,37 @@ fn unauthenticated_create_reservation_error(
     command_error
 }
 
+fn map_create_reservation_command_error_db_group(
+    command_error: &CommandError,
+) -> Option<DbErrorGroup> {
+    match command_error.code.as_str() {
+        codes::DB_LOCKED_RETRYABLE => Some(DbErrorGroup::Locked),
+        codes::CONFLICT_ROOM_UNAVAILABLE => Some(DbErrorGroup::Constraint),
+        codes::ROOM_NOT_FOUND | codes::BOOKING_NOT_FOUND => Some(DbErrorGroup::NotFound),
+        _ => None,
+    }
+}
+
+fn record_create_reservation_command_failure(
+    effective_correlation_id: &EffectiveCorrelationId,
+    command_error: &CommandError,
+    context: Value,
+) {
+    record_command_failure_with_db_group(
+        "create_reservation",
+        command_error,
+        &effective_correlation_id.value,
+        map_create_reservation_command_error_db_group(command_error),
+        context,
+    );
+}
+
 #[tauri::command]
 pub async fn create_reservation(
     state: State<'_, AppState>,
     app: tauri::AppHandle,
     req: CreateReservationRequest,
+    idempotency_key: String,
     correlation_id: Option<String>,
 ) -> CommandResult<Booking> {
     let effective_correlation_id = normalize_correlation_id(correlation_id);
@@ -374,24 +402,46 @@ pub async fn create_reservation(
         ));
     }
 
-    let booking = reservation_lifecycle::create_reservation(&state.db, req)
-        .await
-        .map_err(|error| {
-            let (command_error, db_error_group) = map_create_reservation_error(
-                "create_reservation",
-                &effective_correlation_id,
-                error,
-                error_context.clone(),
-            );
-            record_command_failure_with_db_group(
-                "create_reservation",
-                &command_error,
-                &effective_correlation_id.value,
-                db_error_group,
-                error_context.clone(),
-            );
-            command_error
-        })?;
+    let write_command_context = WriteCommandContext::for_scoped_command(
+        effective_correlation_id.value.clone(),
+        idempotency_key,
+        "create_reservation",
+    )
+    .inspect_err(|command_error| {
+        record_create_reservation_command_failure(
+            &effective_correlation_id,
+            command_error,
+            error_context.clone(),
+        );
+    })?;
+
+    let create_result = reservation_lifecycle::create_reservation_idempotent(
+        &state.db,
+        &write_command_context,
+        req,
+    )
+    .await
+    .inspect_err(|command_error| {
+        record_create_reservation_command_failure(
+            &effective_correlation_id,
+            command_error,
+            error_context.clone(),
+        );
+    })?;
+
+    let booking: Booking = serde_json::from_value(create_result.response).map_err(|error| {
+        let command_error = CommandError::system(
+            codes::SYSTEM_INTERNAL_ERROR,
+            format!("Invalid create_reservation idempotent response: {error}"),
+        )
+        .with_request_id(effective_correlation_id.value.clone());
+        record_create_reservation_command_failure(
+            &effective_correlation_id,
+            &command_error,
+            error_context.clone(),
+        );
+        command_error
+    })?;
 
     log::info!(
         "create_reservation success correlation_id={} source={:?} booking_id={} room_id={}",
@@ -663,12 +713,12 @@ pub async fn get_rooms_availability(
 #[cfg(test)]
 mod tests {
     use super::{
-        map_create_reservation_error, reservation_failure_context,
-        unauthenticated_create_reservation_error,
+        map_create_reservation_command_error_db_group, map_create_reservation_error,
+        reservation_failure_context, unauthenticated_create_reservation_error,
     };
     use crate::app_error::{
-        codes, record_command_failure_with_db_group, AppErrorKind, CorrelationIdSource,
-        EffectiveCorrelationId,
+        codes, record_command_failure_with_db_group, AppErrorKind, CommandError,
+        CorrelationIdSource, EffectiveCorrelationId,
     };
     use crate::db_error_monitoring::DbErrorGroup;
     use crate::domain::booking::BookingError;
@@ -839,6 +889,32 @@ mod tests {
         assert!(error.support_id.is_some());
         assert!(error.retryable);
         assert_eq!(db_error_group, Some(DbErrorGroup::Locked));
+    }
+
+    #[test]
+    fn map_create_reservation_command_error_db_group_maps_expected_codes() {
+        let mk = |code: &'static str| CommandError::user(code, "x");
+
+        assert_eq!(
+            map_create_reservation_command_error_db_group(&mk(codes::DB_LOCKED_RETRYABLE)),
+            Some(DbErrorGroup::Locked)
+        );
+        assert_eq!(
+            map_create_reservation_command_error_db_group(&mk(codes::CONFLICT_ROOM_UNAVAILABLE)),
+            Some(DbErrorGroup::Constraint)
+        );
+        assert_eq!(
+            map_create_reservation_command_error_db_group(&mk(codes::ROOM_NOT_FOUND)),
+            Some(DbErrorGroup::NotFound)
+        );
+        assert_eq!(
+            map_create_reservation_command_error_db_group(&mk(codes::BOOKING_NOT_FOUND)),
+            Some(DbErrorGroup::NotFound)
+        );
+        assert_eq!(
+            map_create_reservation_command_error_db_group(&mk(codes::SYSTEM_INTERNAL_ERROR)),
+            None
+        );
     }
 
     #[test]

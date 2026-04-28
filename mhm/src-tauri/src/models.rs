@@ -260,7 +260,7 @@ pub struct RevenueStats {
     pub daily_revenue: Vec<DailyRevenue>,
 }
 
-#[derive(Debug, Serialize, Clone)]
+#[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct FolioLine {
     pub id: String,
     pub booking_id: String,

@@ -5,6 +5,7 @@ use crate::{
         codes, correlation_context, log_system_error, normalize_correlation_id, CommandError,
         CommandResult, EffectiveCorrelationId,
     },
+    command_idempotency::WriteCommandContext,
     db_error_monitoring::{classify_db_error_code, is_room_unavailable_conflict_message},
     domain::booking::BookingError,
     models::*,
@@ -208,15 +209,10 @@ pub async fn group_checkin(
     state: State<'_, AppState>,
     app: tauri::AppHandle,
     req: GroupCheckinRequest,
+    idempotency_key: String,
     correlation_id: Option<String>,
 ) -> CommandResult<BookingGroup> {
     let effective_correlation_id = normalize_correlation_id(correlation_id);
-    let error_context = json!({
-        "group_name": req.group_name.clone(),
-        "room_count": req.room_ids.len(),
-        "nights": req.nights,
-        "master_room_id": req.master_room_id.clone(),
-    });
     log::info!(
         "group_checkin start correlation_id={} source={:?} group_name={} room_count={} nights={}",
         effective_correlation_id.value,
@@ -225,16 +221,25 @@ pub async fn group_checkin(
         req.room_ids.len(),
         req.nights
     );
-    let group = group_lifecycle::group_checkin(&state.db, get_user_id(&state), req)
-        .await
-        .map_err(|error| {
-            map_group_error(
-                "group_checkin",
-                &effective_correlation_id,
-                error,
-                error_context,
-            )
-        })?;
+    let write_command_context = WriteCommandContext::for_scoped_command(
+        effective_correlation_id.value.clone(),
+        idempotency_key,
+        "group_checkin",
+    )?;
+    let result = group_lifecycle::group_checkin_idempotent(
+        &state.db,
+        get_user_id(&state),
+        &write_command_context,
+        req,
+    )
+    .await?;
+    let group: BookingGroup = serde_json::from_value(result.response).map_err(|error| {
+        CommandError::system(
+            codes::SYSTEM_INTERNAL_ERROR,
+            format!("Invalid group_checkin idempotent response: {error}"),
+        )
+        .with_request_id(write_command_context.request_id.clone())
+    })?;
     log::info!(
         "group_checkin success correlation_id={} source={:?} group_id={} total_rooms={}",
         effective_correlation_id.value,

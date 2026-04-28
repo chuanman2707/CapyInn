@@ -31,6 +31,7 @@ pub mod codes {
     pub const AUDIT_DATE_ALREADY_RUN: &str = "AUDIT_DATE_ALREADY_RUN";
     pub const WRITE_TOOL_DISABLED: &str = "WRITE_TOOL_DISABLED";
     pub const APPROVAL_REQUIRED: &str = "APPROVAL_REQUIRED";
+    pub const IDEMPOTENCY_KEY_REQUIRED: &str = "IDEMPOTENCY_KEY_REQUIRED";
     pub const DB_LOCKED_RETRYABLE: &str = "DB_LOCKED_RETRYABLE";
     pub const CONFLICT_ROOM_UNAVAILABLE: &str = "CONFLICT_ROOM_UNAVAILABLE";
     pub const CONFLICT_IDEMPOTENCY_HASH_MISMATCH: &str = "CONFLICT_IDEMPOTENCY_HASH_MISMATCH";
@@ -62,6 +63,7 @@ pub mod codes {
         AUDIT_DATE_ALREADY_RUN,
         WRITE_TOOL_DISABLED,
         APPROVAL_REQUIRED,
+        IDEMPOTENCY_KEY_REQUIRED,
         DB_LOCKED_RETRYABLE,
         CONFLICT_ROOM_UNAVAILABLE,
         CONFLICT_IDEMPOTENCY_HASH_MISMATCH,
@@ -511,6 +513,11 @@ mod tests {
                 codes::APPROVAL_REQUIRED,
                 AppErrorKind::User,
                 "Thao tác này cần phê duyệt.",
+            ),
+            (
+                codes::IDEMPOTENCY_KEY_REQUIRED,
+                AppErrorKind::User,
+                "Idempotency key là bắt buộc.",
             ),
             (
                 codes::DB_LOCKED_RETRYABLE,

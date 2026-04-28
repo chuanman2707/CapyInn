@@ -1,7 +1,7 @@
 import { create } from "zustand";
 import { invoke } from "@tauri-apps/api/core";
 import { createCorrelationId } from "@/lib/correlationId";
-import { invokeCommand } from "@/lib/invokeCommand";
+import { createIdempotencyKey, invokeCommand } from "@/lib/invokeCommand";
 import type {
   CheckInGuestInput,
   DashboardStats,
@@ -212,7 +212,11 @@ export const useHotelStore = create<HotelStore>((set, get) => {
       beginAction();
       try {
         const correlationId = createCorrelationId();
-        await invokeCommand("group_checkin", { req }, { correlationId });
+        await invokeCommand(
+          "group_checkin",
+          { req, idempotencyKey: createIdempotencyKey("group_checkin") },
+          { correlationId },
+        );
         await get().fetchRooms();
         await get().fetchStats();
         await get().fetchGroups();

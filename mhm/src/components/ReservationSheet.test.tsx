@@ -11,6 +11,7 @@ import {
 
 const invoke = vi.hoisted(() => vi.fn());
 const invokeCommand = vi.hoisted(() => vi.fn());
+const createIdempotencyKey = vi.hoisted(() => vi.fn());
 const createCorrelationId = vi.hoisted(() => vi.fn());
 const toastError = vi.hoisted(() => vi.fn());
 const toastSuccess = vi.hoisted(() => vi.fn());
@@ -24,6 +25,7 @@ vi.mock("@tauri-apps/api/core", () => ({
 }));
 
 vi.mock("@/lib/invokeCommand", () => ({
+  createIdempotencyKey,
   invokeCommand,
 }));
 
@@ -110,6 +112,7 @@ describe("ReservationSheet", () => {
     vi.clearAllMocks();
     invoke.mockResolvedValue(undefined);
     invokeCommand.mockResolvedValue(undefined);
+    createIdempotencyKey.mockReturnValue("create_reservation:IDEM-1");
     createCorrelationId.mockReturnValue("COR-5E6F7A8B");
   });
 
@@ -161,6 +164,7 @@ describe("ReservationSheet", () => {
             source: "zalo",
             notes: "Khách thích tầng cao",
           },
+          idempotencyKey: "create_reservation:IDEM-1",
         },
         {
           correlationId: "COR-5E6F7A8B",
@@ -204,6 +208,7 @@ describe("ReservationSheet", () => {
             room_id: "R101",
             guest_name: "Nguyen Van A",
           }),
+          idempotencyKey: "create_reservation:IDEM-1",
         }),
         {
           correlationId: "COR-5E6F7A8B",
