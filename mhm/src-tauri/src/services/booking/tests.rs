@@ -2703,6 +2703,42 @@ async fn check_in_posts_charge_and_marks_room_occupied() {
 }
 
 #[tokio::test]
+async fn check_in_rolls_back_when_room_status_changes_before_guarded_room_update() {
+    let pool = test_pool().await;
+    seed_room(&pool, "R-CAS-CHECKIN").await.unwrap();
+    seed_pricing_rule(&pool, "standard", 100_000.0)
+        .await
+        .unwrap();
+
+    sqlx::query(
+        "CREATE TRIGGER occupy_room_after_booking_insert
+         AFTER INSERT ON bookings
+         WHEN NEW.room_id = 'R-CAS-CHECKIN'
+         BEGIN
+           UPDATE rooms SET status = 'occupied' WHERE id = NEW.room_id;
+         END",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    let error = stay_lifecycle::check_in(&pool, minimal_checkin_request("R-CAS-CHECKIN"), None)
+        .await
+        .expect_err("guarded room update should catch stale state");
+
+    assert!(error
+        .to_string()
+        .contains(crate::app_error::codes::CONFLICT_INVALID_STATE_TRANSITION));
+
+    let booking_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM bookings WHERE room_id = ?")
+        .bind("R-CAS-CHECKIN")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(booking_count, 0);
+}
+
+#[tokio::test]
 async fn check_out_settles_same_day_actual_nights_to_minimum_one_night() {
     let pool = test_pool().await;
     seed_room(&pool, "R410").await.unwrap();

@@ -13,7 +13,8 @@ use super::{
     billing_service::{record_charge_tx, record_payment_tx},
     guest_service::{create_guest_manifest, link_booking_guests},
     support::{
-        begin_immediate_tx, begin_tx, fetch_booking, insert_room_calendar_rows,
+        begin_immediate_tx, begin_tx, ensure_one_row_affected, fetch_booking,
+        insert_room_calendar_rows, invalid_state_transition, lookup_booking_room_id,
         map_room_calendar_insert_error, parse_booking_datetime, read_f64_or_zero,
     },
 };
@@ -25,12 +26,30 @@ fn mark_write_db_error(error: BookingError) -> BookingError {
     }
 }
 
+fn ensure_locked_room_matches_booking(
+    locked_room_id: &str,
+    current_room_id: &str,
+    message: impl AsRef<str>,
+) -> BookingResult<()> {
+    if locked_room_id == current_room_id {
+        Ok(())
+    } else {
+        Err(invalid_state_transition(message))
+    }
+}
+
 pub async fn check_in(
     pool: &Pool<Sqlite>,
     req: CheckInRequest,
     user_id: Option<String>,
 ) -> BookingResult<Booking> {
     validate_check_in_request(&req)?;
+
+    let _lock_guard = crate::aggregate_locks::global_manager()
+        .acquire([crate::aggregate_locks::room_key(&req.room_id)
+            .map_err(|error| BookingError::validation(error.message))?])
+        .await
+        .map_err(|error| BookingError::validation(error.message))?;
 
     let now = Local::now();
     let check_in_at = now.to_rfc3339();
@@ -157,13 +176,15 @@ pub async fn check_in(
     .await
     .map_err(mark_write_db_error)?;
 
-    sqlx::query("UPDATE rooms SET status = ? WHERE id = ?")
+    let result = sqlx::query("UPDATE rooms SET status = ? WHERE id = ? AND status = ?")
         .bind(status::room::OCCUPIED)
         .bind(&req.room_id)
+        .bind(status::room::VACANT)
         .execute(&mut *tx)
         .await
         .map_err(BookingError::from)
         .map_err(mark_write_db_error)?;
+    ensure_one_row_affected(result, format!("room {} is no longer vacant", req.room_id))?;
 
     tx.commit()
         .await
@@ -401,6 +422,17 @@ pub async fn check_out_at(
         ));
     }
 
+    let room_id = lookup_booking_room_id(pool, &req.booking_id).await?;
+    let _lock_guard = crate::aggregate_locks::global_manager()
+        .acquire([
+            crate::aggregate_locks::booking_key(&req.booking_id)
+                .map_err(|error| BookingError::validation(error.message))?,
+            crate::aggregate_locks::room_key(&room_id)
+                .map_err(|error| BookingError::validation(error.message))?,
+        ])
+        .await
+        .map_err(|error| BookingError::validation(error.message))?;
+
     let mut tx = begin_immediate_tx(pool)
         .await
         .map_err(mark_write_db_error)?;
@@ -409,6 +441,11 @@ pub async fn check_out_at(
         settlement_mode: req.settlement_mode,
     };
     let settlement = preview_checkout_settlement_tx(&mut tx, &preview_req, now).await?;
+    ensure_locked_room_matches_booking(
+        &room_id,
+        &settlement.room_id,
+        format!("booking {} changed rooms before checkout", req.booking_id),
+    )?;
     let actual_checkout = now.to_rfc3339();
 
     if settlement.already_paid > req.final_total {
@@ -455,10 +492,10 @@ pub async fn check_out_at(
         manual_override,
     );
 
-    sqlx::query(
+    let result = sqlx::query(
         "UPDATE bookings
          SET status = ?, actual_checkout = ?, nights = ?, total_price = ?, pricing_snapshot = ?
-         WHERE id = ?",
+         WHERE id = ? AND status = ?",
     )
         .bind(status::booking::CHECKED_OUT)
         .bind(&actual_checkout)
@@ -466,18 +503,28 @@ pub async fn check_out_at(
         .bind(req.final_total)
         .bind(pricing_snapshot)
         .bind(&req.booking_id)
+        .bind(status::booking::ACTIVE)
         .execute(&mut *tx)
         .await
         .map_err(BookingError::from)
         .map_err(mark_write_db_error)?;
+    ensure_one_row_affected(
+        result,
+        format!("booking {} is no longer active", req.booking_id),
+    )?;
 
-    sqlx::query("UPDATE rooms SET status = ? WHERE id = ?")
+    let result = sqlx::query("UPDATE rooms SET status = ? WHERE id = ? AND status = ?")
         .bind(status::room::CLEANING)
         .bind(&settlement.room_id)
+        .bind(status::room::OCCUPIED)
         .execute(&mut *tx)
         .await
         .map_err(BookingError::from)
         .map_err(mark_write_db_error)?;
+    ensure_one_row_affected(
+        result,
+        format!("room {} is no longer occupied", settlement.room_id),
+    )?;
 
     sqlx::query(
         "INSERT INTO housekeeping (id, room_id, status, triggered_at, created_at)
@@ -508,6 +555,17 @@ pub async fn check_out_at(
 }
 
 pub async fn extend_stay(pool: &Pool<Sqlite>, booking_id: &str) -> BookingResult<Booking> {
+    let locked_room_id = lookup_booking_room_id(pool, booking_id).await?;
+    let _lock_guard = crate::aggregate_locks::global_manager()
+        .acquire([
+            crate::aggregate_locks::booking_key(booking_id)
+                .map_err(|error| BookingError::validation(error.message))?,
+            crate::aggregate_locks::room_key(&locked_room_id)
+                .map_err(|error| BookingError::validation(error.message))?,
+        ])
+        .await
+        .map_err(|error| BookingError::validation(error.message))?;
+
     let mut tx = begin_immediate_tx(pool).await?;
 
     let booking = sqlx::query(
@@ -524,6 +582,11 @@ pub async fn extend_stay(pool: &Pool<Sqlite>, booking_id: &str) -> BookingResult
     })?;
 
     let room_id: String = booking.get("room_id");
+    ensure_locked_room_matches_booking(
+        &locked_room_id,
+        &room_id,
+        format!("booking {booking_id} changed rooms before extend-stay"),
+    )?;
     let current_nights: i32 = booking.get("nights");
     let current_total = read_f64_or_zero(&booking, "total_price");
     let old_expected_checkout: String = booking.get("expected_checkout");
@@ -575,15 +638,23 @@ pub async fn extend_stay(pool: &Pool<Sqlite>, booking_id: &str) -> BookingResult
     let new_total = current_total + incremental_pricing.total;
     let new_checkout = new_expected.to_rfc3339();
 
-    sqlx::query(
-        "UPDATE bookings SET nights = ?, total_price = ?, expected_checkout = ? WHERE id = ?",
+    let result = sqlx::query(
+        "UPDATE bookings
+         SET nights = ?, total_price = ?, expected_checkout = ?
+         WHERE id = ? AND status = ? AND expected_checkout = ?",
     )
     .bind(current_nights + 1)
     .bind(new_total)
     .bind(&new_checkout)
     .bind(booking_id)
+    .bind(status::booking::ACTIVE)
+    .bind(&old_expected_checkout)
     .execute(&mut *tx)
     .await?;
+    ensure_one_row_affected(
+        result,
+        format!("booking {booking_id} changed before extend-stay"),
+    )?;
 
     sqlx::query(
         "INSERT INTO room_calendar (room_id, date, booking_id, status)
@@ -652,7 +723,7 @@ async fn insert_occupied_calendar_rows(
 
 #[cfg(test)]
 mod tests {
-    use super::mark_write_db_error;
+    use super::{ensure_locked_room_matches_booking, mark_write_db_error};
     use crate::domain::booking::BookingError;
 
     #[test]
@@ -664,6 +735,19 @@ mod tests {
         assert_eq!(
             mark_write_db_error(BookingError::not_found("Booking not found: booking-1")),
             BookingError::not_found("Booking not found: booking-1")
+        );
+    }
+
+    #[test]
+    fn ensure_locked_room_matches_booking_rejects_stale_room_lock() {
+        let result = ensure_locked_room_matches_booking(
+            "room-old",
+            "room-new",
+            "booking booking-1 changed rooms before checkout",
+        );
+
+        assert!(
+            matches!(result, Err(BookingError::Conflict(message)) if message.contains(crate::app_error::codes::CONFLICT_INVALID_STATE_TRANSITION) && message.contains("booking booking-1 changed rooms before checkout"))
         );
     }
 }
