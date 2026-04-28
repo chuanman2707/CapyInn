@@ -2,6 +2,7 @@ use serde::Serialize;
 
 use crate::app_error::codes;
 use crate::runtime_config;
+use crate::write_manifest::LockDeriverId;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "lowercase")]
@@ -21,15 +22,12 @@ pub struct WriteToolMeta {
     pub description: &'static str,
 }
 
-const RESERVATION_WRITE_LOCK_DERIVER_PLACEHOLDER: &str =
-    "reservation_write_lock_deriver_placeholder";
-
 pub const CREATE_RESERVATION_META: WriteToolMeta = WriteToolMeta {
     command_name: "create_reservation",
     risk_level: RiskLevel::High,
     requires_approval: true,
     requires_idempotency_key: true,
-    lock_deriver: RESERVATION_WRITE_LOCK_DERIVER_PLACEHOLDER,
+    lock_deriver: LockDeriverId::RoomFromRequest.policy_name(),
     description: "Creates a reservation booking row and reserves room calendar dates.",
 };
 
@@ -38,7 +36,7 @@ pub const CANCEL_RESERVATION_META: WriteToolMeta = WriteToolMeta {
     risk_level: RiskLevel::High,
     requires_approval: true,
     requires_idempotency_key: true,
-    lock_deriver: RESERVATION_WRITE_LOCK_DERIVER_PLACEHOLDER,
+    lock_deriver: LockDeriverId::ReservationBookingAndRoom.policy_name(),
     description: "Cancels an existing booked reservation.",
 };
 
@@ -47,7 +45,7 @@ pub const MODIFY_RESERVATION_META: WriteToolMeta = WriteToolMeta {
     risk_level: RiskLevel::High,
     requires_approval: true,
     requires_idempotency_key: true,
-    lock_deriver: RESERVATION_WRITE_LOCK_DERIVER_PLACEHOLDER,
+    lock_deriver: LockDeriverId::ReservationBookingAndRoom.policy_name(),
     description: "Changes an existing booked reservation's scheduled dates.",
 };
 
@@ -124,6 +122,21 @@ mod tests {
             assert!(meta.requires_approval);
             assert!(meta.requires_idempotency_key);
             assert!(!meta.lock_deriver.is_empty());
+        }
+    }
+
+    #[test]
+    fn write_tool_manifest_lock_derivers_match_write_manifest() {
+        for meta in WRITE_TOOL_MANIFEST {
+            let write_meta = crate::write_manifest::meta_for(meta.command_name)
+                .expect("gateway write tool must exist in write manifest");
+
+            assert_eq!(
+                meta.lock_deriver,
+                write_meta.lock_deriver.policy_name(),
+                "lock deriver mismatch for {}",
+                meta.command_name
+            );
         }
     }
 }

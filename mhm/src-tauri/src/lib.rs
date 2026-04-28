@@ -25,6 +25,7 @@ mod runtime_config;
 mod services;
 pub mod support_log;
 mod watcher;
+pub mod write_manifest;
 
 use commands::AppState;
 use std::sync::{Arc, Mutex, Once};
