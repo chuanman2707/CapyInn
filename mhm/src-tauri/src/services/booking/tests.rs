@@ -1213,6 +1213,88 @@ async fn group_checkin_idempotent_normalizes_room_order_and_assigns_payment_ordi
     assert_eq!(rows[0].get::<i64, _>("origin_transaction_ordinal"), 0);
     assert_eq!(rows[1].get::<String, _>("room_id"), "GI602");
     assert_eq!(rows[1].get::<i64, _>("origin_transaction_ordinal"), 1);
+
+    let lock_keys_json: String = sqlx::query_scalar(
+        "SELECT lock_keys_json
+         FROM command_idempotency
+         WHERE idempotency_key = ?",
+    )
+    .bind("idem-group-checkin-1")
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(lock_keys_json, r#"["room:GI601","room:GI602"]"#);
+}
+
+#[tokio::test]
+async fn group_checkin_duplicate_in_flight_does_not_wait_for_room_lock() {
+    let pool = test_pool().await;
+    seed_room(&pool, "GI650").await.unwrap();
+    seed_room(&pool, "GI651").await.unwrap();
+    seed_pricing_rule(&pool, "standard", 250_000.0)
+        .await
+        .unwrap();
+    let ctx = crate::command_idempotency::WriteCommandContext::for_internal_test(
+        "req-group-idem-inflight",
+        "idem-group-checkin-inflight",
+        "group_checkin",
+    );
+    let held_room_lock = crate::aggregate_locks::global_manager()
+        .acquire([crate::aggregate_locks::room_key("GI650").unwrap()])
+        .await
+        .unwrap();
+
+    let first_pool = pool.clone();
+    let first_ctx = ctx.clone();
+    let first = tokio::spawn(async move {
+        group_lifecycle::group_checkin_idempotent(
+            &first_pool,
+            Some("seed-user".to_string()),
+            &first_ctx,
+            rich_group_checkin_request(&["GI650", "GI651"], "GI650", Some(100_000.0)),
+        )
+        .await
+    });
+
+    let mut claim_seen = false;
+    for _ in 0..50 {
+        let in_progress_count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*)
+             FROM command_idempotency
+             WHERE idempotency_key = ? AND status = 'in_progress'",
+        )
+        .bind("idem-group-checkin-inflight")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        if in_progress_count == 1 {
+            claim_seen = true;
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    assert!(claim_seen, "first command should claim before waiting for room lock");
+
+    let duplicate = tokio::time::timeout(
+        std::time::Duration::from_millis(200),
+        group_lifecycle::group_checkin_idempotent(
+            &pool,
+            Some("seed-user".to_string()),
+            &ctx,
+            rich_group_checkin_request(&["GI650", "GI651"], "GI650", Some(100_000.0)),
+        ),
+    )
+    .await
+    .expect("duplicate should return without waiting for room lock")
+    .expect_err("duplicate in-flight command should conflict");
+
+    assert_eq!(
+        duplicate.code,
+        crate::app_error::codes::CONFLICT_DUPLICATE_IN_FLIGHT
+    );
+
+    drop(held_room_lock);
+    first.await.unwrap().expect("first command completes");
 }
 
 #[tokio::test]

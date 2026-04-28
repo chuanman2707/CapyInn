@@ -44,6 +44,9 @@ fn map_group_checkin_command_error(error: BookingError) -> CommandError {
             CommandError::user(codes::ROOM_NOT_FOUND, message)
         }
         BookingError::Validation(message) | BookingError::Conflict(message) => {
+            if message.contains(codes::CONFLICT_INVALID_STATE_TRANSITION) {
+                return CommandError::user(codes::CONFLICT_INVALID_STATE_TRANSITION, message);
+            }
             if is_room_unavailable_conflict_message(&message) {
                 return CommandError::user(codes::CONFLICT_ROOM_UNAVAILABLE, message);
             }
@@ -111,6 +114,25 @@ fn build_group_checkin_hash_payload(req: &GroupCheckinRequest) -> serde_json::Va
         "notes": req.notes.clone(),
         "paid_minor_units": paid_minor_units,
     })
+}
+
+fn group_checkin_lock_keys_from_payload(
+    hash_payload: &serde_json::Value,
+) -> CommandResult<Vec<String>> {
+    let room_ids = hash_payload
+        .get("room_ids")
+        .and_then(serde_json::Value::as_array)
+        .ok_or_else(|| system_error("group check-in lock payload missing room_ids"))?;
+
+    room_ids
+        .iter()
+        .map(|value| {
+            let room_id = value
+                .as_str()
+                .ok_or_else(|| system_error("group check-in lock room id must be a string"))?;
+            crate::aggregate_locks::room_key(room_id)
+        })
+        .collect()
 }
 
 fn build_group_checkin_payment_origins(
@@ -181,47 +203,49 @@ pub async fn group_checkin_idempotent(
     ])?;
     let summary =
         CommandLedgerSummary::new("Group check-in")?.with_business_date(effective_checkin_date)?;
+    let runtime_lock_keys = group_checkin_lock_keys_from_payload(&hash_payload)?;
     let request = WriteCommandRequest::new_sanitized(hash_payload, ledger_intent, summary)?
+        .with_lock_key_deriver(group_checkin_lock_keys_from_payload)
         .with_success_summary(CommandLedgerResultSummary::success("Group checked in")?);
 
     let req_for_service = req;
     let user_id_for_service = user_id;
     let origin_idempotency_key = ctx.idempotency_key.clone();
 
-    let lock_keys = req_for_service
-        .room_ids
-        .iter()
-        .map(|room_id| crate::aggregate_locks::room_key(room_id))
-        .collect::<CommandResult<Vec<_>>>()?;
-    let _lock_guard = crate::aggregate_locks::global_manager()
-        .acquire(lock_keys)
-        .await?;
-
     WriteCommandExecutor::new(pool.clone())
-        .execute_atomic(ctx, request, move |tx| {
-            Box::pin(async move {
-                let payment_origins = if req_for_service.paid_amount.unwrap_or(0.0) > 0.0 {
-                    Some(build_group_checkin_payment_origins(
-                        &origin_idempotency_key,
-                        &req_for_service.room_ids,
-                    )?)
-                } else {
-                    None
-                };
-                let group_id = group_checkin_tx(
-                    tx,
-                    user_id_for_service.as_deref(),
-                    &req_for_service,
-                    payment_origins.as_ref(),
-                )
-                .await
-                .map_err(map_group_checkin_command_error)?;
-                let group = fetch_group_tx(tx, &group_id)
+        .execute_with_pre_transaction_guard(
+            ctx,
+            request,
+            move || async move {
+                crate::aggregate_locks::global_manager()
+                    .acquire(runtime_lock_keys)
+                    .await
+            },
+            move |tx| {
+                Box::pin(async move {
+                    let payment_origins = if req_for_service.paid_amount.unwrap_or(0.0) > 0.0 {
+                        Some(build_group_checkin_payment_origins(
+                            &origin_idempotency_key,
+                            &req_for_service.room_ids,
+                        )?)
+                    } else {
+                        None
+                    };
+                    let group_id = group_checkin_tx(
+                        tx,
+                        user_id_for_service.as_deref(),
+                        &req_for_service,
+                        payment_origins.as_ref(),
+                    )
                     .await
                     .map_err(map_group_checkin_command_error)?;
-                serde_json::to_value(&group).map_err(system_error)
-            })
-        })
+                    let group = fetch_group_tx(tx, &group_id)
+                        .await
+                        .map_err(map_group_checkin_command_error)?;
+                    serde_json::to_value(&group).map_err(system_error)
+                })
+            },
+        )
         .await
 }
 
@@ -896,4 +920,19 @@ async fn fetch_group(pool: &Pool<Sqlite>, group_id: &str) -> BookingResult<Booki
 fn parse_date(value: &str) -> BookingResult<NaiveDate> {
     NaiveDate::parse_from_str(value, "%Y-%m-%d")
         .map_err(|error| BookingError::datetime_parse(error.to_string()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn map_group_checkin_command_error_maps_invalid_state_transition_code() {
+        let error = map_group_checkin_command_error(BookingError::conflict(format!(
+            "{}: room R101 is no longer vacant",
+            codes::CONFLICT_INVALID_STATE_TRANSITION
+        )));
+
+        assert_eq!(error.code, codes::CONFLICT_INVALID_STATE_TRANSITION);
+    }
 }
