@@ -16,6 +16,48 @@ pub async fn begin_immediate_tx<'a>(
         .map_err(BookingError::from)
 }
 
+pub fn invalid_state_transition(message: impl AsRef<str>) -> BookingError {
+    BookingError::conflict(format!(
+        "{}: {}",
+        crate::app_error::codes::CONFLICT_INVALID_STATE_TRANSITION,
+        message.as_ref()
+    ))
+}
+
+pub fn ensure_one_row_affected(
+    result: sqlx::sqlite::SqliteQueryResult,
+    message: impl AsRef<str>,
+) -> BookingResult<()> {
+    if result.rows_affected() == 1 {
+        Ok(())
+    } else {
+        Err(invalid_state_transition(message))
+    }
+}
+
+pub fn ensure_rows_affected(
+    result: sqlx::sqlite::SqliteQueryResult,
+    expected: u64,
+    message: impl AsRef<str>,
+) -> BookingResult<()> {
+    if result.rows_affected() == expected {
+        Ok(())
+    } else {
+        Err(invalid_state_transition(message))
+    }
+}
+
+pub async fn lookup_booking_room_id(
+    pool: &Pool<Sqlite>,
+    booking_id: &str,
+) -> BookingResult<String> {
+    sqlx::query_scalar::<_, String>("SELECT room_id FROM bookings WHERE id = ?")
+        .bind(booking_id)
+        .fetch_optional(pool)
+        .await?
+        .ok_or_else(|| BookingError::not_found(format!("Không tìm thấy booking {}", booking_id)))
+}
+
 pub fn rfc3339_now() -> String {
     Local::now().to_rfc3339()
 }
@@ -124,8 +166,16 @@ pub fn read_f64_strict(row: &SqliteRow, column: &str) -> f64 {
 
 #[cfg(test)]
 pub mod tests {
-    use super::begin_immediate_tx;
+    use super::{begin_immediate_tx, invalid_state_transition};
     use sqlx::{sqlite::SqlitePoolOptions, Row};
+
+    #[test]
+    fn invalid_state_transition_error_includes_shared_code() {
+        let error = invalid_state_transition("booking is no longer active");
+        assert!(error
+            .to_string()
+            .contains(crate::app_error::codes::CONFLICT_INVALID_STATE_TRANSITION));
+    }
 
     #[tokio::test]
     async fn begin_immediate_tx_starts_transaction_that_can_write() {
