@@ -322,11 +322,10 @@ async fn preview_checkout_settlement_tx(
 ) -> BookingResult<CheckoutSettlementComputation> {
     let booking = sqlx::query(
         "SELECT room_id, check_in_at, nights, total_price, paid_amount,
-                COALESCE(pricing_type, 'nightly') AS pricing_type
-         FROM bookings WHERE id = ? AND status = ?",
+                COALESCE(pricing_type, 'nightly') AS pricing_type, status
+         FROM bookings WHERE id = ?",
     )
     .bind(&req.booking_id)
-    .bind(status::booking::ACTIVE)
     .fetch_optional(&mut **tx)
     .await?
     .ok_or_else(|| {
@@ -335,6 +334,14 @@ async fn preview_checkout_settlement_tx(
             req.booking_id
         ))
     })?;
+
+    let booking_status: String = booking.get("status");
+    if booking_status != status::booking::ACTIVE {
+        return Err(invalid_state_transition(format!(
+            "booking {} is no longer active",
+            req.booking_id
+        )));
+    }
 
     let room_id: String = booking.get("room_id");
     let check_in_at: String = booking.get("check_in_at");

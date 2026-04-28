@@ -152,10 +152,28 @@ mod tests {
     #[tokio::test]
     async fn unrelated_keys_do_not_wait_for_each_other() {
         let manager = AggregateLockManager::default();
-        let _first = manager.acquire(["room:R1"]).await.expect("first lock");
-        let second = manager.acquire(["room:R2"]).await.expect("second lock");
+        let first = manager.acquire(["room:R1"]).await.expect("first lock");
+        let (acquired_tx, acquired_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = tokio::sync::oneshot::channel::<()>();
 
-        assert_eq!(second.keys(), &["room:R2".to_string()]);
+        let second_manager = manager.clone();
+        let second = tokio::spawn(async move {
+            let second_guard = second_manager.acquire(["room:R2"]).await.expect("second lock");
+            acquired_tx
+                .send(second_guard.keys().to_vec())
+                .expect("main task waits for acquired signal");
+            release_rx.await.expect("release signal received");
+            drop(second_guard);
+        });
+
+        assert_eq!(
+            acquired_rx.await.expect("second key acquired"),
+            vec!["room:R2".to_string()]
+        );
+
+        drop(first);
+        release_tx.send(()).expect("second task waits for release");
+        second.await.expect("second task joins");
     }
 
     #[tokio::test]

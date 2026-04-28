@@ -344,6 +344,32 @@ pub async fn test_pool() -> Pool<Sqlite> {
     pool
 }
 
+async fn shared_file_test_pools(label: &str) -> (Pool<Sqlite>, Pool<Sqlite>, std::path::PathBuf) {
+    let db_path = std::env::temp_dir().join(format!(
+        "capyinn-{label}-{}.sqlite",
+        uuid::Uuid::new_v4()
+    ));
+    let database_url = format!("sqlite://{}?mode=rwc", db_path.display());
+
+    let pool_a = SqlitePoolOptions::new()
+        .max_connections(2)
+        .connect(&database_url)
+        .await
+        .expect("failed to open first sqlite file test pool");
+
+    crate::db::run_migrations(&pool_a)
+        .await
+        .expect("failed to run migrations for shared file test pool");
+
+    let pool_b = SqlitePoolOptions::new()
+        .max_connections(2)
+        .connect(&database_url)
+        .await
+        .expect("failed to open second sqlite file test pool");
+
+    (pool_a, pool_b, db_path)
+}
+
 pub async fn seed_room(pool: &Pool<Sqlite>, room_id: &str) -> BookingResult<()> {
     sqlx::query(
         "INSERT INTO rooms (id, name, type, floor, has_balcony, base_price, max_guests, extra_person_fee, status)
@@ -2901,6 +2927,40 @@ async fn check_in_rolls_back_when_room_status_changes_before_guarded_room_update
         .await
         .unwrap();
     assert_eq!(booking_count, 0);
+}
+
+#[tokio::test]
+async fn checkout_fails_when_second_pool_checked_out_booking_first() {
+    let (pool_a, pool_b, db_path) = shared_file_test_pools("second-pool-checkout").await;
+    seed_room(&pool_a, "R-2POOL").await.unwrap();
+    seed_active_booking(&pool_a, "B-2POOL", "R-2POOL")
+        .await
+        .unwrap();
+
+    sqlx::query("UPDATE bookings SET status = 'checked_out' WHERE id = ?")
+        .bind("B-2POOL")
+        .execute(&pool_b)
+        .await
+        .unwrap();
+
+    let error = stay_lifecycle::check_out(
+        &pool_a,
+        CheckOutRequest {
+            booking_id: "B-2POOL".to_string(),
+            settlement_mode: CheckoutSettlementMode::BookedNights,
+            final_total: 100_000.0,
+        },
+    )
+    .await
+    .expect_err("checkout should reject stale booking state");
+
+    assert!(error
+        .to_string()
+        .contains(crate::app_error::codes::CONFLICT_INVALID_STATE_TRANSITION));
+
+    pool_a.close().await;
+    pool_b.close().await;
+    let _ = std::fs::remove_file(db_path);
 }
 
 #[tokio::test]
