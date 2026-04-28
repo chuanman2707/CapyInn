@@ -489,6 +489,39 @@ impl WriteCommandExecutor {
         }
     }
 
+    pub async fn execute_with_pre_transaction_guard<F, G, GFut, Guard>(
+        &self,
+        ctx: &WriteCommandContext,
+        request: WriteCommandRequest,
+        before_transaction: G,
+        service: F,
+    ) -> CommandResult<IdempotentCommandResult<serde_json::Value>>
+    where
+        F: for<'tx> FnOnce(&'tx mut Transaction<'_, Sqlite>) -> WriteCommandServiceFuture<'tx>,
+        G: FnOnce() -> GFut,
+        GFut: Future<Output = CommandResult<Guard>> + Send,
+        Guard: Send,
+    {
+        let prepared = prepare_write_command_request(request)?;
+        let claim = self.claim_or_reclaim(ctx, &prepared).await?;
+
+        match claim {
+            ClaimOutcome::Claimed { claim_token } => {
+                let _guard = match before_transaction().await {
+                    Ok(guard) => guard,
+                    Err(mut error) => {
+                        error.request_id = Some(ctx.request_id.clone());
+                        self.finalize_failure(ctx, &claim_token, &error).await?;
+                        return Err(error);
+                    }
+                };
+                self.run_claimed(ctx, &claim_token, &prepared, service)
+                    .await
+            }
+            ClaimOutcome::Replayed(result) => Ok(result),
+        }
+    }
+
     pub async fn execute_atomic<F>(
         &self,
         ctx: &WriteCommandContext,

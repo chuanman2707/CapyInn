@@ -344,6 +344,32 @@ pub async fn test_pool() -> Pool<Sqlite> {
     pool
 }
 
+async fn shared_file_test_pools(label: &str) -> (Pool<Sqlite>, Pool<Sqlite>, std::path::PathBuf) {
+    let db_path = std::env::temp_dir().join(format!(
+        "capyinn-{label}-{}.sqlite",
+        uuid::Uuid::new_v4()
+    ));
+    let database_url = format!("sqlite://{}?mode=rwc", db_path.display());
+
+    let pool_a = SqlitePoolOptions::new()
+        .max_connections(2)
+        .connect(&database_url)
+        .await
+        .expect("failed to open first sqlite file test pool");
+
+    crate::db::run_migrations(&pool_a)
+        .await
+        .expect("failed to run migrations for shared file test pool");
+
+    let pool_b = SqlitePoolOptions::new()
+        .max_connections(2)
+        .connect(&database_url)
+        .await
+        .expect("failed to open second sqlite file test pool");
+
+    (pool_a, pool_b, db_path)
+}
+
 pub async fn seed_room(pool: &Pool<Sqlite>, room_id: &str) -> BookingResult<()> {
     sqlx::query(
         "INSERT INTO rooms (id, name, type, floor, has_balcony, base_price, max_guests, extra_person_fee, status)
@@ -1121,6 +1147,22 @@ async fn group_checkin_rejects_duplicate_room_ids() {
 }
 
 #[tokio::test]
+async fn group_checkin_lock_keys_are_stable_for_room_order() {
+    let left = crate::aggregate_locks::canonicalize_lock_keys(vec![
+        crate::aggregate_locks::room_key("R2").unwrap(),
+        crate::aggregate_locks::room_key("R1").unwrap(),
+    ])
+    .unwrap();
+    let right = crate::aggregate_locks::canonicalize_lock_keys(vec![
+        crate::aggregate_locks::room_key("R1").unwrap(),
+        crate::aggregate_locks::room_key("R2").unwrap(),
+    ])
+    .unwrap();
+
+    assert_eq!(left, right);
+}
+
+#[tokio::test]
 async fn group_checkin_idempotent_normalizes_room_order_and_assigns_payment_ordinals() {
     let pool = test_pool().await;
     seed_room(&pool, "GI601").await.unwrap();
@@ -1171,6 +1213,88 @@ async fn group_checkin_idempotent_normalizes_room_order_and_assigns_payment_ordi
     assert_eq!(rows[0].get::<i64, _>("origin_transaction_ordinal"), 0);
     assert_eq!(rows[1].get::<String, _>("room_id"), "GI602");
     assert_eq!(rows[1].get::<i64, _>("origin_transaction_ordinal"), 1);
+
+    let lock_keys_json: String = sqlx::query_scalar(
+        "SELECT lock_keys_json
+         FROM command_idempotency
+         WHERE idempotency_key = ?",
+    )
+    .bind("idem-group-checkin-1")
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(lock_keys_json, r#"["room:GI601","room:GI602"]"#);
+}
+
+#[tokio::test]
+async fn group_checkin_duplicate_in_flight_does_not_wait_for_room_lock() {
+    let pool = test_pool().await;
+    seed_room(&pool, "GI650").await.unwrap();
+    seed_room(&pool, "GI651").await.unwrap();
+    seed_pricing_rule(&pool, "standard", 250_000.0)
+        .await
+        .unwrap();
+    let ctx = crate::command_idempotency::WriteCommandContext::for_internal_test(
+        "req-group-idem-inflight",
+        "idem-group-checkin-inflight",
+        "group_checkin",
+    );
+    let held_room_lock = crate::aggregate_locks::global_manager()
+        .acquire([crate::aggregate_locks::room_key("GI650").unwrap()])
+        .await
+        .unwrap();
+
+    let first_pool = pool.clone();
+    let first_ctx = ctx.clone();
+    let first = tokio::spawn(async move {
+        group_lifecycle::group_checkin_idempotent(
+            &first_pool,
+            Some("seed-user".to_string()),
+            &first_ctx,
+            rich_group_checkin_request(&["GI650", "GI651"], "GI650", Some(100_000.0)),
+        )
+        .await
+    });
+
+    let mut claim_seen = false;
+    for _ in 0..50 {
+        let in_progress_count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*)
+             FROM command_idempotency
+             WHERE idempotency_key = ? AND status = 'in_progress'",
+        )
+        .bind("idem-group-checkin-inflight")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        if in_progress_count == 1 {
+            claim_seen = true;
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    assert!(claim_seen, "first command should claim before waiting for room lock");
+
+    let duplicate = tokio::time::timeout(
+        std::time::Duration::from_millis(200),
+        group_lifecycle::group_checkin_idempotent(
+            &pool,
+            Some("seed-user".to_string()),
+            &ctx,
+            rich_group_checkin_request(&["GI650", "GI651"], "GI650", Some(100_000.0)),
+        ),
+    )
+    .await
+    .expect("duplicate should return without waiting for room lock")
+    .expect_err("duplicate in-flight command should conflict");
+
+    assert_eq!(
+        duplicate.code,
+        crate::app_error::codes::CONFLICT_DUPLICATE_IN_FLIGHT
+    );
+
+    drop(held_room_lock);
+    first.await.unwrap().expect("first command completes");
 }
 
 #[tokio::test]
@@ -1504,6 +1628,78 @@ async fn group_checkout_clears_master_flag_when_group_completes() {
         .await
         .unwrap();
     assert_eq!(booking_row.get::<i64, _>("is_master_room"), 0);
+}
+
+#[tokio::test]
+async fn group_checkout_rejects_stale_selected_booking() {
+    let pool = test_pool().await;
+    seed_room(&pool, "G501").await.unwrap();
+    seed_room(&pool, "G502").await.unwrap();
+    seed_pricing_rule(&pool, "standard", 250_000.0)
+        .await
+        .unwrap();
+
+    let group = group_lifecycle::group_checkin(
+        &pool,
+        Some("seed-user".to_string()),
+        minimal_group_checkin_request(&["G501", "G502"]),
+    )
+    .await
+    .unwrap();
+
+    let booking_ids: Vec<String> =
+        sqlx::query_scalar("SELECT id FROM bookings WHERE group_id = ? ORDER BY room_id")
+            .bind(&group.id)
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+    sqlx::query("UPDATE bookings SET status = 'checked_out' WHERE id = ?")
+        .bind(&booking_ids[0])
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    let error = group_lifecycle::group_checkout(
+        &pool,
+        GroupCheckoutRequest {
+            group_id: group.id.clone(),
+            booking_ids,
+            final_paid: None,
+        },
+    )
+    .await
+    .unwrap_err();
+
+    assert!(error
+        .to_string()
+        .contains(crate::app_error::codes::CONFLICT_INVALID_STATE_TRANSITION));
+}
+
+#[test]
+fn group_checkout_locked_room_map_rejects_changed_room_mapping() {
+    let locked = std::collections::HashMap::from([
+        ("booking-1".to_string(), "room-old".to_string()),
+        ("booking-2".to_string(), "room-stable".to_string()),
+    ]);
+    let current = std::collections::HashMap::from([
+        ("booking-1".to_string(), "room-new".to_string()),
+        ("booking-2".to_string(), "room-stable".to_string()),
+    ]);
+
+    let error = group_lifecycle::ensure_group_checkout_room_map_still_locked(
+        "group-1",
+        &["booking-1".to_string(), "booking-2".to_string()],
+        &locked,
+        &current,
+    )
+    .unwrap_err();
+
+    assert!(error
+        .to_string()
+        .contains(crate::app_error::codes::CONFLICT_INVALID_STATE_TRANSITION));
+    assert!(error
+        .to_string()
+        .contains("one or more bookings in group group-1 changed rooms before checkout"));
 }
 
 #[tokio::test]
@@ -2228,6 +2424,29 @@ async fn cancel_reservation_releases_calendar_and_keeps_fee_record() {
 }
 
 #[tokio::test]
+async fn cancel_reservation_returns_invalid_state_when_booking_is_not_booked() {
+    let pool = test_pool().await;
+    seed_room(&pool, "R-CAS-CANCEL").await.unwrap();
+    seed_booked_reservation(&pool, "B-CAS-CANCEL", "R-CAS-CANCEL")
+        .await
+        .unwrap();
+
+    sqlx::query("UPDATE bookings SET status = 'active' WHERE id = ?")
+        .bind("B-CAS-CANCEL")
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    let error = reservation_lifecycle::cancel_reservation(&pool, "B-CAS-CANCEL")
+        .await
+        .expect_err("stale reservation should fail");
+
+    assert!(error
+        .to_string()
+        .contains(crate::app_error::codes::CONFLICT_INVALID_STATE_TRANSITION));
+}
+
+#[tokio::test]
 async fn do_create_reservation_returns_service_booking_and_leaves_room_vacant() {
     let pool = test_pool().await;
     seed_room(&pool, "R162").await.unwrap();
@@ -2428,6 +2647,29 @@ async fn confirm_reservation_rejects_no_show_calendar_rows() {
 }
 
 #[tokio::test]
+async fn confirm_reservation_returns_invalid_state_when_booking_is_not_booked() {
+    let pool = test_pool().await;
+    seed_room(&pool, "R-CAS-CONFIRM").await.unwrap();
+    seed_booked_reservation(&pool, "B-CAS-CONFIRM", "R-CAS-CONFIRM")
+        .await
+        .unwrap();
+
+    sqlx::query("UPDATE bookings SET status = 'cancelled' WHERE id = ?")
+        .bind("B-CAS-CONFIRM")
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    let error = reservation_lifecycle::confirm_reservation(&pool, "B-CAS-CONFIRM")
+        .await
+        .expect_err("stale reservation should fail");
+
+    assert!(error
+        .to_string()
+        .contains(crate::app_error::codes::CONFLICT_INVALID_STATE_TRANSITION));
+}
+
+#[tokio::test]
 async fn confirm_reservation_late_arrival_persists_effective_checkout() {
     let pool = test_pool().await;
     seed_room(&pool, "R165A").await.unwrap();
@@ -2623,6 +2865,37 @@ async fn modify_reservation_rejects_inconsistent_nights_input() {
 }
 
 #[tokio::test]
+async fn modify_reservation_returns_invalid_state_when_booking_is_not_booked() {
+    let pool = test_pool().await;
+    seed_room(&pool, "R-CAS-MOD").await.unwrap();
+    seed_booked_reservation(&pool, "B-CAS-MOD", "R-CAS-MOD")
+        .await
+        .unwrap();
+
+    sqlx::query("UPDATE bookings SET status = 'cancelled' WHERE id = ?")
+        .bind("B-CAS-MOD")
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    let error = reservation_lifecycle::modify_reservation(
+        &pool,
+        crate::models::ModifyReservationRequest {
+            booking_id: "B-CAS-MOD".to_string(),
+            new_check_in_date: "2026-04-24".to_string(),
+            new_check_out_date: "2026-04-26".to_string(),
+            new_nights: 2,
+        },
+    )
+    .await
+    .expect_err("stale reservation should fail");
+
+    assert!(error
+        .to_string()
+        .contains(crate::app_error::codes::CONFLICT_INVALID_STATE_TRANSITION));
+}
+
+#[tokio::test]
 async fn do_modify_reservation_returns_service_booking_without_app_handle() {
     let pool = test_pool().await;
     seed_room(&pool, "R167").await.unwrap();
@@ -2700,6 +2973,76 @@ async fn check_in_posts_charge_and_marks_room_occupied() {
     .await
     .unwrap();
     assert_eq!(calendar_days.0, 2);
+}
+
+#[tokio::test]
+async fn check_in_rolls_back_when_room_status_changes_before_guarded_room_update() {
+    let pool = test_pool().await;
+    seed_room(&pool, "R-CAS-CHECKIN").await.unwrap();
+    seed_pricing_rule(&pool, "standard", 100_000.0)
+        .await
+        .unwrap();
+
+    sqlx::query(
+        "CREATE TRIGGER occupy_room_after_booking_insert
+         AFTER INSERT ON bookings
+         WHEN NEW.room_id = 'R-CAS-CHECKIN'
+         BEGIN
+           UPDATE rooms SET status = 'occupied' WHERE id = NEW.room_id;
+         END",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    let error = stay_lifecycle::check_in(&pool, minimal_checkin_request("R-CAS-CHECKIN"), None)
+        .await
+        .expect_err("guarded room update should catch stale state");
+
+    assert!(error
+        .to_string()
+        .contains(crate::app_error::codes::CONFLICT_INVALID_STATE_TRANSITION));
+
+    let booking_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM bookings WHERE room_id = ?")
+        .bind("R-CAS-CHECKIN")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(booking_count, 0);
+}
+
+#[tokio::test]
+async fn checkout_fails_when_second_pool_checked_out_booking_first() {
+    let (pool_a, pool_b, db_path) = shared_file_test_pools("second-pool-checkout").await;
+    seed_room(&pool_a, "R-2POOL").await.unwrap();
+    seed_active_booking(&pool_a, "B-2POOL", "R-2POOL")
+        .await
+        .unwrap();
+
+    sqlx::query("UPDATE bookings SET status = 'checked_out' WHERE id = ?")
+        .bind("B-2POOL")
+        .execute(&pool_b)
+        .await
+        .unwrap();
+
+    let error = stay_lifecycle::check_out(
+        &pool_a,
+        CheckOutRequest {
+            booking_id: "B-2POOL".to_string(),
+            settlement_mode: CheckoutSettlementMode::BookedNights,
+            final_total: 100_000.0,
+        },
+    )
+    .await
+    .expect_err("checkout should reject stale booking state");
+
+    assert!(error
+        .to_string()
+        .contains(crate::app_error::codes::CONFLICT_INVALID_STATE_TRANSITION));
+
+    pool_a.close().await;
+    pool_b.close().await;
+    let _ = std::fs::remove_file(db_path);
 }
 
 #[tokio::test]

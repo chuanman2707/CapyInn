@@ -572,6 +572,14 @@ pub async fn update_housekeeping(
     new_status: String,
     note: Option<String>,
 ) -> Result<(), String> {
+    if new_status == "clean" {
+        complete_housekeeping_clean_to_vacant(&state.db, &task_id, note.as_deref())
+            .await
+            .map_err(|error| format!("{}: {}", error.code, error.message))?;
+        emit_db_update(&app, "housekeeping");
+        return Ok(());
+    }
+
     let now = chrono::Local::now();
 
     let cleaned_at = if new_status == "clean" {
@@ -591,22 +599,114 @@ pub async fn update_housekeeping(
     .await
     .map_err(|e| e.to_string())?;
 
-    // If clean, update room to vacant
-    if new_status == "clean" {
-        let room_id: (String,) = sqlx::query_as("SELECT room_id FROM housekeeping WHERE id = ?")
-            .bind(&task_id)
-            .fetch_one(&state.db)
-            .await
-            .map_err(|e| e.to_string())?;
+    emit_db_update(&app, "housekeeping");
 
-        sqlx::query("UPDATE rooms SET status = 'vacant' WHERE id = ?")
-            .bind(&room_id.0)
-            .execute(&state.db)
-            .await
-            .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+async fn complete_housekeeping_clean_to_vacant(
+    pool: &Pool<Sqlite>,
+    task_id: &str,
+    note: Option<&str>,
+) -> CommandResult<()> {
+    let room_id: String = sqlx::query_scalar("SELECT room_id FROM housekeeping WHERE id = ?")
+        .bind(task_id)
+        .fetch_one(pool)
+        .await
+        .map_err(|error| {
+            log_system_error(
+                "update_housekeeping",
+                error.to_string(),
+                json!({
+                    "task_id": task_id,
+                    "step": "lookup_room",
+                }),
+            )
+        })?;
+
+    let _lock_guard = crate::aggregate_locks::global_manager()
+        .acquire([crate::aggregate_locks::room_key(&room_id)?])
+        .await?;
+
+    let mut tx = pool.begin().await.map_err(|error| {
+        log_system_error(
+            "update_housekeeping",
+            error.to_string(),
+            json!({
+                "task_id": task_id,
+                "room_id": room_id,
+                "step": "begin",
+            }),
+        )
+    })?;
+
+    let cleaned_at = chrono::Local::now().to_rfc3339();
+    let housekeeping_result = sqlx::query(
+        "UPDATE housekeeping
+         SET status = 'clean', note = COALESCE(?, note), cleaned_at = ?
+         WHERE id = ? AND status = 'cleaning'",
+    )
+    .bind(note)
+    .bind(&cleaned_at)
+    .bind(task_id)
+    .execute(&mut *tx)
+    .await
+    .map_err(|error| {
+        log_system_error(
+            "update_housekeeping",
+            error.to_string(),
+            json!({
+                "task_id": task_id,
+                "room_id": room_id,
+                "step": "update_housekeeping",
+            }),
+        )
+    })?;
+
+    if housekeeping_result.rows_affected() != 1 {
+        let _ = tx.rollback().await;
+        return Err(CommandError::user(
+            codes::CONFLICT_INVALID_STATE_TRANSITION,
+            "Housekeeping task is no longer cleaning",
+        ));
     }
 
-    emit_db_update(&app, "housekeeping");
+    let room_result =
+        sqlx::query("UPDATE rooms SET status = 'vacant' WHERE id = ? AND status = 'cleaning'")
+            .bind(&room_id)
+            .execute(&mut *tx)
+            .await
+            .map_err(|error| {
+                log_system_error(
+                    "update_housekeeping",
+                    error.to_string(),
+                    json!({
+                        "task_id": task_id,
+                        "room_id": room_id,
+                        "step": "update_room",
+                    }),
+                )
+            })?;
+
+    if room_result.rows_affected() != 1 {
+        let _ = tx.rollback().await;
+        return Err(CommandError::user(
+            codes::CONFLICT_INVALID_STATE_TRANSITION,
+            "Room is no longer waiting for cleaning completion",
+        ));
+    }
+
+    tx.commit().await.map_err(|error| {
+        log_system_error(
+            "update_housekeeping",
+            error.to_string(),
+            json!({
+                "task_id": task_id,
+                "room_id": room_id,
+                "step": "commit",
+            }),
+        )
+    })?;
 
     Ok(())
 }
@@ -743,7 +843,10 @@ pub async fn scan_image(path: String) -> Result<crate::ocr::CccdInfo, String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{check_in_failure_context, check_out_failure_context, map_stay_error};
+    use super::{
+        check_in_failure_context, check_out_failure_context,
+        complete_housekeeping_clean_to_vacant, map_stay_error,
+    };
     use crate::app_error::{
         codes, record_command_failure_with_db_group, AppErrorKind, CorrelationIdSource,
         EffectiveCorrelationId,
@@ -754,7 +857,20 @@ mod tests {
         CheckInRequest, CheckOutRequest, CheckoutSettlementMode, CreateGuestRequest,
     };
     use serde_json::json;
+    use sqlx::{sqlite::SqlitePoolOptions, Row};
     use std::fs;
+
+    async fn migrated_pool() -> sqlx::Pool<sqlx::Sqlite> {
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .expect("connect in-memory sqlite");
+        crate::db::run_migrations(&pool)
+            .await
+            .expect("run migrations");
+        pool
+    }
 
     fn frontend_correlation_id() -> EffectiveCorrelationId {
         EffectiveCorrelationId {
@@ -778,6 +894,58 @@ mod tests {
             Some(value) => std::env::set_var("CAPYINN_RUNTIME_ROOT", value),
             None => std::env::remove_var("CAPYINN_RUNTIME_ROOT"),
         }
+    }
+
+    #[tokio::test]
+    async fn housekeeping_clean_does_not_mark_occupied_room_vacant() {
+        let pool = migrated_pool().await;
+        sqlx::query(
+            "INSERT INTO rooms (id, name, type, floor, has_balcony, base_price, max_guests, extra_person_fee, status)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        )
+        .bind("R-HK")
+        .bind("Housekeeping Guard")
+        .bind("standard")
+        .bind(1)
+        .bind(0)
+        .bind(100000.0)
+        .bind(2)
+        .bind(0.0)
+        .bind("occupied")
+        .execute(&pool)
+        .await
+        .expect("insert occupied room");
+        sqlx::query(
+            "INSERT INTO housekeeping (id, room_id, status, note, triggered_at, cleaned_at, created_at)
+             VALUES (?, ?, ?, ?, datetime('now'), NULL, datetime('now'))",
+        )
+        .bind("HK1")
+        .bind("R-HK")
+        .bind("cleaning")
+        .bind("started")
+        .execute(&pool)
+        .await
+        .expect("insert housekeeping task");
+
+        let error = complete_housekeeping_clean_to_vacant(&pool, "HK1", None)
+            .await
+            .expect_err("occupied room should reject clean-to-vacant");
+
+        assert_eq!(error.code, codes::CONFLICT_INVALID_STATE_TRANSITION);
+
+        let room = sqlx::query("SELECT status FROM rooms WHERE id = ?")
+            .bind("R-HK")
+            .fetch_one(&pool)
+            .await
+            .expect("room status");
+        assert_eq!(room.get::<String, _>("status"), "occupied");
+
+        let housekeeping = sqlx::query("SELECT status FROM housekeeping WHERE id = ?")
+            .bind("HK1")
+            .fetch_one(&pool)
+            .await
+            .expect("housekeeping status");
+        assert_eq!(housekeeping.get::<String, _>("status"), "cleaning");
     }
 
     #[test]

@@ -21,7 +21,10 @@ use super::{
         record_deposit_with_origin_tx,
     },
     guest_service::{create_reservation_guest_manifest, link_booking_guests},
-    support::{begin_immediate_tx, fetch_booking, insert_room_calendar_rows, read_f64_strict},
+    support::{
+        begin_immediate_tx, ensure_one_row_affected, fetch_booking, insert_room_calendar_rows,
+        invalid_state_transition, lookup_booking_room_id, read_f64_strict,
+    },
 };
 
 fn mark_write_db_error(error: BookingError) -> BookingError {
@@ -322,6 +325,17 @@ pub async fn create_reservation_idempotent(
 }
 
 pub async fn cancel_reservation(pool: &Pool<Sqlite>, booking_id: &str) -> BookingResult<()> {
+    let locked_room_id = lookup_booking_room_id(pool, booking_id).await?;
+    let _lock_guard = crate::aggregate_locks::global_manager()
+        .acquire([
+            crate::aggregate_locks::booking_key(booking_id)
+                .map_err(|error| BookingError::validation(error.message))?,
+            crate::aggregate_locks::room_key(&locked_room_id)
+                .map_err(|error| BookingError::validation(error.message))?,
+        ])
+        .await
+        .map_err(|error| BookingError::validation(error.message))?;
+
     let mut tx = begin_immediate_tx(pool).await?;
 
     let booking = sqlx::query(
@@ -337,21 +351,31 @@ pub async fn cancel_reservation(pool: &Pool<Sqlite>, booking_id: &str) -> Bookin
         .ok_or_else(|| BookingError::not_found(format!("Booking not found: {}", booking_id)))?;
 
     let status: String = booking.get("status");
-    if status != status::booking::BOOKED {
-        return Err(BookingError::conflict(format!(
-            "Can only cancel reservations in 'booked' status (current: {})",
-            status
+    let room_id: String = booking.get("room_id");
+    if room_id != locked_room_id {
+        return Err(invalid_state_transition(format!(
+            "reservation {booking_id} changed rooms before cancellation"
         )));
     }
 
-    let room_id: String = booking.get("room_id");
+    if status != status::booking::BOOKED {
+        return Err(invalid_state_transition(format!(
+            "reservation {booking_id} is no longer booked"
+        )));
+    }
+
     let deposit_amount: f64 = booking.get("deposit_amount");
 
-    sqlx::query("UPDATE bookings SET status = ? WHERE id = ?")
+    let result = sqlx::query("UPDATE bookings SET status = ? WHERE id = ? AND status = ?")
         .bind(status::booking::CANCELLED)
         .bind(booking_id)
+        .bind(status::booking::BOOKED)
         .execute(&mut *tx)
         .await?;
+    ensure_one_row_affected(
+        result,
+        format!("reservation {booking_id} is no longer booked"),
+    )?;
 
     sqlx::query("DELETE FROM room_calendar WHERE booking_id = ? AND status = ?")
         .bind(booking_id)
@@ -395,8 +419,24 @@ pub async fn cancel_reservation(pool: &Pool<Sqlite>, booking_id: &str) -> Bookin
 }
 
 pub async fn confirm_reservation(pool: &Pool<Sqlite>, booking_id: &str) -> BookingResult<Booking> {
+    let locked_room_id = lookup_booking_room_id(pool, booking_id).await?;
+    let _lock_guard = crate::aggregate_locks::global_manager()
+        .acquire([
+            crate::aggregate_locks::booking_key(booking_id)
+                .map_err(|error| BookingError::validation(error.message))?,
+            crate::aggregate_locks::room_key(&locked_room_id)
+                .map_err(|error| BookingError::validation(error.message))?,
+        ])
+        .await
+        .map_err(|error| BookingError::validation(error.message))?;
+
     let mut tx = begin_immediate_tx(pool).await?;
     let reservation = load_booked_reservation(&mut tx, booking_id).await?;
+    if reservation.room_id != locked_room_id {
+        return Err(invalid_state_transition(format!(
+            "reservation {booking_id} changed rooms before confirmation"
+        )));
+    }
     reject_no_show_confirmation(&mut tx, booking_id).await?;
 
     let now = Local::now();
@@ -434,10 +474,10 @@ pub async fn confirm_reservation(pool: &Pool<Sqlite>, booking_id: &str) -> Booki
     )
     .await?;
 
-    sqlx::query(
+    let result = sqlx::query(
         "UPDATE bookings
          SET status = ?, check_in_at = ?, expected_checkout = ?, nights = ?, total_price = ?, paid_amount = ?
-         WHERE id = ?",
+         WHERE id = ? AND status = ?",
     )
     .bind(status::booking::ACTIVE)
     .bind(&check_in_at)
@@ -446,14 +486,28 @@ pub async fn confirm_reservation(pool: &Pool<Sqlite>, booking_id: &str) -> Booki
     .bind(pricing.total)
     .bind(reservation.paid_amount)
     .bind(booking_id)
+    .bind(status::booking::BOOKED)
     .execute(&mut *tx)
     .await?;
+    ensure_one_row_affected(
+        result,
+        format!("reservation {booking_id} is no longer booked"),
+    )?;
 
-    sqlx::query("UPDATE rooms SET status = ? WHERE id = ?")
+    let result = sqlx::query("UPDATE rooms SET status = ? WHERE id = ? AND status IN (?, ?)")
         .bind(status::room::OCCUPIED)
         .bind(&reservation.room_id)
+        .bind(status::room::VACANT)
+        .bind(status::room::BOOKED)
         .execute(&mut *tx)
         .await?;
+    ensure_one_row_affected(
+        result,
+        format!(
+            "room {} is no longer available for confirmation",
+            reservation.room_id
+        ),
+    )?;
 
     record_charge_tx(
         &mut tx,
@@ -485,8 +539,25 @@ pub async fn modify_reservation(
         req.new_nights,
     )? as i64;
 
+    let locked_room_id = lookup_booking_room_id(pool, &req.booking_id).await?;
+    let _lock_guard = crate::aggregate_locks::global_manager()
+        .acquire([
+            crate::aggregate_locks::booking_key(&req.booking_id)
+                .map_err(|error| BookingError::validation(error.message))?,
+            crate::aggregate_locks::room_key(&locked_room_id)
+                .map_err(|error| BookingError::validation(error.message))?,
+        ])
+        .await
+        .map_err(|error| BookingError::validation(error.message))?;
+
     let mut tx = begin_immediate_tx(pool).await?;
     let reservation = load_booked_reservation(&mut tx, &req.booking_id).await?;
+    if reservation.room_id != locked_room_id {
+        return Err(invalid_state_transition(format!(
+            "reservation {} changed rooms before modification",
+            req.booking_id
+        )));
+    }
 
     sqlx::query("DELETE FROM room_calendar WHERE booking_id = ? AND status = ?")
         .bind(&req.booking_id)
@@ -520,10 +591,10 @@ pub async fn modify_reservation(
     )
     .await?;
 
-    sqlx::query(
+    let result = sqlx::query(
         "UPDATE bookings
          SET check_in_at = ?, expected_checkout = ?, scheduled_checkin = ?, scheduled_checkout = ?, nights = ?, total_price = ?
-         WHERE id = ?",
+         WHERE id = ? AND status = ? AND room_id = ?",
     )
     .bind(&req.new_check_in_date)
     .bind(&req.new_check_out_date)
@@ -532,8 +603,14 @@ pub async fn modify_reservation(
     .bind(derived_nights)
     .bind(pricing.total)
     .bind(&req.booking_id)
+    .bind(status::booking::BOOKED)
+    .bind(&locked_room_id)
     .execute(&mut *tx)
     .await?;
+    ensure_one_row_affected(
+        result,
+        format!("reservation {} is no longer booked", req.booking_id),
+    )?;
 
     insert_booked_calendar_rows(
         &mut tx,
@@ -624,9 +701,8 @@ async fn load_booked_reservation(
         row.ok_or_else(|| BookingError::not_found(format!("Booking not found: {}", booking_id)))?;
     let booking_status: String = row.get("status");
     if booking_status != status::booking::BOOKED {
-        return Err(BookingError::conflict(format!(
-            "Can only operate on reservations in 'booked' status (current: {})",
-            booking_status
+        return Err(invalid_state_transition(format!(
+            "reservation {booking_id} is no longer booked"
         )));
     }
 

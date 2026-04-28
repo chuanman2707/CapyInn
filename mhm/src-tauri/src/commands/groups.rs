@@ -70,6 +70,16 @@ fn map_known_group_error_code(
         ));
     }
 
+    if message.contains(codes::CONFLICT_INVALID_STATE_TRANSITION) {
+        return Some(map_group_user_error(
+            codes::CONFLICT_INVALID_STATE_TRANSITION,
+            command_name,
+            effective_correlation_id,
+            message.to_string(),
+            context,
+        ));
+    }
+
     match classify_db_error_code(message) {
         Some(codes::DB_LOCKED_RETRYABLE) => Some(
             CommandError::system(codes::DB_LOCKED_RETRYABLE, message.to_string()).retryable(true),
@@ -773,6 +783,24 @@ mod tests {
 
         assert_eq!(error.code, codes::CONFLICT_ROOM_UNAVAILABLE);
         assert!(error.message.contains("lịch trùng"));
+        assert_eq!(error.kind, AppErrorKind::User);
+        assert!(error.support_id.is_none());
+    }
+
+    #[test]
+    fn map_group_error_maps_invalid_state_transition_to_shared_conflict_code() {
+        let effective_correlation_id = frontend_correlation_id();
+        let error = map_group_error(
+            "group_checkout",
+            &effective_correlation_id,
+            BookingError::conflict(
+                "CONFLICT_INVALID_STATE_TRANSITION: booking is no longer active",
+            ),
+            json!({ "group_id": "group-1" }),
+        );
+
+        assert_eq!(error.code, codes::CONFLICT_INVALID_STATE_TRANSITION);
+        assert!(error.message.contains("CONFLICT_INVALID_STATE_TRANSITION"));
         assert_eq!(error.kind, AppErrorKind::User);
         assert!(error.support_id.is_none());
     }

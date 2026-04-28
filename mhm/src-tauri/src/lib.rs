@@ -3,6 +3,7 @@ use tauri::Manager;
 
 pub mod app_error;
 pub mod app_identity;
+pub mod aggregate_locks;
 mod backup;
 mod command_failure_log;
 pub mod command_idempotency;
@@ -24,6 +25,7 @@ mod runtime_config;
 mod services;
 pub mod support_log;
 mod watcher;
+pub mod write_manifest;
 
 use commands::AppState;
 use std::sync::{Arc, Mutex, Once};

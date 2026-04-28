@@ -36,6 +36,9 @@ pub mod codes {
     pub const CONFLICT_ROOM_UNAVAILABLE: &str = "CONFLICT_ROOM_UNAVAILABLE";
     pub const CONFLICT_IDEMPOTENCY_HASH_MISMATCH: &str = "CONFLICT_IDEMPOTENCY_HASH_MISMATCH";
     pub const CONFLICT_DUPLICATE_IN_FLIGHT: &str = "CONFLICT_DUPLICATE_IN_FLIGHT";
+    pub const CONFLICT_INVALID_STATE_TRANSITION: &str = "CONFLICT_INVALID_STATE_TRANSITION";
+    pub const CONFLICT_INVALID_STATE_TRANSITION_DEFAULT_MESSAGE: &str =
+        "Dữ liệu đã thay đổi, vui lòng tải lại trước khi thao tác.";
     pub const COMMAND_LEDGER_ROW_NOT_FOUND: &str = "COMMAND_LEDGER_ROW_NOT_FOUND";
     pub const SYSTEM_INTERNAL_ERROR: &str = "SYSTEM_INTERNAL_ERROR";
 
@@ -68,6 +71,7 @@ pub mod codes {
         CONFLICT_ROOM_UNAVAILABLE,
         CONFLICT_IDEMPOTENCY_HASH_MISMATCH,
         CONFLICT_DUPLICATE_IN_FLIGHT,
+        CONFLICT_INVALID_STATE_TRANSITION,
         COMMAND_LEDGER_ROW_NOT_FOUND,
         SYSTEM_INTERNAL_ERROR,
     ];
@@ -384,6 +388,34 @@ mod tests {
     }
 
     #[test]
+    fn invalid_state_transition_conflict_code_is_registered_with_default_message() {
+        #[derive(Deserialize)]
+        struct RegistryEntry {
+            code: String,
+            kind: AppErrorKind,
+            #[serde(rename = "defaultMessage")]
+            default_message: String,
+        }
+
+        let registry_path =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("../shared/error-codes.json");
+        let registry: Vec<RegistryEntry> =
+            serde_json::from_str(&fs::read_to_string(&registry_path).expect("read registry"))
+                .expect("parse registry");
+        let entry = registry
+            .iter()
+            .find(|entry| entry.code == codes::CONFLICT_INVALID_STATE_TRANSITION)
+            .expect("invalid state transition code is registered");
+
+        assert!(codes::ALL.contains(&codes::CONFLICT_INVALID_STATE_TRANSITION));
+        assert_eq!(entry.kind, AppErrorKind::User);
+        assert_eq!(
+            entry.default_message,
+            codes::CONFLICT_INVALID_STATE_TRANSITION_DEFAULT_MESSAGE
+        );
+    }
+
+    #[test]
     fn registry_matches_the_exported_code_constants() {
         #[derive(Deserialize)]
         struct RegistryEntry {
@@ -538,6 +570,11 @@ mod tests {
                 codes::CONFLICT_DUPLICATE_IN_FLIGHT,
                 AppErrorKind::User,
                 "Lệnh đang được xử lý.",
+            ),
+            (
+                codes::CONFLICT_INVALID_STATE_TRANSITION,
+                AppErrorKind::User,
+                codes::CONFLICT_INVALID_STATE_TRANSITION_DEFAULT_MESSAGE,
             ),
             (
                 codes::SYSTEM_INTERNAL_ERROR,
