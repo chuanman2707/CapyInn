@@ -1121,6 +1121,22 @@ async fn group_checkin_rejects_duplicate_room_ids() {
 }
 
 #[tokio::test]
+async fn group_checkin_lock_keys_are_stable_for_room_order() {
+    let left = crate::aggregate_locks::canonicalize_lock_keys(vec![
+        crate::aggregate_locks::room_key("R2").unwrap(),
+        crate::aggregate_locks::room_key("R1").unwrap(),
+    ])
+    .unwrap();
+    let right = crate::aggregate_locks::canonicalize_lock_keys(vec![
+        crate::aggregate_locks::room_key("R1").unwrap(),
+        crate::aggregate_locks::room_key("R2").unwrap(),
+    ])
+    .unwrap();
+
+    assert_eq!(left, right);
+}
+
+#[tokio::test]
 async fn group_checkin_idempotent_normalizes_room_order_and_assigns_payment_ordinals() {
     let pool = test_pool().await;
     seed_room(&pool, "GI601").await.unwrap();
@@ -1504,6 +1520,78 @@ async fn group_checkout_clears_master_flag_when_group_completes() {
         .await
         .unwrap();
     assert_eq!(booking_row.get::<i64, _>("is_master_room"), 0);
+}
+
+#[tokio::test]
+async fn group_checkout_rejects_stale_selected_booking() {
+    let pool = test_pool().await;
+    seed_room(&pool, "G501").await.unwrap();
+    seed_room(&pool, "G502").await.unwrap();
+    seed_pricing_rule(&pool, "standard", 250_000.0)
+        .await
+        .unwrap();
+
+    let group = group_lifecycle::group_checkin(
+        &pool,
+        Some("seed-user".to_string()),
+        minimal_group_checkin_request(&["G501", "G502"]),
+    )
+    .await
+    .unwrap();
+
+    let booking_ids: Vec<String> =
+        sqlx::query_scalar("SELECT id FROM bookings WHERE group_id = ? ORDER BY room_id")
+            .bind(&group.id)
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+    sqlx::query("UPDATE bookings SET status = 'checked_out' WHERE id = ?")
+        .bind(&booking_ids[0])
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    let error = group_lifecycle::group_checkout(
+        &pool,
+        GroupCheckoutRequest {
+            group_id: group.id.clone(),
+            booking_ids,
+            final_paid: None,
+        },
+    )
+    .await
+    .unwrap_err();
+
+    assert!(error
+        .to_string()
+        .contains(crate::app_error::codes::CONFLICT_INVALID_STATE_TRANSITION));
+}
+
+#[test]
+fn group_checkout_locked_room_map_rejects_changed_room_mapping() {
+    let locked = std::collections::HashMap::from([
+        ("booking-1".to_string(), "room-old".to_string()),
+        ("booking-2".to_string(), "room-stable".to_string()),
+    ]);
+    let current = std::collections::HashMap::from([
+        ("booking-1".to_string(), "room-new".to_string()),
+        ("booking-2".to_string(), "room-stable".to_string()),
+    ]);
+
+    let error = group_lifecycle::ensure_group_checkout_room_map_still_locked(
+        "group-1",
+        &["booking-1".to_string(), "booking-2".to_string()],
+        &locked,
+        &current,
+    )
+    .unwrap_err();
+
+    assert!(error
+        .to_string()
+        .contains(crate::app_error::codes::CONFLICT_INVALID_STATE_TRANSITION));
+    assert!(error
+        .to_string()
+        .contains("one or more bookings in group group-1 changed rooms before checkout"));
 }
 
 #[tokio::test]
