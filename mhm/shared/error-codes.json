@@ -140,6 +140,11 @@
     "defaultMessage": "Lệnh đang được xử lý."
   },
   {
+    "code": "CONFLICT_INVALID_STATE_TRANSITION",
+    "kind": "user",
+    "defaultMessage": "Dữ liệu đã thay đổi, vui lòng tải lại trước khi thao tác."
+  },
+  {
     "code": "SYSTEM_INTERNAL_ERROR",
     "kind": "system",
     "defaultMessage": "Có lỗi hệ thống, vui lòng thử lại"
