@@ -10,6 +10,10 @@ use std::{collections::BTreeMap, future::Future, pin::Pin};
 
 pub const SET_CRASH_REPORTING_PREFERENCE_COMMAND: &str = "settings.set_crash_reporting_preference";
 const CLAIM_LEASE_SECONDS: i64 = 30;
+#[cfg(test)]
+const CLAIM_LEASE_REFRESH_SECONDS: u64 = 1;
+#[cfg(not(test))]
+const CLAIM_LEASE_REFRESH_SECONDS: u64 = 15;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -507,7 +511,10 @@ impl WriteCommandExecutor {
 
         match claim {
             ClaimOutcome::Claimed { claim_token } => {
-                let _guard = match before_transaction().await {
+                let _guard = match self
+                    .await_pre_transaction_guard(ctx, &claim_token, before_transaction())
+                    .await
+                {
                     Ok(guard) => guard,
                     Err(mut error) => {
                         error.request_id = Some(ctx.request_id.clone());
@@ -519,6 +526,70 @@ impl WriteCommandExecutor {
                     .await
             }
             ClaimOutcome::Replayed(result) => Ok(result),
+        }
+    }
+
+    async fn await_pre_transaction_guard<GFut, Guard>(
+        &self,
+        ctx: &WriteCommandContext,
+        claim_token: &str,
+        guard_future: GFut,
+    ) -> CommandResult<Guard>
+    where
+        GFut: Future<Output = CommandResult<Guard>> + Send,
+        Guard: Send,
+    {
+        tokio::pin!(guard_future);
+        let mut refresh_interval =
+            tokio::time::interval(std::time::Duration::from_secs(CLAIM_LEASE_REFRESH_SECONDS));
+        refresh_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        refresh_interval.tick().await;
+
+        loop {
+            tokio::select! {
+                result = &mut guard_future => return result,
+                _ = refresh_interval.tick() => {
+                    self.refresh_claim_lease(ctx, claim_token).await?;
+                }
+            }
+        }
+    }
+
+    async fn refresh_claim_lease(
+        &self,
+        ctx: &WriteCommandContext,
+        claim_token: &str,
+    ) -> CommandResult<()> {
+        let now = Utc::now();
+        let now_string = now.to_rfc3339();
+        let lease_expires_at = (now + chrono::Duration::seconds(CLAIM_LEASE_SECONDS)).to_rfc3339();
+        let result = sqlx::query(
+            "UPDATE command_idempotency
+             SET lease_expires_at = ?,
+                 updated_at = ?
+             WHERE command_name = ?
+               AND idempotency_key = ?
+               AND status = ?
+               AND claim_token = ?",
+        )
+        .bind(&lease_expires_at)
+        .bind(&now_string)
+        .bind(&ctx.command_name)
+        .bind(&ctx.idempotency_key)
+        .bind(CommandStatus::InProgress.as_str())
+        .bind(claim_token)
+        .execute(&self.pool)
+        .await
+        .map_err(system_error)?;
+
+        if result.rows_affected() == 1 {
+            Ok(())
+        } else {
+            Err(CommandError::system(
+                codes::SYSTEM_INTERNAL_ERROR,
+                "Failed to refresh claimed idempotency lease",
+            )
+            .with_request_id(ctx.request_id.clone()))
         }
     }
 
@@ -1867,6 +1938,85 @@ mod tests {
         assert!(!error_summary_json.contains("payment"));
         assert!(!error_summary_json.contains("token"));
         assert!(error_summary_json.contains("Command failed"));
+    }
+
+    #[tokio::test]
+    async fn execute_with_pre_transaction_guard_keeps_claim_fresh_while_waiting() {
+        let pool = test_pool().await;
+        let ctx = WriteCommandContext::for_internal_test(
+            "test-request-pre-guard-lease",
+            "idem-pre-guard-lease",
+            "test.pre_guard_lease",
+        );
+        let request = WriteCommandRequest::new_low_risk(
+            serde_json::json!({ "case": "pre-guard-lease" }),
+            "Pre-guard lease",
+        )
+        .expect("request builds");
+        let wait_started = std::sync::Arc::new(tokio::sync::Notify::new());
+        let release_guard = std::sync::Arc::new(tokio::sync::Notify::new());
+
+        let runner_pool = pool.clone();
+        let runner_ctx = ctx.clone();
+        let runner_request = request.clone();
+        let runner_wait_started = wait_started.clone();
+        let runner_release_guard = release_guard.clone();
+        let runner = tokio::spawn(async move {
+            WriteCommandExecutor::new(runner_pool)
+                .execute_with_pre_transaction_guard(
+                    &runner_ctx,
+                    runner_request,
+                    move || {
+                        let wait_started = runner_wait_started.clone();
+                        let release_guard = runner_release_guard.clone();
+                        async move {
+                            wait_started.notify_one();
+                            release_guard.notified().await;
+                            Ok(())
+                        }
+                    },
+                    |_tx| Box::pin(async move { Ok(serde_json::json!({ "ok": true })) }),
+                )
+                .await
+        });
+
+        wait_started.notified().await;
+
+        let expired_lease = (Utc::now() - chrono::Duration::seconds(1)).to_rfc3339();
+        sqlx::query(
+            "UPDATE command_idempotency
+             SET lease_expires_at = ?
+             WHERE command_name = ? AND idempotency_key = ?",
+        )
+        .bind(&expired_lease)
+        .bind(&ctx.command_name)
+        .bind(&ctx.idempotency_key)
+        .execute(&pool)
+        .await
+        .expect("expires active claim lease");
+
+        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+
+        let duplicate_error = WriteCommandExecutor::new(pool.clone())
+            .execute_with_pre_transaction_guard(
+                &ctx,
+                request,
+                || async { Ok(()) },
+                |_tx| Box::pin(async move { Ok(serde_json::json!({ "unexpected": true })) }),
+            )
+            .await
+            .expect_err("duplicate must remain in-flight while original waits for guard");
+
+        assert_eq!(duplicate_error.code, codes::CONFLICT_DUPLICATE_IN_FLIGHT);
+
+        release_guard.notify_one();
+        let result = runner
+            .await
+            .expect("original task joins")
+            .expect("original guarded command completes");
+
+        assert_eq!(result.response, serde_json::json!({ "ok": true }));
+        assert!(!result.replayed);
     }
 
     #[tokio::test]

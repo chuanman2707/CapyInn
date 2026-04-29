@@ -214,16 +214,21 @@ fn map_reservation_write_error(
             ),
             Some(DbErrorGroup::NotFound),
         ),
-        BookingError::NotFound(message) if message.starts_with("Booking not found: ") => (
-            map_create_reservation_user_error(
-                codes::BOOKING_NOT_FOUND,
-                command_name,
-                effective_correlation_id,
-                message,
-                &context,
-            ),
-            Some(DbErrorGroup::NotFound),
-        ),
+        BookingError::NotFound(message)
+            if message.starts_with("Booking not found: ")
+                || message.starts_with("Không tìm thấy booking ") =>
+        {
+            (
+                map_create_reservation_user_error(
+                    codes::BOOKING_NOT_FOUND,
+                    command_name,
+                    effective_correlation_id,
+                    message,
+                    &context,
+                ),
+                Some(DbErrorGroup::NotFound),
+            )
+        }
         BookingError::Validation(message) | BookingError::Conflict(message) => {
             if let Some(mapped) = map_known_reservation_error_code(
                 command_name,
@@ -892,6 +897,21 @@ mod tests {
             "modify_reservation",
             &frontend_correlation_id(),
             BookingError::not_found("Booking not found: B101"),
+            json!({ "booking_id": "B101" }),
+        );
+
+        assert_eq!(error.code, codes::BOOKING_NOT_FOUND);
+        assert_eq!(error.kind, AppErrorKind::User);
+        assert!(error.support_id.is_none());
+        assert_eq!(db_error_group, Some(DbErrorGroup::NotFound));
+    }
+
+    #[test]
+    fn map_create_reservation_error_maps_vietnamese_booking_not_found_to_shared_code() {
+        let (error, db_error_group) = map_create_reservation_error(
+            "modify_reservation",
+            &frontend_correlation_id(),
+            BookingError::not_found("Không tìm thấy booking B101"),
             json!({ "booking_id": "B101" }),
         );
 
