@@ -14,6 +14,10 @@ const CLAIM_LEASE_SECONDS: i64 = 30;
 const CLAIM_LEASE_REFRESH_SECONDS: u64 = 1;
 #[cfg(not(test))]
 const CLAIM_LEASE_REFRESH_SECONDS: u64 = 15;
+#[cfg(test)]
+const CLAIM_LEASE_REFRESH_TIMEOUT_SECONDS: u64 = 1;
+#[cfg(not(test))]
+const CLAIM_LEASE_REFRESH_TIMEOUT_SECONDS: u64 = 2;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -563,7 +567,7 @@ impl WriteCommandExecutor {
         let now = Utc::now();
         let now_string = now.to_rfc3339();
         let lease_expires_at = (now + chrono::Duration::seconds(CLAIM_LEASE_SECONDS)).to_rfc3339();
-        let result = sqlx::query(
+        let refresh = sqlx::query(
             "UPDATE command_idempotency
              SET lease_expires_at = ?,
                  updated_at = ?
@@ -578,9 +582,19 @@ impl WriteCommandExecutor {
         .bind(&ctx.idempotency_key)
         .bind(CommandStatus::InProgress.as_str())
         .bind(claim_token)
-        .execute(&self.pool)
+        .execute(&self.pool);
+
+        let result = match tokio::time::timeout(
+            std::time::Duration::from_secs(CLAIM_LEASE_REFRESH_TIMEOUT_SECONDS),
+            refresh,
+        )
         .await
-        .map_err(system_error)?;
+        {
+            Ok(Ok(result)) => result,
+            Ok(Err(error)) if lease_refresh_error_is_transient(&error) => return Ok(()),
+            Ok(Err(error)) => return Err(system_error(error)),
+            Err(_) => return Ok(()),
+        };
 
         if result.rows_affected() == 1 {
             Ok(())
@@ -998,6 +1012,11 @@ impl WriteCommandExecutor {
 
         tx.commit().await.map_err(system_error)
     }
+}
+
+fn lease_refresh_error_is_transient(error: &sqlx::Error) -> bool {
+    crate::db_error_monitoring::classify_db_error_code(&error.to_string())
+        == Some(codes::DB_LOCKED_RETRYABLE)
 }
 
 impl WriteCommandContext {
@@ -2017,6 +2036,72 @@ mod tests {
 
         assert_eq!(result.response, serde_json::json!({ "ok": true }));
         assert!(!result.replayed);
+    }
+
+    #[tokio::test]
+    async fn refresh_claim_lease_ignores_transient_database_lock() {
+        let pool = test_pool().await;
+        let ctx = WriteCommandContext::for_internal_test(
+            "test-request-refresh-lock",
+            "idem-refresh-lock",
+            "test.refresh_lock",
+        );
+        let request = WriteCommandRequest::new_low_risk(
+            serde_json::json!({ "case": "refresh-lock" }),
+            "Refresh lock",
+        )
+        .expect("request builds");
+        let prepared = prepare_write_command_request(request).expect("prepares request");
+        let now = Utc::now().to_rfc3339();
+        let lease_expires_at = (Utc::now() + chrono::Duration::seconds(CLAIM_LEASE_SECONDS))
+            .to_rfc3339();
+        let claim_token = "refresh-lock-claim-token";
+
+        sqlx::query(
+            "INSERT INTO command_idempotency (
+                idempotency_key,
+                command_name,
+                request_hash,
+                intent_json,
+                lock_keys_json,
+                status,
+                claim_token,
+                retryable,
+                lease_expires_at,
+                created_at,
+                updated_at,
+                last_attempt_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        )
+        .bind(&ctx.idempotency_key)
+        .bind(&ctx.command_name)
+        .bind(&prepared.request_hash)
+        .bind(&prepared.intent_json)
+        .bind(&prepared.lock_keys_json)
+        .bind(CommandStatus::InProgress.as_str())
+        .bind(claim_token)
+        .bind(0_i64)
+        .bind(&lease_expires_at)
+        .bind(&now)
+        .bind(&now)
+        .bind(&now)
+        .execute(&pool)
+        .await
+        .expect("seeds in-progress claim");
+
+        let _blocking_tx = pool
+            .begin_with("BEGIN IMMEDIATE")
+            .await
+            .expect("holds a write lock");
+
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(3),
+            WriteCommandExecutor::new(pool.clone()).refresh_claim_lease(&ctx, claim_token),
+        )
+        .await
+        .expect("refresh returns without waiting for the blocking writer");
+
+        result.expect("transient lock should not fail the command");
     }
 
     #[tokio::test]
