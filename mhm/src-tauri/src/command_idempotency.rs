@@ -593,7 +593,14 @@ impl WriteCommandExecutor {
             Ok(Ok(result)) => result,
             Ok(Err(error)) if lease_refresh_error_is_transient(&error) => return Ok(()),
             Ok(Err(error)) => return Err(system_error(error)),
-            Err(_) => return Ok(()),
+            Err(_) => {
+                return Err(CommandError::system(
+                    codes::SYSTEM_INTERNAL_ERROR,
+                    "Timed out refreshing claimed idempotency lease",
+                )
+                .retryable(true)
+                .with_request_id(ctx.request_id.clone()))
+            }
         };
 
         if result.rows_affected() == 1 {
@@ -1351,14 +1358,14 @@ mod tests {
     use crate::app_error::codes;
     use sqlx::sqlite::SqlitePoolOptions;
 
-    async fn test_pool() -> Pool<Sqlite> {
+    async fn test_pool_with_max_connections(max_connections: u32) -> Pool<Sqlite> {
         let database_url = format!(
             "sqlite://file:{}?mode=memory&cache=shared",
             uuid::Uuid::new_v4()
         );
 
         let pool = SqlitePoolOptions::new()
-            .max_connections(5)
+            .max_connections(max_connections)
             .connect(&database_url)
             .await
             .expect("failed to open sqlite test pool");
@@ -1368,6 +1375,10 @@ mod tests {
             .expect("failed to run migrations");
 
         pool
+    }
+
+    async fn test_pool() -> Pool<Sqlite> {
+        test_pool_with_max_connections(5).await
     }
 
     #[test]
@@ -2039,7 +2050,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn refresh_claim_lease_ignores_transient_database_lock() {
+    async fn refresh_claim_lease_write_lock_timeout_fails_claim() {
         let pool = test_pool().await;
         let ctx = WriteCommandContext::for_internal_test(
             "test-request-refresh-lock",
@@ -2053,8 +2064,8 @@ mod tests {
         .expect("request builds");
         let prepared = prepare_write_command_request(request).expect("prepares request");
         let now = Utc::now().to_rfc3339();
-        let lease_expires_at = (Utc::now() + chrono::Duration::seconds(CLAIM_LEASE_SECONDS))
-            .to_rfc3339();
+        let lease_expires_at =
+            (Utc::now() + chrono::Duration::seconds(CLAIM_LEASE_SECONDS)).to_rfc3339();
         let claim_token = "refresh-lock-claim-token";
 
         sqlx::query(
@@ -2094,14 +2105,88 @@ mod tests {
             .await
             .expect("holds a write lock");
 
-        let result = tokio::time::timeout(
+        let error = tokio::time::timeout(
             std::time::Duration::from_secs(3),
             WriteCommandExecutor::new(pool.clone()).refresh_claim_lease(&ctx, claim_token),
         )
         .await
-        .expect("refresh returns without waiting for the blocking writer");
+        .expect("refresh returns without waiting past the refresh timeout")
+        .expect_err("refresh timeout must fail the claim");
 
-        result.expect("transient lock should not fail the command");
+        assert_eq!(error.code, codes::SYSTEM_INTERNAL_ERROR);
+        assert!(error.retryable);
+        assert_eq!(error.request_id.as_deref(), Some(ctx.request_id.as_str()));
+        assert_eq!(
+            error.message,
+            "Timed out refreshing claimed idempotency lease"
+        );
+    }
+
+    #[tokio::test]
+    async fn refresh_claim_lease_timeout_fails_claim() {
+        let pool = test_pool_with_max_connections(1).await;
+        let ctx = WriteCommandContext::for_internal_test(
+            "test-request-refresh-timeout",
+            "idem-refresh-timeout",
+            "test.refresh_timeout",
+        );
+        let request = WriteCommandRequest::new_low_risk(
+            serde_json::json!({ "case": "refresh-timeout" }),
+            "Refresh timeout",
+        )
+        .expect("request builds");
+        let prepared = prepare_write_command_request(request).expect("prepares request");
+        let now = Utc::now().to_rfc3339();
+        let lease_expires_at =
+            (Utc::now() + chrono::Duration::seconds(CLAIM_LEASE_SECONDS)).to_rfc3339();
+        let claim_token = "refresh-timeout-claim-token";
+
+        sqlx::query(
+            "INSERT INTO command_idempotency (
+                idempotency_key,
+                command_name,
+                request_hash,
+                intent_json,
+                lock_keys_json,
+                status,
+                claim_token,
+                retryable,
+                lease_expires_at,
+                created_at,
+                updated_at,
+                last_attempt_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        )
+        .bind(&ctx.idempotency_key)
+        .bind(&ctx.command_name)
+        .bind(&prepared.request_hash)
+        .bind(&prepared.intent_json)
+        .bind(&prepared.lock_keys_json)
+        .bind(CommandStatus::InProgress.as_str())
+        .bind(claim_token)
+        .bind(0_i64)
+        .bind(&lease_expires_at)
+        .bind(&now)
+        .bind(&now)
+        .bind(&now)
+        .execute(&pool)
+        .await
+        .expect("seeds in-progress claim");
+
+        let _held_connection = pool.acquire().await.expect("holds the only connection");
+
+        let error = WriteCommandExecutor::new(pool.clone())
+            .refresh_claim_lease(&ctx, claim_token)
+            .await
+            .expect_err("refresh timeout must fail the claim");
+
+        assert_eq!(error.code, codes::SYSTEM_INTERNAL_ERROR);
+        assert!(error.retryable);
+        assert_eq!(error.request_id.as_deref(), Some(ctx.request_id.as_str()));
+        assert_eq!(
+            error.message,
+            "Timed out refreshing claimed idempotency lease"
+        );
     }
 
     #[tokio::test]
