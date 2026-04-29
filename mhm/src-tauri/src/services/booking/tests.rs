@@ -345,10 +345,8 @@ pub async fn test_pool() -> Pool<Sqlite> {
 }
 
 async fn shared_file_test_pools(label: &str) -> (Pool<Sqlite>, Pool<Sqlite>, std::path::PathBuf) {
-    let db_path = std::env::temp_dir().join(format!(
-        "capyinn-{label}-{}.sqlite",
-        uuid::Uuid::new_v4()
-    ));
+    let db_path =
+        std::env::temp_dir().join(format!("capyinn-{label}-{}.sqlite", uuid::Uuid::new_v4()));
     let database_url = format!("sqlite://{}?mode=rwc", db_path.display());
 
     let pool_a = SqlitePoolOptions::new()
@@ -1273,7 +1271,10 @@ async fn group_checkin_duplicate_in_flight_does_not_wait_for_room_lock() {
         }
         tokio::time::sleep(std::time::Duration::from_millis(10)).await;
     }
-    assert!(claim_seen, "first command should claim before waiting for room lock");
+    assert!(
+        claim_seen,
+        "first command should claim before waiting for room lock"
+    );
 
     let duplicate = tokio::time::timeout(
         std::time::Duration::from_millis(200),
@@ -1357,7 +1358,10 @@ async fn group_checkin_idempotent_non_positive_paid_amount_writes_no_payment_ori
     )
     .await
     .expect("negative reservation paid amount still creates group");
-    assert_eq!(negative_reservation.response["status"].as_str(), Some("booked"));
+    assert_eq!(
+        negative_reservation.response["status"].as_str(),
+        Some("booked")
+    );
 
     let zero_count: i64 =
         sqlx::query_scalar("SELECT COUNT(*) FROM transactions WHERE origin_idempotency_key = ?")
@@ -2228,7 +2232,7 @@ async fn create_reservation_idempotent_retry_does_not_duplicate_deposit() {
 
     let count: i64 =
         sqlx::query_scalar("SELECT COUNT(*) FROM transactions WHERE origin_idempotency_key = ?")
-            .bind("idem-reservation-1")
+            .bind("create_reservation:idem-reservation-1")
             .fetch_one(&pool)
             .await
             .expect("counts deposit rows");
@@ -2368,6 +2372,828 @@ async fn create_reservation_same_key_different_payload_conflicts() {
 }
 
 #[tokio::test]
+async fn reservation_command_idempotency_create_hashes_deposit_as_integer_vnd_units() {
+    let pool = test_pool().await;
+    seed_room(&pool, "R690").await.expect("seeds room");
+    seed_pricing_rule(&pool, "standard", 600_000.0)
+        .await
+        .expect("seeds pricing");
+    let ctx = crate::command_idempotency::WriteCommandContext::for_internal_test(
+        "req-reservation-deposit-vnd",
+        "idem-reservation-deposit-vnd",
+        "create_reservation",
+    );
+    let request = CreateReservationRequest {
+        room_id: "R690".to_string(),
+        guest_name: "Deposit Units Guest".to_string(),
+        guest_doc_number: Some("DOC690".to_string()),
+        guest_phone: None,
+        check_in_date: "2026-05-01".to_string(),
+        check_out_date: "2026-05-02".to_string(),
+        nights: 1,
+        source: Some("phone".to_string()),
+        notes: None,
+        deposit_amount: Some(500_000.0),
+    };
+
+    reservation_lifecycle::create_reservation_idempotent(&pool, &ctx, request)
+        .await
+        .expect("reservation succeeds");
+
+    let row = sqlx::query(
+        "SELECT request_hash, intent_json FROM command_idempotency
+         WHERE command_name = ? AND idempotency_key = ?",
+    )
+    .bind(&ctx.command_name)
+    .bind(&ctx.idempotency_key)
+    .fetch_one(&pool)
+    .await
+    .expect("reads command row");
+
+    let expected_payload = serde_json::json!({
+        "schema": "reservation.create.v1",
+        "room_id": "R690",
+        "guest_name": "Deposit Units Guest",
+        "guest_doc_number": "DOC690",
+        "guest_phone": null,
+        "check_in_date": "2026-05-01",
+        "check_out_date": "2026-05-02",
+        "nights": 1,
+        "source": "phone",
+        "notes": null,
+        "deposit_vnd_units": 500000,
+    });
+    let mut cents_payload = expected_payload.clone();
+    cents_payload["deposit_vnd_units"] = serde_json::json!(50000000);
+    let mut float_payload = expected_payload.clone();
+    float_payload["deposit_vnd_units"] = serde_json::json!(500000.0);
+    let mut string_payload = expected_payload.clone();
+    string_payload["deposit_vnd_units"] = serde_json::json!("500000");
+
+    assert_eq!(
+        row.get::<String, _>("request_hash"),
+        crate::command_idempotency::stable_request_hash(&expected_payload)
+            .expect("expected payload hashes")
+    );
+    assert_ne!(
+        row.get::<String, _>("request_hash"),
+        crate::command_idempotency::stable_request_hash(&cents_payload)
+            .expect("cents payload hashes")
+    );
+    assert_ne!(
+        row.get::<String, _>("request_hash"),
+        crate::command_idempotency::stable_request_hash(&float_payload)
+            .expect("float payload hashes")
+    );
+    assert_ne!(
+        row.get::<String, _>("request_hash"),
+        crate::command_idempotency::stable_request_hash(&string_payload)
+            .expect("string payload hashes")
+    );
+
+    let intent_json = row.get::<String, _>("intent_json");
+    assert!(intent_json.contains("\"deposit_present\":true"));
+    assert!(intent_json.contains("\"deposit_vnd_units\":500000"));
+}
+
+fn reservation_modify_request(
+    booking_id: &str,
+    check_in: &str,
+    check_out: &str,
+    nights: i32,
+) -> crate::models::ModifyReservationRequest {
+    crate::models::ModifyReservationRequest {
+        booking_id: booking_id.to_string(),
+        new_check_in_date: check_in.to_string(),
+        new_check_out_date: check_out.to_string(),
+        new_nights: nights,
+    }
+}
+
+#[tokio::test]
+async fn reservation_command_idempotency_create_replay_does_not_duplicate_booking_or_calendar() {
+    let pool = test_pool().await;
+    seed_room(&pool, "R691").await.expect("seeds room");
+    seed_pricing_rule(&pool, "standard", 600_000.0)
+        .await
+        .expect("seeds pricing");
+    let ctx = crate::command_idempotency::WriteCommandContext::for_internal_test(
+        "req-create-replay-no-dup",
+        "idem-create-replay-no-dup",
+        "reservation.create",
+    );
+
+    let first = reservation_lifecycle::create_reservation_idempotent(
+        &pool,
+        &ctx,
+        minimal_reservation_request("R691"),
+    )
+    .await
+    .expect("first create succeeds");
+    let replay = reservation_lifecycle::create_reservation_idempotent(
+        &pool,
+        &ctx,
+        minimal_reservation_request("R691"),
+    )
+    .await
+    .expect("create replays");
+
+    assert!(!first.replayed);
+    assert!(replay.replayed);
+    assert_eq!(first.response, replay.response);
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM bookings WHERE room_id = ?")
+            .bind("R691")
+            .fetch_one(&pool)
+            .await
+            .expect("counts bookings"),
+        1
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM room_calendar WHERE room_id = ?")
+            .bind("R691")
+            .fetch_one(&pool)
+            .await
+            .expect("counts calendar rows"),
+        2
+    );
+}
+
+#[tokio::test]
+async fn reservation_command_idempotency_modify_replay_returns_stored_snapshot() {
+    let pool = test_pool().await;
+    seed_room(&pool, "R692").await.unwrap();
+    seed_pricing_rule(&pool, "standard", 600_000.0)
+        .await
+        .unwrap();
+    seed_booked_reservation(&pool, "B692", "R692")
+        .await
+        .unwrap();
+    let ctx = crate::command_idempotency::WriteCommandContext::for_internal_test(
+        "req-modify-snapshot",
+        "idem-modify-snapshot",
+        "reservation.modify",
+    );
+
+    let first = reservation_lifecycle::modify_reservation_idempotent(
+        &pool,
+        &ctx,
+        reservation_modify_request("B692", "2026-04-23", "2026-04-26", 3),
+    )
+    .await
+    .expect("first modify succeeds");
+    sqlx::query("UPDATE bookings SET total_price = 999 WHERE id = ?")
+        .bind("B692")
+        .execute(&pool)
+        .await
+        .expect("mutates booking after first response");
+    let replay = reservation_lifecycle::modify_reservation_idempotent(
+        &pool,
+        &ctx,
+        reservation_modify_request("B692", "2026-04-23", "2026-04-26", 3),
+    )
+    .await
+    .expect("modify replays");
+
+    assert!(replay.replayed);
+    assert_eq!(first.response, replay.response);
+    assert_eq!(
+        replay.response["total_price"],
+        serde_json::json!(1_800_000.0)
+    );
+}
+
+#[tokio::test]
+async fn reservation_command_idempotency_modify_replay_does_not_duplicate_calendar() {
+    let pool = test_pool().await;
+    seed_room(&pool, "R693").await.unwrap();
+    seed_pricing_rule(&pool, "standard", 600_000.0)
+        .await
+        .unwrap();
+    seed_booked_reservation(&pool, "B693", "R693")
+        .await
+        .unwrap();
+    let ctx = crate::command_idempotency::WriteCommandContext::for_internal_test(
+        "req-modify-calendar",
+        "idem-modify-calendar",
+        "reservation.modify",
+    );
+    reservation_lifecycle::modify_reservation_idempotent(
+        &pool,
+        &ctx,
+        reservation_modify_request("B693", "2026-04-23", "2026-04-26", 3),
+    )
+    .await
+    .expect("first modify succeeds");
+    reservation_lifecycle::modify_reservation_idempotent(
+        &pool,
+        &ctx,
+        reservation_modify_request("B693", "2026-04-23", "2026-04-26", 3),
+    )
+    .await
+    .expect("modify replays");
+
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM room_calendar WHERE booking_id = ?")
+            .bind("B693")
+            .fetch_one(&pool)
+            .await
+            .expect("counts calendar rows"),
+        3
+    );
+}
+
+#[tokio::test]
+async fn reservation_command_idempotency_cancel_replay_does_not_duplicate_cancellation_fee() {
+    let pool = test_pool().await;
+    seed_room(&pool, "R694").await.unwrap();
+    seed_booked_reservation(&pool, "B694", "R694")
+        .await
+        .unwrap();
+    let ctx = crate::command_idempotency::WriteCommandContext::for_internal_test(
+        "req-cancel-fee",
+        "idem-cancel-fee",
+        "reservation.cancel",
+    );
+
+    let first = reservation_lifecycle::cancel_reservation_idempotent(&pool, &ctx, "B694")
+        .await
+        .expect("first cancel succeeds");
+    let replay = reservation_lifecycle::cancel_reservation_idempotent(&pool, &ctx, "B694")
+        .await
+        .expect("cancel replays");
+
+    assert_eq!(first.response, replay.response);
+    assert!(replay.replayed);
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM transactions WHERE booking_id = ? AND type = 'cancellation_fee'",
+        )
+        .bind("B694")
+        .fetch_one(&pool)
+        .await
+        .expect("counts cancellation fees"),
+        1
+    );
+}
+
+#[tokio::test]
+async fn reservation_command_idempotency_confirm_replay_does_not_duplicate_room_charge() {
+    let pool = test_pool().await;
+    seed_room(&pool, "R695").await.unwrap();
+    seed_pricing_rule(&pool, "standard", 600_000.0)
+        .await
+        .unwrap();
+    seed_booked_reservation(&pool, "B695", "R695")
+        .await
+        .unwrap();
+    let ctx = crate::command_idempotency::WriteCommandContext::for_internal_test(
+        "req-confirm-charge",
+        "idem-confirm-charge",
+        "reservation.confirm",
+    );
+
+    reservation_lifecycle::confirm_reservation_idempotent(&pool, &ctx, "B695")
+        .await
+        .expect("first confirm succeeds");
+    reservation_lifecycle::confirm_reservation_idempotent(&pool, &ctx, "B695")
+        .await
+        .expect("confirm replays");
+
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM transactions WHERE booking_id = ? AND type = 'charge'",
+        )
+        .bind("B695")
+        .fetch_one(&pool)
+        .await
+        .expect("counts room charges"),
+        1
+    );
+}
+
+#[tokio::test]
+async fn reservation_command_idempotency_confirm_replay_does_not_requery_or_reprice_later_retry() {
+    let pool = test_pool().await;
+    seed_room(&pool, "R696").await.unwrap();
+    seed_pricing_rule(&pool, "standard", 600_000.0)
+        .await
+        .unwrap();
+    seed_booked_reservation(&pool, "B696", "R696")
+        .await
+        .unwrap();
+    let ctx = crate::command_idempotency::WriteCommandContext::for_internal_test(
+        "req-confirm-no-reprice",
+        "idem-confirm-no-reprice",
+        "reservation.confirm",
+    );
+
+    let first = reservation_lifecycle::confirm_reservation_idempotent(&pool, &ctx, "B696")
+        .await
+        .expect("first confirm succeeds");
+    sqlx::query("UPDATE pricing_rules SET daily_rate = 9999999 WHERE room_type = 'standard'")
+        .execute(&pool)
+        .await
+        .expect("mutates pricing");
+    sqlx::query("UPDATE bookings SET total_price = 123 WHERE id = ?")
+        .bind("B696")
+        .execute(&pool)
+        .await
+        .expect("mutates booking");
+    let replay = reservation_lifecycle::confirm_reservation_idempotent(&pool, &ctx, "B696")
+        .await
+        .expect("confirm replays");
+
+    assert!(replay.replayed);
+    assert_eq!(first.response, replay.response);
+    assert_ne!(replay.response["total_price"], serde_json::json!(123.0));
+}
+
+#[tokio::test]
+async fn reservation_command_idempotency_modify_cancel_confirm_same_key_different_payload_conflicts(
+) {
+    let pool = test_pool().await;
+    seed_room(&pool, "R697A").await.unwrap();
+    seed_room(&pool, "R697B").await.unwrap();
+    seed_pricing_rule(&pool, "standard", 600_000.0)
+        .await
+        .unwrap();
+    seed_booked_reservation(&pool, "B697A", "R697A")
+        .await
+        .unwrap();
+    seed_booked_reservation(&pool, "B697B", "R697B")
+        .await
+        .unwrap();
+
+    let modify_ctx = crate::command_idempotency::WriteCommandContext::for_internal_test(
+        "req-modify-hash-conflict",
+        "idem-modify-hash-conflict",
+        "reservation.modify",
+    );
+    reservation_lifecycle::modify_reservation_idempotent(
+        &pool,
+        &modify_ctx,
+        crate::models::ModifyReservationRequest {
+            booking_id: "B697A".to_string(),
+            new_check_in_date: "2026-04-23".to_string(),
+            new_check_out_date: "2026-04-25".to_string(),
+            new_nights: 2,
+        },
+    )
+    .await
+    .expect("first modify succeeds");
+    let modify_error = reservation_lifecycle::modify_reservation_idempotent(
+        &pool,
+        &modify_ctx,
+        crate::models::ModifyReservationRequest {
+            booking_id: "B697B".to_string(),
+            new_check_in_date: "2026-04-23".to_string(),
+            new_check_out_date: "2026-04-25".to_string(),
+            new_nights: 2,
+        },
+    )
+    .await
+    .expect_err("different modify payload conflicts");
+    assert_eq!(
+        modify_error.code,
+        crate::app_error::codes::CONFLICT_IDEMPOTENCY_HASH_MISMATCH
+    );
+
+    let cancel_ctx = crate::command_idempotency::WriteCommandContext::for_internal_test(
+        "req-cancel-hash-conflict",
+        "idem-cancel-hash-conflict",
+        "reservation.cancel",
+    );
+    reservation_lifecycle::cancel_reservation_idempotent(&pool, &cancel_ctx, "B697A")
+        .await
+        .expect("first cancel succeeds");
+    let cancel_error =
+        reservation_lifecycle::cancel_reservation_idempotent(&pool, &cancel_ctx, "B697B")
+            .await
+            .expect_err("different cancel payload conflicts");
+    assert_eq!(
+        cancel_error.code,
+        crate::app_error::codes::CONFLICT_IDEMPOTENCY_HASH_MISMATCH
+    );
+
+    let confirm_ctx = crate::command_idempotency::WriteCommandContext::for_internal_test(
+        "req-confirm-hash-conflict",
+        "idem-confirm-hash-conflict",
+        "reservation.confirm",
+    );
+    reservation_lifecycle::confirm_reservation_idempotent(&pool, &confirm_ctx, "B697B")
+        .await
+        .expect("first confirm succeeds");
+    let confirm_error =
+        reservation_lifecycle::confirm_reservation_idempotent(&pool, &confirm_ctx, "B697A")
+            .await
+            .expect_err("different confirm payload conflicts");
+    assert_eq!(
+        confirm_error.code,
+        crate::app_error::codes::CONFLICT_IDEMPOTENCY_HASH_MISMATCH
+    );
+}
+
+#[tokio::test]
+async fn reservation_command_idempotency_modify_conflict_replays_terminal_room_unavailable() {
+    let pool = test_pool().await;
+    seed_room(&pool, "R698").await.unwrap();
+    seed_pricing_rule(&pool, "standard", 600_000.0)
+        .await
+        .unwrap();
+    seed_booked_reservation(&pool, "B698", "R698")
+        .await
+        .unwrap();
+    sqlx::query(
+        "INSERT INTO room_calendar (room_id, date, booking_id, status)
+         VALUES (?, '2026-04-23', NULL, 'booked')",
+    )
+    .bind("R698")
+    .execute(&pool)
+    .await
+    .expect("seeds conflicting calendar");
+    let ctx = crate::command_idempotency::WriteCommandContext::for_internal_test(
+        "req-modify-room-conflict",
+        "idem-modify-room-conflict",
+        "reservation.modify",
+    );
+    let first = reservation_lifecycle::modify_reservation_idempotent(
+        &pool,
+        &ctx,
+        reservation_modify_request("B698", "2026-04-23", "2026-04-25", 2),
+    )
+    .await
+    .expect_err("first conflict fails");
+    sqlx::query("DELETE FROM room_calendar WHERE room_id = ? AND booking_id IS NULL")
+        .bind("R698")
+        .execute(&pool)
+        .await
+        .expect("removes conflict");
+    let replay = reservation_lifecycle::modify_reservation_idempotent(
+        &pool,
+        &ctx,
+        reservation_modify_request("B698", "2026-04-23", "2026-04-25", 2),
+    )
+    .await
+    .expect_err("terminal conflict replays");
+
+    assert_eq!(
+        first.code,
+        crate::app_error::codes::CONFLICT_ROOM_UNAVAILABLE
+    );
+    assert_eq!(replay.code, first.code);
+}
+
+#[tokio::test]
+async fn reservation_command_idempotency_cancel_confirm_invalid_state_replays_terminal() {
+    let pool = test_pool().await;
+    seed_room(&pool, "R699A").await.unwrap();
+    seed_room(&pool, "R699B").await.unwrap();
+    seed_booked_reservation(&pool, "B699A", "R699A")
+        .await
+        .unwrap();
+    seed_booked_reservation(&pool, "B699B", "R699B")
+        .await
+        .unwrap();
+    sqlx::query("UPDATE bookings SET status = 'active' WHERE id = ?")
+        .bind("B699A")
+        .execute(&pool)
+        .await
+        .expect("makes cancel invalid");
+    sqlx::query("UPDATE bookings SET status = 'cancelled' WHERE id = ?")
+        .bind("B699B")
+        .execute(&pool)
+        .await
+        .expect("makes confirm invalid");
+
+    let cancel_ctx = crate::command_idempotency::WriteCommandContext::for_internal_test(
+        "req-cancel-invalid-replay",
+        "idem-cancel-invalid-replay",
+        "reservation.cancel",
+    );
+    let cancel_first =
+        reservation_lifecycle::cancel_reservation_idempotent(&pool, &cancel_ctx, "B699A")
+            .await
+            .expect_err("cancel invalid state fails");
+    sqlx::query("UPDATE bookings SET status = 'booked' WHERE id = ?")
+        .bind("B699A")
+        .execute(&pool)
+        .await
+        .expect("would make cancel valid");
+    let cancel_replay =
+        reservation_lifecycle::cancel_reservation_idempotent(&pool, &cancel_ctx, "B699A")
+            .await
+            .expect_err("cancel invalid state replays");
+
+    let confirm_ctx = crate::command_idempotency::WriteCommandContext::for_internal_test(
+        "req-confirm-invalid-replay",
+        "idem-confirm-invalid-replay",
+        "reservation.confirm",
+    );
+    let confirm_first =
+        reservation_lifecycle::confirm_reservation_idempotent(&pool, &confirm_ctx, "B699B")
+            .await
+            .expect_err("confirm invalid state fails");
+    sqlx::query("UPDATE bookings SET status = 'booked' WHERE id = ?")
+        .bind("B699B")
+        .execute(&pool)
+        .await
+        .expect("would make confirm valid");
+    let confirm_replay =
+        reservation_lifecycle::confirm_reservation_idempotent(&pool, &confirm_ctx, "B699B")
+            .await
+            .expect_err("confirm invalid state replays");
+
+    assert_eq!(
+        cancel_first.code,
+        crate::app_error::codes::CONFLICT_INVALID_STATE_TRANSITION
+    );
+    assert_eq!(cancel_replay.code, cancel_first.code);
+    assert_eq!(
+        confirm_first.code,
+        crate::app_error::codes::CONFLICT_INVALID_STATE_TRANSITION
+    );
+    assert_eq!(confirm_replay.code, confirm_first.code);
+}
+
+#[tokio::test]
+async fn reservation_command_idempotency_missing_booking_for_cancel_modify_confirm_replays_terminal(
+) {
+    let pool = test_pool().await;
+    seed_room(&pool, "R700A").await.unwrap();
+    seed_room(&pool, "R700B").await.unwrap();
+    seed_room(&pool, "R700C").await.unwrap();
+    seed_pricing_rule(&pool, "standard", 600_000.0)
+        .await
+        .unwrap();
+
+    let cancel_ctx = crate::command_idempotency::WriteCommandContext::for_internal_test(
+        "req-cancel-missing",
+        "idem-cancel-missing",
+        "reservation.cancel",
+    );
+    let cancel_first =
+        reservation_lifecycle::cancel_reservation_idempotent(&pool, &cancel_ctx, "B700A")
+            .await
+            .expect_err("missing cancel booking fails");
+    seed_booked_reservation(&pool, "B700A", "R700A")
+        .await
+        .unwrap();
+    let cancel_replay =
+        reservation_lifecycle::cancel_reservation_idempotent(&pool, &cancel_ctx, "B700A")
+            .await
+            .expect_err("missing cancel booking replays");
+
+    let modify_ctx = crate::command_idempotency::WriteCommandContext::for_internal_test(
+        "req-modify-missing",
+        "idem-modify-missing",
+        "reservation.modify",
+    );
+    let modify_first = reservation_lifecycle::modify_reservation_idempotent(
+        &pool,
+        &modify_ctx,
+        reservation_modify_request("B700B", "2026-04-23", "2026-04-25", 2),
+    )
+    .await
+    .expect_err("missing modify booking fails");
+    seed_booked_reservation(&pool, "B700B", "R700B")
+        .await
+        .unwrap();
+    let modify_replay = reservation_lifecycle::modify_reservation_idempotent(
+        &pool,
+        &modify_ctx,
+        reservation_modify_request("B700B", "2026-04-23", "2026-04-25", 2),
+    )
+    .await
+    .expect_err("missing modify booking replays");
+
+    let confirm_ctx = crate::command_idempotency::WriteCommandContext::for_internal_test(
+        "req-confirm-missing",
+        "idem-confirm-missing",
+        "reservation.confirm",
+    );
+    let confirm_first =
+        reservation_lifecycle::confirm_reservation_idempotent(&pool, &confirm_ctx, "B700C")
+            .await
+            .expect_err("missing confirm booking fails");
+    seed_booked_reservation(&pool, "B700C", "R700C")
+        .await
+        .unwrap();
+    let confirm_replay =
+        reservation_lifecycle::confirm_reservation_idempotent(&pool, &confirm_ctx, "B700C")
+            .await
+            .expect_err("missing confirm booking replays");
+
+    for error in [
+        cancel_first,
+        cancel_replay,
+        modify_first,
+        modify_replay,
+        confirm_first,
+        confirm_replay,
+    ] {
+        assert_eq!(error.code, crate::app_error::codes::BOOKING_NOT_FOUND);
+    }
+}
+
+#[tokio::test]
+async fn reservation_command_idempotency_duplicate_in_flight_returns_conflict() {
+    let pool = test_pool().await;
+    seed_room(&pool, "R701").await.unwrap();
+    seed_booked_reservation(&pool, "B701", "R701")
+        .await
+        .unwrap();
+    let ctx = crate::command_idempotency::WriteCommandContext::for_internal_test(
+        "req-cancel-in-flight",
+        "idem-cancel-in-flight",
+        "reservation.cancel",
+    );
+    let payload = serde_json::json!({
+        "schema": "reservation.cancel.v1",
+        "booking_id": "B701",
+    });
+    let now = chrono::Utc::now().to_rfc3339();
+    let lease_expires_at = (chrono::Utc::now() + chrono::Duration::seconds(30)).to_rfc3339();
+    sqlx::query(
+        "INSERT INTO command_idempotency (
+            idempotency_key, command_name, request_hash, intent_json, lock_keys_json,
+            status, claim_token, retryable, lease_expires_at, created_at, updated_at, last_attempt_at
+        ) VALUES (?, ?, ?, '{}', '[]', 'in_progress', 'other-claim', 0, ?, ?, ?, ?)",
+    )
+    .bind(&ctx.idempotency_key)
+    .bind(&ctx.command_name)
+    .bind(crate::command_idempotency::stable_request_hash(&payload).expect("payload hashes"))
+    .bind(&lease_expires_at)
+    .bind(&now)
+    .bind(&now)
+    .bind(&now)
+    .execute(&pool)
+    .await
+    .expect("seeds in-flight row");
+
+    let error = reservation_lifecycle::cancel_reservation_idempotent(&pool, &ctx, "B701")
+        .await
+        .expect_err("duplicate in-flight conflicts");
+
+    assert_eq!(
+        error.code,
+        crate::app_error::codes::CONFLICT_DUPLICATE_IN_FLIGHT
+    );
+}
+
+#[tokio::test]
+async fn reservation_command_idempotency_retryable_reclaimable_failure_can_be_reclaimed() {
+    let pool = test_pool().await;
+    seed_room(&pool, "R702").await.unwrap();
+    seed_booked_reservation(&pool, "B702", "R702")
+        .await
+        .unwrap();
+    let ctx = crate::command_idempotency::WriteCommandContext::for_internal_test(
+        "req-cancel-reclaim",
+        "idem-cancel-reclaim",
+        "reservation.cancel",
+    );
+    let payload = serde_json::json!({
+        "schema": "reservation.cancel.v1",
+        "booking_id": "B702",
+    });
+    let now = chrono::Utc::now().to_rfc3339();
+    sqlx::query(
+        "INSERT INTO command_idempotency (
+            idempotency_key, command_name, request_hash, intent_json, lock_keys_json,
+            status, claim_token, error_code, error_json, retryable, created_at, updated_at,
+            last_attempt_at
+        ) VALUES (?, ?, ?, '{}', '[]', 'failed_retryable', 'failed-claim',
+            'DB_LOCKED_RETRYABLE', '{}', 1, ?, ?, ?)",
+    )
+    .bind(&ctx.idempotency_key)
+    .bind(&ctx.command_name)
+    .bind(crate::command_idempotency::stable_request_hash(&payload).expect("payload hashes"))
+    .bind(&now)
+    .bind(&now)
+    .bind(&now)
+    .execute(&pool)
+    .await
+    .expect("seeds retryable row");
+
+    let result = reservation_lifecycle::cancel_reservation_idempotent(&pool, &ctx, "B702")
+        .await
+        .expect("retryable row is reclaimed");
+
+    assert!(!result.replayed);
+    assert_eq!(result.response["ok"], true);
+    assert_eq!(
+        sqlx::query_scalar::<_, String>(
+            "SELECT status FROM command_idempotency WHERE command_name = ? AND idempotency_key = ?",
+        )
+        .bind(&ctx.command_name)
+        .bind(&ctx.idempotency_key)
+        .fetch_one(&pool)
+        .await
+        .expect("reads status"),
+        "completed"
+    );
+}
+
+#[tokio::test]
+async fn reservation_command_idempotency_invalid_modify_nights_replays_terminal_error() {
+    let pool = test_pool().await;
+    seed_room(&pool, "R703").await.unwrap();
+    seed_pricing_rule(&pool, "standard", 600_000.0)
+        .await
+        .unwrap();
+    seed_booked_reservation(&pool, "B703", "R703")
+        .await
+        .unwrap();
+    let ctx = crate::command_idempotency::WriteCommandContext::for_internal_test(
+        "req-modify-invalid-nights",
+        "idem-modify-invalid-nights",
+        "reservation.modify",
+    );
+
+    let first = reservation_lifecycle::modify_reservation_idempotent(
+        &pool,
+        &ctx,
+        reservation_modify_request("B703", "2026-04-23", "2026-04-26", 2),
+    )
+    .await
+    .expect_err("invalid nights should fail inside command boundary");
+
+    let status: String = sqlx::query_scalar(
+        "SELECT status FROM command_idempotency
+         WHERE command_name = ? AND idempotency_key = ?",
+    )
+    .bind(&ctx.command_name)
+    .bind(&ctx.idempotency_key)
+    .fetch_one(&pool)
+    .await
+    .expect("invalid command row is stored");
+    assert_eq!(status, "failed_terminal");
+
+    let replay = reservation_lifecycle::modify_reservation_idempotent(
+        &pool,
+        &ctx,
+        reservation_modify_request("B703", "2026-04-23", "2026-04-26", 2),
+    )
+    .await
+    .expect_err("invalid nights should replay stored terminal error");
+
+    assert_eq!(first.code, replay.code);
+    assert_eq!(first.message, replay.message);
+}
+
+#[tokio::test]
+async fn reservation_command_idempotency_same_plain_key_across_commands_scopes_origin_rows() {
+    let pool = test_pool().await;
+    seed_room(&pool, "R704").await.unwrap();
+    seed_pricing_rule(&pool, "standard", 600_000.0)
+        .await
+        .unwrap();
+    let plain_key = "idem-shared-reservation-origin";
+    let create_ctx = crate::command_idempotency::WriteCommandContext::for_internal_test(
+        "req-create-shared-origin",
+        plain_key,
+        "reservation.create",
+    );
+    let cancel_ctx = crate::command_idempotency::WriteCommandContext::for_internal_test(
+        "req-cancel-shared-origin",
+        plain_key,
+        "reservation.cancel",
+    );
+
+    let created = reservation_lifecycle::create_reservation_idempotent(
+        &pool,
+        &create_ctx,
+        minimal_reservation_request("R704"),
+    )
+    .await
+    .expect("create with deposit succeeds");
+    let booking_id = created.response["id"]
+        .as_str()
+        .expect("booking id in create response")
+        .to_string();
+
+    reservation_lifecycle::cancel_reservation_idempotent(&pool, &cancel_ctx, &booking_id)
+        .await
+        .expect("cancel with same plain key but different command succeeds");
+
+    let origins = sqlx::query_scalar::<_, String>(
+        "SELECT origin_idempotency_key
+         FROM transactions
+         WHERE booking_id = ? AND type IN ('deposit', 'cancellation_fee')
+         ORDER BY type ASC",
+    )
+    .bind(&booking_id)
+    .fetch_all(&pool)
+    .await
+    .expect("reads transaction origins");
+
+    assert_eq!(origins.len(), 2);
+    assert!(origins.contains(&format!("{}:{}", create_ctx.command_name, plain_key)));
+    assert!(origins.contains(&format!("{}:{}", cancel_ctx.command_name, plain_key)));
+}
+
+#[tokio::test]
 async fn cancel_reservation_releases_calendar_and_keeps_fee_record() {
     let pool = test_pool().await;
     seed_room(&pool, "R161").await.unwrap();
@@ -2454,8 +3280,13 @@ async fn do_create_reservation_returns_service_booking_and_leaves_room_vacant() 
         .await
         .unwrap();
 
+    let ctx = crate::command_idempotency::WriteCommandContext::for_internal_test(
+        "req-do-create-reservation",
+        "idem-do-create-reservation",
+        "create_reservation",
+    );
     let booking =
-        reservations::do_create_reservation(&pool, None, minimal_reservation_request("R162"))
+        reservations::do_create_reservation(&pool, None, &ctx, minimal_reservation_request("R162"))
             .await
             .unwrap();
 
@@ -2495,9 +3326,16 @@ async fn do_cancel_reservation_cleans_legacy_booked_room_state() {
         .await
         .unwrap();
 
-    reservations::do_cancel_reservation(&pool, None, "B163")
+    let ctx = crate::command_idempotency::WriteCommandContext::for_internal_test(
+        "req-do-cancel-reservation",
+        "idem-do-cancel-reservation",
+        "cancel_reservation",
+    );
+    let response = reservations::do_cancel_reservation(&pool, None, &ctx, "B163")
         .await
         .unwrap();
+    assert!(response.ok);
+    assert_eq!(response.booking_id, "B163");
 
     let room = sqlx::query("SELECT status FROM rooms WHERE id = ?")
         .bind("R163")
@@ -2906,9 +3744,15 @@ async fn do_modify_reservation_returns_service_booking_without_app_handle() {
         .await
         .unwrap();
 
+    let ctx = crate::command_idempotency::WriteCommandContext::for_internal_test(
+        "req-do-modify-reservation",
+        "idem-do-modify-reservation",
+        "modify_reservation",
+    );
     let booking = reservations::do_modify_reservation(
         &pool,
         None,
+        &ctx,
         crate::models::ModifyReservationRequest {
             booking_id: "B167".to_string(),
             new_check_in_date: "2026-04-24".to_string(),
@@ -4351,7 +5195,7 @@ async fn add_folio_line_idempotent_retry_replays_and_does_not_duplicate_row() {
 
     let count: i64 =
         sqlx::query_scalar("SELECT COUNT(*) FROM folio_lines WHERE origin_idempotency_key = ?")
-            .bind("idem-folio-line-1")
+            .bind("add_folio_line:idem-folio-line-1")
             .fetch_one(&pool)
             .await
             .unwrap();
@@ -4603,7 +5447,7 @@ async fn add_folio_line_idempotent_invalid_amount_does_not_consume_claim_or_ordi
     .unwrap();
     assert_eq!(
         row.get::<String, _>("origin_idempotency_key"),
-        "idem-folio-line-5"
+        "add_folio_line:idem-folio-line-5"
     );
     assert_eq!(row.get::<i64, _>("origin_line_ordinal"), 0);
 }

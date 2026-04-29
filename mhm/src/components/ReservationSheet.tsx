@@ -1,5 +1,4 @@
 import { useState, useEffect } from "react";
-import { invoke } from "@tauri-apps/api/core";
 import { useHotelStore } from "../stores/useHotelStore";
 import { CalendarDays, User, Phone, CreditCard, AlertTriangle, FileText } from "lucide-react";
 import { Sheet, SheetContent, SheetHeader, SheetTitle } from "@/components/ui/sheet";
@@ -9,7 +8,7 @@ import { useInvoiceDialog } from "@/hooks/useInvoiceDialog";
 import { formatAppError } from "@/lib/appError";
 import { createCorrelationId } from "@/lib/correlationId";
 import { fmtNumber } from "@/lib/format";
-import { createIdempotencyKey, invokeCommand } from "@/lib/invokeCommand";
+import { invokeWriteCommand } from "@/lib/invokeCommand";
 import { toast } from "sonner";
 import InvoiceDialog from "./InvoiceDialog";
 import type { EditableBooking } from "@/types";
@@ -101,19 +100,27 @@ export default function ReservationSheet({ open, onOpenChange, preSelectedRoomId
         }
         setLoading(true);
         try {
+            const correlationId = createCorrelationId();
             if (isEditMode && editBooking) {
-                await invoke("modify_reservation", {
+                await invokeWriteCommand("modify_reservation", {
                     req: {
                         booking_id: editBooking.id,
                         new_check_in_date: checkInDate,
                         new_check_out_date: checkOutDate,
                         new_nights: nights,
                     },
+                }, {
+                    correlationId,
+                    monitoringContext: {
+                        nights,
+                        deposit_present: false,
+                        source: null,
+                        notes_present: false,
+                    },
                 });
                 toast.success("Đã cập nhật đặt phòng!");
             } else {
-                const correlationId = createCorrelationId();
-                await invokeCommand("create_reservation", {
+                await invokeWriteCommand("create_reservation", {
                     req: {
                         room_id: roomId,
                         guest_name: guestName,
@@ -126,7 +133,6 @@ export default function ReservationSheet({ open, onOpenChange, preSelectedRoomId
                         source,
                         notes: notes || null,
                     },
-                    idempotencyKey: createIdempotencyKey("create_reservation"),
                 }, {
                     correlationId,
                     monitoringContext: {

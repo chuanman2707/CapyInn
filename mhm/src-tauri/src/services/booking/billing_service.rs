@@ -124,7 +124,7 @@ pub async fn add_folio_line_idempotent(
     let category = category.to_string();
     let description = description.to_string();
     let created_by = created_by.map(ToString::to_string);
-    let origin_key = ctx.idempotency_key.clone();
+    let origin_key = format!("{}:{}", ctx.command_name, ctx.idempotency_key);
 
     WriteCommandExecutor::new(pool.clone())
         .execute_atomic(ctx, request, move |tx| {
@@ -171,6 +171,27 @@ pub async fn record_charge_tx(
 ) -> BookingResult<()> {
     record_money_tx(
         tx, booking_id, amount, note, "charge", created_at, false, None,
+    )
+    .await
+}
+
+pub async fn record_charge_with_origin_tx(
+    tx: &mut Transaction<'_, Sqlite>,
+    booking_id: &str,
+    amount: f64,
+    note: impl Into<String>,
+    created_at: impl Into<String>,
+    origin: &OriginSideEffect,
+) -> BookingResult<()> {
+    record_money_tx(
+        tx,
+        booking_id,
+        amount,
+        note,
+        "charge",
+        created_at,
+        false,
+        Some(origin),
     )
     .await
 }
@@ -270,6 +291,26 @@ pub async fn record_cancellation_fee_tx(
         rfc3339_now(),
         false,
         None,
+    )
+    .await
+}
+
+pub async fn record_cancellation_fee_with_origin_tx(
+    tx: &mut Transaction<'_, Sqlite>,
+    booking_id: &str,
+    amount: f64,
+    note: impl Into<String>,
+    origin: &OriginSideEffect,
+) -> BookingResult<()> {
+    record_money_tx(
+        tx,
+        booking_id,
+        amount,
+        note,
+        "cancellation_fee",
+        rfc3339_now(),
+        false,
+        Some(origin),
     )
     .await
 }

@@ -1,12 +1,15 @@
 use chrono::{Local, NaiveDate};
+use serde::{Deserialize, Serialize};
 use serde_json::json;
 use sqlx::{Pool, Row, Sqlite, Transaction};
 
 use crate::{
+    aggregate_locks::{booking_key, global_manager, room_key, AggregateLockGuard},
     app_error::{codes, CommandError, CommandResult},
     command_idempotency::{
         system_error, CommandLedgerResultSummary, CommandLedgerSummary, IdempotentCommandResult,
-        SanitizedLedgerIntent, WriteCommandContext, WriteCommandExecutor, WriteCommandRequest,
+        ResolvedWriteCommandGuard, SanitizedLedgerIntent, WriteCommandContext,
+        WriteCommandExecutor, WriteCommandRequest,
     },
     db_error_monitoring::{classify_db_error_code, is_room_unavailable_conflict_message},
     domain::booking::{
@@ -17,15 +20,24 @@ use crate::{
 
 use super::{
     billing_service::{
-        record_cancellation_fee_tx, record_charge_tx, record_deposit_tx,
-        record_deposit_with_origin_tx,
+        record_cancellation_fee_tx, record_cancellation_fee_with_origin_tx, record_charge_tx,
+        record_charge_with_origin_tx, record_deposit_tx, record_deposit_with_origin_tx,
     },
     guest_service::{create_reservation_guest_manifest, link_booking_guests},
     support::{
-        begin_immediate_tx, ensure_one_row_affected, fetch_booking, insert_room_calendar_rows,
-        invalid_state_transition, lookup_booking_room_id, read_f64_strict,
+        ensure_one_row_affected, insert_room_calendar_rows, invalid_state_transition,
+        read_f64_strict,
     },
 };
+
+#[cfg(test)]
+use super::support::{begin_immediate_tx, fetch_booking, lookup_booking_room_id};
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReservationCancelResponse {
+    pub ok: bool,
+    pub booking_id: String,
+}
 
 fn mark_write_db_error(error: BookingError) -> BookingError {
     match error {
@@ -79,6 +91,134 @@ fn map_create_reservation_command_error(error: BookingError) -> CommandError {
             CommandError::system(codes::SYSTEM_INTERNAL_ERROR, message)
         }
     }
+}
+
+fn map_reservation_command_error(error: BookingError) -> CommandError {
+    match error {
+        BookingError::Validation(message)
+            if message == "Number of nights must be greater than 0" =>
+        {
+            CommandError::user(codes::BOOKING_INVALID_NIGHTS, "Số đêm phải lớn hơn 0")
+        }
+        BookingError::NotFound(message)
+            if message.starts_with("Không tìm thấy booking ")
+                || message.starts_with("Booking not found:") =>
+        {
+            CommandError::user(codes::BOOKING_NOT_FOUND, message)
+        }
+        BookingError::Validation(message) | BookingError::Conflict(message) => {
+            if message.contains(codes::CONFLICT_INVALID_STATE_TRANSITION) {
+                return CommandError::user(codes::CONFLICT_INVALID_STATE_TRANSITION, message);
+            }
+            if let Some(mapped) = map_known_reservation_command_error(&message) {
+                return mapped;
+            }
+            CommandError::user(codes::BOOKING_INVALID_STATE, message)
+        }
+        BookingError::DatabaseWrite(message) | BookingError::Database(message) => {
+            if let Some(mapped) = map_known_reservation_command_error(&message) {
+                return mapped;
+            }
+            if message.contains("FOREIGN KEY constraint failed") {
+                return CommandError::user(codes::BOOKING_NOT_FOUND, "Booking not found");
+            }
+            CommandError::system(codes::SYSTEM_INTERNAL_ERROR, message)
+        }
+        BookingError::DateTimeParse(message) | BookingError::NotFound(message) => {
+            CommandError::system(codes::SYSTEM_INTERNAL_ERROR, message)
+        }
+    }
+}
+
+pub(crate) fn canonical_vnd_units(amount: Option<f64>) -> CommandResult<i64> {
+    let Some(amount) = amount else {
+        return Ok(0);
+    };
+
+    if !amount.is_finite() || amount < 0.0 || amount.fract() != 0.0 {
+        return Err(CommandError::user(
+            codes::BOOKING_INVALID_STATE,
+            "Reservation deposit must be a whole non-negative VND amount",
+        ));
+    }
+
+    let units_text = format!("{amount:.0}");
+    let units = units_text.parse::<u128>().map_err(system_error)?;
+    if units > i64::MAX as u128 {
+        return Err(CommandError::user(
+            codes::BOOKING_INVALID_STATE,
+            "Reservation deposit must be a whole non-negative VND amount",
+        ));
+    }
+
+    Ok(units as i64)
+}
+
+fn create_room_lock_keys(intent: &serde_json::Value) -> CommandResult<Vec<String>> {
+    let room_id = intent
+        .get("room_id")
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| system_error("reservation create hash payload missing room_id"))?;
+    Ok(vec![room_key(room_id)?])
+}
+
+fn reservation_booking_lock_keys(intent: &serde_json::Value) -> CommandResult<Vec<String>> {
+    let booking_id = intent
+        .get("booking_id")
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| system_error("reservation hash payload missing booking_id"))?;
+    Ok(vec![booking_key(booking_id)?])
+}
+
+struct ReservationResolvedGuard {
+    room_id: String,
+    _guard: AggregateLockGuard,
+}
+
+async fn resolve_room_lock(
+    room_id: String,
+) -> CommandResult<ResolvedWriteCommandGuard<ReservationResolvedGuard>> {
+    let lock_key = room_key(&room_id)?;
+    let guard = global_manager().acquire([lock_key.clone()]).await?;
+    Ok(ResolvedWriteCommandGuard::new(
+        ReservationResolvedGuard {
+            room_id,
+            _guard: guard,
+        },
+        [lock_key],
+    ))
+}
+
+async fn resolve_reservation_lock(
+    pool: Pool<Sqlite>,
+    booking_id: String,
+) -> CommandResult<ResolvedWriteCommandGuard<ReservationResolvedGuard>> {
+    let room_id = sqlx::query_scalar::<_, String>("SELECT room_id FROM bookings WHERE id = ?")
+        .bind(&booking_id)
+        .fetch_optional(&pool)
+        .await
+        .map_err(BookingError::from)
+        .map_err(map_reservation_command_error)?
+        .ok_or_else(|| {
+            CommandError::user(
+                codes::BOOKING_NOT_FOUND,
+                format!("Booking not found: {}", booking_id),
+            )
+        })?;
+
+    let lock_keys = vec![booking_key(&booking_id)?, room_key(&room_id)?];
+    let guard = global_manager().acquire(lock_keys.clone()).await?;
+    Ok(ResolvedWriteCommandGuard::new(
+        ReservationResolvedGuard {
+            room_id,
+            _guard: guard,
+        },
+        lock_keys,
+    ))
+}
+
+fn command_origin_key(ctx: &WriteCommandContext) -> String {
+    format!("{}:{}", ctx.command_name, ctx.idempotency_key)
 }
 
 pub async fn create_reservation_tx(
@@ -194,6 +334,7 @@ pub async fn create_reservation_tx(
     Ok(booking_id)
 }
 
+#[cfg(test)]
 pub async fn fetch_booking_by_id(pool: &Pool<Sqlite>, booking_id: &str) -> BookingResult<Booking> {
     fetch_booking(
         pool,
@@ -238,6 +379,7 @@ pub async fn fetch_booking_by_id_tx(
     })
 }
 
+#[cfg(test)]
 pub async fn create_reservation(
     pool: &Pool<Sqlite>,
     req: CreateReservationRequest,
@@ -268,10 +410,7 @@ pub async fn create_reservation_idempotent(
     let check_out_date = req.check_out_date.clone();
     let nights = req.nights;
     let source = req.source.clone();
-    let deposit_minor_units = req
-        .deposit_amount
-        .map(|amount| format!("{:.0}", amount * 100.0))
-        .unwrap_or_else(|| "0".to_string());
+    let deposit_vnd_units = canonical_vnd_units(req.deposit_amount)?;
 
     let hash_payload = json!({
         "schema": "reservation.create.v1",
@@ -284,67 +423,65 @@ pub async fn create_reservation_idempotent(
         "nights": nights,
         "source": source.clone(),
         "notes": req.notes.clone(),
-        "deposit_minor_units": deposit_minor_units,
+        "deposit_vnd_units": deposit_vnd_units,
     });
 
     let ledger_intent = SanitizedLedgerIntent::from_pairs([
         ("schema", json!("reservation.create.v1")),
-        ("room_id", json!(room_id.clone())),
+        ("room_present", json!(true)),
         ("check_in_date", json!(check_in_date.clone())),
         ("check_out_date", json!(check_out_date.clone())),
         ("nights", json!(nights)),
-        (
-            "deposit_present",
-            json!(req.deposit_amount.unwrap_or(0.0) > 0.0),
-        ),
+        ("deposit_present", json!(deposit_vnd_units > 0)),
+        ("deposit_vnd_units", json!(deposit_vnd_units)),
     ])?;
     let summary = CommandLedgerSummary::new("Create reservation")?
-        .with_aggregate_ref("room", room_id, None::<String>)?
-        .with_business_date(check_in_date)?;
+        .with_aggregate_ref("room", "room", None::<String>)?
+        .with_business_date(check_in_date.clone())?;
     let request = WriteCommandRequest::new_sanitized(hash_payload, ledger_intent, summary)?
+        .with_primary_aggregate_key(format!("room:{room_id}"))
+        .with_lock_key_deriver(create_room_lock_keys)
         .with_success_summary(CommandLedgerResultSummary::success("Reservation created")?);
 
     let request_for_service = req;
-    let origin_idempotency_key = ctx.idempotency_key.clone();
+    let origin_idempotency_key = command_origin_key(ctx);
+    let room_id_for_guard = room_id.clone();
 
     WriteCommandExecutor::new(pool.clone())
-        .execute_atomic(ctx, request, move |tx| {
-            Box::pin(async move {
-                let origin =
-                    OriginSideEffect::new(origin_idempotency_key, 0).map_err(system_error)?;
-                let booking_id = create_reservation_tx(tx, request_for_service, Some(&origin))
-                    .await
-                    .map_err(map_create_reservation_command_error)?;
-                let booking = fetch_booking_by_id_tx(tx, &booking_id)
-                    .await
-                    .map_err(map_create_reservation_command_error)?;
-                serde_json::to_value(&booking).map_err(system_error)
-            })
-        })
+        .execute_with_resolved_guard(
+            ctx,
+            request,
+            move || resolve_room_lock(room_id_for_guard),
+            move |tx, _guard| {
+                Box::pin(async move {
+                    let origin =
+                        OriginSideEffect::new(origin_idempotency_key, 0).map_err(system_error)?;
+                    let booking_id = create_reservation_tx(tx, request_for_service, Some(&origin))
+                        .await
+                        .map_err(map_create_reservation_command_error)?;
+                    let booking = fetch_booking_by_id_tx(tx, &booking_id)
+                        .await
+                        .map_err(map_create_reservation_command_error)?;
+                    serde_json::to_value(&booking).map_err(system_error)
+                })
+            },
+        )
         .await
 }
 
-pub async fn cancel_reservation(pool: &Pool<Sqlite>, booking_id: &str) -> BookingResult<()> {
-    let locked_room_id = lookup_booking_room_id(pool, booking_id).await?;
-    let _lock_guard = crate::aggregate_locks::global_manager()
-        .acquire([
-            crate::aggregate_locks::booking_key(booking_id)
-                .map_err(|error| BookingError::validation(error.message))?,
-            crate::aggregate_locks::room_key(&locked_room_id)
-                .map_err(|error| BookingError::validation(error.message))?,
-        ])
-        .await
-        .map_err(|error| BookingError::validation(error.message))?;
-
-    let mut tx = begin_immediate_tx(pool).await?;
-
+pub async fn cancel_reservation_tx(
+    tx: &mut Transaction<'_, Sqlite>,
+    booking_id: &str,
+    locked_room_id: &str,
+    origin: Option<&OriginSideEffect>,
+) -> BookingResult<ReservationCancelResponse> {
     let booking = sqlx::query(
         "SELECT room_id, status, COALESCE(deposit_amount, 0) AS deposit_amount
          FROM bookings
          WHERE id = ?",
     )
     .bind(booking_id)
-    .fetch_optional(&mut *tx)
+    .fetch_optional(&mut **tx)
     .await?;
 
     let booking = booking
@@ -370,7 +507,7 @@ pub async fn cancel_reservation(pool: &Pool<Sqlite>, booking_id: &str) -> Bookin
         .bind(status::booking::CANCELLED)
         .bind(booking_id)
         .bind(status::booking::BOOKED)
-        .execute(&mut *tx)
+        .execute(&mut **tx)
         .await?;
     ensure_one_row_affected(
         result,
@@ -380,64 +517,90 @@ pub async fn cancel_reservation(pool: &Pool<Sqlite>, booking_id: &str) -> Bookin
     sqlx::query("DELETE FROM room_calendar WHERE booking_id = ? AND status = ?")
         .bind(booking_id)
         .bind(status::calendar::BOOKED)
-        .execute(&mut *tx)
+        .execute(&mut **tx)
         .await?;
 
     if deposit_amount > 0.0 {
-        record_cancellation_fee_tx(
-            &mut tx,
-            booking_id,
-            deposit_amount,
-            "Deposit retained (cancellation)",
-        )
-        .await?;
+        match origin {
+            Some(origin) => {
+                record_cancellation_fee_with_origin_tx(
+                    tx,
+                    booking_id,
+                    deposit_amount,
+                    "Deposit retained (cancellation)",
+                    origin,
+                )
+                .await?;
+            }
+            None => {
+                record_cancellation_fee_tx(
+                    tx,
+                    booking_id,
+                    deposit_amount,
+                    "Deposit retained (cancellation)",
+                )
+                .await?;
+            }
+        }
     }
 
     let remaining_booked: (i64,) =
         sqlx::query_as("SELECT COUNT(*) FROM room_calendar WHERE room_id = ? AND status = ?")
             .bind(&room_id)
             .bind(status::calendar::BOOKED)
-            .fetch_one(&mut *tx)
+            .fetch_one(&mut **tx)
             .await?;
 
     let room_status = sqlx::query_scalar::<_, String>("SELECT status FROM rooms WHERE id = ?")
         .bind(&room_id)
-        .fetch_one(&mut *tx)
+        .fetch_one(&mut **tx)
         .await?;
 
     if room_status == status::room::BOOKED && remaining_booked.0 == 0 {
         sqlx::query("UPDATE rooms SET status = ? WHERE id = ?")
             .bind(status::room::VACANT)
             .bind(&room_id)
-            .execute(&mut *tx)
+            .execute(&mut **tx)
             .await?;
     }
 
-    tx.commit().await.map_err(BookingError::from)?;
-
-    Ok(())
+    Ok(ReservationCancelResponse {
+        ok: true,
+        booking_id: booking_id.to_string(),
+    })
 }
 
-pub async fn confirm_reservation(pool: &Pool<Sqlite>, booking_id: &str) -> BookingResult<Booking> {
+#[cfg(test)]
+pub async fn cancel_reservation(pool: &Pool<Sqlite>, booking_id: &str) -> BookingResult<()> {
     let locked_room_id = lookup_booking_room_id(pool, booking_id).await?;
-    let _lock_guard = crate::aggregate_locks::global_manager()
+    let _lock_guard = global_manager()
         .acquire([
-            crate::aggregate_locks::booking_key(booking_id)
-                .map_err(|error| BookingError::validation(error.message))?,
-            crate::aggregate_locks::room_key(&locked_room_id)
-                .map_err(|error| BookingError::validation(error.message))?,
+            booking_key(booking_id).map_err(|error| BookingError::validation(error.message))?,
+            room_key(&locked_room_id).map_err(|error| BookingError::validation(error.message))?,
         ])
         .await
         .map_err(|error| BookingError::validation(error.message))?;
 
     let mut tx = begin_immediate_tx(pool).await?;
-    let reservation = load_booked_reservation(&mut tx, booking_id).await?;
+    cancel_reservation_tx(&mut tx, booking_id, &locked_room_id, None).await?;
+    tx.commit().await.map_err(BookingError::from)?;
+
+    Ok(())
+}
+
+pub async fn confirm_reservation_tx(
+    tx: &mut Transaction<'_, Sqlite>,
+    booking_id: &str,
+    locked_room_id: &str,
+    origin: Option<&OriginSideEffect>,
+) -> BookingResult<Booking> {
+    let reservation = load_booked_reservation(tx, booking_id).await?;
     if reservation.room_id != locked_room_id {
         return Err(invalid_state_transition(format!(
             "reservation {booking_id} changed rooms before confirmation"
         )));
     }
-    reject_no_show_confirmation(&mut tx, booking_id).await?;
+    reject_no_show_confirmation(tx, booking_id).await?;
 
     let now = Local::now();
     let today = now.date_naive();
@@ -449,7 +612,7 @@ pub async fn confirm_reservation(pool: &Pool<Sqlite>, booking_id: &str) -> Booki
     };
     let effective_checkout = effective_checkout_date.format("%Y-%m-%d").to_string();
     let pricing = calculate_stay_price_tx(
-        &mut tx,
+        tx,
         &reservation.room_id,
         &today.format("%Y-%m-%d").to_string(),
         &effective_checkout,
@@ -461,11 +624,11 @@ pub async fn confirm_reservation(pool: &Pool<Sqlite>, booking_id: &str) -> Booki
 
     sqlx::query("DELETE FROM room_calendar WHERE booking_id = ?")
         .bind(booking_id)
-        .execute(&mut *tx)
+        .execute(&mut **tx)
         .await?;
 
     insert_calendar_rows(
-        &mut tx,
+        tx,
         &reservation.room_id,
         booking_id,
         today,
@@ -487,7 +650,7 @@ pub async fn confirm_reservation(pool: &Pool<Sqlite>, booking_id: &str) -> Booki
     .bind(reservation.paid_amount)
     .bind(booking_id)
     .bind(status::booking::BOOKED)
-    .execute(&mut *tx)
+    .execute(&mut **tx)
     .await?;
     ensure_one_row_affected(
         result,
@@ -499,7 +662,7 @@ pub async fn confirm_reservation(pool: &Pool<Sqlite>, booking_id: &str) -> Booki
         .bind(&reservation.room_id)
         .bind(status::room::VACANT)
         .bind(status::room::BOOKED)
-        .execute(&mut *tx)
+        .execute(&mut **tx)
         .await?;
     ensure_one_row_affected(
         result,
@@ -509,29 +672,55 @@ pub async fn confirm_reservation(pool: &Pool<Sqlite>, booking_id: &str) -> Booki
         ),
     )?;
 
-    record_charge_tx(
-        &mut tx,
-        booking_id,
-        pricing.total,
-        "Room charge (reservation)",
-        check_in_at,
-    )
-    .await?;
+    match origin {
+        Some(origin) => {
+            record_charge_with_origin_tx(
+                tx,
+                booking_id,
+                pricing.total,
+                "Room charge (reservation)",
+                check_in_at,
+                origin,
+            )
+            .await?;
+        }
+        None => {
+            record_charge_tx(
+                tx,
+                booking_id,
+                pricing.total,
+                "Room charge (reservation)",
+                check_in_at,
+            )
+            .await?;
+        }
+    }
 
-    tx.commit().await.map_err(BookingError::from)?;
-
-    fetch_booking(
-        pool,
-        booking_id,
-        format!("Booking not found: {}", booking_id),
-        read_f64_strict,
-    )
-    .await
+    fetch_booking_by_id_tx(tx, booking_id).await
 }
 
-pub async fn modify_reservation(
-    pool: &Pool<Sqlite>,
+#[cfg(test)]
+pub async fn confirm_reservation(pool: &Pool<Sqlite>, booking_id: &str) -> BookingResult<Booking> {
+    let locked_room_id = lookup_booking_room_id(pool, booking_id).await?;
+    let _lock_guard = global_manager()
+        .acquire([
+            booking_key(booking_id).map_err(|error| BookingError::validation(error.message))?,
+            room_key(&locked_room_id).map_err(|error| BookingError::validation(error.message))?,
+        ])
+        .await
+        .map_err(|error| BookingError::validation(error.message))?;
+
+    let mut tx = begin_immediate_tx(pool).await?;
+    let booking = confirm_reservation_tx(&mut tx, booking_id, &locked_room_id, None).await?;
+    tx.commit().await.map_err(BookingError::from)?;
+
+    Ok(booking)
+}
+
+pub async fn modify_reservation_tx(
+    tx: &mut Transaction<'_, Sqlite>,
     req: ModifyReservationRequest,
+    locked_room_id: &str,
 ) -> BookingResult<Booking> {
     let derived_nights = validate_requested_nights(
         &req.new_check_in_date,
@@ -539,19 +728,7 @@ pub async fn modify_reservation(
         req.new_nights,
     )? as i64;
 
-    let locked_room_id = lookup_booking_room_id(pool, &req.booking_id).await?;
-    let _lock_guard = crate::aggregate_locks::global_manager()
-        .acquire([
-            crate::aggregate_locks::booking_key(&req.booking_id)
-                .map_err(|error| BookingError::validation(error.message))?,
-            crate::aggregate_locks::room_key(&locked_room_id)
-                .map_err(|error| BookingError::validation(error.message))?,
-        ])
-        .await
-        .map_err(|error| BookingError::validation(error.message))?;
-
-    let mut tx = begin_immediate_tx(pool).await?;
-    let reservation = load_booked_reservation(&mut tx, &req.booking_id).await?;
+    let reservation = load_booked_reservation(tx, &req.booking_id).await?;
     if reservation.room_id != locked_room_id {
         return Err(invalid_state_transition(format!(
             "reservation {} changed rooms before modification",
@@ -562,7 +739,7 @@ pub async fn modify_reservation(
     sqlx::query("DELETE FROM room_calendar WHERE booking_id = ? AND status = ?")
         .bind(&req.booking_id)
         .bind(status::calendar::BOOKED)
-        .execute(&mut *tx)
+        .execute(&mut **tx)
         .await?;
 
     let conflicts = sqlx::query(
@@ -571,7 +748,7 @@ pub async fn modify_reservation(
     .bind(&reservation.room_id)
     .bind(&req.new_check_in_date)
     .bind(&req.new_check_out_date)
-    .fetch_all(&mut *tx)
+    .fetch_all(&mut **tx)
     .await?;
 
     if let Some(first_conflict) = conflicts.first() {
@@ -583,7 +760,7 @@ pub async fn modify_reservation(
     }
 
     let pricing = calculate_stay_price_tx(
-        &mut tx,
+        tx,
         &reservation.room_id,
         &req.new_check_in_date,
         &req.new_check_out_date,
@@ -604,8 +781,8 @@ pub async fn modify_reservation(
     .bind(pricing.total)
     .bind(&req.booking_id)
     .bind(status::booking::BOOKED)
-    .bind(&locked_room_id)
-    .execute(&mut *tx)
+    .bind(locked_room_id)
+    .execute(&mut **tx)
     .await?;
     ensure_one_row_affected(
         result,
@@ -613,7 +790,7 @@ pub async fn modify_reservation(
     )?;
 
     insert_booked_calendar_rows(
-        &mut tx,
+        tx,
         &reservation.room_id,
         &req.booking_id,
         &req.new_check_in_date,
@@ -621,15 +798,182 @@ pub async fn modify_reservation(
     )
     .await?;
 
+    fetch_booking_by_id_tx(tx, &req.booking_id).await
+}
+
+#[cfg(test)]
+pub async fn modify_reservation(
+    pool: &Pool<Sqlite>,
+    req: ModifyReservationRequest,
+) -> BookingResult<Booking> {
+    let locked_room_id = lookup_booking_room_id(pool, &req.booking_id).await?;
+    let _lock_guard = global_manager()
+        .acquire([
+            booking_key(&req.booking_id)
+                .map_err(|error| BookingError::validation(error.message))?,
+            room_key(&locked_room_id).map_err(|error| BookingError::validation(error.message))?,
+        ])
+        .await
+        .map_err(|error| BookingError::validation(error.message))?;
+
+    let mut tx = begin_immediate_tx(pool).await?;
+    let booking = modify_reservation_tx(&mut tx, req, &locked_room_id).await?;
     tx.commit().await.map_err(BookingError::from)?;
 
-    fetch_booking(
-        pool,
-        &req.booking_id,
-        format!("Booking not found: {}", req.booking_id),
-        read_f64_strict,
-    )
-    .await
+    Ok(booking)
+}
+
+pub async fn cancel_reservation_idempotent(
+    pool: &Pool<Sqlite>,
+    ctx: &WriteCommandContext,
+    booking_id: &str,
+) -> CommandResult<IdempotentCommandResult<serde_json::Value>> {
+    let hash_payload = json!({
+        "schema": "reservation.cancel.v1",
+        "booking_id": booking_id,
+    });
+    let ledger_intent = SanitizedLedgerIntent::from_pairs([
+        ("schema", json!("reservation.cancel.v1")),
+        ("booking_present", json!(true)),
+    ])?;
+    let summary = CommandLedgerSummary::new("Cancel reservation")?.with_aggregate_ref(
+        "booking",
+        "booking",
+        None::<String>,
+    )?;
+    let request = WriteCommandRequest::new_sanitized(hash_payload, ledger_intent, summary)?
+        .with_primary_aggregate_key(format!("booking:{booking_id}"))
+        .with_lock_key_deriver(reservation_booking_lock_keys)
+        .with_success_summary(CommandLedgerResultSummary::success(
+            "Reservation cancelled",
+        )?);
+
+    let pool_for_guard = pool.clone();
+    let booking_id_for_guard = booking_id.to_string();
+    let booking_id_for_service = booking_id.to_string();
+    let origin_idempotency_key = command_origin_key(ctx);
+
+    WriteCommandExecutor::new(pool.clone())
+        .execute_with_resolved_guard(
+            ctx,
+            request,
+            move || resolve_reservation_lock(pool_for_guard, booking_id_for_guard),
+            move |tx, guard| {
+                Box::pin(async move {
+                    let origin =
+                        OriginSideEffect::new(origin_idempotency_key, 0).map_err(system_error)?;
+                    let response = cancel_reservation_tx(
+                        tx,
+                        &booking_id_for_service,
+                        &guard.room_id,
+                        Some(&origin),
+                    )
+                    .await
+                    .map_err(map_reservation_command_error)?;
+                    serde_json::to_value(response).map_err(system_error)
+                })
+            },
+        )
+        .await
+}
+
+pub async fn confirm_reservation_idempotent(
+    pool: &Pool<Sqlite>,
+    ctx: &WriteCommandContext,
+    booking_id: &str,
+) -> CommandResult<IdempotentCommandResult<serde_json::Value>> {
+    let hash_payload = json!({
+        "schema": "reservation.confirm.v1",
+        "booking_id": booking_id,
+    });
+    let ledger_intent = SanitizedLedgerIntent::from_pairs([
+        ("schema", json!("reservation.confirm.v1")),
+        ("booking_present", json!(true)),
+    ])?;
+    let summary = CommandLedgerSummary::new("Confirm reservation")?.with_aggregate_ref(
+        "booking",
+        "booking",
+        None::<String>,
+    )?;
+    let request = WriteCommandRequest::new_sanitized(hash_payload, ledger_intent, summary)?
+        .with_primary_aggregate_key(format!("booking:{booking_id}"))
+        .with_lock_key_deriver(reservation_booking_lock_keys)
+        .with_success_summary(CommandLedgerResultSummary::success(
+            "Reservation confirmed",
+        )?);
+
+    let pool_for_guard = pool.clone();
+    let booking_id_for_guard = booking_id.to_string();
+    let booking_id_for_service = booking_id.to_string();
+    let origin_idempotency_key = command_origin_key(ctx);
+
+    WriteCommandExecutor::new(pool.clone())
+        .execute_with_resolved_guard(
+            ctx,
+            request,
+            move || resolve_reservation_lock(pool_for_guard, booking_id_for_guard),
+            move |tx, guard| {
+                Box::pin(async move {
+                    let origin =
+                        OriginSideEffect::new(origin_idempotency_key, 0).map_err(system_error)?;
+                    let booking = confirm_reservation_tx(
+                        tx,
+                        &booking_id_for_service,
+                        &guard.room_id,
+                        Some(&origin),
+                    )
+                    .await
+                    .map_err(map_reservation_command_error)?;
+                    serde_json::to_value(booking).map_err(system_error)
+                })
+            },
+        )
+        .await
+}
+
+pub async fn modify_reservation_idempotent(
+    pool: &Pool<Sqlite>,
+    ctx: &WriteCommandContext,
+    req: ModifyReservationRequest,
+) -> CommandResult<IdempotentCommandResult<serde_json::Value>> {
+    let hash_payload = json!({
+        "schema": "reservation.modify.v1",
+        "booking_id": req.booking_id.clone(),
+        "new_check_in_date": req.new_check_in_date.clone(),
+        "new_check_out_date": req.new_check_out_date.clone(),
+        "new_nights": req.new_nights,
+    });
+    let ledger_intent = SanitizedLedgerIntent::from_pairs([
+        ("schema", json!("reservation.modify.v1")),
+        ("booking_present", json!(true)),
+        ("nights", json!(req.new_nights)),
+    ])?;
+    let summary = CommandLedgerSummary::new("Modify reservation")?
+        .with_aggregate_ref("booking", "booking", None::<String>)?
+        .with_business_date(req.new_check_in_date.clone())?;
+    let request = WriteCommandRequest::new_sanitized(hash_payload, ledger_intent, summary)?
+        .with_primary_aggregate_key(format!("booking:{}", req.booking_id))
+        .with_lock_key_deriver(reservation_booking_lock_keys)
+        .with_success_summary(CommandLedgerResultSummary::success("Reservation modified")?);
+
+    let pool_for_guard = pool.clone();
+    let booking_id_for_guard = req.booking_id.clone();
+
+    WriteCommandExecutor::new(pool.clone())
+        .execute_with_resolved_guard(
+            ctx,
+            request,
+            move || resolve_reservation_lock(pool_for_guard, booking_id_for_guard),
+            move |tx, guard| {
+                Box::pin(async move {
+                    let booking = modify_reservation_tx(tx, req, &guard.room_id)
+                        .await
+                        .map_err(map_reservation_command_error)?;
+                    serde_json::to_value(booking).map_err(system_error)
+                })
+            },
+        )
+        .await
 }
 
 fn validate_requested_nights(
@@ -775,5 +1119,14 @@ mod tests {
             mark_write_db_error(BookingError::database_write("disk full")),
             BookingError::database_write("disk full")
         );
+    }
+
+    #[test]
+    fn map_reservation_command_error_marks_locked_lookup_retryable() {
+        let error =
+            super::map_reservation_command_error(BookingError::database("database is locked"));
+
+        assert_eq!(error.code, crate::app_error::codes::DB_LOCKED_RETRYABLE);
+        assert!(error.retryable);
     }
 }

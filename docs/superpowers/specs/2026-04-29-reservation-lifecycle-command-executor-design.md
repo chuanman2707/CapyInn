@@ -62,7 +62,7 @@ Each reservation write receives a `WriteCommandContext` containing:
 - actor metadata
 - timestamp and request context metadata already supported by the command ledger
 
-UI commands use human actor context. MCP gateway commands use hidden gateway-created command context with an AI-agent or integration actor type as appropriate. The LLM must not see or supply idempotency keys as ordinary business tool arguments.
+UI commands use human actor context. MCP gateway reservation writes use hidden gateway-created command context with `ActorType::AiAgent`. The LLM must not see or supply idempotency keys as ordinary business tool arguments.
 
 ## UI Behavior
 
@@ -88,7 +88,7 @@ The UI treats same-key replay as a normal success. It may still refresh rooms/bo
 
 Reservation write tool schemas must not expose `idempotency_key`.
 
-The gateway creates hidden idempotency keys per tool call. If the gateway retries the same tool-call request, it reuses the same hidden key. If the LLM asks for a new tool call, the gateway generates a new key and normal business validation runs.
+The gateway creates hidden idempotency keys per tool call. The key is derived from gateway instance/session identity, command name, MCP request id, and the canonical tool-argument hash. If the gateway retries the same tool-call request with the same canonical arguments, it reuses the same hidden key. If the LLM asks for a new tool call, or a client reuses a JSON-RPC request id with different arguments, the gateway generates a different hidden key and normal business validation runs.
 
 Gateway reservation writes must return structured JSON success/error envelopes instead of raw string-only `Error: ...` values. This keeps policy, idempotency, conflict, and validation results machine-readable.
 
@@ -137,7 +137,9 @@ Confirm payload includes:
 
 The app currently stores and models VND amounts in several places as floating-point values. Full conversion to integer VND storage and models is issue #102.
 
-#69 must not expand into full money migration. It must also avoid introducing new float-based idempotency behavior. For reservation command hashing and ledger intent, any reservation deposit is canonicalized to integer VND units before hashing. For example, a `deposit_amount` representing `500000` VND is hashed as integer `500000`, not as `500000.0`.
+#69 must not expand into full money migration. It must also avoid introducing new float-based idempotency behavior. For reservation command hashing and safe ledger intent, any reservation deposit is canonicalized to integer VND units before hashing. For example, a `deposit_amount` representing `500000` VND is hashed as integer `500000`, not as `500000.0`.
+
+Command ledger safe fields must not contain raw booking UUIDs, guest identifiers, phone numbers, or other values rejected by the existing safe-field sanitizer. Exact booking and room ids belong in the canonical hash payload, primary aggregate key, and lock key metadata, not in sanitized ledger summary fields. Ledger summaries can use safe facts such as command schema, date fields, booleans, and small integer VND amounts.
 
 ## Idempotency Result Contract
 
@@ -202,20 +204,27 @@ The current room id may require a pre-transaction lookup before acquiring the ru
 
 Lock keys are sorted and deduplicated by existing lock/executor conventions.
 
+For modify, cancel, and confirm, the idempotency row must be claimed before the room lookup. The booking id is available from the canonical payload and can be recorded immediately as `booking:{booking_id}`. After the claimed command resolves the current room id, the executor path must acquire the combined booking and room runtime locks and refresh the command row lock metadata to include `room:{current_room_id}` before the business transaction runs. If the booking lookup fails, the failure is finalized as a terminal command error so same-key replay returns the stored not-found result.
+
+Create already knows `room_id` from the canonical payload. It must acquire the real runtime room lock, not only persist lock metadata.
+
 ## Business Transaction Rules
 
 Each reservation command runs as one business mutation:
 
-1. validate command payload
-2. derive and acquire stable locks
-3. claim or replay the idempotency row
-4. open `BEGIN IMMEDIATE`
-5. revalidate booking, room, and state inside the transaction
-6. mutate booking, calendar, and any ledger/folio side effects
-7. write response snapshot and finalize the command row
-8. commit, or roll back all business and command-finalize writes together
+1. validate command payload and build the canonical request hash
+2. claim or replay the idempotency row before fallible business lookups
+3. resolve and acquire stable runtime locks
+4. refresh command lock metadata when post-claim lookup discovers additional lock keys
+5. open `BEGIN IMMEDIATE`
+6. revalidate booking, room, and state inside the transaction
+7. mutate booking, calendar, and any ledger/folio side effects
+8. write response snapshot and finalize the command row
+9. commit, or roll back all business and command-finalize writes together
 
 Where the executor path can make command claim, business mutation, and finalize atomic in one transaction, use that atomic path.
+
+#69 is not production-complete under the durable outbox rule until the later outbox roadmap work (#76 through #82) is implemented. This issue must not add direct external side effects inside business mutations; existing UI refresh events remain adapter-level notifications after command success.
 
 ## Calendar Conflict Semantics
 
@@ -296,7 +305,7 @@ Primary tests:
 - `mhm/src-tauri/src/commands/reservations.rs` unit tests
 - `mhm/src-tauri/src/gateway/tools.rs` tests
 - `mhm/src/components/ReservationSheet.test.tsx`
-- reservation page/UI tests as needed for confirm/cancel wiring
+- reservation page/UI tests for confirm and cancel wiring
 
 ## Test Plan
 
@@ -308,7 +317,7 @@ Backend idempotency tests:
 - confirm exact retry does not write an extra room charge and does not recalculate by retry date
 - same key with changed payload returns `CONFLICT_IDEMPOTENCY_HASH_MISMATCH`
 - duplicate in-flight returns `CONFLICT_DUPLICATE_IN_FLIGHT`
-- retryable DB lock failure can be reclaimed when appropriate
+- retryable DB lock failure can be reclaimed with the same key after the failed command row becomes reclaimable
 
 Conflict and state tests:
 

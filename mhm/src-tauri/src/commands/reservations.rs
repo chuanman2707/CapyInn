@@ -1,5 +1,5 @@
 use super::{emit_db_update, get_f64, get_user, AppState};
-use crate::services::booking::reservation_lifecycle;
+use crate::services::booking::reservation_lifecycle::{self, ReservationCancelResponse};
 use crate::{
     app_error::{
         codes, correlation_context, log_system_error, normalize_correlation_id,
@@ -11,7 +11,7 @@ use crate::{
         classify_db_error_code, classify_db_failure, inject_db_error_group,
         is_room_unavailable_conflict_message, DbErrorGroup, MonitoredDbFailure,
     },
-    domain::booking::{BookingError, BookingResult},
+    domain::booking::BookingError,
     models::*,
 };
 use serde_json::{json, Value};
@@ -92,9 +92,18 @@ pub async fn check_availability(
 pub async fn do_create_reservation(
     pool: &Pool<Sqlite>,
     app_handle: Option<&tauri::AppHandle>,
+    ctx: &WriteCommandContext,
     req: CreateReservationRequest,
-) -> BookingResult<Booking> {
-    let booking = reservation_lifecycle::create_reservation(pool, req).await?;
+) -> CommandResult<Booking> {
+    let create_result =
+        reservation_lifecycle::create_reservation_idempotent(pool, ctx, req).await?;
+    let booking: Booking = serde_json::from_value(create_result.response).map_err(|error| {
+        CommandError::system(
+            codes::SYSTEM_INTERNAL_ERROR,
+            format!("Invalid create_reservation idempotent response: {error}"),
+        )
+        .with_request_id(ctx.request_id.clone())
+    })?;
 
     if let Some(app) = app_handle {
         emit_db_update(app, "rooms");
@@ -433,33 +442,15 @@ pub async fn create_reservation(
         );
     })?;
 
-    let create_result = reservation_lifecycle::create_reservation_idempotent(
-        &state.db,
-        &write_command_context,
-        req,
-    )
-    .await
-    .inspect_err(|command_error| {
-        record_create_reservation_command_failure(
-            &effective_correlation_id,
-            command_error,
-            error_context.clone(),
-        );
-    })?;
-
-    let booking: Booking = serde_json::from_value(create_result.response).map_err(|error| {
-        let command_error = CommandError::system(
-            codes::SYSTEM_INTERNAL_ERROR,
-            format!("Invalid create_reservation idempotent response: {error}"),
-        )
-        .with_request_id(effective_correlation_id.value.clone());
-        record_create_reservation_command_failure(
-            &effective_correlation_id,
-            &command_error,
-            error_context.clone(),
-        );
-        command_error
-    })?;
+    let booking = do_create_reservation(&state.db, Some(&app), &write_command_context, req)
+        .await
+        .inspect_err(|command_error| {
+            record_create_reservation_command_failure(
+                &effective_correlation_id,
+                command_error,
+                error_context.clone(),
+            );
+        })?;
 
     log::info!(
         "create_reservation success correlation_id={} source={:?} booking_id={} room_id={}",
@@ -468,8 +459,6 @@ pub async fn create_reservation(
         booking.id,
         booking.room_id
     );
-
-    emit_db_update(&app, "rooms");
 
     Ok(booking)
 }
@@ -481,11 +470,70 @@ pub async fn confirm_reservation(
     state: State<'_, AppState>,
     app: tauri::AppHandle,
     booking_id: String,
-) -> Result<Booking, String> {
-    get_user(&state).ok_or_else(|| "Chưa đăng nhập".to_string())?;
-    let booking = reservation_lifecycle::confirm_reservation(&state.db, &booking_id)
-        .await
-        .map_err(|error| error.to_string())?;
+    idempotency_key: String,
+    correlation_id: Option<String>,
+) -> CommandResult<Booking> {
+    let effective_correlation_id = normalize_correlation_id(correlation_id);
+    let error_context = reservation_booking_failure_context(&booking_id);
+
+    if get_user(&state).is_none() {
+        let command_error = CommandError::user(codes::AUTH_NOT_AUTHENTICATED, "Chưa đăng nhập");
+        record_command_failure(
+            "confirm_reservation",
+            &command_error,
+            &effective_correlation_id.value,
+            error_context,
+        );
+        return Err(command_error);
+    }
+
+    let write_command_context = WriteCommandContext::for_scoped_command(
+        effective_correlation_id.value.clone(),
+        idempotency_key,
+        "confirm_reservation",
+    )
+    .inspect_err(|command_error| {
+        record_command_failure_with_db_group(
+            "confirm_reservation",
+            command_error,
+            &effective_correlation_id.value,
+            map_create_reservation_command_error_db_group(command_error),
+            error_context.clone(),
+        );
+    })?;
+
+    let confirm_result = reservation_lifecycle::confirm_reservation_idempotent(
+        &state.db,
+        &write_command_context,
+        &booking_id,
+    )
+    .await
+    .inspect_err(|command_error| {
+        record_command_failure_with_db_group(
+            "confirm_reservation",
+            command_error,
+            &effective_correlation_id.value,
+            map_create_reservation_command_error_db_group(command_error),
+            error_context.clone(),
+        );
+    })?;
+
+    let booking: Booking = serde_json::from_value(confirm_result.response).map_err(|error| {
+        let command_error = CommandError::system(
+            codes::SYSTEM_INTERNAL_ERROR,
+            format!("Invalid confirm_reservation idempotent response: {error}"),
+        )
+        .with_request_id(effective_correlation_id.value.clone());
+        record_command_failure_with_db_group(
+            "confirm_reservation",
+            &command_error,
+            &effective_correlation_id.value,
+            map_create_reservation_command_error_db_group(&command_error),
+            error_context.clone(),
+        );
+        command_error
+    })?;
+
     emit_db_update(&app, "rooms");
 
     Ok(booking)
@@ -496,15 +544,25 @@ pub async fn confirm_reservation(
 pub async fn do_cancel_reservation(
     pool: &Pool<Sqlite>,
     app_handle: Option<&tauri::AppHandle>,
+    ctx: &WriteCommandContext,
     booking_id: &str,
-) -> BookingResult<()> {
-    reservation_lifecycle::cancel_reservation(pool, booking_id).await?;
+) -> CommandResult<ReservationCancelResponse> {
+    let cancel_result =
+        reservation_lifecycle::cancel_reservation_idempotent(pool, ctx, booking_id).await?;
+    let response: ReservationCancelResponse = serde_json::from_value(cancel_result.response)
+        .map_err(|error| {
+            CommandError::system(
+                codes::SYSTEM_INTERNAL_ERROR,
+                format!("Invalid cancel_reservation idempotent response: {error}"),
+            )
+            .with_request_id(ctx.request_id.clone())
+        })?;
 
     if let Some(app) = app_handle {
         emit_db_update(app, "rooms");
     }
 
-    Ok(())
+    Ok(response)
 }
 
 #[tauri::command]
@@ -512,8 +570,9 @@ pub async fn cancel_reservation(
     state: State<'_, AppState>,
     app: tauri::AppHandle,
     booking_id: String,
+    idempotency_key: String,
     correlation_id: Option<String>,
-) -> CommandResult<()> {
+) -> CommandResult<ReservationCancelResponse> {
     let effective_correlation_id = normalize_correlation_id(correlation_id);
     let error_context = reservation_booking_failure_context(&booking_id);
 
@@ -528,23 +587,31 @@ pub async fn cancel_reservation(
         return Err(command_error);
     }
 
-    do_cancel_reservation(&state.db, Some(&app), &booking_id)
+    let write_command_context = WriteCommandContext::for_scoped_command(
+        effective_correlation_id.value.clone(),
+        idempotency_key,
+        "cancel_reservation",
+    )
+    .inspect_err(|command_error| {
+        record_command_failure_with_db_group(
+            "cancel_reservation",
+            command_error,
+            &effective_correlation_id.value,
+            map_create_reservation_command_error_db_group(command_error),
+            error_context.clone(),
+        );
+    })?;
+
+    do_cancel_reservation(&state.db, Some(&app), &write_command_context, &booking_id)
         .await
-        .map_err(|error| {
-            let (command_error, db_error_group) = map_reservation_write_error(
-                "cancel_reservation",
-                &effective_correlation_id,
-                error,
-                error_context.clone(),
-            );
+        .inspect_err(|command_error| {
             record_command_failure_with_db_group(
                 "cancel_reservation",
-                &command_error,
+                command_error,
                 &effective_correlation_id.value,
-                db_error_group,
+                map_create_reservation_command_error_db_group(command_error),
                 error_context.clone(),
             );
-            command_error
         })
 }
 
@@ -553,9 +620,19 @@ pub async fn cancel_reservation(
 pub async fn do_modify_reservation(
     pool: &Pool<Sqlite>,
     app_handle: Option<&tauri::AppHandle>,
+    ctx: &WriteCommandContext,
     req: ModifyReservationRequest,
-) -> BookingResult<Booking> {
-    let booking = reservation_lifecycle::modify_reservation(pool, req).await?;
+) -> CommandResult<Booking> {
+    let modify_result =
+        reservation_lifecycle::modify_reservation_idempotent(pool, ctx, req).await?;
+    let booking: Booking = serde_json::from_value(modify_result.response).map_err(|error| {
+        CommandError::system(
+            codes::SYSTEM_INTERNAL_ERROR,
+            format!("Invalid modify_reservation idempotent response: {error}"),
+        )
+        .with_request_id(ctx.request_id.clone())
+    })?;
+
     if let Some(app) = app_handle {
         emit_db_update(app, "rooms");
     }
@@ -568,6 +645,7 @@ pub async fn modify_reservation(
     state: State<'_, AppState>,
     app: tauri::AppHandle,
     req: ModifyReservationRequest,
+    idempotency_key: String,
     correlation_id: Option<String>,
 ) -> CommandResult<Booking> {
     let effective_correlation_id = normalize_correlation_id(correlation_id);
@@ -584,23 +662,31 @@ pub async fn modify_reservation(
         return Err(command_error);
     }
 
-    do_modify_reservation(&state.db, Some(&app), req)
+    let write_command_context = WriteCommandContext::for_scoped_command(
+        effective_correlation_id.value.clone(),
+        idempotency_key,
+        "modify_reservation",
+    )
+    .inspect_err(|command_error| {
+        record_command_failure_with_db_group(
+            "modify_reservation",
+            command_error,
+            &effective_correlation_id.value,
+            map_create_reservation_command_error_db_group(command_error),
+            error_context.clone(),
+        );
+    })?;
+
+    do_modify_reservation(&state.db, Some(&app), &write_command_context, req)
         .await
-        .map_err(|error| {
-            let (command_error, db_error_group) = map_reservation_write_error(
-                "modify_reservation",
-                &effective_correlation_id,
-                error,
-                error_context.clone(),
-            );
+        .inspect_err(|command_error| {
             record_command_failure_with_db_group(
                 "modify_reservation",
-                &command_error,
+                command_error,
                 &effective_correlation_id.value,
-                db_error_group,
+                map_create_reservation_command_error_db_group(command_error),
                 error_context.clone(),
             );
-            command_error
         })
 }
 
