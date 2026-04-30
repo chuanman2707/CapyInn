@@ -27,6 +27,8 @@ pub fn validate_non_negative_money_vnd(value: MoneyVnd, field: &str) -> CommandR
 }
 
 pub fn percentage_money_line(base: MoneyVnd, pct: f64, field: &str) -> CommandResult<MoneyVnd> {
+    let base = validate_transport_money_vnd(base, field)?;
+
     if !pct.is_finite() {
         return Err(CommandError::user(
             codes::VALIDATION_INVALID_INPUT,
@@ -118,5 +120,13 @@ mod tests {
         let error = percentage_money_line(2, f64::MAX, "surcharge")
             .expect_err("too-large percentage must fail");
         assert!(error.message.contains("surcharge"));
+    }
+
+    #[test]
+    fn percentage_money_rejects_unsafe_base_before_arithmetic() {
+        let pct = (u64::MAX as f64 + 1.0) / 1_000_000.0;
+        let error = percentage_money_line(MoneyVnd::MIN, pct, "base_amount")
+            .expect_err("unsafe base must fail");
+        assert!(error.message.contains("base_amount"));
     }
 }
