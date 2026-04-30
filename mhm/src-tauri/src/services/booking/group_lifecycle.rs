@@ -1,4 +1,4 @@
-use chrono::{Duration, Local, NaiveDate};
+use chrono::{DateTime, Duration, FixedOffset, Local, NaiveDate};
 use serde_json::json;
 use sqlx::{Pool, Row, Sqlite, Transaction};
 
@@ -42,6 +42,18 @@ fn allocate_positive_money_evenly(total: MoneyVnd, count: usize) -> Vec<MoneyVnd
     let remainder = total % count;
     (0..count)
         .map(|index| base + if index < remainder { 1 } else { 0 })
+        .collect()
+}
+
+fn allocate_positive_money_evenly_by_room(
+    total: MoneyVnd,
+    room_ids: &[String],
+) -> std::collections::HashMap<String, MoneyVnd> {
+    let normalized_room_ids = normalized_room_ids(room_ids);
+    allocate_positive_money_evenly(total, normalized_room_ids.len())
+        .into_iter()
+        .zip(normalized_room_ids)
+        .map(|(amount, room_id)| (room_id, amount))
         .collect()
 }
 
@@ -151,6 +163,51 @@ fn group_checkin_lock_keys_from_payload(
         .collect()
 }
 
+struct ExistingGroupCheckinCommandContext {
+    check_in_date: Option<String>,
+    issued_at: DateTime<FixedOffset>,
+}
+
+async fn existing_group_checkin_command_context(
+    pool: &Pool<Sqlite>,
+    ctx: &WriteCommandContext,
+) -> CommandResult<Option<ExistingGroupCheckinCommandContext>> {
+    let row = sqlx::query(
+        "SELECT intent_json, issued_at
+         FROM command_idempotency
+         WHERE command_name = ? AND idempotency_key = ?",
+    )
+    .bind(&ctx.command_name)
+    .bind(&ctx.idempotency_key)
+    .fetch_optional(pool)
+    .await
+    .map_err(system_error)?;
+
+    let Some(row) = row else {
+        return Ok(None);
+    };
+    let intent_json: String = row.get("intent_json");
+    let issued_at: String = row.get("issued_at");
+    let issued_at = DateTime::parse_from_rfc3339(&issued_at).map_err(system_error)?;
+    let intent: serde_json::Value = serde_json::from_str(&intent_json).map_err(system_error)?;
+    let Some(check_in_date) = intent
+        .get("fields")
+        .and_then(|fields| fields.get("check_in_date"))
+        .and_then(serde_json::Value::as_str)
+    else {
+        return Ok(Some(ExistingGroupCheckinCommandContext {
+            check_in_date: None,
+            issued_at,
+        }));
+    };
+
+    parse_date(check_in_date).map_err(map_group_checkin_command_error)?;
+    Ok(Some(ExistingGroupCheckinCommandContext {
+        check_in_date: Some(check_in_date.to_string()),
+        issued_at,
+    }))
+}
+
 fn build_group_checkin_payment_origins(
     idempotency_key: &str,
     room_ids: &[String],
@@ -174,7 +231,14 @@ pub async fn group_checkin(
     validate_group_checkin_request(&req)?;
 
     let mut tx = begin_immediate_tx(pool).await?;
-    let group_id = group_checkin_tx(&mut tx, user_id.as_deref(), &req, None).await?;
+    let group_id = group_checkin_tx(
+        &mut tx,
+        user_id.as_deref(),
+        &req,
+        None,
+        Local::now().fixed_offset(),
+    )
+    .await?;
     tx.commit().await.map_err(BookingError::from)?;
     fetch_group(pool, &group_id).await
 }
@@ -183,14 +247,25 @@ pub async fn group_checkin_idempotent(
     pool: &Pool<Sqlite>,
     user_id: Option<String>,
     ctx: &WriteCommandContext,
-    req: GroupCheckinRequest,
+    mut req: GroupCheckinRequest,
 ) -> CommandResult<IdempotentCommandResult<serde_json::Value>> {
     validate_group_checkin_request(&req).map_err(map_group_checkin_command_error)?;
 
-    let effective_checkin_date = req
-        .check_in_date
-        .clone()
-        .unwrap_or_else(|| Local::now().format("%Y-%m-%d").to_string());
+    let existing_command_context = existing_group_checkin_command_context(pool, ctx).await?;
+    let command_now = existing_command_context
+        .as_ref()
+        .map(|existing| existing.issued_at)
+        .unwrap_or(ctx.issued_at);
+    let effective_checkin_date = match req.check_in_date.clone() {
+        Some(check_in_date) => check_in_date,
+        None => existing_command_context
+            .as_ref()
+            .and_then(|existing| existing.check_in_date.clone())
+            .unwrap_or_else(|| command_now.format("%Y-%m-%d").to_string()),
+    };
+    if req.check_in_date.is_none() {
+        req.check_in_date = Some(effective_checkin_date.clone());
+    }
     let paid_amount = req.paid_amount.unwrap_or(0);
 
     let hash_payload = build_group_checkin_hash_payload(&req);
@@ -252,6 +327,7 @@ pub async fn group_checkin_idempotent(
                         user_id_for_service.as_deref(),
                         &req_for_service,
                         payment_origins.as_ref(),
+                        command_now,
                     )
                     .await
                     .map_err(map_group_checkin_command_error)?;
@@ -270,8 +346,8 @@ async fn group_checkin_tx(
     user_id: Option<&str>,
     req: &GroupCheckinRequest,
     payment_origins_by_room: Option<&std::collections::HashMap<String, OriginSideEffect>>,
+    now: DateTime<FixedOffset>,
 ) -> BookingResult<String> {
-    let now = Local::now();
     let now_rfc3339 = now.to_rfc3339();
     let today_str = now.format("%Y-%m-%d").to_string();
     let is_reservation = req
@@ -316,12 +392,12 @@ async fn group_checkin_tx(
     .execute(&mut **tx)
     .await?;
 
-    let paid_allocations =
-        allocate_positive_money_evenly(req.paid_amount.unwrap_or(0), req.room_ids.len());
+    let paid_allocations_by_room =
+        allocate_positive_money_evenly_by_room(req.paid_amount.unwrap_or(0), &req.room_ids);
     let mut master_booking_id: Option<String> = None;
 
-    for (room_index, room_id) in req.room_ids.iter().enumerate() {
-        let paid_for_room = paid_allocations.get(room_index).copied().unwrap_or(0);
+    for room_id in &req.room_ids {
+        let paid_for_room = paid_allocations_by_room.get(room_id).copied().unwrap_or(0);
         let is_master = room_id == &req.master_room_id;
         let room_guests = req
             .guests_per_room

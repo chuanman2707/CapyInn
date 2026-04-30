@@ -1,9 +1,7 @@
 use super::{emit_db_update, get_money_vnd, get_optional_money_vnd, get_user_id, AppState};
 use crate::services::booking::group_lifecycle;
 use crate::{
-    app_error::{
-        codes, log_system_error, normalize_correlation_id, CommandError, CommandResult,
-    },
+    app_error::{codes, log_system_error, normalize_correlation_id, CommandError, CommandResult},
     command_idempotency::WriteCommandContext,
     models::*,
 };
@@ -220,6 +218,21 @@ fn map_group_detail_error(group_id: &str, error: sqlx::Error) -> CommandError {
     }
 }
 
+fn require_group_checkin_actor_id(user_id: Option<String>) -> CommandResult<String> {
+    user_id.ok_or_else(|| CommandError::user(codes::AUTH_NOT_AUTHENTICATED, "Chưa đăng nhập"))
+}
+
+fn group_checkin_write_command_context(
+    request_id: String,
+    idempotency_key: String,
+    actor_id: String,
+) -> CommandResult<WriteCommandContext> {
+    let mut context =
+        WriteCommandContext::for_scoped_command(request_id, idempotency_key, "group_checkin")?;
+    context.actor_id = Some(actor_id);
+    Ok(context)
+}
+
 /// Check-in a group: creates booking_groups + N bookings atomically
 #[tauri::command]
 pub async fn group_checkin(
@@ -238,14 +251,15 @@ pub async fn group_checkin(
         req.room_ids.len(),
         req.nights
     );
-    let write_command_context = WriteCommandContext::for_scoped_command(
+    let actor_id = require_group_checkin_actor_id(get_user_id(&state))?;
+    let write_command_context = group_checkin_write_command_context(
         effective_correlation_id.value.clone(),
         idempotency_key,
-        "group_checkin",
+        actor_id.clone(),
     )?;
     let result = group_lifecycle::group_checkin_idempotent(
         &state.db,
-        get_user_id(&state),
+        Some(actor_id),
         &write_command_context,
         req,
     )
@@ -732,7 +746,10 @@ pub async fn generate_group_invoice(
 
 #[cfg(test)]
 mod tests {
-    use super::{map_auto_assign_error, map_group_detail_error, map_group_error};
+    use super::{
+        group_checkin_write_command_context, map_auto_assign_error, map_group_detail_error,
+        map_group_error, require_group_checkin_actor_id,
+    };
     use crate::app_error::{codes, AppErrorKind, CorrelationIdSource, EffectiveCorrelationId};
     use crate::domain::booking::BookingError;
     use serde_json::json;
@@ -743,6 +760,28 @@ mod tests {
             source: CorrelationIdSource::Frontend,
             rejected_length: None,
         }
+    }
+
+    #[test]
+    fn group_checkin_write_context_sets_actor_id() {
+        let ctx = group_checkin_write_command_context(
+            "COR-GROUP-CHECKIN".to_string(),
+            "idem-group-command".to_string(),
+            "user-1".to_string(),
+        )
+        .expect("context builds");
+
+        assert_eq!(ctx.command_name, "group_checkin");
+        assert_eq!(ctx.request_id, "COR-GROUP-CHECKIN");
+        assert_eq!(ctx.idempotency_key, "idem-group-command");
+        assert_eq!(ctx.actor_id.as_deref(), Some("user-1"));
+    }
+
+    #[test]
+    fn group_checkin_requires_authenticated_actor() {
+        let error = require_group_checkin_actor_id(None).expect_err("missing user rejects");
+
+        assert_eq!(error.code, codes::AUTH_NOT_AUTHENTICATED);
     }
 
     #[test]

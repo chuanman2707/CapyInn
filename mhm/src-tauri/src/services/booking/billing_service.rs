@@ -89,6 +89,20 @@ fn map_add_folio_line_command_error(error: BookingError) -> CommandError {
     }
 }
 
+fn add_folio_line_lock_keys_from_payload(
+    hash_payload: &serde_json::Value,
+) -> CommandResult<Vec<String>> {
+    let booking_id = hash_payload
+        .get("booking_id")
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| system_error("folio add line lock payload missing booking_id"))?;
+
+    Ok(vec![
+        crate::aggregate_locks::booking_key(booking_id)?,
+        crate::aggregate_locks::folio_key(booking_id)?,
+    ])
+}
+
 pub async fn add_folio_line_idempotent(
     pool: &Pool<Sqlite>,
     ctx: &WriteCommandContext,
@@ -126,6 +140,7 @@ pub async fn add_folio_line_idempotent(
     )?;
     let request = WriteCommandRequest::new_sanitized(hash_payload, ledger_intent, summary)?
         .with_primary_aggregate_key(format!("booking:{booking_id}"))
+        .with_lock_key_deriver(add_folio_line_lock_keys_from_payload)
         .with_success_summary(CommandLedgerResultSummary::success("Folio line added")?);
 
     let booking_id = booking_id.to_string();

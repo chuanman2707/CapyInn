@@ -884,6 +884,99 @@ pub fn rich_group_checkin_request(
     }
 }
 
+fn group_checkin_hash_payload_for_test(req: &GroupCheckinRequest) -> serde_json::Value {
+    let paid_minor_units = req
+        .paid_amount
+        .map(|amount| serde_json::json!((i128::from(amount) * 100).to_string()))
+        .unwrap_or(serde_json::Value::Null);
+    let mut room_ids = req.room_ids.clone();
+    room_ids.sort();
+    let guests_per_room = req
+        .guests_per_room
+        .iter()
+        .map(|(room_id, guests)| {
+            let guests = guests
+                .iter()
+                .map(|guest| {
+                    serde_json::json!({
+                        "guest_type": guest.guest_type.clone(),
+                        "full_name": guest.full_name.clone(),
+                        "doc_number": guest.doc_number.clone(),
+                        "dob": guest.dob.clone(),
+                        "gender": guest.gender.clone(),
+                        "nationality": guest.nationality.clone(),
+                        "address": guest.address.clone(),
+                        "visa_expiry": guest.visa_expiry.clone(),
+                        "scan_path": guest.scan_path.clone(),
+                        "phone": guest.phone.clone(),
+                    })
+                })
+                .collect::<Vec<_>>();
+            (room_id.clone(), serde_json::json!(guests))
+        })
+        .collect::<serde_json::Map<_, _>>();
+
+    serde_json::json!({
+        "schema": "group.checkin.v1",
+        "group_name": req.group_name.clone(),
+        "organizer_name": req.organizer_name.clone(),
+        "organizer_phone": req.organizer_phone.clone(),
+        "check_in_date": req.check_in_date.clone(),
+        "room_ids": room_ids,
+        "master_room_id": req.master_room_id.clone(),
+        "guests_per_room": guests_per_room,
+        "nights": req.nights,
+        "source": req.source.clone(),
+        "notes": req.notes.clone(),
+        "paid_minor_units": paid_minor_units,
+    })
+}
+
+fn add_folio_line_hash_payload_for_test(
+    booking_id: &str,
+    category: &str,
+    description: &str,
+    amount: MoneyVnd,
+    created_by: Option<&str>,
+) -> serde_json::Value {
+    serde_json::json!({
+        "schema": "folio.add_line.v1",
+        "booking_id": booking_id,
+        "category": category,
+        "description": description,
+        "amount_minor_units": (i128::from(amount) * 100).to_string(),
+        "created_by": created_by,
+    })
+}
+
+async fn seed_live_in_progress_command(
+    pool: &Pool<Sqlite>,
+    command_name: &str,
+    idempotency_key: &str,
+    payload: &serde_json::Value,
+) {
+    let now = chrono::Utc::now().to_rfc3339();
+    let lease_expires_at = (chrono::Utc::now() + chrono::Duration::seconds(30)).to_rfc3339();
+    sqlx::query(
+        "INSERT INTO command_idempotency (
+            idempotency_key, command_name, request_hash, intent_json, lock_keys_json,
+            status, claim_token, retryable, lease_expires_at, issued_at,
+            created_at, updated_at, last_attempt_at
+        ) VALUES (?, ?, ?, '{}', '[]', 'in_progress', 'other-claim', 0, ?, ?, ?, ?, ?)",
+    )
+    .bind(idempotency_key)
+    .bind(command_name)
+    .bind(crate::command_idempotency::stable_request_hash(payload).expect("payload hashes"))
+    .bind(&lease_expires_at)
+    .bind(&now)
+    .bind(&now)
+    .bind(&now)
+    .bind(&now)
+    .execute(pool)
+    .await
+    .expect("seed in-progress command");
+}
+
 #[tokio::test]
 async fn check_in_rejects_negative_paid_amount() {
     let pool = test_pool().await;
@@ -1532,7 +1625,7 @@ async fn group_checkin_idempotent_normalizes_room_order_and_assigns_payment_ordi
         &pool,
         Some("seed-user".to_string()),
         &ctx,
-        rich_group_checkin_request(&["GI602", "GI601"], "GI602", Some(100_000)),
+        rich_group_checkin_request(&["GI602", "GI601"], "GI602", Some(100_001)),
     )
     .await
     .expect("first group checkin succeeds");
@@ -1540,7 +1633,7 @@ async fn group_checkin_idempotent_normalizes_room_order_and_assigns_payment_ordi
         &pool,
         Some("seed-user".to_string()),
         &ctx,
-        rich_group_checkin_request(&["GI601", "GI602"], "GI602", Some(100_000)),
+        rich_group_checkin_request(&["GI601", "GI602"], "GI602", Some(100_001)),
     )
     .await
     .expect("same payload with different room order replays");
@@ -1550,7 +1643,7 @@ async fn group_checkin_idempotent_normalizes_room_order_and_assigns_payment_ordi
     assert_eq!(first.response["id"], second.response["id"]);
 
     let rows = sqlx::query(
-        "SELECT b.room_id, t.origin_transaction_ordinal
+        "SELECT b.room_id, t.amount, t.origin_transaction_ordinal
          FROM transactions t
          JOIN bookings b ON b.id = t.booking_id
          WHERE t.origin_idempotency_key = ? AND t.type = 'payment'
@@ -1562,8 +1655,10 @@ async fn group_checkin_idempotent_normalizes_room_order_and_assigns_payment_ordi
     .unwrap();
     assert_eq!(rows.len(), 2);
     assert_eq!(rows[0].get::<String, _>("room_id"), "GI601");
+    assert_eq!(rows[0].get::<i64, _>("amount"), 50_001);
     assert_eq!(rows[0].get::<i64, _>("origin_transaction_ordinal"), 0);
     assert_eq!(rows[1].get::<String, _>("room_id"), "GI602");
+    assert_eq!(rows[1].get::<i64, _>("amount"), 50_000);
     assert_eq!(rows[1].get::<i64, _>("origin_transaction_ordinal"), 1);
 
     let lock_keys_json: String = sqlx::query_scalar(
@@ -1576,6 +1671,262 @@ async fn group_checkin_idempotent_normalizes_room_order_and_assigns_payment_ordi
     .await
     .unwrap();
     assert_eq!(lock_keys_json, r#"["room:GI601","room:GI602"]"#);
+}
+
+#[tokio::test]
+async fn group_checkin_idempotent_materializes_omitted_checkin_date_in_hash() {
+    let pool = test_pool().await;
+    seed_room(&pool, "GI603").await.unwrap();
+    seed_room(&pool, "GI604").await.unwrap();
+    seed_pricing_rule(&pool, "standard", 250_000).await.unwrap();
+    let ctx = crate::command_idempotency::WriteCommandContext::for_internal_test(
+        "req-group-idem-materialized-date",
+        "idem-group-checkin-materialized-date",
+        "group_checkin",
+    );
+
+    let req = rich_group_checkin_request(&["GI603", "GI604"], "GI603", Some(100_000));
+    assert!(req.check_in_date.is_none());
+
+    group_lifecycle::group_checkin_idempotent(&pool, Some("seed-user".to_string()), &ctx, req)
+        .await
+        .expect("group checkin succeeds");
+
+    let stored_hash: String = sqlx::query_scalar(
+        "SELECT request_hash
+         FROM command_idempotency
+         WHERE idempotency_key = ?",
+    )
+    .bind("idem-group-checkin-materialized-date")
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+
+    let mut materialized = rich_group_checkin_request(&["GI603", "GI604"], "GI603", Some(100_000));
+    materialized.check_in_date = Some(ctx.issued_at.format("%Y-%m-%d").to_string());
+    let expected_hash = crate::command_idempotency::stable_request_hash(
+        &group_checkin_hash_payload_for_test(&materialized),
+    )
+    .expect("materialized payload hashes");
+    let null_date_hash =
+        crate::command_idempotency::stable_request_hash(&group_checkin_hash_payload_for_test(
+            &rich_group_checkin_request(&["GI603", "GI604"], "GI603", Some(100_000)),
+        ))
+        .expect("null date payload hashes");
+
+    assert_eq!(stored_hash, expected_hash);
+    assert_ne!(stored_hash, null_date_hash);
+}
+
+#[tokio::test]
+async fn group_checkin_idempotent_omitted_date_replays_after_issued_at_rollover() {
+    let pool = test_pool().await;
+    seed_room(&pool, "GI605").await.unwrap();
+    seed_room(&pool, "GI606").await.unwrap();
+    seed_pricing_rule(&pool, "standard", 250_000).await.unwrap();
+    let first_ctx = crate::command_idempotency::WriteCommandContext::for_internal_test(
+        "req-group-idem-rollover-first",
+        "idem-group-checkin-rollover",
+        "group_checkin",
+    );
+
+    let first = group_lifecycle::group_checkin_idempotent(
+        &pool,
+        Some("seed-user".to_string()),
+        &first_ctx,
+        rich_group_checkin_request(&["GI605", "GI606"], "GI605", Some(100_000)),
+    )
+    .await
+    .expect("first group checkin succeeds");
+
+    let mut retry_ctx = crate::command_idempotency::WriteCommandContext::for_internal_test(
+        "req-group-idem-rollover-retry",
+        "idem-group-checkin-rollover",
+        "group_checkin",
+    );
+    retry_ctx.issued_at = chrono::DateTime::parse_from_rfc3339("2026-04-25T01:00:00+07:00")
+        .expect("retry timestamp parses");
+
+    let retry = group_lifecycle::group_checkin_idempotent(
+        &pool,
+        Some("seed-user".to_string()),
+        &retry_ctx,
+        rich_group_checkin_request(&["GI605", "GI606"], "GI605", Some(100_000)),
+    )
+    .await
+    .expect("omitted-date retry replays across issued_at rollover");
+
+    assert!(!first.replayed);
+    assert!(retry.replayed);
+    assert_eq!(first.response["id"], retry.response["id"]);
+}
+
+#[tokio::test]
+async fn group_checkin_idempotent_reclaimed_omitted_date_uses_original_command_time() {
+    let pool = test_pool().await;
+    seed_room(&pool, "GI607").await.unwrap();
+    seed_room(&pool, "GI608").await.unwrap();
+    seed_pricing_rule(&pool, "standard", 250_000).await.unwrap();
+
+    let mut original_ctx = crate::command_idempotency::WriteCommandContext::for_internal_test(
+        "req-group-idem-reclaim-original",
+        "idem-group-checkin-reclaim-rollover",
+        "group_checkin",
+    );
+    original_ctx.issued_at = chrono::DateTime::parse_from_rfc3339("2026-04-24T10:00:00+07:00")
+        .expect("original timestamp parses");
+    let mut materialized = rich_group_checkin_request(&["GI607", "GI608"], "GI607", Some(100_000));
+    materialized.check_in_date = Some("2026-04-24".to_string());
+    let payload = group_checkin_hash_payload_for_test(&materialized);
+    let request_hash =
+        crate::command_idempotency::stable_request_hash(&payload).expect("payload hashes");
+    let now = chrono::Utc::now().to_rfc3339();
+    let expired_lease = (chrono::Utc::now() - chrono::Duration::seconds(30)).to_rfc3339();
+    let intent_json = serde_json::json!({
+        "fields": {
+            "schema": "group.checkin.v1",
+            "room_count": 2,
+            "guest_room_count": 2,
+            "guest_form_count": 2,
+            "nights": 2,
+            "check_in_date": "2026-04-24",
+            "has_organizer_contact": true,
+            "has_source": true,
+            "has_notes": true,
+            "has_paid_amount": true,
+            "paid_amount_positive": true,
+        }
+    })
+    .to_string();
+
+    sqlx::query(
+        "INSERT INTO command_idempotency (
+            idempotency_key, command_name, request_hash, intent_json, lock_keys_json,
+            status, claim_token, retryable, lease_expires_at, issued_at,
+            created_at, updated_at, last_attempt_at
+        ) VALUES (?, ?, ?, ?, ?, 'in_progress', 'expired-claim', 0, ?, ?, ?, ?, ?)",
+    )
+    .bind("idem-group-checkin-reclaim-rollover")
+    .bind("group_checkin")
+    .bind(&request_hash)
+    .bind(intent_json)
+    .bind(r#"["room:GI607","room:GI608"]"#)
+    .bind(&expired_lease)
+    .bind(original_ctx.issued_at.to_rfc3339())
+    .bind(&now)
+    .bind(&now)
+    .bind(&now)
+    .execute(&pool)
+    .await
+    .expect("seed expired in-progress command");
+
+    let mut retry_ctx = crate::command_idempotency::WriteCommandContext::for_internal_test(
+        "req-group-idem-reclaim-retry",
+        "idem-group-checkin-reclaim-rollover",
+        "group_checkin",
+    );
+    retry_ctx.issued_at = chrono::DateTime::parse_from_rfc3339("2026-04-25T01:00:00+07:00")
+        .expect("retry timestamp parses");
+
+    let result = group_lifecycle::group_checkin_idempotent(
+        &pool,
+        Some("seed-user".to_string()),
+        &retry_ctx,
+        rich_group_checkin_request(&["GI607", "GI608"], "GI607", Some(100_000)),
+    )
+    .await
+    .expect("reclaimed omitted-date command succeeds");
+
+    assert!(!result.replayed);
+
+    let statuses = sqlx::query(
+        "SELECT status, booking_type, scheduled_checkin
+         FROM bookings
+         WHERE group_id = ?
+         ORDER BY room_id",
+    )
+    .bind(result.response["id"].as_str().unwrap())
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    assert_eq!(statuses.len(), 2);
+    for row in statuses {
+        assert_eq!(
+            row.get::<String, _>("status"),
+            crate::models::status::booking::ACTIVE
+        );
+        assert_eq!(row.get::<String, _>("booking_type"), "walk-in");
+        assert_eq!(
+            row.get::<Option<String>, _>("scheduled_checkin"),
+            None::<String>
+        );
+    }
+
+    let room_statuses = sqlx::query_scalar::<_, String>(
+        "SELECT status FROM rooms WHERE id IN ('GI607', 'GI608') ORDER BY id",
+    )
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        room_statuses,
+        vec![
+            crate::models::status::room::OCCUPIED.to_string(),
+            crate::models::status::room::OCCUPIED.to_string()
+        ]
+    );
+}
+
+#[tokio::test]
+async fn group_checkin_idempotent_retry_does_not_duplicate_groups_bookings_or_payments() {
+    let pool = test_pool().await;
+    seed_room(&pool, "GI620").await.unwrap();
+    seed_room(&pool, "GI621").await.unwrap();
+    seed_pricing_rule(&pool, "standard", 250_000).await.unwrap();
+    let ctx = crate::command_idempotency::WriteCommandContext::for_internal_test(
+        "req-group-idem-no-dup",
+        "idem-group-checkin-no-dup",
+        "group_checkin",
+    );
+
+    let first = group_lifecycle::group_checkin_idempotent(
+        &pool,
+        Some("seed-user".to_string()),
+        &ctx,
+        rich_group_checkin_request(&["GI620", "GI621"], "GI620", Some(100_000)),
+    )
+    .await
+    .expect("first group checkin succeeds");
+    let replay = group_lifecycle::group_checkin_idempotent(
+        &pool,
+        Some("seed-user".to_string()),
+        &ctx,
+        rich_group_checkin_request(&["GI620", "GI621"], "GI620", Some(100_000)),
+    )
+    .await
+    .expect("retry replays");
+
+    assert!(!first.replayed);
+    assert!(replay.replayed);
+    assert_eq!(first.response["id"], replay.response["id"]);
+
+    let group_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM booking_groups")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    let booking_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM bookings")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    let payment_count: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM transactions WHERE type = 'payment'")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+
+    assert_eq!(group_count, 1);
+    assert_eq!(booking_count, 2);
+    assert_eq!(payment_count, 2);
 }
 
 #[tokio::test]
@@ -1648,6 +1999,38 @@ async fn group_checkin_duplicate_in_flight_does_not_wait_for_room_lock() {
 
     drop(held_room_lock);
     first.await.unwrap().expect("first command completes");
+}
+
+#[tokio::test]
+async fn group_checkin_idempotent_duplicate_seeded_live_in_flight_returns_conflict() {
+    let pool = test_pool().await;
+    seed_room(&pool, "GI655").await.unwrap();
+    seed_room(&pool, "GI656").await.unwrap();
+    seed_pricing_rule(&pool, "standard", 250_000).await.unwrap();
+    let ctx = crate::command_idempotency::WriteCommandContext::for_internal_test(
+        "req-group-idem-seeded-inflight",
+        "idem-group-checkin-seeded-inflight",
+        "group_checkin",
+    );
+    let mut req = rich_group_checkin_request(&["GI655", "GI656"], "GI655", Some(100_000));
+    req.check_in_date = Some(ctx.issued_at.format("%Y-%m-%d").to_string());
+    seed_live_in_progress_command(
+        &pool,
+        "group_checkin",
+        "idem-group-checkin-seeded-inflight",
+        &group_checkin_hash_payload_for_test(&req),
+    )
+    .await;
+
+    let error =
+        group_lifecycle::group_checkin_idempotent(&pool, Some("seed-user".to_string()), &ctx, req)
+            .await
+            .expect_err("duplicate live in-flight command should conflict");
+
+    assert_eq!(
+        error.code,
+        crate::app_error::codes::CONFLICT_DUPLICATE_IN_FLIGHT
+    );
 }
 
 #[tokio::test]
@@ -1792,6 +2175,45 @@ async fn group_checkin_idempotent_same_key_different_payload_conflicts() {
     )
     .await
     .expect_err("same key with different payload conflicts");
+
+    assert_eq!(
+        error.code,
+        crate::app_error::codes::CONFLICT_IDEMPOTENCY_HASH_MISMATCH
+    );
+}
+
+#[tokio::test]
+async fn group_checkin_idempotent_same_key_changed_guest_name_conflicts() {
+    let pool = test_pool().await;
+    seed_room(&pool, "GI642").await.unwrap();
+    seed_room(&pool, "GI643").await.unwrap();
+    seed_pricing_rule(&pool, "standard", 250_000).await.unwrap();
+    let ctx = crate::command_idempotency::WriteCommandContext::for_internal_test(
+        "req-group-idem-guest-change",
+        "idem-group-checkin-guest-change",
+        "group_checkin",
+    );
+
+    group_lifecycle::group_checkin_idempotent(
+        &pool,
+        Some("seed-user".to_string()),
+        &ctx,
+        rich_group_checkin_request(&["GI642", "GI643"], "GI642", Some(100_000)),
+    )
+    .await
+    .expect("first group checkin succeeds");
+
+    let mut changed = rich_group_checkin_request(&["GI642", "GI643"], "GI642", Some(100_000));
+    changed.guests_per_room.get_mut("GI642").unwrap()[0].full_name =
+        "Changed Guest Name".to_string();
+    let error = group_lifecycle::group_checkin_idempotent(
+        &pool,
+        Some("seed-user".to_string()),
+        &ctx,
+        changed,
+    )
+    .await
+    .expect_err("same key with changed guest name conflicts");
 
     assert_eq!(
         error.code,
@@ -6151,6 +6573,59 @@ async fn add_folio_line_idempotent_accepts_uuid_booking_id_in_safe_ledger_metada
 }
 
 #[tokio::test]
+async fn add_folio_line_idempotent_metadata_is_sanitized_and_contains_lock_keys() {
+    let pool = test_pool().await;
+    seed_room(&pool, "FOLIO-IDEM-META").await.unwrap();
+    seed_active_booking(&pool, "B-FOLIO-IDEM-META", "FOLIO-IDEM-META")
+        .await
+        .unwrap();
+    let ctx = crate::command_idempotency::WriteCommandContext::for_internal_test(
+        "req-folio-idem-meta",
+        "idem-folio-line-meta",
+        "add_folio_line",
+    );
+
+    add_folio_line_idempotent(
+        &pool,
+        &ctx,
+        "B-FOLIO-IDEM-META",
+        "laundry",
+        "Laundry bundle",
+        25_000,
+        Some("staff-1"),
+    )
+    .await
+    .expect("folio line succeeds");
+
+    let row = sqlx::query(
+        "SELECT intent_json, lock_keys_json, primary_aggregate_key
+         FROM command_idempotency
+         WHERE command_name = 'add_folio_line' AND idempotency_key = ?",
+    )
+    .bind("idem-folio-line-meta")
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    let intent_json = row.get::<String, _>("intent_json");
+    let lock_keys_json = row.get::<String, _>("lock_keys_json");
+
+    assert!(intent_json.contains("\"schema\":\"folio.add_line.v1\""));
+    assert!(intent_json.contains("\"category_present\":true"));
+    assert!(intent_json.contains("\"description_present\":true"));
+    assert!(intent_json.contains("\"created_by_present\":true"));
+    assert!(!intent_json.contains("Laundry bundle"));
+    assert!(!intent_json.contains("staff-1"));
+    assert_eq!(
+        row.get::<String, _>("primary_aggregate_key"),
+        "booking:B-FOLIO-IDEM-META"
+    );
+    assert_eq!(
+        lock_keys_json,
+        r#"["booking:B-FOLIO-IDEM-META","folio:B-FOLIO-IDEM-META"]"#
+    );
+}
+
+#[tokio::test]
 async fn add_folio_line_idempotent_same_key_different_payload_conflicts() {
     let pool = test_pool().await;
     seed_room(&pool, "FOLIO-IDEM-2").await.unwrap();
@@ -6186,6 +6661,49 @@ async fn add_folio_line_idempotent_same_key_different_payload_conflicts() {
     )
     .await
     .expect_err("same key with different payload conflicts");
+
+    assert_eq!(
+        error.code,
+        crate::app_error::codes::CONFLICT_IDEMPOTENCY_HASH_MISMATCH
+    );
+}
+
+#[tokio::test]
+async fn add_folio_line_idempotent_same_key_changed_amount_conflicts() {
+    let pool = test_pool().await;
+    seed_room(&pool, "FOLIO-IDEM-AMOUNT").await.unwrap();
+    seed_active_booking(&pool, "B-FOLIO-IDEM-AMOUNT", "FOLIO-IDEM-AMOUNT")
+        .await
+        .unwrap();
+    let ctx = crate::command_idempotency::WriteCommandContext::for_internal_test(
+        "req-folio-idem-amount",
+        "idem-folio-line-amount",
+        "add_folio_line",
+    );
+
+    add_folio_line_idempotent(
+        &pool,
+        &ctx,
+        "B-FOLIO-IDEM-AMOUNT",
+        "laundry",
+        "Laundry bundle",
+        25_000,
+        Some("staff-1"),
+    )
+    .await
+    .expect("first folio line succeeds");
+
+    let error = add_folio_line_idempotent(
+        &pool,
+        &ctx,
+        "B-FOLIO-IDEM-AMOUNT",
+        "laundry",
+        "Laundry bundle",
+        30_000,
+        Some("staff-1"),
+    )
+    .await
+    .expect_err("same key with changed amount conflicts");
 
     assert_eq!(
         error.code,
@@ -6241,6 +6759,50 @@ async fn add_folio_line_idempotent_replay_returns_stored_snapshot() {
     assert!(replay.replayed);
     assert_eq!(replay.response["amount"].as_i64(), Some(first_amount));
     assert_ne!(replay.response["amount"].as_i64(), Some(99_999));
+}
+
+#[tokio::test]
+async fn add_folio_line_idempotent_duplicate_seeded_live_in_flight_returns_conflict() {
+    let pool = test_pool().await;
+    seed_room(&pool, "FOLIO-IDEM-INFLIGHT").await.unwrap();
+    seed_active_booking(&pool, "B-FOLIO-IDEM-INFLIGHT", "FOLIO-IDEM-INFLIGHT")
+        .await
+        .unwrap();
+    let ctx = crate::command_idempotency::WriteCommandContext::for_internal_test(
+        "req-folio-idem-inflight",
+        "idem-folio-line-inflight",
+        "add_folio_line",
+    );
+    seed_live_in_progress_command(
+        &pool,
+        "add_folio_line",
+        "idem-folio-line-inflight",
+        &add_folio_line_hash_payload_for_test(
+            "B-FOLIO-IDEM-INFLIGHT",
+            "laundry",
+            "Laundry bundle",
+            25_000,
+            Some("staff-1"),
+        ),
+    )
+    .await;
+
+    let error = add_folio_line_idempotent(
+        &pool,
+        &ctx,
+        "B-FOLIO-IDEM-INFLIGHT",
+        "laundry",
+        "Laundry bundle",
+        25_000,
+        Some("staff-1"),
+    )
+    .await
+    .expect_err("duplicate live in-flight command should conflict");
+
+    assert_eq!(
+        error.code,
+        crate::app_error::codes::CONFLICT_DUPLICATE_IN_FLIGHT
+    );
 }
 
 #[tokio::test]
