@@ -215,6 +215,15 @@ pub struct CheckOutRequest {
     pub final_total: MoneyVnd,
 }
 
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
+pub struct CheckOutResponse {
+    pub ok: bool,
+    pub booking_id: String,
+    pub room_id: String,
+    pub actual_checkout: String,
+    pub final_total: MoneyVnd,
+}
+
 #[derive(Debug, Deserialize)]
 pub struct CheckoutSettlementPreviewRequest {
     pub booking_id: String,
@@ -270,6 +279,14 @@ pub struct FolioLine {
     pub amount: MoneyVnd,
     pub created_by: Option<String>,
     pub created_at: String,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
+pub struct RecordPaymentResponse {
+    pub ok: bool,
+    pub booking_id: String,
+    pub transaction_id: String,
+    pub amount: MoneyVnd,
 }
 
 #[derive(Debug, Serialize, Clone)]
@@ -610,6 +627,15 @@ pub struct GroupCheckoutRequest {
     pub group_id: String,
     pub booking_ids: Vec<String>,
     pub final_paid: Option<MoneyVnd>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
+pub struct GroupCheckoutResponse {
+    pub ok: bool,
+    pub group_id: String,
+    pub booking_ids: Vec<String>,
+    pub checked_out_count: usize,
+    pub status: String,
 }
 
 #[derive(Debug, Deserialize)]
