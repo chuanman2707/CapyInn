@@ -19,8 +19,8 @@ use super::{
     audit_service,
     billing_service::{
         add_folio_line, add_folio_line_idempotent, record_cancellation_fee_tx, record_deposit_tx,
-        record_deposit_with_origin_tx, record_payment, record_payment_returning_id_tx,
-        record_payment_tx,
+        record_deposit_with_origin_tx, record_payment, record_payment_idempotent,
+        record_payment_returning_id_tx, record_payment_tx,
     },
     group_lifecycle, guest_service, reservation_lifecycle, stay_lifecycle,
 };
@@ -1780,6 +1780,155 @@ async fn record_payment_returning_id_tx_returns_inserted_transaction_id() {
         .unwrap();
 
     assert_eq!(booking.get::<Option<i64>, _>("paid_amount"), Some(25_000));
+}
+
+#[tokio::test]
+async fn record_payment_idempotent_retry_replays_and_does_not_double_post() {
+    let pool = test_pool().await;
+    seed_room(&pool, "R-PAY-IDEM").await.unwrap();
+    seed_active_booking(&pool, "B-PAY-IDEM", "R-PAY-IDEM")
+        .await
+        .unwrap();
+    let ctx = crate::command_idempotency::WriteCommandContext::for_internal_test(
+        "req-payment-idem",
+        "idem-payment-1",
+        "record_payment",
+    );
+
+    let first = record_payment_idempotent(&pool, &ctx, "B-PAY-IDEM", 125_000, "Payment retry test")
+        .await
+        .unwrap();
+    let second =
+        record_payment_idempotent(&pool, &ctx, "B-PAY-IDEM", 125_000, "Payment retry test")
+            .await
+            .unwrap();
+
+    assert!(!first.replayed);
+    assert!(second.replayed);
+    assert_eq!(first.response, second.response);
+
+    let payment_count: (i64,) = sqlx::query_as(
+        "SELECT COUNT(*) FROM transactions WHERE booking_id = ? AND type = 'payment'",
+    )
+    .bind("B-PAY-IDEM")
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(payment_count.0, 1);
+
+    let paid_amount: i64 = sqlx::query_scalar("SELECT paid_amount FROM bookings WHERE id = ?")
+        .bind("B-PAY-IDEM")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(paid_amount, 125_000);
+}
+
+#[tokio::test]
+async fn record_payment_idempotent_same_key_different_amount_conflicts() {
+    let pool = test_pool().await;
+    seed_room(&pool, "R-PAY-HASH").await.unwrap();
+    seed_active_booking(&pool, "B-PAY-HASH", "R-PAY-HASH")
+        .await
+        .unwrap();
+    let ctx = crate::command_idempotency::WriteCommandContext::for_internal_test(
+        "req-payment-hash",
+        "idem-payment-hash",
+        "record_payment",
+    );
+
+    record_payment_idempotent(&pool, &ctx, "B-PAY-HASH", 50_000, "first")
+        .await
+        .unwrap();
+    let error = record_payment_idempotent(&pool, &ctx, "B-PAY-HASH", 60_000, "first")
+        .await
+        .unwrap_err();
+
+    assert_eq!(
+        error.code,
+        crate::app_error::codes::CONFLICT_IDEMPOTENCY_HASH_MISMATCH
+    );
+}
+
+#[tokio::test]
+async fn record_payment_idempotent_distinct_keys_sum_paid_amount() {
+    let pool = test_pool().await;
+    seed_room(&pool, "R-PAY-SUM").await.unwrap();
+    seed_active_booking(&pool, "B-PAY-SUM", "R-PAY-SUM")
+        .await
+        .unwrap();
+    let first_ctx = crate::command_idempotency::WriteCommandContext::for_internal_test(
+        "req-payment-sum-1",
+        "idem-payment-sum-1",
+        "record_payment",
+    );
+    let second_ctx = crate::command_idempotency::WriteCommandContext::for_internal_test(
+        "req-payment-sum-2",
+        "idem-payment-sum-2",
+        "record_payment",
+    );
+
+    record_payment_idempotent(&pool, &first_ctx, "B-PAY-SUM", 40_000, "first")
+        .await
+        .unwrap();
+    record_payment_idempotent(&pool, &second_ctx, "B-PAY-SUM", 60_000, "second")
+        .await
+        .unwrap();
+
+    let paid_amount: i64 = sqlx::query_scalar("SELECT paid_amount FROM bookings WHERE id = ?")
+        .bind("B-PAY-SUM")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(paid_amount, 100_000);
+}
+
+#[tokio::test]
+async fn record_payment_idempotent_duplicate_in_flight_returns_conflict() {
+    let pool = test_pool().await;
+    seed_room(&pool, "R-PAY-LIVE").await.unwrap();
+    seed_active_booking(&pool, "B-PAY-LIVE", "R-PAY-LIVE")
+        .await
+        .unwrap();
+    let ctx = crate::command_idempotency::WriteCommandContext::for_internal_test(
+        "req-payment-live",
+        "idem-payment-live",
+        "record_payment",
+    );
+    let payload = serde_json::json!({
+        "schema": "payment.record.v1",
+        "booking_id": "B-PAY-LIVE",
+        "amount": 75_000,
+        "note": "live payment",
+    });
+    let now = chrono::Utc::now().to_rfc3339();
+    let lease_expires_at = (chrono::Utc::now() + chrono::Duration::seconds(30)).to_rfc3339();
+
+    sqlx::query(
+        "INSERT INTO command_idempotency (
+            idempotency_key, command_name, request_hash, intent_json, lock_keys_json,
+            status, claim_token, retryable, lease_expires_at, created_at, updated_at, last_attempt_at
+        ) VALUES (?, ?, ?, '{}', '[]', 'in_progress', 'other-claim', 0, ?, ?, ?, ?)",
+    )
+    .bind(&ctx.idempotency_key)
+    .bind(&ctx.command_name)
+    .bind(crate::command_idempotency::stable_request_hash(&payload).expect("payload hashes"))
+    .bind(&lease_expires_at)
+    .bind(&now)
+    .bind(&now)
+    .bind(&now)
+    .execute(&pool)
+    .await
+    .expect("seeds in-flight row");
+
+    let error = record_payment_idempotent(&pool, &ctx, "B-PAY-LIVE", 75_000, "live payment")
+        .await
+        .expect_err("duplicate in-flight conflicts");
+
+    assert_eq!(
+        error.code,
+        crate::app_error::codes::CONFLICT_DUPLICATE_IN_FLIGHT
+    );
 }
 
 #[tokio::test]

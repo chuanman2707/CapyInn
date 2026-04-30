@@ -53,6 +53,44 @@ pub async fn add_folio_line(
 }
 
 #[tauri::command]
+pub async fn record_payment(
+    state: State<'_, AppState>,
+    app: tauri::AppHandle,
+    booking_id: String,
+    amount: MoneyVnd,
+    note: String,
+    idempotency_key: String,
+) -> CommandResult<crate::models::RecordPaymentResponse> {
+    let actor_id = get_user_id(&state)
+        .ok_or_else(|| CommandError::user(codes::AUTH_NOT_AUTHENTICATED, "Chưa đăng nhập"))?;
+    let mut write_command_context = WriteCommandContext::for_scoped_command(
+        uuid::Uuid::new_v4().to_string(),
+        idempotency_key,
+        "record_payment",
+    )?;
+    write_command_context.actor_id = Some(actor_id);
+    let result = billing_service::record_payment_idempotent(
+        &state.db,
+        &write_command_context,
+        &booking_id,
+        amount,
+        &note,
+    )
+    .await?;
+    let response: crate::models::RecordPaymentResponse = serde_json::from_value(result.response)
+        .map_err(|error| {
+            CommandError::system(
+                codes::SYSTEM_INTERNAL_ERROR,
+                format!("Invalid record_payment idempotent response: {error}"),
+            )
+            .with_request_id(write_command_context.request_id.clone())
+        })?;
+
+    emit_db_update(&app, "folio");
+    Ok(response)
+}
+
+#[tauri::command]
 pub async fn get_folio_lines(
     state: State<'_, AppState>,
     booking_id: String,
