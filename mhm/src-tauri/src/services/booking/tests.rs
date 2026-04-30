@@ -11,6 +11,7 @@ use crate::{
         CheckInRequest, CheckOutRequest, CheckoutSettlementMode, CheckoutSettlementPreviewRequest,
         CreateGuestRequest, CreateReservationRequest, GroupCheckinRequest, GroupCheckoutRequest,
     },
+    money::{MoneyVnd, MAX_TRANSPORT_SAFE_MONEY_VND},
     queries::booking::{audit_queries, billing_queries, revenue_queries},
 };
 
@@ -47,9 +48,9 @@ pub async fn test_pool() -> Pool<Sqlite> {
             type TEXT NOT NULL,
             floor INTEGER NOT NULL,
             has_balcony INTEGER NOT NULL DEFAULT 0,
-            base_price REAL NOT NULL DEFAULT 0,
+            base_price INTEGER NOT NULL DEFAULT 0,
             max_guests INTEGER NOT NULL DEFAULT 2,
-            extra_person_fee REAL NOT NULL DEFAULT 0,
+            extra_person_fee INTEGER NOT NULL DEFAULT 0,
             status TEXT NOT NULL DEFAULT 'vacant'
         )",
     )
@@ -86,15 +87,15 @@ pub async fn test_pool() -> Pool<Sqlite> {
             expected_checkout TEXT NOT NULL,
             actual_checkout TEXT,
             nights INTEGER NOT NULL,
-            total_price REAL NOT NULL,
-            paid_amount REAL,
+            total_price INTEGER NOT NULL,
+            paid_amount INTEGER,
             status TEXT NOT NULL,
             source TEXT,
             notes TEXT,
             created_by TEXT,
             booking_type TEXT DEFAULT 'walk-in',
             pricing_type TEXT DEFAULT 'nightly',
-            deposit_amount REAL,
+            deposit_amount INTEGER,
             guest_phone TEXT,
             scheduled_checkin TEXT,
             scheduled_checkout TEXT,
@@ -142,7 +143,7 @@ pub async fn test_pool() -> Pool<Sqlite> {
         "CREATE TABLE transactions (
             id TEXT PRIMARY KEY,
             booking_id TEXT NOT NULL REFERENCES bookings(id),
-            amount REAL NOT NULL,
+            amount INTEGER NOT NULL,
             type TEXT NOT NULL,
             note TEXT,
             origin_idempotency_key TEXT,
@@ -186,9 +187,9 @@ pub async fn test_pool() -> Pool<Sqlite> {
         "CREATE TABLE pricing_rules (
             id TEXT PRIMARY KEY,
             room_type TEXT NOT NULL UNIQUE,
-            hourly_rate REAL NOT NULL DEFAULT 0,
-            overnight_rate REAL NOT NULL DEFAULT 0,
-            daily_rate REAL NOT NULL DEFAULT 0,
+            hourly_rate INTEGER NOT NULL DEFAULT 0,
+            overnight_rate INTEGER NOT NULL DEFAULT 0,
+            daily_rate INTEGER NOT NULL DEFAULT 0,
             overnight_start TEXT NOT NULL DEFAULT '22:00',
             overnight_end TEXT NOT NULL DEFAULT '11:00',
             daily_checkin TEXT NOT NULL DEFAULT '14:00',
@@ -221,7 +222,7 @@ pub async fn test_pool() -> Pool<Sqlite> {
         "CREATE TABLE expenses (
             id TEXT PRIMARY KEY,
             category TEXT NOT NULL,
-            amount REAL NOT NULL,
+            amount INTEGER NOT NULL,
             note TEXT,
             expense_date TEXT NOT NULL,
             created_at TEXT NOT NULL
@@ -237,7 +238,7 @@ pub async fn test_pool() -> Pool<Sqlite> {
             booking_id TEXT NOT NULL REFERENCES bookings(id),
             category TEXT NOT NULL,
             description TEXT NOT NULL,
-            amount REAL NOT NULL,
+            amount INTEGER NOT NULL,
             created_by TEXT,
             origin_idempotency_key TEXT,
             origin_line_ordinal INTEGER NOT NULL DEFAULT 0,
@@ -288,10 +289,10 @@ pub async fn test_pool() -> Pool<Sqlite> {
         "CREATE TABLE night_audit_logs (
             id TEXT PRIMARY KEY,
             audit_date TEXT NOT NULL UNIQUE,
-            total_revenue REAL NOT NULL DEFAULT 0,
-            room_revenue REAL NOT NULL DEFAULT 0,
-            folio_revenue REAL NOT NULL DEFAULT 0,
-            total_expenses REAL NOT NULL DEFAULT 0,
+            total_revenue INTEGER NOT NULL DEFAULT 0,
+            room_revenue INTEGER NOT NULL DEFAULT 0,
+            folio_revenue INTEGER NOT NULL DEFAULT 0,
+            total_expenses INTEGER NOT NULL DEFAULT 0,
             occupancy_pct REAL NOT NULL DEFAULT 0,
             rooms_sold INTEGER NOT NULL DEFAULT 0,
             total_rooms INTEGER NOT NULL DEFAULT 0,
@@ -413,7 +414,7 @@ pub async fn seed_booking_for_origin_tests(
 pub async fn seed_pricing_rule(
     pool: &Pool<Sqlite>,
     room_type: &str,
-    daily_rate: f64,
+    daily_rate: MoneyVnd,
 ) -> BookingResult<()> {
     let now = "2026-04-15T10:00:00+07:00";
 
@@ -439,7 +440,7 @@ pub async fn seed_pricing_rule(
 pub async fn seed_pricing_rule_tx(
     tx: &mut Transaction<'_, Sqlite>,
     room_type: &str,
-    daily_rate: f64,
+    daily_rate: MoneyVnd,
 ) -> BookingResult<()> {
     let now = "2026-04-15T10:00:00+07:00";
 
@@ -540,7 +541,7 @@ pub async fn seed_active_booking(
     .bind(now)
     .bind("2026-04-16T10:00:00+07:00")
     .bind(1_i64)
-    .bind(250_000.0_f64)
+    .bind(250_000)
     .bind("walk-in")
     .bind("seed booking")
     .bind("seed-user")
@@ -578,7 +579,7 @@ pub async fn seed_active_booking_with_terms(
     check_in_at: &str,
     expected_checkout: &str,
     nights: i64,
-    total_price: f64,
+    total_price: MoneyVnd,
     paid_amount: Option<i64>,
 ) -> BookingResult<()> {
     seed_active_booking(pool, booking_id, room_id).await?;
@@ -612,8 +613,8 @@ pub async fn seed_booked_reservation(
     let check_in = "2026-04-20";
     let check_out = "2026-04-22";
     let nights = 2_i64;
-    let deposit = 50_000.0_f64;
-    let total_price = 500_000.0_f64;
+    let deposit = 50_000;
+    let total_price = 500_000;
 
     let mut tx = pool.begin().await?;
 
@@ -680,7 +681,7 @@ pub async fn seed_booked_reservation(
     .execute(&mut *tx)
     .await?;
 
-    if deposit > 0.0 {
+    if deposit > 0 {
         sqlx::query(
             "INSERT INTO transactions (id, booking_id, amount, type, note, created_at)
              VALUES (?, ?, ?, 'deposit', ?, ?)",
@@ -725,7 +726,7 @@ pub fn minimal_checkin_request(room_id: &str) -> CheckInRequest {
 pub async fn seed_transaction(
     pool: &Pool<Sqlite>,
     booking_id: &str,
-    amount: f64,
+    amount: MoneyVnd,
     txn_type: &str,
     note: &str,
     created_at: &str,
@@ -749,7 +750,7 @@ pub async fn seed_transaction(
 pub async fn seed_folio_line(
     pool: &Pool<Sqlite>,
     booking_id: &str,
-    amount: f64,
+    amount: MoneyVnd,
     created_at: &str,
 ) -> BookingResult<()> {
     sqlx::query(
@@ -769,7 +770,7 @@ pub async fn seed_folio_line(
 pub async fn seed_expense(
     pool: &Pool<Sqlite>,
     category: &str,
-    amount: f64,
+    amount: MoneyVnd,
     expense_date: &str,
 ) -> BookingResult<()> {
     sqlx::query(
@@ -1087,9 +1088,7 @@ async fn group_checkin_creates_active_group_and_placeholder_guest_manifest() {
     let pool = test_pool().await;
     seed_room(&pool, "G101").await.unwrap();
     seed_room(&pool, "G102").await.unwrap();
-    seed_pricing_rule(&pool, "standard", 250_000.0)
-        .await
-        .unwrap();
+    seed_pricing_rule(&pool, "standard", 250_000).await.unwrap();
 
     let group = group_lifecycle::group_checkin(
         &pool,
@@ -1127,16 +1126,16 @@ async fn group_checkin_creates_active_group_and_placeholder_guest_manifest() {
     .unwrap();
     assert_eq!(paid_amounts.len(), 2);
     assert_eq!(
-        paid_amounts[0].get::<Option<f64>, _>("paid_amount"),
-        Some(50_000.0)
+        paid_amounts[0].get::<Option<i64>, _>("paid_amount"),
+        Some(50_000)
     );
     assert_eq!(
-        paid_amounts[1].get::<Option<f64>, _>("paid_amount"),
-        Some(50_000.0)
+        paid_amounts[1].get::<Option<i64>, _>("paid_amount"),
+        Some(50_000)
     );
     assert_eq!(
-        paid_amounts[0].get::<Option<f64>, _>("deposit_amount"),
-        Some(0.0)
+        paid_amounts[0].get::<Option<i64>, _>("deposit_amount"),
+        Some(0)
     );
 
     let placeholder = sqlx::query(
@@ -1161,9 +1160,7 @@ async fn group_checkin_reservation_blocks_calendar_and_tracks_deposit() {
     let pool = test_pool().await;
     seed_room(&pool, "G201").await.unwrap();
     seed_room(&pool, "G202").await.unwrap();
-    seed_pricing_rule(&pool, "standard", 300_000.0)
-        .await
-        .unwrap();
+    seed_pricing_rule(&pool, "standard", 300_000).await.unwrap();
 
     let mut req = minimal_group_checkin_request(&["G201", "G202"]);
     req.check_in_date = Some(
@@ -1204,12 +1201,12 @@ async fn group_checkin_reservation_blocks_calendar_and_tracks_deposit() {
     .await
     .unwrap();
     assert_eq!(
-        amounts[0].get::<Option<f64>, _>("paid_amount"),
-        Some(30_000.0)
+        amounts[0].get::<Option<i64>, _>("paid_amount"),
+        Some(30_000)
     );
     assert_eq!(
-        amounts[0].get::<Option<f64>, _>("deposit_amount"),
-        Some(30_000.0)
+        amounts[0].get::<Option<i64>, _>("deposit_amount"),
+        Some(30_000)
     );
 }
 
@@ -1217,9 +1214,7 @@ async fn group_checkin_reservation_blocks_calendar_and_tracks_deposit() {
 async fn group_checkin_rejects_duplicate_room_ids() {
     let pool = test_pool().await;
     seed_room(&pool, "G250").await.unwrap();
-    seed_pricing_rule(&pool, "standard", 250_000.0)
-        .await
-        .unwrap();
+    seed_pricing_rule(&pool, "standard", 250_000).await.unwrap();
 
     let error = group_lifecycle::group_checkin(
         &pool,
@@ -1256,9 +1251,7 @@ async fn group_checkin_idempotent_normalizes_room_order_and_assigns_payment_ordi
     let pool = test_pool().await;
     seed_room(&pool, "GI601").await.unwrap();
     seed_room(&pool, "GI602").await.unwrap();
-    seed_pricing_rule(&pool, "standard", 250_000.0)
-        .await
-        .unwrap();
+    seed_pricing_rule(&pool, "standard", 250_000).await.unwrap();
     let ctx = crate::command_idempotency::WriteCommandContext::for_internal_test(
         "req-group-idem-1",
         "idem-group-checkin-1",
@@ -1320,9 +1313,7 @@ async fn group_checkin_duplicate_in_flight_does_not_wait_for_room_lock() {
     let pool = test_pool().await;
     seed_room(&pool, "GI650").await.unwrap();
     seed_room(&pool, "GI651").await.unwrap();
-    seed_pricing_rule(&pool, "standard", 250_000.0)
-        .await
-        .unwrap();
+    seed_pricing_rule(&pool, "standard", 250_000).await.unwrap();
     let ctx = crate::command_idempotency::WriteCommandContext::for_internal_test(
         "req-group-idem-inflight",
         "idem-group-checkin-inflight",
@@ -1394,9 +1385,7 @@ async fn group_checkin_idempotent_zero_paid_amount_writes_no_payment_origin_rows
     let pool = test_pool().await;
     seed_room(&pool, "GI610").await.unwrap();
     seed_room(&pool, "GI611").await.unwrap();
-    seed_pricing_rule(&pool, "standard", 250_000.0)
-        .await
-        .unwrap();
+    seed_pricing_rule(&pool, "standard", 250_000).await.unwrap();
 
     let zero_ctx = crate::command_idempotency::WriteCommandContext::for_internal_test(
         "req-group-idem-2-zero",
@@ -1428,9 +1417,7 @@ async fn group_checkin_idempotent_blank_key_rejected_before_writes() {
     let pool = test_pool().await;
     seed_room(&pool, "GI620").await.unwrap();
     seed_room(&pool, "GI621").await.unwrap();
-    seed_pricing_rule(&pool, "standard", 250_000.0)
-        .await
-        .unwrap();
+    seed_pricing_rule(&pool, "standard", 250_000).await.unwrap();
 
     let error = crate::command_idempotency::WriteCommandContext::for_scoped_command(
         "req-group-idem-blank",
@@ -1463,9 +1450,7 @@ async fn group_checkin_idempotent_replay_returns_stored_snapshot_after_db_mutati
     let pool = test_pool().await;
     seed_room(&pool, "GI630").await.unwrap();
     seed_room(&pool, "GI631").await.unwrap();
-    seed_pricing_rule(&pool, "standard", 250_000.0)
-        .await
-        .unwrap();
+    seed_pricing_rule(&pool, "standard", 250_000).await.unwrap();
     let ctx = crate::command_idempotency::WriteCommandContext::for_internal_test(
         "req-group-idem-3",
         "idem-group-checkin-3",
@@ -1511,9 +1496,7 @@ async fn group_checkin_idempotent_same_key_different_payload_conflicts() {
     let pool = test_pool().await;
     seed_room(&pool, "GI640").await.unwrap();
     seed_room(&pool, "GI641").await.unwrap();
-    seed_pricing_rule(&pool, "standard", 250_000.0)
-        .await
-        .unwrap();
+    seed_pricing_rule(&pool, "standard", 250_000).await.unwrap();
     let ctx = crate::command_idempotency::WriteCommandContext::for_internal_test(
         "req-group-idem-4",
         "idem-group-checkin-4",
@@ -1551,9 +1534,7 @@ async fn group_checkout_reassigns_master_and_updates_group_payment() {
     let pool = test_pool().await;
     seed_room(&pool, "G301").await.unwrap();
     seed_room(&pool, "G302").await.unwrap();
-    seed_pricing_rule(&pool, "standard", 250_000.0)
-        .await
-        .unwrap();
+    seed_pricing_rule(&pool, "standard", 250_000).await.unwrap();
 
     let group = group_lifecycle::group_checkin(
         &pool,
@@ -1601,23 +1582,21 @@ async fn group_checkout_reassigns_master_and_updates_group_payment() {
             .unwrap();
     assert_eq!(housekeeping_count.0, 1);
 
-    let remaining_paid: (f64,) = sqlx::query_as(
+    let remaining_paid: (i64,) = sqlx::query_as(
         "SELECT paid_amount FROM bookings WHERE group_id = ? AND status = 'active' LIMIT 1",
     )
     .bind(&group.id)
     .fetch_one(&pool)
     .await
     .unwrap();
-    assert_eq!(remaining_paid.0, 90_000.0);
+    assert_eq!(remaining_paid.0, 90_000);
 }
 
 #[tokio::test]
 async fn group_checkout_clears_master_flag_when_group_completes() {
     let pool = test_pool().await;
     seed_room(&pool, "G401").await.unwrap();
-    seed_pricing_rule(&pool, "standard", 250_000.0)
-        .await
-        .unwrap();
+    seed_pricing_rule(&pool, "standard", 250_000).await.unwrap();
 
     let group = group_lifecycle::group_checkin(
         &pool,
@@ -1664,9 +1643,7 @@ async fn group_checkout_rejects_stale_selected_booking() {
     let pool = test_pool().await;
     seed_room(&pool, "G501").await.unwrap();
     seed_room(&pool, "G502").await.unwrap();
-    seed_pricing_rule(&pool, "standard", 250_000.0)
-        .await
-        .unwrap();
+    seed_pricing_rule(&pool, "standard", 250_000).await.unwrap();
 
     let group = group_lifecycle::group_checkin(
         &pool,
@@ -1737,7 +1714,7 @@ async fn record_payment_updates_paid_amount_cache() {
     seed_room(&pool, "R101").await.unwrap();
     seed_active_booking(&pool, "B101", "R101").await.unwrap();
 
-    record_payment(&pool, "B101", 25_000.0, "deposit")
+    record_payment(&pool, "B101", 25_000, "deposit")
         .await
         .unwrap();
 
@@ -1746,8 +1723,7 @@ async fn record_payment_updates_paid_amount_cache() {
         .fetch_one(&pool)
         .await
         .unwrap();
-
-    assert_eq!(booking.get::<Option<f64>, _>("paid_amount"), Some(25_000.0));
+    assert_eq!(booking.get::<Option<i64>, _>("paid_amount"), Some(25_000));
 
     let txn = sqlx::query("SELECT type, amount, note FROM transactions WHERE booking_id = ?")
         .bind("B101")
@@ -1756,7 +1732,7 @@ async fn record_payment_updates_paid_amount_cache() {
         .unwrap();
 
     assert_eq!(txn.get::<String, _>("type"), "payment");
-    assert_eq!(txn.get::<f64, _>("amount"), 25_000.0);
+    assert_eq!(txn.get::<i64, _>("amount"), 25_000);
     assert_eq!(txn.get::<String, _>("note"), "deposit");
 }
 
@@ -1767,7 +1743,7 @@ async fn record_payment_tx_can_compose_inside_outer_transaction() {
     seed_active_booking(&pool, "B102", "R102").await.unwrap();
 
     let mut tx = pool.begin().await.unwrap();
-    record_payment_tx(&mut tx, "B102", 12_500.0, "deposit")
+    record_payment_tx(&mut tx, "B102", 12_500, "deposit")
         .await
         .unwrap();
 
@@ -1777,7 +1753,7 @@ async fn record_payment_tx_can_compose_inside_outer_transaction() {
         .await
         .unwrap();
 
-    assert_eq!(booking.get::<Option<f64>, _>("paid_amount"), Some(12_500.0));
+    assert_eq!(booking.get::<Option<i64>, _>("paid_amount"), Some(12_500));
 
     tx.rollback().await.unwrap();
 }
@@ -1791,7 +1767,7 @@ async fn record_deposit_tx_updates_paid_amount_cache() {
         .unwrap();
 
     let mut tx = pool.begin().await.unwrap();
-    record_deposit_tx(&mut tx, "B103", 25_000.0, "extra deposit")
+    record_deposit_tx(&mut tx, "B103", 25_000, "extra deposit")
         .await
         .unwrap();
     tx.commit().await.unwrap();
@@ -1802,7 +1778,7 @@ async fn record_deposit_tx_updates_paid_amount_cache() {
         .await
         .unwrap();
 
-    assert_eq!(booking.get::<Option<f64>, _>("paid_amount"), Some(75_000.0));
+    assert_eq!(booking.get::<Option<i64>, _>("paid_amount"), Some(75_000));
 
     let txn = sqlx::query(
         "SELECT type, amount, note FROM transactions WHERE booking_id = ? AND note = ?",
@@ -1814,7 +1790,7 @@ async fn record_deposit_tx_updates_paid_amount_cache() {
     .unwrap();
 
     assert_eq!(txn.get::<String, _>("type"), "deposit");
-    assert_eq!(txn.get::<f64, _>("amount"), 25_000.0);
+    assert_eq!(txn.get::<i64, _>("amount"), 25_000);
     assert_eq!(txn.get::<String, _>("note"), "extra deposit");
 }
 
@@ -1826,7 +1802,7 @@ async fn record_deposit_with_origin_writes_origin_key_and_ordinal() {
     let origin = OriginSideEffect::new("idem-deposit-1", 0).unwrap();
 
     let mut tx = pool.begin().await.unwrap();
-    record_deposit_with_origin_tx(&mut tx, &booking_id, 25_000.0, "origin deposit", &origin)
+    record_deposit_with_origin_tx(&mut tx, &booking_id, 25_000, "origin deposit", &origin)
         .await
         .unwrap();
     tx.commit().await.unwrap();
@@ -1877,7 +1853,7 @@ async fn record_cancellation_fee_tx_does_not_change_paid_amount() {
         .unwrap();
 
     let mut tx = pool.begin().await.unwrap();
-    record_cancellation_fee_tx(&mut tx, "B104", 25_000.0, "retained deposit")
+    record_cancellation_fee_tx(&mut tx, "B104", 25_000, "retained deposit")
         .await
         .unwrap();
     tx.commit().await.unwrap();
@@ -1888,7 +1864,7 @@ async fn record_cancellation_fee_tx_does_not_change_paid_amount() {
         .await
         .unwrap();
 
-    assert_eq!(booking.get::<Option<f64>, _>("paid_amount"), Some(50_000.0));
+    assert_eq!(booking.get::<Option<i64>, _>("paid_amount"), Some(50_000));
 
     let txn = sqlx::query(
         "SELECT type, amount, note FROM transactions WHERE booking_id = ? AND note = ?",
@@ -1900,7 +1876,7 @@ async fn record_cancellation_fee_tx_does_not_change_paid_amount() {
     .unwrap();
 
     assert_eq!(txn.get::<String, _>("type"), "cancellation_fee");
-    assert_eq!(txn.get::<f64, _>("amount"), 25_000.0);
+    assert_eq!(txn.get::<i64, _>("amount"), 25_000);
     assert_eq!(txn.get::<String, _>("note"), "retained deposit");
 }
 
@@ -1909,7 +1885,7 @@ async fn calculate_stay_price_tx_reads_uncommitted_pricing_rule() {
     let pool = test_pool().await;
     seed_room(&pool, "R150").await.unwrap();
     let mut tx = pool.begin().await.unwrap();
-    seed_pricing_rule_tx(&mut tx, "standard", 600_000.0)
+    seed_pricing_rule_tx(&mut tx, "standard", 600_000)
         .await
         .unwrap();
 
@@ -1932,9 +1908,7 @@ async fn calculate_stay_price_tx_reads_uncommitted_pricing_rule() {
 async fn calculate_stay_price_matches_tx_path_and_applies_special_date_uplift() {
     let pool = test_pool().await;
     seed_room(&pool, "R149").await.unwrap();
-    seed_pricing_rule(&pool, "standard", 600_000.0)
-        .await
-        .unwrap();
+    seed_pricing_rule(&pool, "standard", 600_000).await.unwrap();
     seed_special_date(&pool, "2026-04-20", 10.0).await.unwrap();
 
     let pool_pricing = calculate_stay_price(
@@ -2033,7 +2007,7 @@ async fn calculate_stay_price_tx_reads_uncommitted_room_base_price() {
 
     let mut tx = pool.begin().await.unwrap();
     sqlx::query("UPDATE rooms SET base_price = ? WHERE id = ?")
-        .bind(600_000.0_f64)
+        .bind(600_000)
         .bind("R151")
         .execute(&mut *tx)
         .await
@@ -2058,9 +2032,7 @@ async fn calculate_stay_price_tx_reads_uncommitted_room_base_price() {
 async fn calculate_stay_price_tx_reads_uncommitted_special_date() {
     let pool = test_pool().await;
     seed_room(&pool, "R152").await.unwrap();
-    seed_pricing_rule(&pool, "standard", 600_000.0)
-        .await
-        .unwrap();
+    seed_pricing_rule(&pool, "standard", 600_000).await.unwrap();
 
     let mut tx = pool.begin().await.unwrap();
     seed_special_date_tx(&mut tx, "2026-04-20", 10.0)
@@ -2127,9 +2099,7 @@ async fn calculate_stay_price_returns_datetime_parse_for_invalid_check_in() {
 async fn create_reservation_blocks_calendar_and_posts_deposit() {
     let pool = test_pool().await;
     seed_room(&pool, "R160").await.unwrap();
-    seed_pricing_rule(&pool, "standard", 600_000.0)
-        .await
-        .unwrap();
+    seed_pricing_rule(&pool, "standard", 600_000).await.unwrap();
 
     let booking =
         reservation_lifecycle::create_reservation(&pool, minimal_reservation_request("R160"))
@@ -2165,7 +2135,7 @@ async fn create_reservation_blocks_calendar_and_posts_deposit() {
     .await
     .unwrap();
     assert_eq!(deposit.get::<String, _>("type"), "deposit");
-    assert_eq!(deposit.get::<f64, _>("amount"), 50_000.0);
+    assert_eq!(deposit.get::<i64, _>("amount"), 50_000);
     assert_eq!(deposit.get::<String, _>("note"), "Reservation deposit");
 }
 
@@ -2173,9 +2143,7 @@ async fn create_reservation_blocks_calendar_and_posts_deposit() {
 async fn create_reservation_rejects_inconsistent_nights_input() {
     let pool = test_pool().await;
     seed_room(&pool, "R160A").await.unwrap();
-    seed_pricing_rule(&pool, "standard", 600_000.0)
-        .await
-        .unwrap();
+    seed_pricing_rule(&pool, "standard", 600_000).await.unwrap();
 
     let error = reservation_lifecycle::create_reservation(
         &pool,
@@ -2205,7 +2173,7 @@ async fn create_reservation_rejects_inconsistent_nights_input() {
 async fn create_reservation_idempotent_retry_does_not_duplicate_deposit() {
     let pool = test_pool().await;
     seed_room(&pool, "R601").await.expect("seeds room");
-    seed_pricing_rule(&pool, "standard", 600_000.0)
+    seed_pricing_rule(&pool, "standard", 600_000)
         .await
         .expect("seeds pricing");
     let ctx = crate::command_idempotency::WriteCommandContext::for_internal_test(
@@ -2269,7 +2237,7 @@ async fn create_reservation_idempotent_retry_does_not_duplicate_deposit() {
 async fn create_reservation_idempotent_replay_returns_stored_booking_snapshot() {
     let pool = test_pool().await;
     seed_room(&pool, "R604").await.expect("seeds room");
-    seed_pricing_rule(&pool, "standard", 600_000.0)
+    seed_pricing_rule(&pool, "standard", 600_000)
         .await
         .expect("seeds pricing");
     let ctx = crate::command_idempotency::WriteCommandContext::for_internal_test(
@@ -2343,7 +2311,7 @@ async fn create_reservation_same_key_different_payload_conflicts() {
     let pool = test_pool().await;
     seed_room(&pool, "R602").await.expect("seeds room");
     seed_room(&pool, "R603").await.expect("seeds room");
-    seed_pricing_rule(&pool, "standard", 600_000.0)
+    seed_pricing_rule(&pool, "standard", 600_000)
         .await
         .expect("seeds pricing");
     let ctx = crate::command_idempotency::WriteCommandContext::for_internal_test(
@@ -2400,7 +2368,7 @@ async fn create_reservation_same_key_different_payload_conflicts() {
 async fn reservation_command_idempotency_create_hashes_deposit_as_integer_vnd_units() {
     let pool = test_pool().await;
     seed_room(&pool, "R690").await.expect("seeds room");
-    seed_pricing_rule(&pool, "standard", 600_000.0)
+    seed_pricing_rule(&pool, "standard", 600_000)
         .await
         .expect("seeds pricing");
     let ctx = crate::command_idempotency::WriteCommandContext::for_internal_test(
@@ -2509,7 +2477,10 @@ async fn reservation_command_idempotency_rejects_invalid_deposit_before_claim() 
             .await
             .expect_err("invalid deposit_amount must fail");
 
-        assert_eq!(error.code, crate::app_error::codes::VALIDATION_INVALID_INPUT);
+        assert_eq!(
+            error.code,
+            crate::app_error::codes::VALIDATION_INVALID_INPUT
+        );
         assert!(
             error.message.contains("deposit_amount"),
             "error should name the invalid field: {error:?}"
@@ -2546,7 +2517,7 @@ fn reservation_modify_request(
 async fn reservation_command_idempotency_create_replay_does_not_duplicate_booking_or_calendar() {
     let pool = test_pool().await;
     seed_room(&pool, "R691").await.expect("seeds room");
-    seed_pricing_rule(&pool, "standard", 600_000.0)
+    seed_pricing_rule(&pool, "standard", 600_000)
         .await
         .expect("seeds pricing");
     let ctx = crate::command_idempotency::WriteCommandContext::for_internal_test(
@@ -2595,9 +2566,7 @@ async fn reservation_command_idempotency_create_replay_does_not_duplicate_bookin
 async fn reservation_command_idempotency_modify_replay_returns_stored_snapshot() {
     let pool = test_pool().await;
     seed_room(&pool, "R692").await.unwrap();
-    seed_pricing_rule(&pool, "standard", 600_000.0)
-        .await
-        .unwrap();
+    seed_pricing_rule(&pool, "standard", 600_000).await.unwrap();
     seed_booked_reservation(&pool, "B692", "R692")
         .await
         .unwrap();
@@ -2636,9 +2605,7 @@ async fn reservation_command_idempotency_modify_replay_returns_stored_snapshot()
 async fn reservation_command_idempotency_modify_replay_does_not_duplicate_calendar() {
     let pool = test_pool().await;
     seed_room(&pool, "R693").await.unwrap();
-    seed_pricing_rule(&pool, "standard", 600_000.0)
-        .await
-        .unwrap();
+    seed_pricing_rule(&pool, "standard", 600_000).await.unwrap();
     seed_booked_reservation(&pool, "B693", "R693")
         .await
         .unwrap();
@@ -2710,9 +2677,7 @@ async fn reservation_command_idempotency_cancel_replay_does_not_duplicate_cancel
 async fn reservation_command_idempotency_confirm_replay_does_not_duplicate_room_charge() {
     let pool = test_pool().await;
     seed_room(&pool, "R695").await.unwrap();
-    seed_pricing_rule(&pool, "standard", 600_000.0)
-        .await
-        .unwrap();
+    seed_pricing_rule(&pool, "standard", 600_000).await.unwrap();
     seed_booked_reservation(&pool, "B695", "R695")
         .await
         .unwrap();
@@ -2745,9 +2710,7 @@ async fn reservation_command_idempotency_confirm_replay_does_not_duplicate_room_
 async fn reservation_command_idempotency_confirm_replay_does_not_requery_or_reprice_later_retry() {
     let pool = test_pool().await;
     seed_room(&pool, "R696").await.unwrap();
-    seed_pricing_rule(&pool, "standard", 600_000.0)
-        .await
-        .unwrap();
+    seed_pricing_rule(&pool, "standard", 600_000).await.unwrap();
     seed_booked_reservation(&pool, "B696", "R696")
         .await
         .unwrap();
@@ -2775,7 +2738,7 @@ async fn reservation_command_idempotency_confirm_replay_does_not_requery_or_repr
 
     assert!(replay.replayed);
     assert_eq!(first.response, replay.response);
-    assert_ne!(replay.response["total_price"], serde_json::json!(123.0));
+    assert_ne!(replay.response["total_price"], serde_json::json!(123));
 }
 
 #[tokio::test]
@@ -2784,9 +2747,7 @@ async fn reservation_command_idempotency_modify_cancel_confirm_same_key_differen
     let pool = test_pool().await;
     seed_room(&pool, "R697A").await.unwrap();
     seed_room(&pool, "R697B").await.unwrap();
-    seed_pricing_rule(&pool, "standard", 600_000.0)
-        .await
-        .unwrap();
+    seed_pricing_rule(&pool, "standard", 600_000).await.unwrap();
     seed_booked_reservation(&pool, "B697A", "R697A")
         .await
         .unwrap();
@@ -2867,9 +2828,7 @@ async fn reservation_command_idempotency_modify_cancel_confirm_same_key_differen
 async fn reservation_command_idempotency_modify_conflict_replays_terminal_room_unavailable() {
     let pool = test_pool().await;
     seed_room(&pool, "R698").await.unwrap();
-    seed_pricing_rule(&pool, "standard", 600_000.0)
-        .await
-        .unwrap();
+    seed_pricing_rule(&pool, "standard", 600_000).await.unwrap();
     seed_booked_reservation(&pool, "B698", "R698")
         .await
         .unwrap();
@@ -2992,9 +2951,7 @@ async fn reservation_command_idempotency_missing_booking_for_cancel_modify_confi
     seed_room(&pool, "R700A").await.unwrap();
     seed_room(&pool, "R700B").await.unwrap();
     seed_room(&pool, "R700C").await.unwrap();
-    seed_pricing_rule(&pool, "standard", 600_000.0)
-        .await
-        .unwrap();
+    seed_pricing_rule(&pool, "standard", 600_000).await.unwrap();
 
     let cancel_ctx = crate::command_idempotency::WriteCommandContext::for_internal_test(
         "req-cancel-missing",
@@ -3168,9 +3125,7 @@ async fn reservation_command_idempotency_retryable_reclaimable_failure_can_be_re
 async fn reservation_command_idempotency_invalid_modify_nights_replays_terminal_error() {
     let pool = test_pool().await;
     seed_room(&pool, "R703").await.unwrap();
-    seed_pricing_rule(&pool, "standard", 600_000.0)
-        .await
-        .unwrap();
+    seed_pricing_rule(&pool, "standard", 600_000).await.unwrap();
     seed_booked_reservation(&pool, "B703", "R703")
         .await
         .unwrap();
@@ -3215,9 +3170,7 @@ async fn reservation_command_idempotency_invalid_modify_nights_replays_terminal_
 async fn reservation_command_idempotency_same_plain_key_across_commands_scopes_origin_rows() {
     let pool = test_pool().await;
     seed_room(&pool, "R704").await.unwrap();
-    seed_pricing_rule(&pool, "standard", 600_000.0)
-        .await
-        .unwrap();
+    seed_pricing_rule(&pool, "standard", 600_000).await.unwrap();
     let plain_key = "idem-shared-reservation-origin";
     let create_ctx = crate::command_idempotency::WriteCommandContext::for_internal_test(
         "req-create-shared-origin",
@@ -3286,7 +3239,7 @@ async fn cancel_reservation_releases_calendar_and_keeps_fee_record() {
         .await
         .unwrap();
     assert_eq!(booking.get::<String, _>("status"), "cancelled");
-    assert_eq!(booking.get::<Option<f64>, _>("paid_amount"), Some(50_000.0));
+    assert_eq!(booking.get::<Option<i64>, _>("paid_amount"), Some(50_000));
 
     let remaining_calendar: (i64,) =
         sqlx::query_as("SELECT COUNT(*) FROM room_calendar WHERE booking_id = ?")
@@ -3311,7 +3264,7 @@ async fn cancel_reservation_releases_calendar_and_keeps_fee_record() {
     .await
     .unwrap();
     assert_eq!(fee.get::<String, _>("type"), "cancellation_fee");
-    assert_eq!(fee.get::<f64, _>("amount"), 50_000.0);
+    assert_eq!(fee.get::<i64, _>("amount"), 50_000);
     assert_eq!(
         fee.get::<String, _>("note"),
         "Deposit retained (cancellation)"
@@ -3345,9 +3298,7 @@ async fn cancel_reservation_returns_invalid_state_when_booking_is_not_booked() {
 async fn do_create_reservation_returns_service_booking_and_leaves_room_vacant() {
     let pool = test_pool().await;
     seed_room(&pool, "R162").await.unwrap();
-    seed_pricing_rule(&pool, "standard", 600_000.0)
-        .await
-        .unwrap();
+    seed_pricing_rule(&pool, "standard", 600_000).await.unwrap();
 
     let ctx = crate::command_idempotency::WriteCommandContext::for_internal_test(
         "req-do-create-reservation",
@@ -3426,9 +3377,7 @@ async fn do_cancel_reservation_cleans_legacy_booked_room_state() {
 async fn confirm_reservation_reprices_and_marks_room_occupied() {
     let pool = test_pool().await;
     seed_room(&pool, "R164").await.unwrap();
-    seed_pricing_rule(&pool, "standard", 600_000.0)
-        .await
-        .unwrap();
+    seed_pricing_rule(&pool, "standard", 600_000).await.unwrap();
     seed_booked_reservation(&pool, "B164", "R164")
         .await
         .unwrap();
@@ -3449,7 +3398,7 @@ async fn confirm_reservation_reprices_and_marks_room_occupied() {
     .bind(&scheduled_checkin_str)
     .bind(&scheduled_checkout_str)
     .bind(3_i64)
-    .bind(1_800_000.0_f64)
+    .bind(1_800_000)
     .bind("B164")
     .execute(&pool)
     .await
@@ -3520,7 +3469,7 @@ async fn confirm_reservation_reprices_and_marks_room_occupied() {
     .await
     .unwrap();
     assert_eq!(charge.get::<String, _>("type"), "charge");
-    assert_eq!(charge.get::<f64, _>("amount"), 3_000_000.0);
+    assert_eq!(charge.get::<i64, _>("amount"), 3_000_000);
     assert_eq!(charge.get::<String, _>("note"), "Room charge (reservation)");
 }
 
@@ -3528,9 +3477,7 @@ async fn confirm_reservation_reprices_and_marks_room_occupied() {
 async fn confirm_reservation_rejects_no_show_calendar_rows() {
     let pool = test_pool().await;
     seed_room(&pool, "R165").await.unwrap();
-    seed_pricing_rule(&pool, "standard", 600_000.0)
-        .await
-        .unwrap();
+    seed_pricing_rule(&pool, "standard", 600_000).await.unwrap();
     seed_booked_reservation(&pool, "B165", "R165")
         .await
         .unwrap();
@@ -3580,9 +3527,7 @@ async fn confirm_reservation_returns_invalid_state_when_booking_is_not_booked() 
 async fn confirm_reservation_late_arrival_persists_effective_checkout() {
     let pool = test_pool().await;
     seed_room(&pool, "R165A").await.unwrap();
-    seed_pricing_rule(&pool, "standard", 600_000.0)
-        .await
-        .unwrap();
+    seed_pricing_rule(&pool, "standard", 600_000).await.unwrap();
     seed_booked_reservation(&pool, "B165A", "R165A")
         .await
         .unwrap();
@@ -3604,7 +3549,7 @@ async fn confirm_reservation_late_arrival_persists_effective_checkout() {
     .bind(&scheduled_checkin_str)
     .bind(&scheduled_checkout_str)
     .bind(2_i64)
-    .bind(1_200_000.0_f64)
+    .bind(1_200_000)
     .bind("B165A")
     .execute(&pool)
     .await
@@ -3644,9 +3589,7 @@ async fn confirm_reservation_late_arrival_persists_effective_checkout() {
 async fn confirm_reservation_preserves_extra_precheckin_payment() {
     let pool = test_pool().await;
     seed_room(&pool, "R165B").await.unwrap();
-    seed_pricing_rule(&pool, "standard", 600_000.0)
-        .await
-        .unwrap();
+    seed_pricing_rule(&pool, "standard", 600_000).await.unwrap();
     seed_booked_reservation(&pool, "B165B", "R165B")
         .await
         .unwrap();
@@ -3657,7 +3600,7 @@ async fn confirm_reservation_preserves_extra_precheckin_payment() {
     )
     .bind(uuid::Uuid::new_v4().to_string())
     .bind("B165B")
-    .bind(25_000.0_f64)
+    .bind(25_000)
     .bind("Extra pre-check-in payment")
     .bind("2026-04-15T10:00:00+07:00")
     .execute(&pool)
@@ -3665,7 +3608,7 @@ async fn confirm_reservation_preserves_extra_precheckin_payment() {
     .unwrap();
 
     sqlx::query("UPDATE bookings SET paid_amount = ? WHERE id = ?")
-        .bind(75_000.0_f64)
+        .bind(75_000)
         .bind("B165B")
         .execute(&pool)
         .await
@@ -3682,9 +3625,7 @@ async fn confirm_reservation_preserves_extra_precheckin_payment() {
 async fn modify_reservation_rewrites_booked_calendar_range() {
     let pool = test_pool().await;
     seed_room(&pool, "R166").await.unwrap();
-    seed_pricing_rule(&pool, "standard", 600_000.0)
-        .await
-        .unwrap();
+    seed_pricing_rule(&pool, "standard", 600_000).await.unwrap();
     seed_booked_reservation(&pool, "B166", "R166")
         .await
         .unwrap();
@@ -3746,9 +3687,7 @@ async fn modify_reservation_rewrites_booked_calendar_range() {
 async fn modify_reservation_rejects_inconsistent_nights_input() {
     let pool = test_pool().await;
     seed_room(&pool, "R166A").await.unwrap();
-    seed_pricing_rule(&pool, "standard", 600_000.0)
-        .await
-        .unwrap();
+    seed_pricing_rule(&pool, "standard", 600_000).await.unwrap();
     seed_booked_reservation(&pool, "B166A", "R166A")
         .await
         .unwrap();
@@ -3806,9 +3745,7 @@ async fn modify_reservation_returns_invalid_state_when_booking_is_not_booked() {
 async fn do_modify_reservation_returns_service_booking_without_app_handle() {
     let pool = test_pool().await;
     seed_room(&pool, "R167").await.unwrap();
-    seed_pricing_rule(&pool, "standard", 600_000.0)
-        .await
-        .unwrap();
+    seed_pricing_rule(&pool, "standard", 600_000).await.unwrap();
     seed_booked_reservation(&pool, "B167", "R167")
         .await
         .unwrap();
@@ -3876,7 +3813,7 @@ async fn check_in_posts_charge_and_marks_room_occupied() {
     .await
     .unwrap();
     assert_eq!(charge.get::<String, _>("type"), "charge");
-    assert_eq!(charge.get::<f64, _>("amount"), booking.total_price as f64);
+    assert_eq!(charge.get::<i64, _>("amount"), booking.total_price);
 
     let calendar_days: (i64,) = sqlx::query_as(
         "SELECT COUNT(*) FROM room_calendar WHERE booking_id = ? AND status = 'occupied'",
@@ -3892,9 +3829,7 @@ async fn check_in_posts_charge_and_marks_room_occupied() {
 async fn check_in_rolls_back_when_room_status_changes_before_guarded_room_update() {
     let pool = test_pool().await;
     seed_room(&pool, "R-CAS-CHECKIN").await.unwrap();
-    seed_pricing_rule(&pool, "standard", 100_000.0)
-        .await
-        .unwrap();
+    seed_pricing_rule(&pool, "standard", 100_000).await.unwrap();
 
     sqlx::query(
         "CREATE TRIGGER occupy_room_after_booking_insert
@@ -3962,9 +3897,7 @@ async fn checkout_fails_when_second_pool_checked_out_booking_first() {
 async fn check_out_settles_same_day_actual_nights_to_minimum_one_night() {
     let pool = test_pool().await;
     seed_room(&pool, "R410").await.unwrap();
-    seed_pricing_rule(&pool, "standard", 500_000.0)
-        .await
-        .unwrap();
+    seed_pricing_rule(&pool, "standard", 500_000).await.unwrap();
     seed_active_booking_with_terms(
         &pool,
         "B410",
@@ -3972,7 +3905,7 @@ async fn check_out_settles_same_day_actual_nights_to_minimum_one_night() {
         "2026-04-20T08:00:00+07:00",
         "2026-04-25T12:00:00+07:00",
         5,
-        2_500_000.0,
+        2_500_000,
         Some(0),
     )
     .await
@@ -4020,8 +3953,8 @@ async fn check_out_settles_same_day_actual_nights_to_minimum_one_night() {
     .unwrap();
 
     assert_eq!(booking.get::<i64, _>("nights"), 1);
-    assert_eq!(booking.get::<f64, _>("total_price"), 500_000.0);
-    assert_eq!(booking.get::<f64, _>("paid_amount"), 500_000.0);
+    assert_eq!(booking.get::<i64, _>("total_price"), 500_000);
+    assert_eq!(booking.get::<i64, _>("paid_amount"), 500_000);
     assert!(booking
         .get::<Option<String>, _>("pricing_snapshot")
         .unwrap()
@@ -4039,12 +3972,12 @@ async fn check_out_keeps_active_booking_values_for_booked_nights_mode() {
         "2026-04-20T08:00:00+07:00",
         "2026-04-25T12:00:00+07:00",
         5,
-        2_500_000.0,
+        2_500_000,
         Some(0),
     )
     .await
     .unwrap();
-    record_payment(&pool, "B411", 1_000_000.0, "prior payment")
+    record_payment(&pool, "B411", 1_000_000, "prior payment")
         .await
         .unwrap();
 
@@ -4087,8 +4020,8 @@ async fn check_out_keeps_active_booking_values_for_booked_nights_mode() {
         .unwrap();
 
     assert_eq!(booking.get::<i64, _>("nights"), 5);
-    assert_eq!(booking.get::<f64, _>("total_price"), 2_500_000.0);
-    assert_eq!(booking.get::<f64, _>("paid_amount"), 2_500_000.0);
+    assert_eq!(booking.get::<i64, _>("total_price"), 2_500_000);
+    assert_eq!(booking.get::<i64, _>("paid_amount"), 2_500_000);
 }
 
 #[tokio::test]
@@ -4102,7 +4035,7 @@ async fn check_out_booked_nights_enforces_minimum_one_night_for_corrupted_bookin
         "2026-04-20T08:00:00+07:00",
         "2026-04-20T12:00:00+07:00",
         0,
-        0.0,
+        0,
         Some(0),
     )
     .await
@@ -4152,9 +4085,7 @@ async fn check_out_booked_nights_enforces_minimum_one_night_for_corrupted_bookin
 async fn check_out_actual_nights_uses_early_checkout_nights() {
     let pool = test_pool().await;
     seed_room(&pool, "R414").await.unwrap();
-    seed_pricing_rule(&pool, "standard", 500_000.0)
-        .await
-        .unwrap();
+    seed_pricing_rule(&pool, "standard", 500_000).await.unwrap();
     seed_active_booking_with_terms(
         &pool,
         "B414",
@@ -4162,7 +4093,7 @@ async fn check_out_actual_nights_uses_early_checkout_nights() {
         "2026-04-20T08:00:00+07:00",
         "2026-04-25T12:00:00+07:00",
         5,
-        2_500_000.0,
+        2_500_000,
         Some(0),
     )
     .await
@@ -4207,7 +4138,7 @@ async fn check_out_actual_nights_uses_early_checkout_nights() {
         .unwrap();
 
     assert_eq!(booking.get::<i64, _>("nights"), 2);
-    assert_eq!(booking.get::<f64, _>("total_price"), 1_000_000.0);
+    assert_eq!(booking.get::<i64, _>("total_price"), 1_000_000);
 }
 
 #[tokio::test]
@@ -4221,7 +4152,7 @@ async fn check_out_hourly_persists_manual_settlement() {
         "2026-04-20T08:00:00+07:00",
         "2026-04-25T12:00:00+07:00",
         5,
-        2_500_000.0,
+        2_500_000,
         Some(0),
     )
     .await
@@ -4257,8 +4188,8 @@ async fn check_out_hourly_persists_manual_settlement() {
     let pricing_snapshot: serde_json::Value = serde_json::from_str(&pricing_snapshot).unwrap();
 
     assert_eq!(booking.get::<i64, _>("nights"), 1);
-    assert_eq!(booking.get::<f64, _>("total_price"), 500_000.0);
-    assert_eq!(booking.get::<f64, _>("paid_amount"), 500_000.0);
+    assert_eq!(booking.get::<i64, _>("total_price"), 500_000);
+    assert_eq!(booking.get::<i64, _>("paid_amount"), 500_000);
     assert_eq!(
         pricing_snapshot["checkout_settlement"]["mode"],
         serde_json::json!("hourly")
@@ -4280,7 +4211,7 @@ async fn check_out_hourly_multi_day_stay_still_persists_one_night() {
         "2026-04-20T08:00:00+07:00",
         "2026-04-25T12:00:00+07:00",
         5,
-        2_500_000.0,
+        2_500_000,
         Some(0),
     )
     .await
@@ -4308,16 +4239,14 @@ async fn check_out_hourly_multi_day_stay_still_persists_one_night() {
         .unwrap();
 
     assert_eq!(booking.get::<i64, _>("nights"), 1);
-    assert_eq!(booking.get::<f64, _>("total_price"), 500_000.0);
+    assert_eq!(booking.get::<i64, _>("total_price"), 500_000);
 }
 
 #[tokio::test]
 async fn check_out_persists_manual_override_when_final_total_differs_from_recommendation() {
     let pool = test_pool().await;
     seed_room(&pool, "R416").await.unwrap();
-    seed_pricing_rule(&pool, "standard", 500_000.0)
-        .await
-        .unwrap();
+    seed_pricing_rule(&pool, "standard", 500_000).await.unwrap();
     seed_active_booking_with_terms(
         &pool,
         "B416",
@@ -4325,12 +4254,12 @@ async fn check_out_persists_manual_override_when_final_total_differs_from_recomm
         "2026-04-20T08:00:00+07:00",
         "2026-04-25T12:00:00+07:00",
         5,
-        2_500_000.0,
+        2_500_000,
         Some(0),
     )
     .await
     .unwrap();
-    record_payment(&pool, "B416", 300_000.0, "prior payment")
+    record_payment(&pool, "B416", 300_000, "prior payment")
         .await
         .unwrap();
 
@@ -4379,8 +4308,8 @@ async fn check_out_persists_manual_override_when_final_total_differs_from_recomm
         .unwrap();
     let pricing_snapshot: serde_json::Value = serde_json::from_str(&pricing_snapshot).unwrap();
 
-    assert_eq!(booking.get::<f64, _>("total_price"), 800_000.0);
-    assert_eq!(booking.get::<f64, _>("paid_amount"), 800_000.0);
+    assert_eq!(booking.get::<i64, _>("total_price"), 800_000);
+    assert_eq!(booking.get::<i64, _>("paid_amount"), 800_000);
     assert_eq!(
         pricing_snapshot["checkout_settlement"]["manual_override"],
         serde_json::json!(true)
@@ -4395,9 +4324,7 @@ async fn check_out_persists_manual_override_when_final_total_differs_from_recomm
 async fn check_out_writes_charge_adjustment_ledger_when_settled_total_drops() {
     let pool = test_pool().await;
     seed_room(&pool, "R417").await.unwrap();
-    seed_pricing_rule(&pool, "standard", 500_000.0)
-        .await
-        .unwrap();
+    seed_pricing_rule(&pool, "standard", 500_000).await.unwrap();
     seed_active_booking_with_terms(
         &pool,
         "B417",
@@ -4405,12 +4332,12 @@ async fn check_out_writes_charge_adjustment_ledger_when_settled_total_drops() {
         "2026-04-20T08:00:00+07:00",
         "2026-04-25T12:00:00+07:00",
         5,
-        2_500_000.0,
+        2_500_000,
         Some(0),
     )
     .await
     .unwrap();
-    record_payment(&pool, "B417", 800_000.0, "prior payment")
+    record_payment(&pool, "B417", 800_000, "prior payment")
         .await
         .unwrap();
 
@@ -4448,7 +4375,7 @@ async fn check_out_writes_charge_adjustment_ledger_when_settled_total_drops() {
     .await
     .unwrap();
 
-    assert_eq!(adjustment.get::<f64, _>("amount"), -1_700_000.0);
+    assert_eq!(adjustment.get::<i64, _>("amount"), -1_700_000);
     assert_eq!(
         adjustment.get::<String, _>("note"),
         "Điều chỉnh giảm tiền phòng khi quyết toán check-out"
@@ -4467,12 +4394,12 @@ async fn check_out_writes_payment_delta_ledger_when_collecting_extra_payment() {
         "2026-04-20T08:00:00+07:00",
         "2026-04-25T12:00:00+07:00",
         5,
-        2_500_000.0,
+        2_500_000,
         Some(0),
     )
     .await
     .unwrap();
-    record_payment(&pool, "B418", 1_000_000.0, "prior payment")
+    record_payment(&pool, "B418", 1_000_000, "prior payment")
         .await
         .unwrap();
 
@@ -4516,9 +4443,9 @@ async fn check_out_writes_payment_delta_ledger_when_collecting_extra_payment() {
     .await
     .unwrap();
 
-    assert_eq!(payment.get::<f64, _>("amount"), 1_500_000.0);
+    assert_eq!(payment.get::<i64, _>("amount"), 1_500_000);
     assert_eq!(payment.get::<String, _>("note"), "Thanh toán khi check-out");
-    assert_eq!(booking.get::<f64, _>("paid_amount"), 2_500_000.0);
+    assert_eq!(booking.get::<i64, _>("paid_amount"), 2_500_000);
     assert_eq!(charge_adjustment_count.0, 0);
 }
 
@@ -4526,9 +4453,7 @@ async fn check_out_writes_payment_delta_ledger_when_collecting_extra_payment() {
 async fn checkout_paid_amount_is_ledger_projection_not_direct_overwrite() {
     let pool = test_pool().await;
     seed_room(&pool, "R420").await.unwrap();
-    seed_pricing_rule(&pool, "standard", 75_000.0)
-        .await
-        .unwrap();
+    seed_pricing_rule(&pool, "standard", 75_000).await.unwrap();
     seed_active_booking_with_terms(
         &pool,
         "B420",
@@ -4536,12 +4461,12 @@ async fn checkout_paid_amount_is_ledger_projection_not_direct_overwrite() {
         "2026-04-20T08:00:00+07:00",
         "2026-04-21T12:00:00+07:00",
         1,
-        75_000.0,
+        75_000,
         Some(0),
     )
     .await
     .unwrap();
-    record_payment(&pool, "B420", 75_000.0, "prior payment")
+    record_payment(&pool, "B420", 75_000, "prior payment")
         .await
         .unwrap();
     sqlx::query(
@@ -4575,8 +4500,8 @@ async fn checkout_paid_amount_is_ledger_projection_not_direct_overwrite() {
         .fetch_one(&pool)
         .await
         .unwrap();
-    let ledger_total: f64 = sqlx::query_scalar(
-        "SELECT COALESCE(SUM(amount), 0)
+    let ledger_total: i64 = sqlx::query_scalar(
+        "SELECT CAST(COALESCE(SUM(amount), 0) AS INTEGER)
          FROM transactions
          WHERE booking_id = ? AND type IN ('payment', 'deposit')",
     )
@@ -4585,8 +4510,8 @@ async fn checkout_paid_amount_is_ledger_projection_not_direct_overwrite() {
     .await
     .unwrap();
 
-    assert_eq!(ledger_total, 75_000.0);
-    assert_eq!(booking.get::<f64, _>("paid_amount"), ledger_total);
+    assert_eq!(ledger_total, 75_000);
+    assert_eq!(booking.get::<i64, _>("paid_amount"), ledger_total);
 }
 
 #[tokio::test]
@@ -4600,12 +4525,12 @@ async fn check_out_rejects_overpaid_booking_until_refund_flow_exists() {
         "2026-04-20T08:00:00+07:00",
         "2026-04-25T12:00:00+07:00",
         5,
-        2_500_000.0,
+        2_500_000,
         Some(0),
     )
     .await
     .unwrap();
-    record_payment(&pool, "B412", 700_000.0, "prior payment")
+    record_payment(&pool, "B412", 700_000, "prior payment")
         .await
         .unwrap();
 
@@ -4654,7 +4579,7 @@ async fn extend_stay_uses_existing_expected_checkout() {
     .fetch_one(&pool)
     .await
     .unwrap();
-    assert_eq!(charge.get::<f64, _>("amount"), 250_000.0);
+    assert_eq!(charge.get::<i64, _>("amount"), 250_000);
 }
 
 #[tokio::test]
@@ -4665,7 +4590,7 @@ async fn revenue_queries_use_recognized_room_revenue_and_ignore_payments() {
     seed_transaction(
         &pool,
         "B301",
-        250_000.0,
+        250_000,
         "charge",
         "Room charge",
         "2026-04-15T10:00:00+07:00",
@@ -4675,14 +4600,14 @@ async fn revenue_queries_use_recognized_room_revenue_and_ignore_payments() {
     seed_transaction(
         &pool,
         "B301",
-        120_000.0,
+        120_000,
         "payment",
         "Cash received",
         "2026-04-15T10:05:00+07:00",
     )
     .await
     .unwrap();
-    seed_folio_line(&pool, "B301", 50_000.0, "2026-04-15T11:00:00+07:00")
+    seed_folio_line(&pool, "B301", 50_000, "2026-04-15T11:00:00+07:00")
         .await
         .unwrap();
 
@@ -4713,14 +4638,14 @@ async fn analytics_breakdowns_reconcile_to_total_revenue() {
     seed_transaction(
         &pool,
         "B302",
-        250_000.0,
+        250_000,
         "charge",
         "Room charge",
         "2026-04-15T10:00:00+07:00",
     )
     .await
     .unwrap();
-    seed_folio_line(&pool, "B302", 25_000.0, "2026-04-15T12:00:00+07:00")
+    seed_folio_line(&pool, "B302", 25_000, "2026-04-15T12:00:00+07:00")
         .await
         .unwrap();
 
@@ -4756,7 +4681,7 @@ async fn revenue_queries_include_cancellation_fees_in_recognized_revenue() {
     seed_transaction(
         &pool,
         "B305",
-        50_000.0,
+        50_000,
         "cancellation_fee",
         "Retained deposit",
         "2026-04-15T14:00:00+07:00",
@@ -4793,7 +4718,7 @@ async fn same_day_checkout_settlement_counts_one_room_sold_and_full_revenue() {
         "2026-04-20T08:00:00+07:00",
         "2026-04-25T12:00:00+07:00",
         5,
-        2_500_000.0,
+        2_500_000,
         Some(0),
     )
     .await
@@ -4817,7 +4742,7 @@ async fn same_day_checkout_settlement_counts_one_room_sold_and_full_revenue() {
     seed_transaction(
         &pool,
         "B420",
-        250_000.0,
+        250_000,
         "charge",
         "Room charge",
         "2026-04-20T08:00:00+07:00",
@@ -4827,7 +4752,7 @@ async fn same_day_checkout_settlement_counts_one_room_sold_and_full_revenue() {
     seed_transaction(
         &pool,
         "B420",
-        -1_750_000.0,
+        -1_750_000,
         "charge",
         "Điều chỉnh checkout settlement",
         "2026-04-20T18:00:00+07:00",
@@ -4859,7 +4784,7 @@ async fn booked_nights_settlement_uses_reporting_checkout_for_financial_revenue(
         "2026-04-20T08:00:00+07:00",
         "2026-04-25T12:00:00+07:00",
         5,
-        2_500_000.0,
+        2_500_000,
         Some(2_500_000),
     )
     .await
@@ -4896,7 +4821,7 @@ async fn checkout_settlement_updates_booking_export_rows() {
         "2026-04-20T08:00:00+07:00",
         "2026-04-25T12:00:00+07:00",
         5,
-        2_500_000.0,
+        2_500_000,
         Some(0),
     )
     .await
@@ -4920,7 +4845,7 @@ async fn checkout_settlement_updates_booking_export_rows() {
     seed_transaction(
         &pool,
         "B422",
-        2_500_000.0,
+        2_500_000,
         "charge",
         "Room charge",
         "2026-04-20T08:00:00+07:00",
@@ -4930,7 +4855,7 @@ async fn checkout_settlement_updates_booking_export_rows() {
     seed_transaction(
         &pool,
         "B422",
-        -2_000_000.0,
+        -2_000_000,
         "charge",
         "Điều chỉnh checkout settlement",
         "2026-04-20T18:00:00+07:00",
@@ -4959,7 +4884,7 @@ async fn checkout_settlement_export_rows_follow_reporting_checkout_boundary() {
         "2026-04-20T08:00:00+07:00",
         "2026-04-25T12:00:00+07:00",
         5,
-        2_500_000.0,
+        2_500_000,
         Some(0),
     )
     .await
@@ -4983,7 +4908,7 @@ async fn checkout_settlement_export_rows_follow_reporting_checkout_boundary() {
     seed_transaction(
         &pool,
         "B423",
-        2_500_000.0,
+        2_500_000,
         "charge",
         "Room charge",
         "2026-04-20T08:00:00+07:00",
@@ -4993,7 +4918,7 @@ async fn checkout_settlement_export_rows_follow_reporting_checkout_boundary() {
     seed_transaction(
         &pool,
         "B423",
-        -2_000_000.0,
+        -2_000_000,
         "charge",
         "Điều chỉnh checkout settlement",
         "2026-04-20T18:00:00+07:00",
@@ -5021,7 +4946,7 @@ async fn checkout_settlement_export_rows_exclude_original_checkin_window_after_s
         "2026-04-20T08:00:00+07:00",
         "2026-04-25T12:00:00+07:00",
         5,
-        2_500_000.0,
+        2_500_000,
         Some(0),
     )
     .await
@@ -5045,7 +4970,7 @@ async fn checkout_settlement_export_rows_exclude_original_checkin_window_after_s
     seed_transaction(
         &pool,
         "B424",
-        2_500_000.0,
+        2_500_000,
         "charge",
         "Room charge",
         "2026-04-20T08:00:00+07:00",
@@ -5055,7 +4980,7 @@ async fn checkout_settlement_export_rows_exclude_original_checkin_window_after_s
     seed_transaction(
         &pool,
         "B424",
-        -2_000_000.0,
+        -2_000_000,
         "charge",
         "Điều chỉnh checkout settlement",
         "2026-04-20T18:00:00+07:00",
@@ -5095,7 +5020,7 @@ async fn cancellation_fee_export_uses_transaction_period_when_checkin_is_future(
     seed_transaction(
         &pool,
         "B425",
-        50_000.0,
+        50_000,
         "cancellation_fee",
         "Retained deposit",
         "2026-04-15T14:00:00+07:00",
@@ -5129,7 +5054,7 @@ async fn run_night_audit_uses_canonical_room_and_folio_revenue() {
     seed_transaction(
         &pool,
         "B303",
-        500_000.0,
+        500_000,
         "charge",
         "Room charge",
         "2026-04-15T10:00:00+07:00",
@@ -5139,17 +5064,17 @@ async fn run_night_audit_uses_canonical_room_and_folio_revenue() {
     seed_transaction(
         &pool,
         "B303",
-        90_000.0,
+        90_000,
         "payment",
         "Cash received",
         "2026-04-16T10:05:00+07:00",
     )
     .await
     .unwrap();
-    seed_folio_line(&pool, "B303", 40_000.0, "2026-04-16T13:00:00+07:00")
+    seed_folio_line(&pool, "B303", 40_000, "2026-04-16T13:00:00+07:00")
         .await
         .unwrap();
-    seed_expense(&pool, "electricity", 10_000.0, "2026-04-16")
+    seed_expense(&pool, "electricity", 10_000, "2026-04-16")
         .await
         .unwrap();
 
@@ -5186,7 +5111,7 @@ async fn billing_and_export_queries_preserve_canonical_revenue_columns() {
     seed_transaction(
         &pool,
         "B304",
-        250_000.0,
+        250_000,
         "charge",
         "Room charge",
         "2026-04-15T10:00:00+07:00",
@@ -5199,7 +5124,7 @@ async fn billing_and_export_queries_preserve_canonical_revenue_columns() {
         "B304",
         "laundry",
         "Laundry bundle",
-        35_000.0,
+        35_000,
         Some("staff-1"),
     )
     .await
@@ -5241,7 +5166,7 @@ async fn add_folio_line_idempotent_retry_replays_and_does_not_duplicate_row() {
         "B-FOLIO-IDEM-1",
         "laundry",
         "Laundry bundle",
-        25_000.0,
+        25_000,
         Some("staff-1"),
     )
     .await
@@ -5252,7 +5177,7 @@ async fn add_folio_line_idempotent_retry_replays_and_does_not_duplicate_row() {
         "B-FOLIO-IDEM-1",
         "laundry",
         "Laundry bundle",
-        25_000.0,
+        25_000,
         Some("staff-1"),
     )
     .await
@@ -5291,7 +5216,7 @@ async fn add_folio_line_idempotent_accepts_uuid_booking_id_in_safe_ledger_metada
         &booking_id,
         "laundry",
         "Laundry bundle",
-        25_000.0,
+        25_000,
         Some("staff-1"),
     )
     .await
@@ -5337,7 +5262,7 @@ async fn add_folio_line_idempotent_same_key_different_payload_conflicts() {
         "B-FOLIO-IDEM-2",
         "laundry",
         "Laundry bundle",
-        25_000.0,
+        25_000,
         Some("staff-1"),
     )
     .await
@@ -5349,7 +5274,7 @@ async fn add_folio_line_idempotent_same_key_different_payload_conflicts() {
         "B-FOLIO-IDEM-2",
         "laundry",
         "Different description",
-        25_000.0,
+        25_000,
         Some("staff-1"),
     )
     .await
@@ -5380,15 +5305,15 @@ async fn add_folio_line_idempotent_replay_returns_stored_snapshot() {
         "B-FOLIO-IDEM-3",
         "laundry",
         "Snapshot line",
-        25_000.0,
+        25_000,
         Some("staff-1"),
     )
     .await
     .expect("first folio line succeeds");
     let line_id = first.response["id"].as_str().unwrap().to_string();
-    let first_amount = first.response["amount"].as_f64().unwrap();
+    let first_amount = first.response["amount"].as_i64().unwrap();
 
-    sqlx::query("UPDATE folio_lines SET amount = 99_999.0 WHERE id = ?")
+    sqlx::query("UPDATE folio_lines SET amount = 99999 WHERE id = ?")
         .bind(&line_id)
         .execute(&pool)
         .await
@@ -5400,15 +5325,15 @@ async fn add_folio_line_idempotent_replay_returns_stored_snapshot() {
         "B-FOLIO-IDEM-3",
         "laundry",
         "Snapshot line",
-        25_000.0,
+        25_000,
         Some("staff-1"),
     )
     .await
     .expect("replay succeeds");
 
     assert!(replay.replayed);
-    assert_eq!(replay.response["amount"].as_f64(), Some(first_amount));
-    assert_ne!(replay.response["amount"].as_f64(), Some(99_999.0));
+    assert_eq!(replay.response["amount"].as_i64(), Some(first_amount));
+    assert_ne!(replay.response["amount"].as_i64(), Some(99_999));
 }
 
 #[tokio::test]
@@ -5467,7 +5392,7 @@ async fn add_folio_line_idempotent_invalid_amount_does_not_consume_claim_or_ordi
         "B-FOLIO-IDEM-5",
         "laundry",
         "Invalid amount",
-        0.0,
+        0,
         Some("staff-1"),
     )
     .await
@@ -5498,7 +5423,7 @@ async fn add_folio_line_idempotent_invalid_amount_does_not_consume_claim_or_ordi
         "B-FOLIO-IDEM-5",
         "laundry",
         "Valid amount",
-        15_000.0,
+        15_000,
         Some("staff-1"),
     )
     .await
@@ -5522,15 +5447,15 @@ async fn add_folio_line_idempotent_invalid_amount_does_not_consume_claim_or_ordi
 }
 
 #[tokio::test]
-async fn add_folio_line_idempotent_fractional_amount_does_not_consume_claim_or_write() {
+async fn add_folio_line_idempotent_unsafe_amount_does_not_consume_claim_or_write() {
     let pool = test_pool().await;
     seed_room(&pool, "B-FOLIO-FRACTION").await.unwrap();
     seed_active_booking(&pool, "B-FOLIO-FRACTION", "B-FOLIO-FRACTION")
         .await
         .unwrap();
     let ctx = crate::command_idempotency::WriteCommandContext::for_internal_test(
-        "req-folio-fraction",
-        "idem-folio-fraction",
+        "req-folio-unsafe",
+        "idem-folio-unsafe",
         "add_folio_line",
     );
 
@@ -5539,12 +5464,12 @@ async fn add_folio_line_idempotent_fractional_amount_does_not_consume_claim_or_w
         &ctx,
         "B-FOLIO-FRACTION",
         "laundry",
-        "Fractional amount",
-        15_000.5,
+        "Unsafe amount",
+        MAX_TRANSPORT_SAFE_MONEY_VND + 1,
         Some("staff-1"),
     )
     .await
-    .expect_err("fractional amount rejected");
+    .expect_err("unsafe amount rejected");
     assert_eq!(error.code, crate::app_error::codes::BOOKING_INVALID_STATE);
 
     let folio_count: i64 =
@@ -5559,7 +5484,7 @@ async fn add_folio_line_idempotent_fractional_amount_does_not_consume_claim_or_w
         "SELECT COUNT(*) FROM command_idempotency
          WHERE command_name = 'add_folio_line' AND idempotency_key = ?",
     )
-    .bind("idem-folio-fraction")
+    .bind("idem-folio-unsafe")
     .fetch_one(&pool)
     .await
     .unwrap();

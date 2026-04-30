@@ -147,19 +147,6 @@ where
     })
 }
 
-pub fn read_f64_or_zero(row: &SqliteRow, column: &str) -> f64 {
-    row.try_get::<Option<f64>, _>(column)
-        .ok()
-        .flatten()
-        .or_else(|| {
-            row.try_get::<Option<i64>, _>(column)
-                .ok()
-                .flatten()
-                .map(|value| value as f64)
-        })
-        .unwrap_or(0.0)
-}
-
 pub fn read_money_vnd_or_zero(row: &SqliteRow, column: &str) -> MoneyVnd {
     row.try_get::<Option<MoneyVnd>, _>(column)
         .ok()

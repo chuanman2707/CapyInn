@@ -34,7 +34,7 @@ pub async fn add_folio_line(
         &booking_id,
         &category,
         &description,
-        amount as f64,
+        amount,
         user_id.as_deref(),
     )
     .await?;

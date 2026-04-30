@@ -919,9 +919,9 @@ mod tests {
         .bind("standard")
         .bind(1)
         .bind(0)
-        .bind(100000.0)
+        .bind(100000)
         .bind(2)
-        .bind(0.0)
+        .bind(0)
         .bind("occupied")
         .execute(&pool)
         .await

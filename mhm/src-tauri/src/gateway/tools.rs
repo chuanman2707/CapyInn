@@ -11,14 +11,14 @@ use super::models::*;
 use super::policy::{
     guard_write_tool, CANCEL_RESERVATION_META, CREATE_RESERVATION_META, MODIFY_RESERVATION_META,
 };
-use crate::app_error::{codes, CommandError, CommandResult};
+use crate::app_error::{CommandError, CommandResult};
 use crate::app_identity;
 use crate::command_idempotency::{
     stable_request_hash, system_error, ActorType, WriteCommandContext,
 };
 use crate::commands;
 use crate::models::{BookingFilter, CreateReservationRequest, InvoiceData};
-use crate::money::{MoneyVnd, MAX_TRANSPORT_SAFE_MONEY_VND};
+use crate::money::validate_non_negative_money_vnd;
 use crate::services::settings_store::get_setting;
 
 fn hotel_info_field_from_json(json_str: &str, field: &str) -> Option<String> {
@@ -146,26 +146,6 @@ fn tool_error_envelope(tool: &str, request_id: &str, error: CommandError) -> Str
     .unwrap()
 }
 
-fn gateway_non_negative_money_vnd(
-    value: Option<f64>,
-    field: &str,
-) -> CommandResult<Option<MoneyVnd>> {
-    let Some(value) = value else {
-        return Ok(None);
-    };
-    if !value.is_finite()
-        || value < 0.0
-        || value.fract() != 0.0
-        || value > MAX_TRANSPORT_SAFE_MONEY_VND as f64
-    {
-        return Err(CommandError::user(
-            codes::VALIDATION_INVALID_INPUT,
-            format!("{field} must be a whole non-negative VND amount"),
-        ));
-    }
-    Ok(Some(value as MoneyVnd))
-}
-
 #[cfg(test)]
 #[allow(clippy::items_after_test_module)]
 mod tests {
@@ -176,6 +156,7 @@ mod tests {
     use crate::app_error::{codes, CommandError};
     use crate::app_identity;
     use crate::commands::invoices;
+    use crate::money::MoneyVnd;
     use rmcp::handler::server::common::RequestId as McpRequestId;
     use rmcp::handler::server::wrapper::Parameters;
     use rmcp::model::NumberOrString;
@@ -212,7 +193,7 @@ mod tests {
         .expect("seed room");
     }
 
-    async fn seed_pricing_rule(pool: &Pool<Sqlite>, room_type: &str, daily_rate: f64) {
+    async fn seed_pricing_rule(pool: &Pool<Sqlite>, room_type: &str, daily_rate: MoneyVnd) {
         let now = "2026-04-15T10:00:00+07:00";
 
         sqlx::query(
@@ -239,7 +220,7 @@ mod tests {
         let phone = "0901234567";
         let check_in = "2026-04-20";
         let check_out = "2026-04-22";
-        let deposit = 50_000.0_f64;
+        let deposit = 50_000;
 
         sqlx::query(
             "INSERT INTO guests (
@@ -376,7 +357,7 @@ mod tests {
             check_in_date: "2026-04-20".to_string(),
             check_out_date: "2026-04-22".to_string(),
             nights: 2,
-            deposit_amount: Some(50_000.0),
+            deposit_amount: Some(50_000),
             source: Some("phone".to_string()),
             notes: Some("test reservation".to_string()),
         }
@@ -563,7 +544,7 @@ mod tests {
 
         let pool = test_pool().await;
         seed_room(&pool, "R199", "standard").await;
-        seed_pricing_rule(&pool, "standard", 600_000.0).await;
+        seed_pricing_rule(&pool, "standard", 600_000).await;
         let tools = HotelTools::new(pool.clone(), None);
 
         let output = tools
@@ -611,7 +592,7 @@ mod tests {
 
         let pool = test_pool().await;
         seed_room(&pool, "R200", "standard").await;
-        seed_pricing_rule(&pool, "standard", 600_000.0).await;
+        seed_pricing_rule(&pool, "standard", 600_000).await;
         let tools = HotelTools::new(pool.clone(), None);
 
         let output = tools
@@ -636,34 +617,22 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn create_reservation_tool_rejects_fractional_deposit_amount() {
-        let _env_lock = async_env_lock().lock().await;
-        let _env = EnvVarGuard::set("CAPYINN_ENABLE_HIGH_RISK_MCP_WRITES", "1");
+    async fn create_reservation_input_rejects_fractional_deposit_amount() {
+        let payload = serde_json::json!({
+            "room_id": "R201",
+            "guest_name": "Nguyen Van A",
+            "guest_phone": "0900000000",
+            "guest_doc_number": "079123456789",
+            "check_in_date": "2026-04-20",
+            "check_out_date": "2026-04-22",
+            "nights": 2,
+            "deposit_amount": 50_000.5,
+            "source": "phone",
+            "notes": "test reservation"
+        });
 
-        let pool = test_pool().await;
-        seed_room(&pool, "R201", "standard").await;
-        seed_pricing_rule(&pool, "standard", 600_000.0).await;
-        let tools = HotelTools::new(pool.clone(), None);
-        let mut input = create_reservation_input("R201");
-        input.deposit_amount = Some(50_000.5);
-
-        let output = tools
-            .create_reservation(Parameters(input), mcp_request_id("req-create-fractional"))
-            .await;
-
-        let envelope: Value = serde_json::from_str(&output).expect("error envelope json");
-        assert_eq!(envelope["ok"].as_bool(), Some(false));
-        assert_eq!(
-            envelope["error"]["code"].as_str(),
-            Some(codes::VALIDATION_INVALID_INPUT)
-        );
-
-        let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM bookings WHERE room_id = ?")
-            .bind("R201")
-            .fetch_one(&pool)
-            .await
-            .expect("booking count");
-        assert_eq!(count, 0);
+        serde_json::from_value::<CreateReservationInput>(payload)
+            .expect_err("fractional gateway money must fail deserialization");
     }
 
     #[tokio::test]
@@ -706,7 +675,7 @@ mod tests {
 
         let pool = test_pool().await;
         seed_room(&pool, "R202", "standard").await;
-        seed_pricing_rule(&pool, "standard", 600_000.0).await;
+        seed_pricing_rule(&pool, "standard", 600_000).await;
         seed_booked_reservation(&pool, "B202", "R202").await;
         let tools = HotelTools::new(pool.clone(), None);
 
@@ -770,7 +739,7 @@ mod tests {
 
         let pool = test_pool().await;
         seed_room(&pool, "R203", "standard").await;
-        seed_pricing_rule(&pool, "standard", 600_000.0).await;
+        seed_pricing_rule(&pool, "standard", 600_000).await;
         let tools = HotelTools::new(pool.clone(), None);
 
         let first_output = tools
@@ -816,7 +785,7 @@ mod tests {
         let pool = test_pool().await;
         seed_room(&pool, "R204A", "standard").await;
         seed_room(&pool, "R204B", "standard").await;
-        seed_pricing_rule(&pool, "standard", 600_000.0).await;
+        seed_pricing_rule(&pool, "standard", 600_000).await;
         let tools = HotelTools::new(pool.clone(), None);
 
         let first_output = tools
@@ -854,7 +823,7 @@ mod tests {
 
         let pool = test_pool().await;
         seed_room(&pool, "R205", "standard").await;
-        seed_pricing_rule(&pool, "standard", 600_000.0).await;
+        seed_pricing_rule(&pool, "standard", 600_000).await;
         let tools = HotelTools::new(pool.clone(), None);
 
         let first_output = tools
@@ -1185,13 +1154,16 @@ impl HotelTools {
             }
         };
 
-        let deposit_amount =
-            match gateway_non_negative_money_vnd(input.deposit_amount, "deposit_amount") {
-                Ok(amount) => amount,
-                Err(error) => {
-                    return tool_error_envelope("create_reservation", &request_id_text, error);
-                }
-            };
+        let deposit_amount = match input
+            .deposit_amount
+            .map(|amount| validate_non_negative_money_vnd(amount, "deposit_amount"))
+            .transpose()
+        {
+            Ok(amount) => amount,
+            Err(error) => {
+                return tool_error_envelope("create_reservation", &request_id_text, error);
+            }
+        };
 
         let req = CreateReservationRequest {
             room_id: input.room_id,

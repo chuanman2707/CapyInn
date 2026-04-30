@@ -568,9 +568,9 @@ mod tests {
         .bind(room_type)
         .bind(1)
         .bind(1)
-        .bind(300_000.0)
+        .bind(300_000)
         .bind(2)
-        .bind(100_000.0)
+        .bind(100_000)
         .bind(status)
         .execute(pool)
         .await

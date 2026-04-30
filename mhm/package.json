@@ -11,6 +11,7 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "test:coverage": "vitest run --coverage",
+    "verify:money": "node ./scripts/verify/no-float-money.mjs",
     "verify:quick": "node ./scripts/verify/quick.mjs",
     "verify:full": "node ./scripts/verify/full.mjs",
     "verify:repeat": "node ./scripts/verify/repeat.mjs"

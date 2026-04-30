@@ -422,7 +422,7 @@ async fn group_checkin_tx(
             record_charge_tx(
                 tx,
                 &booking_id,
-                total_price as f64,
+                total_price,
                 "Tiền phòng (đoàn)",
                 booking_checkin_at.clone(),
             )
@@ -434,7 +434,7 @@ async fn group_checkin_tx(
                         record_payment_with_origin_tx(
                             tx,
                             &booking_id,
-                            paid_for_room as f64,
+                            paid_for_room,
                             "Thanh toán group check-in",
                             origin,
                         )
@@ -443,19 +443,14 @@ async fn group_checkin_tx(
                         record_payment_tx(
                             tx,
                             &booking_id,
-                            paid_for_room as f64,
+                            paid_for_room,
                             "Thanh toán group check-in",
                         )
                         .await?;
                     }
                 } else {
-                    record_payment_tx(
-                        tx,
-                        &booking_id,
-                        paid_for_room as f64,
-                        "Thanh toán group check-in",
-                    )
-                    .await?;
+                    record_payment_tx(tx, &booking_id, paid_for_room, "Thanh toán group check-in")
+                        .await?;
                 }
             }
         } else if paid_for_room > 0 {
@@ -464,17 +459,16 @@ async fn group_checkin_tx(
                     record_payment_with_origin_tx(
                         tx,
                         &booking_id,
-                        paid_for_room as f64,
+                        paid_for_room,
                         "Đặt cọc đoàn",
                         origin,
                     )
                     .await?;
                 } else {
-                    record_payment_tx(tx, &booking_id, paid_for_room as f64, "Đặt cọc đoàn")
-                        .await?;
+                    record_payment_tx(tx, &booking_id, paid_for_room, "Đặt cọc đoàn").await?;
                 }
             } else {
-                record_payment_tx(tx, &booking_id, paid_for_room as f64, "Đặt cọc đoàn").await?;
+                record_payment_tx(tx, &booking_id, paid_for_room, "Đặt cọc đoàn").await?;
             }
         }
 
@@ -714,7 +708,7 @@ pub async fn group_checkout(pool: &Pool<Sqlite>, req: GroupCheckoutRequest) -> B
         record_payment_tx(
             &mut tx,
             &target_booking.0,
-            final_paid as f64,
+            final_paid,
             "Thanh toán group checkout",
         )
         .await?;

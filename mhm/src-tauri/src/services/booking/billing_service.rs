@@ -10,36 +10,25 @@ use crate::{
     },
     db_error_monitoring::classify_db_error_code,
     domain::booking::{BookingError, BookingResult, OriginSideEffect},
-    money::{MoneyVnd, MAX_TRANSPORT_SAFE_MONEY_VND, MIN_TRANSPORT_SAFE_MONEY_VND},
+    money::{validate_transport_money_vnd, MoneyVnd},
 };
 use serde_json::json;
 
 use super::support::{begin_tx, rfc3339_now};
 
-fn validate_whole_positive_vnd(amount: f64) -> BookingResult<MoneyVnd> {
-    if !amount.is_finite()
-        || amount <= 0.0
-        || amount.fract() != 0.0
-        || amount > MAX_TRANSPORT_SAFE_MONEY_VND as f64
-    {
+fn validate_whole_positive_vnd(amount: MoneyVnd) -> BookingResult<MoneyVnd> {
+    let amount = validate_whole_vnd(amount, "amount")?;
+    if amount <= 0 {
         return Err(BookingError::validation(
             "Folio amount must be a whole positive VND amount",
         ));
     }
-    Ok(amount as MoneyVnd)
+    Ok(amount)
 }
 
-fn validate_whole_vnd(amount: f64, field: &str) -> BookingResult<MoneyVnd> {
-    if !amount.is_finite()
-        || amount.fract() != 0.0
-        || amount < MIN_TRANSPORT_SAFE_MONEY_VND as f64
-        || amount > MAX_TRANSPORT_SAFE_MONEY_VND as f64
-    {
-        return Err(BookingError::validation(format!(
-            "{field} must be a whole VND amount"
-        )));
-    }
-    Ok(amount as MoneyVnd)
+fn validate_whole_vnd(amount: MoneyVnd, field: &str) -> BookingResult<MoneyVnd> {
+    validate_transport_money_vnd(amount, field)
+        .map_err(|error| BookingError::validation(error.message))
 }
 
 #[allow(dead_code)]
@@ -48,7 +37,7 @@ pub async fn add_folio_line(
     booking_id: &str,
     category: &str,
     description: &str,
-    amount: f64,
+    amount: MoneyVnd,
     created_by: Option<&str>,
 ) -> BookingResult<FolioLine> {
     let amount = validate_whole_positive_vnd(amount)?;
@@ -106,7 +95,7 @@ pub async fn add_folio_line_idempotent(
     booking_id: &str,
     category: &str,
     description: &str,
-    amount: f64,
+    amount: MoneyVnd,
     created_by: Option<&str>,
 ) -> CommandResult<IdempotentCommandResult<serde_json::Value>> {
     let amount = validate_whole_positive_vnd(amount).map_err(|error| {
@@ -171,7 +160,7 @@ pub async fn add_folio_line_idempotent(
 pub async fn record_payment(
     pool: &Pool<Sqlite>,
     booking_id: &str,
-    amount: f64,
+    amount: MoneyVnd,
     note: impl Into<String>,
 ) -> BookingResult<()> {
     let mut tx = begin_tx(pool).await?;
@@ -184,7 +173,7 @@ pub async fn record_payment(
 pub async fn record_charge_tx(
     tx: &mut Transaction<'_, Sqlite>,
     booking_id: &str,
-    amount: f64,
+    amount: MoneyVnd,
     note: impl Into<String>,
     created_at: impl Into<String>,
 ) -> BookingResult<()> {
@@ -197,7 +186,7 @@ pub async fn record_charge_tx(
 pub async fn record_charge_with_origin_tx(
     tx: &mut Transaction<'_, Sqlite>,
     booking_id: &str,
-    amount: f64,
+    amount: MoneyVnd,
     note: impl Into<String>,
     created_at: impl Into<String>,
     origin: &OriginSideEffect,
@@ -218,7 +207,7 @@ pub async fn record_charge_with_origin_tx(
 pub async fn record_payment_tx(
     tx: &mut Transaction<'_, Sqlite>,
     booking_id: &str,
-    amount: f64,
+    amount: MoneyVnd,
     note: impl Into<String>,
 ) -> BookingResult<()> {
     record_money_tx(
@@ -238,7 +227,7 @@ pub async fn record_payment_tx(
 pub async fn record_payment_with_origin_tx(
     tx: &mut Transaction<'_, Sqlite>,
     booking_id: &str,
-    amount: f64,
+    amount: MoneyVnd,
     note: impl Into<String>,
     origin: &OriginSideEffect,
 ) -> BookingResult<()> {
@@ -258,7 +247,7 @@ pub async fn record_payment_with_origin_tx(
 pub async fn record_deposit_tx(
     tx: &mut Transaction<'_, Sqlite>,
     booking_id: &str,
-    amount: f64,
+    amount: MoneyVnd,
     note: impl Into<String>,
 ) -> BookingResult<()> {
     record_money_tx(
@@ -278,7 +267,7 @@ pub async fn record_deposit_tx(
 pub async fn record_deposit_with_origin_tx(
     tx: &mut Transaction<'_, Sqlite>,
     booking_id: &str,
-    amount: f64,
+    amount: MoneyVnd,
     note: impl Into<String>,
     origin: &OriginSideEffect,
 ) -> BookingResult<()> {
@@ -298,7 +287,7 @@ pub async fn record_deposit_with_origin_tx(
 pub async fn record_cancellation_fee_tx(
     tx: &mut Transaction<'_, Sqlite>,
     booking_id: &str,
-    amount: f64,
+    amount: MoneyVnd,
     note: impl Into<String>,
 ) -> BookingResult<()> {
     record_money_tx(
@@ -317,7 +306,7 @@ pub async fn record_cancellation_fee_tx(
 pub async fn record_cancellation_fee_with_origin_tx(
     tx: &mut Transaction<'_, Sqlite>,
     booking_id: &str,
-    amount: f64,
+    amount: MoneyVnd,
     note: impl Into<String>,
     origin: &OriginSideEffect,
 ) -> BookingResult<()> {
@@ -338,7 +327,7 @@ pub async fn record_cancellation_fee_with_origin_tx(
 async fn record_money_tx(
     tx: &mut Transaction<'_, Sqlite>,
     booking_id: &str,
-    amount: f64,
+    amount: MoneyVnd,
     note: impl Into<String>,
     txn_type: &str,
     created_at: impl Into<String>,

@@ -156,7 +156,7 @@ pub async fn check_in(
     record_charge_tx(
         &mut tx,
         &booking_id,
-        total_price as f64,
+        total_price,
         "Tiền phòng",
         check_in_at.clone(),
     )
@@ -164,14 +164,9 @@ pub async fn check_in(
     .map_err(mark_write_db_error)?;
 
     if let Some(paid_amount) = req.paid_amount.filter(|amount| *amount > 0) {
-        record_payment_tx(
-            &mut tx,
-            &booking_id,
-            paid_amount as f64,
-            "Thanh toán khi check-in",
-        )
-        .await
-        .map_err(mark_write_db_error)?;
+        record_payment_tx(&mut tx, &booking_id, paid_amount, "Thanh toán khi check-in")
+            .await
+            .map_err(mark_write_db_error)?;
     }
 
     insert_occupied_calendar_rows(
@@ -475,7 +470,7 @@ pub async fn check_out_at(
         record_charge_tx(
             &mut tx,
             &req.booking_id,
-            charge_delta as f64,
+            charge_delta,
             adjustment_note,
             actual_checkout.clone(),
         )
@@ -488,7 +483,7 @@ pub async fn check_out_at(
         record_payment_tx(
             &mut tx,
             &req.booking_id,
-            payment_delta as f64,
+            payment_delta,
             "Thanh toán khi check-out",
         )
         .await
@@ -689,7 +684,7 @@ pub async fn extend_stay(pool: &Pool<Sqlite>, booking_id: &str) -> BookingResult
     record_charge_tx(
         &mut tx,
         booking_id,
-        incremental_total as f64,
+        incremental_total,
         "Extended stay +1 night",
         Local::now().to_rfc3339(),
     )

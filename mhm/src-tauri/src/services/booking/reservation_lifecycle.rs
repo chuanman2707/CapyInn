@@ -27,8 +27,7 @@ use super::{
     guest_service::{create_reservation_guest_manifest, link_booking_guests},
     support::{
         ensure_one_row_affected, insert_room_calendar_rows, invalid_state_transition,
-        read_f64_or_zero, read_money_vnd_or_zero, read_money_vnd_strict,
-        validate_non_negative_booking_money,
+        read_money_vnd_or_zero, read_money_vnd_strict, validate_non_negative_booking_money,
     },
 };
 
@@ -307,7 +306,7 @@ pub async fn create_reservation_tx(
                 record_deposit_with_origin_tx(
                     tx,
                     &booking_id,
-                    deposit_amount as f64,
+                    deposit_amount,
                     "Reservation deposit",
                     origin,
                 )
@@ -315,14 +314,9 @@ pub async fn create_reservation_tx(
                 .map_err(mark_write_db_error)?;
             }
             None => {
-                record_deposit_tx(
-                    tx,
-                    &booking_id,
-                    deposit_amount as f64,
-                    "Reservation deposit",
-                )
-                .await
-                .map_err(mark_write_db_error)?;
+                record_deposit_tx(tx, &booking_id, deposit_amount, "Reservation deposit")
+                    .await
+                    .map_err(mark_write_db_error)?;
             }
         }
     }
@@ -497,7 +491,7 @@ pub async fn cancel_reservation_tx(
         )));
     }
 
-    let deposit_amount = read_f64_or_zero(&booking, "deposit_amount");
+    let deposit_amount = read_money_vnd_or_zero(&booking, "deposit_amount");
 
     let result = sqlx::query("UPDATE bookings SET status = ? WHERE id = ? AND status = ?")
         .bind(status::booking::CANCELLED)
@@ -516,7 +510,7 @@ pub async fn cancel_reservation_tx(
         .execute(&mut **tx)
         .await?;
 
-    if deposit_amount > 0.0 {
+    if deposit_amount > 0 {
         match origin {
             Some(origin) => {
                 record_cancellation_fee_with_origin_tx(
@@ -674,7 +668,7 @@ pub async fn confirm_reservation_tx(
             record_charge_with_origin_tx(
                 tx,
                 booking_id,
-                total_price as f64,
+                total_price,
                 "Room charge (reservation)",
                 check_in_at,
                 origin,
@@ -685,7 +679,7 @@ pub async fn confirm_reservation_tx(
             record_charge_tx(
                 tx,
                 booking_id,
-                total_price as f64,
+                total_price,
                 "Room charge (reservation)",
                 check_in_at,
             )
