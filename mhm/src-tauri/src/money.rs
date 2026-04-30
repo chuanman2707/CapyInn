@@ -34,8 +34,24 @@ pub fn percentage_money_line(base: MoneyVnd, pct: f64, field: &str) -> CommandRe
         ));
     }
 
-    let scaled_pct = (pct * 1_000_000.0).round() as i128;
-    let numerator = base as i128 * scaled_pct;
+    let scaled_pct_float = (pct * 1_000_000.0).round();
+    if !scaled_pct_float.is_finite()
+        || scaled_pct_float <= i128::MIN as f64
+        || scaled_pct_float >= i128::MAX as f64
+    {
+        return Err(CommandError::user(
+            codes::VALIDATION_INVALID_INPUT,
+            format!("{field} percentage calculation overflowed"),
+        ));
+    }
+
+    let scaled_pct = scaled_pct_float as i128;
+    let numerator = (base as i128).checked_mul(scaled_pct).ok_or_else(|| {
+        CommandError::user(
+            codes::VALIDATION_INVALID_INPUT,
+            format!("{field} percentage calculation overflowed"),
+        )
+    })?;
     let denominator = 100_i128 * 1_000_000_i128;
     let rounded = round_ratio_half_away_from_zero(numerator, denominator);
     if rounded < MoneyVnd::MIN as i128 || rounded > MoneyVnd::MAX as i128 {
@@ -95,5 +111,12 @@ mod tests {
         );
         assert_eq!(percentage_money_line(5, 10.0, "surcharge").unwrap(), 1);
         assert_eq!(percentage_money_line(-5, 10.0, "adjustment").unwrap(), -1);
+    }
+
+    #[test]
+    fn percentage_money_rejects_too_large_percentage_without_panic() {
+        let error = percentage_money_line(2, f64::MAX, "surcharge")
+            .expect_err("too-large percentage must fail");
+        assert!(error.message.contains("surcharge"));
     }
 }
