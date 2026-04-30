@@ -1,6 +1,6 @@
 use sqlx::{Pool, Row, Sqlite};
 
-use crate::{commands::get_f64, models::FolioLine};
+use crate::{commands::get_money_vnd, models::FolioLine};
 
 pub async fn list_folio_lines(
     pool: &Pool<Sqlite>,
@@ -23,7 +23,7 @@ pub async fn list_folio_lines(
             booking_id: row.get("booking_id"),
             category: row.get("category"),
             description: row.get("description"),
-            amount: get_f64(row, "amount"),
+            amount: get_money_vnd(row, "amount"),
             created_by: row.get("created_by"),
             created_at: row.get("created_at"),
         })

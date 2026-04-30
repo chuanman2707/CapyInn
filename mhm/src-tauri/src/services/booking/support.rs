@@ -3,6 +3,7 @@ use sqlx::{sqlite::SqliteRow, Pool, Row, Sqlite, Transaction};
 
 use crate::domain::booking::{BookingError, BookingResult};
 use crate::models::Booking;
+use crate::money::{MoneyVnd, MAX_TRANSPORT_SAFE_MONEY_VND, MIN_TRANSPORT_SAFE_MONEY_VND};
 
 pub async fn begin_tx<'a>(pool: &'a Pool<Sqlite>) -> BookingResult<Transaction<'a, Sqlite>> {
     pool.begin().await.map_err(BookingError::from)
@@ -115,7 +116,7 @@ pub async fn fetch_booking<F>(
     read_numeric: F,
 ) -> BookingResult<Booking>
 where
-    F: Fn(&SqliteRow, &str) -> f64,
+    F: Fn(&SqliteRow, &str) -> MoneyVnd,
 {
     let row = sqlx::query(
         "SELECT id, room_id, primary_guest_id, check_in_at, expected_checkout,
@@ -159,9 +160,47 @@ pub fn read_f64_or_zero(row: &SqliteRow, column: &str) -> f64 {
         .unwrap_or(0.0)
 }
 
-pub fn read_f64_strict(row: &SqliteRow, column: &str) -> f64 {
-    row.try_get::<f64, _>(column)
-        .unwrap_or_else(|_| row.get::<i64, _>(column) as f64)
+pub fn read_money_vnd_or_zero(row: &SqliteRow, column: &str) -> MoneyVnd {
+    row.try_get::<Option<MoneyVnd>, _>(column)
+        .ok()
+        .flatten()
+        .or_else(|| {
+            row.try_get::<Option<f64>, _>(column)
+                .ok()
+                .flatten()
+                .map(|value| {
+                    assert!(
+                        value.is_finite() && value.fract() == 0.0,
+                        "money column {column} must be a whole VND amount"
+                    );
+                    value as MoneyVnd
+                })
+        })
+        .unwrap_or(0)
+}
+
+pub fn read_money_vnd_strict(row: &SqliteRow, column: &str) -> MoneyVnd {
+    row.try_get::<MoneyVnd, _>(column).unwrap_or_else(|_| {
+        let value = row.get::<f64, _>(column);
+        assert!(
+            value.is_finite() && value.fract() == 0.0,
+            "money column {column} must be a whole VND amount"
+        );
+        value as MoneyVnd
+    })
+}
+
+pub fn whole_money_vnd_from_f64(value: f64, field: &str) -> BookingResult<MoneyVnd> {
+    if !value.is_finite()
+        || value.fract() != 0.0
+        || value < MIN_TRANSPORT_SAFE_MONEY_VND as f64
+        || value > MAX_TRANSPORT_SAFE_MONEY_VND as f64
+    {
+        return Err(BookingError::validation(format!(
+            "{field} must be a whole VND amount"
+        )));
+    }
+    Ok(value as MoneyVnd)
 }
 
 #[cfg(test)]

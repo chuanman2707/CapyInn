@@ -1,4 +1,4 @@
-use super::{emit_db_update, get_f64, get_user_id, AppState};
+use super::{emit_db_update, get_money_vnd, get_optional_money_vnd, get_user_id, AppState};
 use crate::services::booking::group_lifecycle;
 use crate::{
     app_error::{
@@ -365,12 +365,12 @@ async fn load_group_detail(
             expected_checkout: r.get("expected_checkout"),
             actual_checkout: r.get("actual_checkout"),
             nights: r.get("nights"),
-            total_price: get_f64(r, "total_price"),
-            paid_amount: get_f64(r, "paid_amount"),
+            total_price: get_money_vnd(r, "total_price"),
+            paid_amount: get_money_vnd(r, "paid_amount"),
             status: r.get("status"),
             source: r.get("source"),
             booking_type: r.get("booking_type"),
-            deposit_amount: r.try_get::<f64, _>("deposit_amount").ok(),
+            deposit_amount: get_optional_money_vnd(r, "deposit_amount"),
             scheduled_checkin: r.get("scheduled_checkin"),
             scheduled_checkout: r.get("scheduled_checkout"),
             guest_phone: r.get("guest_phone"),
@@ -392,17 +392,17 @@ async fn load_group_detail(
             booking_id: r.get("booking_id"),
             name: r.get("name"),
             quantity: r.get("quantity"),
-            unit_price: get_f64(r, "unit_price"),
-            total_price: get_f64(r, "total_price"),
+            unit_price: get_money_vnd(r, "unit_price"),
+            total_price: get_money_vnd(r, "total_price"),
             note: r.get("note"),
             created_by: r.get("created_by"),
             created_at: r.get("created_at"),
         })
         .collect();
 
-    let total_room_cost: f64 = bookings.iter().map(|b| b.total_price).sum();
-    let total_service_cost: f64 = services.iter().map(|s| s.total_price).sum();
-    let paid_amount: f64 = bookings.iter().map(|b| b.paid_amount).sum();
+    let total_room_cost = bookings.iter().map(|b| b.total_price).sum();
+    let total_service_cost = services.iter().map(|s| s.total_price).sum();
+    let paid_amount = bookings.iter().map(|b| b.paid_amount).sum();
 
     Ok(GroupDetailResponse {
         group,
@@ -480,7 +480,15 @@ pub async fn add_group_service(
     let user_id = get_user_id(&state);
     let id = uuid::Uuid::new_v4().to_string();
     let now = chrono::Local::now().to_rfc3339();
-    let total_price = req.quantity as f64 * req.unit_price;
+    if req.quantity < 1 {
+        return Err("Quantity must be greater than zero".to_string());
+    }
+    if req.unit_price < 0 {
+        return Err("unit_price must be greater than or equal to zero".to_string());
+    }
+    let total_price = i64::from(req.quantity)
+        .checked_mul(req.unit_price)
+        .ok_or_else(|| "total_price overflowed".to_string())?;
 
     sqlx::query(
         "INSERT INTO group_services (id, group_id, booking_id, name, quantity, unit_price, total_price, note, created_by, created_at)
@@ -578,9 +586,9 @@ pub async fn auto_assign_rooms(
             room_type: r.get("type"),
             floor: r.get("floor"),
             has_balcony: r.get::<i32, _>("has_balcony") == 1,
-            base_price: get_f64(r, "base_price"),
+            base_price: get_money_vnd(r, "base_price"),
             max_guests: r.try_get::<i32, _>("max_guests").unwrap_or(2),
-            extra_person_fee: r.try_get::<f64, _>("extra_person_fee").unwrap_or(0.0),
+            extra_person_fee: get_money_vnd(r, "extra_person_fee"),
             status: r.get("status"),
         })
         .collect();
@@ -670,7 +678,7 @@ pub async fn do_generate_group_invoice(
         .iter()
         .map(|b| {
             let price_per_night = if b.nights > 0 {
-                b.total_price / b.nights as f64
+                b.total_price / i64::from(b.nights)
             } else {
                 b.total_price
             };

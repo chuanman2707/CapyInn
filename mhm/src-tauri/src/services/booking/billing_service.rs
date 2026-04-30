@@ -10,10 +10,37 @@ use crate::{
     },
     db_error_monitoring::classify_db_error_code,
     domain::booking::{BookingError, BookingResult, OriginSideEffect},
+    money::{MoneyVnd, MAX_TRANSPORT_SAFE_MONEY_VND, MIN_TRANSPORT_SAFE_MONEY_VND},
 };
 use serde_json::json;
 
 use super::support::{begin_tx, rfc3339_now};
+
+fn validate_whole_positive_vnd(amount: f64) -> BookingResult<MoneyVnd> {
+    if !amount.is_finite()
+        || amount <= 0.0
+        || amount.fract() != 0.0
+        || amount > MAX_TRANSPORT_SAFE_MONEY_VND as f64
+    {
+        return Err(BookingError::validation(
+            "Folio amount must be a whole positive VND amount",
+        ));
+    }
+    Ok(amount as MoneyVnd)
+}
+
+fn validate_whole_vnd(amount: f64, field: &str) -> BookingResult<MoneyVnd> {
+    if !amount.is_finite()
+        || amount.fract() != 0.0
+        || amount < MIN_TRANSPORT_SAFE_MONEY_VND as f64
+        || amount > MAX_TRANSPORT_SAFE_MONEY_VND as f64
+    {
+        return Err(BookingError::validation(format!(
+            "{field} must be a whole VND amount"
+        )));
+    }
+    Ok(amount as MoneyVnd)
+}
 
 #[allow(dead_code)]
 pub async fn add_folio_line(
@@ -24,11 +51,7 @@ pub async fn add_folio_line(
     amount: f64,
     created_by: Option<&str>,
 ) -> BookingResult<FolioLine> {
-    if amount <= 0.0 {
-        return Err(BookingError::validation(
-            "Folio amount must be greater than zero",
-        ));
-    }
+    let amount = validate_whole_positive_vnd(amount)?;
 
     let mut tx = begin_tx(pool).await?;
     let created_at = rfc3339_now();
@@ -86,15 +109,11 @@ pub async fn add_folio_line_idempotent(
     amount: f64,
     created_by: Option<&str>,
 ) -> CommandResult<IdempotentCommandResult<serde_json::Value>> {
-    if amount <= 0.0 {
-        return Err(CommandError::user(
-            codes::BOOKING_INVALID_STATE,
-            "Folio amount must be greater than zero",
-        )
-        .with_request_id(ctx.request_id.clone()));
-    }
+    let amount = validate_whole_positive_vnd(amount).map_err(|error| {
+        map_add_folio_line_command_error(error).with_request_id(ctx.request_id.clone())
+    })?;
 
-    let amount_minor_units = format!("{:.0}", amount * 100.0);
+    let amount_minor_units = (i128::from(amount) * 100).to_string();
     let hash_payload = json!({
         "schema": "folio.add_line.v1",
         "booking_id": booking_id,
@@ -329,6 +348,7 @@ async fn record_money_tx(
     let id = uuid::Uuid::new_v4().to_string();
     let note = note.into();
     let created_at = created_at.into();
+    let amount = validate_whole_vnd(amount, "transaction amount")?;
     let origin_idempotency_key = origin.map(OriginSideEffect::key);
     let origin_transaction_ordinal = origin.map(OriginSideEffect::ordinal).unwrap_or(0);
 

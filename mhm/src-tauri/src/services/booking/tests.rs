@@ -579,7 +579,7 @@ pub async fn seed_active_booking_with_terms(
     expected_checkout: &str,
     nights: i64,
     total_price: f64,
-    paid_amount: Option<f64>,
+    paid_amount: Option<i64>,
 ) -> BookingResult<()> {
     seed_active_booking(pool, booking_id, room_id).await?;
 
@@ -796,7 +796,7 @@ pub fn minimal_reservation_request(room_id: &str) -> CreateReservationRequest {
         check_in_date: "2026-04-20".to_string(),
         check_out_date: "2026-04-22".to_string(),
         nights: 2,
-        deposit_amount: Some(50_000.0),
+        deposit_amount: Some(50_000),
         source: Some("phone".to_string()),
         notes: Some("test reservation".to_string()),
     }
@@ -836,14 +836,14 @@ pub fn minimal_group_checkin_request(room_ids: &[&str]) -> GroupCheckinRequest {
         nights: 2,
         source: Some("walk-in".to_string()),
         notes: Some("group test".to_string()),
-        paid_amount: Some(100_000.0),
+        paid_amount: Some(100_000),
     }
 }
 
 pub fn rich_group_checkin_request(
     room_ids: &[&str],
     master_room_id: &str,
-    paid_amount: Option<f64>,
+    paid_amount: Option<i64>,
 ) -> GroupCheckinRequest {
     let mut guests_per_room = std::collections::HashMap::new();
     for room_id in room_ids {
@@ -1080,7 +1080,7 @@ async fn group_checkin_reservation_blocks_calendar_and_tracks_deposit() {
             .format("%Y-%m-%d")
             .to_string(),
     );
-    req.paid_amount = Some(60_000.0);
+    req.paid_amount = Some(60_000);
 
     let group = group_lifecycle::group_checkin(&pool, None, req)
         .await
@@ -1178,7 +1178,7 @@ async fn group_checkin_idempotent_normalizes_room_order_and_assigns_payment_ordi
         &pool,
         Some("seed-user".to_string()),
         &ctx,
-        rich_group_checkin_request(&["GI602", "GI601"], "GI602", Some(100_000.0)),
+        rich_group_checkin_request(&["GI602", "GI601"], "GI602", Some(100_000)),
     )
     .await
     .expect("first group checkin succeeds");
@@ -1186,7 +1186,7 @@ async fn group_checkin_idempotent_normalizes_room_order_and_assigns_payment_ordi
         &pool,
         Some("seed-user".to_string()),
         &ctx,
-        rich_group_checkin_request(&["GI601", "GI602"], "GI602", Some(100_000.0)),
+        rich_group_checkin_request(&["GI601", "GI602"], "GI602", Some(100_000)),
     )
     .await
     .expect("same payload with different room order replays");
@@ -1249,7 +1249,7 @@ async fn group_checkin_duplicate_in_flight_does_not_wait_for_room_lock() {
             &first_pool,
             Some("seed-user".to_string()),
             &first_ctx,
-            rich_group_checkin_request(&["GI650", "GI651"], "GI650", Some(100_000.0)),
+            rich_group_checkin_request(&["GI650", "GI651"], "GI650", Some(100_000)),
         )
         .await
     });
@@ -1282,7 +1282,7 @@ async fn group_checkin_duplicate_in_flight_does_not_wait_for_room_lock() {
             &pool,
             Some("seed-user".to_string()),
             &ctx,
-            rich_group_checkin_request(&["GI650", "GI651"], "GI650", Some(100_000.0)),
+            rich_group_checkin_request(&["GI650", "GI651"], "GI650", Some(100_000)),
         ),
     )
     .await
@@ -1320,7 +1320,7 @@ async fn group_checkin_idempotent_non_positive_paid_amount_writes_no_payment_ori
         &pool,
         Some("seed-user".to_string()),
         &zero_ctx,
-        rich_group_checkin_request(&["GI610", "GI611"], "GI610", Some(0.0)),
+        rich_group_checkin_request(&["GI610", "GI611"], "GI610", Some(0)),
     )
     .await
     .expect("zero paid amount still creates group");
@@ -1335,7 +1335,7 @@ async fn group_checkin_idempotent_non_positive_paid_amount_writes_no_payment_ori
         &pool,
         Some("seed-user".to_string()),
         &negative_ctx,
-        rich_group_checkin_request(&["GI612", "GI613"], "GI612", Some(-40_000.0)),
+        rich_group_checkin_request(&["GI612", "GI613"], "GI612", Some(-40_000)),
     )
     .await
     .expect("negative paid amount still creates group");
@@ -1348,7 +1348,7 @@ async fn group_checkin_idempotent_non_positive_paid_amount_writes_no_payment_ori
             "group_checkin",
         );
     let mut negative_reservation_req =
-        rich_group_checkin_request(&["GI614", "GI615"], "GI614", Some(-40_000.0));
+        rich_group_checkin_request(&["GI614", "GI615"], "GI614", Some(-40_000));
     negative_reservation_req.check_in_date = Some("2026-05-10".to_string());
     let negative_reservation = group_lifecycle::group_checkin_idempotent(
         &pool,
@@ -1451,7 +1451,7 @@ async fn group_checkin_idempotent_replay_returns_stored_snapshot_after_db_mutati
         &pool,
         Some("seed-user".to_string()),
         &ctx,
-        rich_group_checkin_request(&["GI630", "GI631"], "GI630", Some(100_000.0)),
+        rich_group_checkin_request(&["GI630", "GI631"], "GI630", Some(100_000)),
     )
     .await
     .expect("first group checkin succeeds");
@@ -1468,7 +1468,7 @@ async fn group_checkin_idempotent_replay_returns_stored_snapshot_after_db_mutati
         &pool,
         Some("seed-user".to_string()),
         &ctx,
-        rich_group_checkin_request(&["GI630", "GI631"], "GI630", Some(100_000.0)),
+        rich_group_checkin_request(&["GI630", "GI631"], "GI630", Some(100_000)),
     )
     .await
     .expect("replay succeeds");
@@ -1499,12 +1499,12 @@ async fn group_checkin_idempotent_same_key_different_payload_conflicts() {
         &pool,
         Some("seed-user".to_string()),
         &ctx,
-        rich_group_checkin_request(&["GI640", "GI641"], "GI640", Some(100_000.0)),
+        rich_group_checkin_request(&["GI640", "GI641"], "GI640", Some(100_000)),
     )
     .await
     .expect("first group checkin succeeds");
 
-    let mut changed = rich_group_checkin_request(&["GI640", "GI641"], "GI640", Some(100_000.0));
+    let mut changed = rich_group_checkin_request(&["GI640", "GI641"], "GI640", Some(100_000));
     changed.nights = 3;
     let error = group_lifecycle::group_checkin_idempotent(
         &pool,
@@ -1544,7 +1544,7 @@ async fn group_checkout_reassigns_master_and_updates_group_payment() {
         GroupCheckoutRequest {
             group_id: group.id.clone(),
             booking_ids: vec![master_booking_id.clone()],
-            final_paid: Some(40_000.0),
+            final_paid: Some(40_000),
         },
     )
     .await
@@ -2113,8 +2113,8 @@ async fn create_reservation_blocks_calendar_and_posts_deposit() {
 
     assert_eq!(booking.room_id, "R160");
     assert_eq!(booking.status, "booked");
-    assert_eq!(booking.total_price, 1_200_000.0);
-    assert_eq!(booking.paid_amount, 50_000.0);
+    assert_eq!(booking.total_price, 1_200_000);
+    assert_eq!(booking.paid_amount, 50_000);
 
     let calendar_days: (i64,) = sqlx::query_as(
         "SELECT COUNT(*) FROM room_calendar WHERE booking_id = ? AND status = 'booked'",
@@ -2162,7 +2162,7 @@ async fn create_reservation_rejects_inconsistent_nights_input() {
             check_in_date: "2026-04-20".to_string(),
             check_out_date: "2026-04-22".to_string(),
             nights: 3,
-            deposit_amount: Some(50_000.0),
+            deposit_amount: Some(50_000),
             source: Some("phone".to_string()),
             notes: Some("test reservation".to_string()),
         },
@@ -2202,7 +2202,7 @@ async fn create_reservation_idempotent_retry_does_not_duplicate_deposit() {
             nights: 1,
             source: Some("phone".to_string()),
             notes: None,
-            deposit_amount: Some(50_000.0),
+            deposit_amount: Some(50_000),
         },
     )
     .await
@@ -2220,7 +2220,7 @@ async fn create_reservation_idempotent_retry_does_not_duplicate_deposit() {
             nights: 1,
             source: Some("phone".to_string()),
             notes: None,
-            deposit_amount: Some(50_000.0),
+            deposit_amount: Some(50_000),
         },
     )
     .await
@@ -2265,7 +2265,7 @@ async fn create_reservation_idempotent_replay_returns_stored_booking_snapshot() 
             nights: 1,
             source: Some("phone".to_string()),
             notes: None,
-            deposit_amount: Some(50_000.0),
+            deposit_amount: Some(50_000),
         },
     )
     .await
@@ -2299,7 +2299,7 @@ async fn create_reservation_idempotent_replay_returns_stored_booking_snapshot() 
             nights: 1,
             source: Some("phone".to_string()),
             notes: None,
-            deposit_amount: Some(50_000.0),
+            deposit_amount: Some(50_000),
         },
     )
     .await
@@ -2340,7 +2340,7 @@ async fn create_reservation_same_key_different_payload_conflicts() {
             nights: 1,
             source: Some("phone".to_string()),
             notes: None,
-            deposit_amount: Some(50_000.0),
+            deposit_amount: Some(50_000),
         },
     )
     .await
@@ -2359,7 +2359,7 @@ async fn create_reservation_same_key_different_payload_conflicts() {
             nights: 1,
             source: Some("phone".to_string()),
             notes: None,
-            deposit_amount: Some(50_000.0),
+            deposit_amount: Some(50_000),
         },
     )
     .await
@@ -2393,7 +2393,7 @@ async fn reservation_command_idempotency_create_hashes_deposit_as_integer_vnd_un
         nights: 1,
         source: Some("phone".to_string()),
         notes: None,
-        deposit_amount: Some(500_000.0),
+        deposit_amount: Some(500_000),
     };
 
     reservation_lifecycle::create_reservation_idempotent(&pool, &ctx, request)
@@ -2557,10 +2557,7 @@ async fn reservation_command_idempotency_modify_replay_returns_stored_snapshot()
 
     assert!(replay.replayed);
     assert_eq!(first.response, replay.response);
-    assert_eq!(
-        replay.response["total_price"],
-        serde_json::json!(1_800_000.0)
-    );
+    assert_eq!(replay.response["total_price"], serde_json::json!(1_800_000));
 }
 
 #[tokio::test]
@@ -3292,8 +3289,8 @@ async fn do_create_reservation_returns_service_booking_and_leaves_room_vacant() 
 
     assert_eq!(booking.room_id, "R162");
     assert_eq!(booking.status, "booked");
-    assert_eq!(booking.total_price, 1_200_000.0);
-    assert_eq!(booking.paid_amount, 50_000.0);
+    assert_eq!(booking.total_price, 1_200_000);
+    assert_eq!(booking.paid_amount, 50_000);
 
     let room = sqlx::query("SELECT status FROM rooms WHERE id = ?")
         .bind("R162")
@@ -3411,10 +3408,10 @@ async fn confirm_reservation_reprices_and_marks_room_occupied() {
         .unwrap();
 
     assert_eq!(booking.status, "active");
-    assert_eq!(booking.paid_amount, 50_000.0);
+    assert_eq!(booking.paid_amount, 50_000);
     assert_eq!(booking.expected_checkout, scheduled_checkout_str);
     assert_eq!(booking.nights, 5);
-    assert_eq!(booking.total_price, 3_000_000.0);
+    assert_eq!(booking.total_price, 3_000_000);
     assert!(booking.check_in_at.contains('T'));
 
     let room = sqlx::query("SELECT status FROM rooms WHERE id = ?")
@@ -3554,7 +3551,7 @@ async fn confirm_reservation_late_arrival_persists_effective_checkout() {
     assert_eq!(booking.status, "active");
     assert_eq!(booking.nights, 1);
     assert_eq!(booking.expected_checkout, effective_checkout_str);
-    assert_eq!(booking.total_price, 600_000.0);
+    assert_eq!(booking.total_price, 600_000);
 
     let calendar_rows = sqlx::query(
         "SELECT date, status FROM room_calendar WHERE booking_id = ? ORDER BY date ASC",
@@ -3606,7 +3603,7 @@ async fn confirm_reservation_preserves_extra_precheckin_payment() {
         .await
         .unwrap();
 
-    assert_eq!(booking.paid_amount, 75_000.0);
+    assert_eq!(booking.paid_amount, 75_000);
 }
 
 #[tokio::test]
@@ -3636,7 +3633,7 @@ async fn modify_reservation_rewrites_booked_calendar_range() {
     assert_eq!(booking.check_in_at, "2026-04-23");
     assert_eq!(booking.expected_checkout, "2026-04-26");
     assert_eq!(booking.nights, 3);
-    assert_eq!(booking.total_price, 1_800_000.0);
+    assert_eq!(booking.total_price, 1_800_000);
 
     let booking_row =
         sqlx::query("SELECT scheduled_checkin, scheduled_checkout FROM bookings WHERE id = ?")
@@ -3767,7 +3764,7 @@ async fn do_modify_reservation_returns_service_booking_without_app_handle() {
     assert_eq!(booking.check_in_at, "2026-04-24");
     assert_eq!(booking.expected_checkout, "2026-04-26");
     assert_eq!(booking.nights, 2);
-    assert_eq!(booking.total_price, 1_200_000.0);
+    assert_eq!(booking.total_price, 1_200_000);
 
     let calendar_days: (i64,) = sqlx::query_as(
         "SELECT COUNT(*) FROM room_calendar WHERE booking_id = ? AND status = 'booked'",
@@ -3807,7 +3804,7 @@ async fn check_in_posts_charge_and_marks_room_occupied() {
     .await
     .unwrap();
     assert_eq!(charge.get::<String, _>("type"), "charge");
-    assert_eq!(charge.get::<f64, _>("amount"), booking.total_price);
+    assert_eq!(charge.get::<f64, _>("amount"), booking.total_price as f64);
 
     let calendar_days: (i64,) = sqlx::query_as(
         "SELECT COUNT(*) FROM room_calendar WHERE booking_id = ? AND status = 'occupied'",
@@ -3874,7 +3871,7 @@ async fn checkout_fails_when_second_pool_checked_out_booking_first() {
         CheckOutRequest {
             booking_id: "B-2POOL".to_string(),
             settlement_mode: CheckoutSettlementMode::BookedNights,
-            final_total: 100_000.0,
+            final_total: 100_000,
         },
     )
     .await
@@ -3904,7 +3901,7 @@ async fn check_out_settles_same_day_actual_nights_to_minimum_one_night() {
         "2026-04-25T12:00:00+07:00",
         5,
         2_500_000.0,
-        Some(0.0),
+        Some(0),
     )
     .await
     .unwrap();
@@ -3924,7 +3921,7 @@ async fn check_out_settles_same_day_actual_nights_to_minimum_one_night() {
     .unwrap();
 
     assert_eq!(preview.settled_nights, 1);
-    assert_eq!(preview.recommended_total, 500_000.0);
+    assert_eq!(preview.recommended_total, 500_000);
 
     stay_lifecycle::check_out_at(
         &pool,
@@ -3971,7 +3968,7 @@ async fn check_out_keeps_active_booking_values_for_booked_nights_mode() {
         "2026-04-25T12:00:00+07:00",
         5,
         2_500_000.0,
-        Some(0.0),
+        Some(0),
     )
     .await
     .unwrap();
@@ -3994,7 +3991,7 @@ async fn check_out_keeps_active_booking_values_for_booked_nights_mode() {
     .unwrap();
 
     assert_eq!(preview.settled_nights, 5);
-    assert_eq!(preview.recommended_total, 2_500_000.0);
+    assert_eq!(preview.recommended_total, 2_500_000);
 
     stay_lifecycle::check_out_at(
         &pool,
@@ -4034,7 +4031,7 @@ async fn check_out_booked_nights_enforces_minimum_one_night_for_corrupted_bookin
         "2026-04-20T12:00:00+07:00",
         0,
         0.0,
-        Some(0.0),
+        Some(0),
     )
     .await
     .unwrap();
@@ -4060,7 +4057,7 @@ async fn check_out_booked_nights_enforces_minimum_one_night_for_corrupted_bookin
         CheckOutRequest {
             booking_id: "B413".to_string(),
             settlement_mode: CheckoutSettlementMode::BookedNights,
-            final_total: 0.0,
+            final_total: 0,
         },
         chrono::Local
             .with_ymd_and_hms(2026, 4, 20, 12, 0, 0)
@@ -4094,7 +4091,7 @@ async fn check_out_actual_nights_uses_early_checkout_nights() {
         "2026-04-25T12:00:00+07:00",
         5,
         2_500_000.0,
-        Some(0.0),
+        Some(0),
     )
     .await
     .unwrap();
@@ -4114,7 +4111,7 @@ async fn check_out_actual_nights_uses_early_checkout_nights() {
     .unwrap();
 
     assert_eq!(preview.settled_nights, 2);
-    assert_eq!(preview.recommended_total, 1_000_000.0);
+    assert_eq!(preview.recommended_total, 1_000_000);
 
     stay_lifecycle::check_out_at(
         &pool,
@@ -4153,7 +4150,7 @@ async fn check_out_hourly_persists_manual_settlement() {
         "2026-04-25T12:00:00+07:00",
         5,
         2_500_000.0,
-        Some(0.0),
+        Some(0),
     )
     .await
     .unwrap();
@@ -4163,7 +4160,7 @@ async fn check_out_hourly_persists_manual_settlement() {
         CheckOutRequest {
             booking_id: "B415".to_string(),
             settlement_mode: CheckoutSettlementMode::Hourly,
-            final_total: 500_000.0,
+            final_total: 500_000,
         },
         chrono::Local
             .with_ymd_and_hms(2026, 4, 20, 10, 0, 0)
@@ -4212,7 +4209,7 @@ async fn check_out_hourly_multi_day_stay_still_persists_one_night() {
         "2026-04-25T12:00:00+07:00",
         5,
         2_500_000.0,
-        Some(0.0),
+        Some(0),
     )
     .await
     .unwrap();
@@ -4222,7 +4219,7 @@ async fn check_out_hourly_multi_day_stay_still_persists_one_night() {
         CheckOutRequest {
             booking_id: "B419".to_string(),
             settlement_mode: CheckoutSettlementMode::Hourly,
-            final_total: 500_000.0,
+            final_total: 500_000,
         },
         chrono::Local
             .with_ymd_and_hms(2026, 4, 22, 9, 0, 0)
@@ -4257,7 +4254,7 @@ async fn check_out_persists_manual_override_when_final_total_differs_from_recomm
         "2026-04-25T12:00:00+07:00",
         5,
         2_500_000.0,
-        Some(0.0),
+        Some(0),
     )
     .await
     .unwrap();
@@ -4279,14 +4276,14 @@ async fn check_out_persists_manual_override_when_final_total_differs_from_recomm
     .await
     .unwrap();
 
-    assert_eq!(preview.recommended_total, 1_000_000.0);
+    assert_eq!(preview.recommended_total, 1_000_000);
 
     stay_lifecycle::check_out_at(
         &pool,
         CheckOutRequest {
             booking_id: "B416".to_string(),
             settlement_mode: CheckoutSettlementMode::ActualNights,
-            final_total: 800_000.0,
+            final_total: 800_000,
         },
         chrono::Local
             .with_ymd_and_hms(2026, 4, 22, 9, 0, 0)
@@ -4337,7 +4334,7 @@ async fn check_out_writes_charge_adjustment_ledger_when_settled_total_drops() {
         "2026-04-25T12:00:00+07:00",
         5,
         2_500_000.0,
-        Some(0.0),
+        Some(0),
     )
     .await
     .unwrap();
@@ -4350,7 +4347,7 @@ async fn check_out_writes_charge_adjustment_ledger_when_settled_total_drops() {
         CheckOutRequest {
             booking_id: "B417".to_string(),
             settlement_mode: CheckoutSettlementMode::ActualNights,
-            final_total: 800_000.0,
+            final_total: 800_000,
         },
         chrono::Local
             .with_ymd_and_hms(2026, 4, 22, 9, 0, 0)
@@ -4399,7 +4396,7 @@ async fn check_out_writes_payment_delta_ledger_when_collecting_extra_payment() {
         "2026-04-25T12:00:00+07:00",
         5,
         2_500_000.0,
-        Some(0.0),
+        Some(0),
     )
     .await
     .unwrap();
@@ -4412,7 +4409,7 @@ async fn check_out_writes_payment_delta_ledger_when_collecting_extra_payment() {
         CheckOutRequest {
             booking_id: "B418".to_string(),
             settlement_mode: CheckoutSettlementMode::BookedNights,
-            final_total: 2_500_000.0,
+            final_total: 2_500_000,
         },
         chrono::Local
             .with_ymd_and_hms(2026, 4, 22, 9, 0, 0)
@@ -4468,7 +4465,7 @@ async fn checkout_paid_amount_is_ledger_projection_not_direct_overwrite() {
         "2026-04-21T12:00:00+07:00",
         1,
         75_000.0,
-        Some(0.0),
+        Some(0),
     )
     .await
     .unwrap();
@@ -4491,7 +4488,7 @@ async fn checkout_paid_amount_is_ledger_projection_not_direct_overwrite() {
         CheckOutRequest {
             booking_id: "B420".to_string(),
             settlement_mode: CheckoutSettlementMode::ActualNights,
-            final_total: 75_000.0,
+            final_total: 75_000,
         },
         chrono::Local
             .with_ymd_and_hms(2026, 4, 21, 9, 0, 0)
@@ -4532,7 +4529,7 @@ async fn check_out_rejects_overpaid_booking_until_refund_flow_exists() {
         "2026-04-25T12:00:00+07:00",
         5,
         2_500_000.0,
-        Some(0.0),
+        Some(0),
     )
     .await
     .unwrap();
@@ -4545,7 +4542,7 @@ async fn check_out_rejects_overpaid_booking_until_refund_flow_exists() {
         CheckOutRequest {
             booking_id: "B412".to_string(),
             settlement_mode: CheckoutSettlementMode::Hourly,
-            final_total: 500_000.0,
+            final_total: 500_000,
         },
         chrono::Local
             .with_ymd_and_hms(2026, 4, 20, 12, 0, 0)
@@ -4568,7 +4565,7 @@ async fn extend_stay_uses_existing_expected_checkout() {
 
     assert_eq!(booking.nights, 2);
     assert_eq!(booking.expected_checkout, "2026-04-17T10:00:00+07:00");
-    assert_eq!(booking.total_price, 500_000.0);
+    assert_eq!(booking.total_price, 500_000);
 
     let extended_day =
         sqlx::query("SELECT status FROM room_calendar WHERE room_id = ? AND date = '2026-04-16'")
@@ -4628,12 +4625,12 @@ async fn revenue_queries_use_recognized_room_revenue_and_ignore_payments() {
     .await
     .unwrap();
 
-    assert_eq!(dashboard.revenue_today, 300_000.0);
-    assert_eq!(stats.total_revenue, 300_000.0);
+    assert_eq!(dashboard.revenue_today, 300_000);
+    assert_eq!(stats.total_revenue, 300_000);
     assert_eq!(stats.rooms_sold, 1);
     assert_eq!(stats.daily_revenue.len(), 1);
     assert_eq!(stats.daily_revenue[0].date, "2026-04-15");
-    assert_eq!(stats.daily_revenue[0].revenue, 300_000.0);
+    assert_eq!(stats.daily_revenue[0].revenue, 300_000);
 }
 
 #[tokio::test]
@@ -4659,17 +4656,17 @@ async fn analytics_breakdowns_reconcile_to_total_revenue() {
         .await
         .unwrap();
 
-    assert_eq!(analytics.total_revenue, 275_000.0);
+    assert_eq!(analytics.total_revenue, 275_000);
     assert_eq!(analytics.occupancy_rate, 100.0);
     assert_eq!(analytics.adr, 250_000.0);
     assert_eq!(analytics.revpar, 250_000.0);
     assert_eq!(analytics.daily_revenue.len(), 1);
     assert_eq!(analytics.revenue_by_source.len(), 1);
     assert_eq!(analytics.revenue_by_source[0].name, "walk-in");
-    assert_eq!(analytics.revenue_by_source[0].value, 275_000.0);
+    assert_eq!(analytics.revenue_by_source[0].value, 275_000);
     assert_eq!(analytics.top_rooms.len(), 1);
     assert_eq!(analytics.top_rooms[0].room, "R302");
-    assert_eq!(analytics.top_rooms[0].revenue, 275_000.0);
+    assert_eq!(analytics.top_rooms[0].revenue, 275_000);
 }
 
 #[tokio::test]
@@ -4707,10 +4704,10 @@ async fn revenue_queries_include_cancellation_fees_in_recognized_revenue() {
         .unwrap();
     let cancelled_row = export_rows.iter().find(|row| row.id == "B305").unwrap();
 
-    assert_eq!(stats.total_revenue, 50_000.0);
-    assert_eq!(cancelled_row.charge_total, 0.0);
-    assert_eq!(cancelled_row.cancellation_fee_total, 50_000.0);
-    assert_eq!(cancelled_row.recognized_revenue, 50_000.0);
+    assert_eq!(stats.total_revenue, 50_000);
+    assert_eq!(cancelled_row.charge_total, 0);
+    assert_eq!(cancelled_row.cancellation_fee_total, 50_000);
+    assert_eq!(cancelled_row.recognized_revenue, 50_000);
 }
 
 #[tokio::test]
@@ -4725,7 +4722,7 @@ async fn same_day_checkout_settlement_counts_one_room_sold_and_full_revenue() {
         "2026-04-25T12:00:00+07:00",
         5,
         2_500_000.0,
-        Some(0.0),
+        Some(0),
     )
     .await
     .unwrap();
@@ -4773,9 +4770,9 @@ async fn same_day_checkout_settlement_counts_one_room_sold_and_full_revenue() {
         .await
         .unwrap();
 
-    assert_eq!(stats.total_revenue, 500_000.0);
+    assert_eq!(stats.total_revenue, 500_000);
     assert_eq!(stats.rooms_sold, 1);
-    assert_eq!(audit.room_revenue, 500_000.0);
+    assert_eq!(audit.room_revenue, 500_000);
     assert_eq!(audit.rooms_sold, 1);
 }
 
@@ -4791,7 +4788,7 @@ async fn booked_nights_settlement_uses_reporting_checkout_for_financial_revenue(
         "2026-04-25T12:00:00+07:00",
         5,
         2_500_000.0,
-        Some(2_500_000.0),
+        Some(2_500_000),
     )
     .await
     .unwrap();
@@ -4813,7 +4810,7 @@ async fn booked_nights_settlement_uses_reporting_checkout_for_financial_revenue(
         .await
         .unwrap();
 
-    assert_eq!(revenue, 2_500_000.0);
+    assert_eq!(revenue, 2_500_000);
 }
 
 #[tokio::test]
@@ -4828,7 +4825,7 @@ async fn checkout_settlement_updates_booking_export_rows() {
         "2026-04-25T12:00:00+07:00",
         5,
         2_500_000.0,
-        Some(0.0),
+        Some(0),
     )
     .await
     .unwrap();
@@ -4874,9 +4871,9 @@ async fn checkout_settlement_updates_booking_export_rows() {
         .unwrap();
     let row = export_rows.iter().find(|row| row.id == "B422").unwrap();
 
-    assert_eq!(row.room_price, 500_000.0);
-    assert_eq!(row.charge_total, 500_000.0);
-    assert_eq!(row.recognized_revenue, 500_000.0);
+    assert_eq!(row.room_price, 500_000);
+    assert_eq!(row.charge_total, 500_000);
+    assert_eq!(row.recognized_revenue, 500_000);
 }
 
 #[tokio::test]
@@ -4891,7 +4888,7 @@ async fn checkout_settlement_export_rows_follow_reporting_checkout_boundary() {
         "2026-04-25T12:00:00+07:00",
         5,
         2_500_000.0,
-        Some(0.0),
+        Some(0),
     )
     .await
     .unwrap();
@@ -4953,7 +4950,7 @@ async fn checkout_settlement_export_rows_exclude_original_checkin_window_after_s
         "2026-04-25T12:00:00+07:00",
         5,
         2_500_000.0,
-        Some(0.0),
+        Some(0),
     )
     .await
     .unwrap();
@@ -5039,8 +5036,8 @@ async fn cancellation_fee_export_uses_transaction_period_when_checkin_is_future(
         .unwrap();
     let row = export_rows.iter().find(|row| row.id == "B425").unwrap();
 
-    assert_eq!(row.cancellation_fee_total, 50_000.0);
-    assert_eq!(row.recognized_revenue, 50_000.0);
+    assert_eq!(row.cancellation_fee_total, 50_000);
+    assert_eq!(row.recognized_revenue, 50_000);
 }
 
 #[tokio::test]
@@ -5094,10 +5091,10 @@ async fn run_night_audit_uses_canonical_room_and_folio_revenue() {
     .unwrap();
 
     assert_eq!(log.audit_date, "2026-04-16");
-    assert_eq!(log.room_revenue, 250_000.0);
-    assert_eq!(log.folio_revenue, 40_000.0);
-    assert_eq!(log.total_revenue, 290_000.0);
-    assert_eq!(log.total_expenses, 10_000.0);
+    assert_eq!(log.room_revenue, 250_000);
+    assert_eq!(log.folio_revenue, 40_000);
+    assert_eq!(log.total_revenue, 290_000);
+    assert_eq!(log.total_expenses, 10_000);
     assert_eq!(log.rooms_sold, 1);
     assert_eq!(log.total_rooms, 1);
 
@@ -5142,15 +5139,15 @@ async fn billing_and_export_queries_preserve_canonical_revenue_columns() {
         .await
         .unwrap();
 
-    assert_eq!(line.amount, 35_000.0);
+    assert_eq!(line.amount, 35_000);
     assert_eq!(folio_lines.len(), 1);
     assert_eq!(folio_lines[0].category, "laundry");
     assert_eq!(export_rows.len(), 1);
-    assert_eq!(export_rows[0].room_price, 250_000.0);
-    assert_eq!(export_rows[0].charge_total, 250_000.0);
-    assert_eq!(export_rows[0].cancellation_fee_total, 0.0);
-    assert_eq!(export_rows[0].folio_total, 35_000.0);
-    assert_eq!(export_rows[0].recognized_revenue, 285_000.0);
+    assert_eq!(export_rows[0].room_price, 250_000);
+    assert_eq!(export_rows[0].charge_total, 250_000);
+    assert_eq!(export_rows[0].cancellation_fee_total, 0);
+    assert_eq!(export_rows[0].folio_total, 35_000);
+    assert_eq!(export_rows[0].recognized_revenue, 285_000);
 }
 
 #[tokio::test]
@@ -5453,6 +5450,51 @@ async fn add_folio_line_idempotent_invalid_amount_does_not_consume_claim_or_ordi
 }
 
 #[tokio::test]
+async fn add_folio_line_idempotent_fractional_amount_does_not_consume_claim_or_write() {
+    let pool = test_pool().await;
+    seed_room(&pool, "B-FOLIO-FRACTION").await.unwrap();
+    seed_active_booking(&pool, "B-FOLIO-FRACTION", "B-FOLIO-FRACTION")
+        .await
+        .unwrap();
+    let ctx = crate::command_idempotency::WriteCommandContext::for_internal_test(
+        "req-folio-fraction",
+        "idem-folio-fraction",
+        "add_folio_line",
+    );
+
+    let error = add_folio_line_idempotent(
+        &pool,
+        &ctx,
+        "B-FOLIO-FRACTION",
+        "laundry",
+        "Fractional amount",
+        15_000.5,
+        Some("staff-1"),
+    )
+    .await
+    .expect_err("fractional amount rejected");
+    assert_eq!(error.code, crate::app_error::codes::BOOKING_INVALID_STATE);
+
+    let folio_count: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM folio_lines WHERE booking_id = ?")
+            .bind("B-FOLIO-FRACTION")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(folio_count, 0);
+
+    let claim_count: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM command_idempotency
+         WHERE command_name = 'add_folio_line' AND idempotency_key = ?",
+    )
+    .bind("idem-folio-fraction")
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(claim_count, 0);
+}
+
+#[tokio::test]
 async fn folio_line_insert_rolls_back_with_parent_transaction() {
     let pool = test_pool().await;
     seed_room(&pool, "FOLIO-1").await.unwrap();
@@ -5468,7 +5510,7 @@ async fn folio_line_insert_rolls_back_with_parent_transaction() {
         "B-FOLIO-1",
         "laundry",
         "Rollback laundry",
-        25_000.0,
+        25_000,
         Some("staff-1"),
         "2026-04-15T12:00:00+07:00",
     )
@@ -5500,7 +5542,7 @@ async fn insert_folio_line_with_origin_writes_origin_key_and_ordinal() {
         &booking_id,
         "laundry",
         "Laundry with origin",
-        25_000.0,
+        25_000,
         Some("staff-1"),
         "2026-04-27T08:00:00+07:00",
         &origin,

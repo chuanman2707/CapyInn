@@ -2,6 +2,7 @@ use super::{emit_db_update, get_user_id, AppState};
 use crate::{
     app_error::{codes, CommandError, CommandResult},
     command_idempotency::WriteCommandContext,
+    money::MoneyVnd,
     queries::booking::billing_queries,
     services::booking::billing_service,
 };
@@ -18,7 +19,7 @@ pub async fn add_folio_line(
     booking_id: String,
     category: String,
     description: String,
-    amount: f64,
+    amount: MoneyVnd,
     idempotency_key: String,
 ) -> CommandResult<crate::models::FolioLine> {
     let user_id = get_user_id(&state);
@@ -33,7 +34,7 @@ pub async fn add_folio_line(
         &booking_id,
         &category,
         &description,
-        amount,
+        amount as f64,
         user_id.as_deref(),
     )
     .await?;

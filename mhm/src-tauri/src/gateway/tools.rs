@@ -11,13 +11,14 @@ use super::models::*;
 use super::policy::{
     guard_write_tool, CANCEL_RESERVATION_META, CREATE_RESERVATION_META, MODIFY_RESERVATION_META,
 };
-use crate::app_error::{CommandError, CommandResult};
+use crate::app_error::{codes, CommandError, CommandResult};
 use crate::app_identity;
 use crate::command_idempotency::{
     stable_request_hash, system_error, ActorType, WriteCommandContext,
 };
 use crate::commands;
 use crate::models::{BookingFilter, CreateReservationRequest, InvoiceData};
+use crate::money::{MoneyVnd, MAX_TRANSPORT_SAFE_MONEY_VND};
 use crate::services::settings_store::get_setting;
 
 fn hotel_info_field_from_json(json_str: &str, field: &str) -> Option<String> {
@@ -143,6 +144,26 @@ fn tool_error_envelope(tool: &str, request_id: &str, error: CommandError) -> Str
         },
     }))
     .unwrap()
+}
+
+fn gateway_non_negative_money_vnd(
+    value: Option<f64>,
+    field: &str,
+) -> CommandResult<Option<MoneyVnd>> {
+    let Some(value) = value else {
+        return Ok(None);
+    };
+    if !value.is_finite()
+        || value < 0.0
+        || value.fract() != 0.0
+        || value > MAX_TRANSPORT_SAFE_MONEY_VND as f64
+    {
+        return Err(CommandError::user(
+            codes::VALIDATION_INVALID_INPUT,
+            format!("{field} must be a whole non-negative VND amount"),
+        ));
+    }
+    Ok(Some(value as MoneyVnd))
 }
 
 #[cfg(test)]
@@ -612,6 +633,37 @@ mod tests {
             .expect("booking row")
             .get("status");
         assert_eq!(stored, "booked");
+    }
+
+    #[tokio::test]
+    async fn create_reservation_tool_rejects_fractional_deposit_amount() {
+        let _env_lock = async_env_lock().lock().await;
+        let _env = EnvVarGuard::set("CAPYINN_ENABLE_HIGH_RISK_MCP_WRITES", "1");
+
+        let pool = test_pool().await;
+        seed_room(&pool, "R201", "standard").await;
+        seed_pricing_rule(&pool, "standard", 600_000.0).await;
+        let tools = HotelTools::new(pool.clone(), None);
+        let mut input = create_reservation_input("R201");
+        input.deposit_amount = Some(50_000.5);
+
+        let output = tools
+            .create_reservation(Parameters(input), mcp_request_id("req-create-fractional"))
+            .await;
+
+        let envelope: Value = serde_json::from_str(&output).expect("error envelope json");
+        assert_eq!(envelope["ok"].as_bool(), Some(false));
+        assert_eq!(
+            envelope["error"]["code"].as_str(),
+            Some(codes::VALIDATION_INVALID_INPUT)
+        );
+
+        let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM bookings WHERE room_id = ?")
+            .bind("R201")
+            .fetch_one(&pool)
+            .await
+            .expect("booking count");
+        assert_eq!(count, 0);
     }
 
     #[tokio::test]
@@ -1133,6 +1185,14 @@ impl HotelTools {
             }
         };
 
+        let deposit_amount =
+            match gateway_non_negative_money_vnd(input.deposit_amount, "deposit_amount") {
+                Ok(amount) => amount,
+                Err(error) => {
+                    return tool_error_envelope("create_reservation", &request_id_text, error);
+                }
+            };
+
         let req = CreateReservationRequest {
             room_id: input.room_id,
             guest_name: input.guest_name,
@@ -1141,7 +1201,7 @@ impl HotelTools {
             check_in_date: input.check_in_date,
             check_out_date: input.check_out_date,
             nights: input.nights,
-            deposit_amount: input.deposit_amount,
+            deposit_amount,
             source: input.source.or(Some("ai-agent".to_string())),
             notes: input.notes,
         };

@@ -1,4 +1,4 @@
-use super::{emit_db_update, get_f64, get_user, AppState};
+use super::{emit_db_update, get_money_vnd, get_optional_money_vnd, get_user, AppState};
 use crate::services::booking::reservation_lifecycle::{self, ReservationCancelResponse};
 use crate::{
     app_error::{
@@ -740,9 +740,9 @@ pub async fn do_get_rooms_availability(
             room_type: rr.get("type"),
             floor: rr.get("floor"),
             has_balcony: rr.get::<i32, _>("has_balcony") == 1,
-            base_price: get_f64(rr, "base_price"),
+            base_price: get_money_vnd(rr, "base_price"),
             max_guests: rr.try_get::<i32, _>("max_guests").unwrap_or(2),
-            extra_person_fee: rr.try_get::<f64, _>("extra_person_fee").unwrap_or(0.0),
+            extra_person_fee: get_money_vnd(rr, "extra_person_fee"),
             status: rr.get("status"),
         };
 
@@ -760,8 +760,8 @@ pub async fn do_get_rooms_availability(
                     expected_checkout: r.get("expected_checkout"),
                     actual_checkout: r.get("actual_checkout"),
                     nights: r.get("nights"),
-                    total_price: get_f64(&r, "total_price"),
-                    paid_amount: get_f64(&r, "paid_amount"),
+                    total_price: get_money_vnd(&r, "total_price"),
+                    paid_amount: get_money_vnd(&r, "paid_amount"),
                     status: r.get("status"),
                     source: r.get("source"),
                     notes: r.get("notes"),
@@ -789,7 +789,7 @@ pub async fn do_get_rooms_availability(
                 scheduled_checkout: r
                     .get::<Option<String>, _>("scheduled_checkout")
                     .unwrap_or_default(),
-                deposit_amount: r.try_get::<f64, _>("deposit_amount").unwrap_or(0.0),
+                deposit_amount: get_optional_money_vnd(r, "deposit_amount").unwrap_or(0),
                 status: r.get("status"),
             })
             .collect();
@@ -839,7 +839,7 @@ mod tests {
             check_in_date: "2026-04-25".to_string(),
             check_out_date: "2026-04-27".to_string(),
             nights: 2,
-            deposit_amount: Some(500000.0),
+            deposit_amount: Some(500_000),
             source: Some("zalo".to_string()),
             notes: Some("Khách thích tầng cao".to_string()),
         }

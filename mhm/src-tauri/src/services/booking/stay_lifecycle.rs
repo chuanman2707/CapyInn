@@ -16,6 +16,7 @@ use super::{
         begin_immediate_tx, begin_tx, ensure_one_row_affected, fetch_booking,
         insert_room_calendar_rows, invalid_state_transition, lookup_booking_room_id,
         map_room_calendar_insert_error, parse_booking_datetime, read_f64_or_zero,
+        read_money_vnd_or_zero, whole_money_vnd_from_f64,
     },
 };
 
@@ -115,6 +116,7 @@ pub async fn check_in(
         &pricing_type,
     )
     .await?;
+    let total_price = whole_money_vnd_from_f64(pricing.total, "total_price")?;
 
     let booking_id = uuid::Uuid::new_v4().to_string();
     let guest_manifest = create_guest_manifest(&mut tx, &req.guests, &check_in_at)
@@ -134,7 +136,7 @@ pub async fn check_in(
     .bind(&check_in_at)
     .bind(&expected_checkout)
     .bind(req.nights)
-    .bind(pricing.total)
+    .bind(total_price)
     .bind(status::booking::ACTIVE)
     .bind(req.source.as_deref().unwrap_or("walk-in"))
     .bind(&req.notes)
@@ -153,17 +155,22 @@ pub async fn check_in(
     record_charge_tx(
         &mut tx,
         &booking_id,
-        pricing.total,
+        total_price as f64,
         "Tiền phòng",
         check_in_at.clone(),
     )
     .await
     .map_err(mark_write_db_error)?;
 
-    if let Some(paid_amount) = req.paid_amount.filter(|amount| *amount > 0.0) {
-        record_payment_tx(&mut tx, &booking_id, paid_amount, "Thanh toán khi check-in")
-            .await
-            .map_err(mark_write_db_error)?;
+    if let Some(paid_amount) = req.paid_amount.filter(|amount| *amount > 0) {
+        record_payment_tx(
+            &mut tx,
+            &booking_id,
+            paid_amount as f64,
+            "Thanh toán khi check-in",
+        )
+        .await
+        .map_err(mark_write_db_error)?;
     }
 
     insert_occupied_calendar_rows(
@@ -195,7 +202,7 @@ pub async fn check_in(
         pool,
         &booking_id,
         format!("Không tìm thấy booking {}", booking_id),
-        read_f64_or_zero,
+        read_money_vnd_or_zero,
     )
     .await
 }
@@ -405,11 +412,13 @@ pub async fn preview_checkout_settlement_at(
     let settlement = preview_checkout_settlement_tx(&mut tx, &req, now).await?;
 
     tx.rollback().await.map_err(BookingError::from)?;
+    let recommended_total =
+        whole_money_vnd_from_f64(settlement.recommended_total, "recommended_total")?;
 
     Ok(CheckoutSettlementPreview {
         settlement_mode: req.settlement_mode,
         settled_nights: settlement.settled_nights,
-        recommended_total: settlement.recommended_total,
+        recommended_total,
         explanation: settlement.explanation,
     })
 }
@@ -423,11 +432,12 @@ pub async fn check_out_at(
     req: CheckOutRequest,
     now: DateTime<Local>,
 ) -> BookingResult<()> {
-    if req.final_total < 0.0 {
+    if req.final_total < 0 {
         return Err(BookingError::validation(
             "Tổng quyết toán phải lớn hơn hoặc bằng 0".to_string(),
         ));
     }
+    let final_total = req.final_total as f64;
 
     let room_id = lookup_booking_room_id(pool, &req.booking_id).await?;
     let _lock_guard = crate::aggregate_locks::global_manager()
@@ -455,13 +465,13 @@ pub async fn check_out_at(
     )?;
     let actual_checkout = now.to_rfc3339();
 
-    if settlement.already_paid > req.final_total {
+    if settlement.already_paid > final_total {
         return Err(BookingError::validation(
             "Overpaid booking requires refund handling before checkout".to_string(),
         ));
     }
 
-    let charge_delta = req.final_total - settlement.original_total;
+    let charge_delta = final_total - settlement.original_total;
     if charge_delta.abs() > f64::EPSILON {
         let adjustment_note = if charge_delta < 0.0 {
             "Điều chỉnh giảm tiền phòng khi quyết toán check-out"
@@ -480,14 +490,19 @@ pub async fn check_out_at(
         .map_err(mark_write_db_error)?;
     }
 
-    let payment_delta = req.final_total - settlement.already_paid;
+    let payment_delta = final_total - settlement.already_paid;
     if payment_delta > f64::EPSILON {
-        record_payment_tx(&mut tx, &req.booking_id, payment_delta, "Thanh toán khi check-out")
-            .await
-            .map_err(mark_write_db_error)?;
+        record_payment_tx(
+            &mut tx,
+            &req.booking_id,
+            payment_delta,
+            "Thanh toán khi check-out",
+        )
+        .await
+        .map_err(mark_write_db_error)?;
     }
 
-    let manual_override = (req.final_total - settlement.recommended_total).abs() > f64::EPSILON;
+    let manual_override = (final_total - settlement.recommended_total).abs() > f64::EPSILON;
     let pricing_snapshot = checkout_settlement_snapshot(
         req.settlement_mode,
         settlement.original_nights,
@@ -495,7 +510,7 @@ pub async fn check_out_at(
         settlement.settled_nights,
         &settlement.reporting_checkout,
         settlement.original_total,
-        req.final_total,
+        final_total,
         manual_override,
     );
 
@@ -504,17 +519,17 @@ pub async fn check_out_at(
          SET status = ?, actual_checkout = ?, nights = ?, total_price = ?, pricing_snapshot = ?
          WHERE id = ? AND status = ?",
     )
-        .bind(status::booking::CHECKED_OUT)
-        .bind(&actual_checkout)
-        .bind(settlement.settled_nights)
-        .bind(req.final_total)
-        .bind(pricing_snapshot)
-        .bind(&req.booking_id)
-        .bind(status::booking::ACTIVE)
-        .execute(&mut *tx)
-        .await
-        .map_err(BookingError::from)
-        .map_err(mark_write_db_error)?;
+    .bind(status::booking::CHECKED_OUT)
+    .bind(&actual_checkout)
+    .bind(settlement.settled_nights)
+    .bind(req.final_total)
+    .bind(pricing_snapshot)
+    .bind(&req.booking_id)
+    .bind(status::booking::ACTIVE)
+    .execute(&mut *tx)
+    .await
+    .map_err(BookingError::from)
+    .map_err(mark_write_db_error)?;
     ensure_one_row_affected(
         result,
         format!("booking {} is no longer active", req.booking_id),
@@ -595,7 +610,7 @@ pub async fn extend_stay(pool: &Pool<Sqlite>, booking_id: &str) -> BookingResult
         format!("booking {booking_id} changed rooms before extend-stay"),
     )?;
     let current_nights: i32 = booking.get("nights");
-    let current_total = read_f64_or_zero(&booking, "total_price");
+    let current_total = read_money_vnd_or_zero(&booking, "total_price");
     let old_expected_checkout: String = booking.get("expected_checkout");
     let pricing_type = booking
         .get::<Option<String>, _>("pricing_type")
@@ -641,8 +656,12 @@ pub async fn extend_stay(pool: &Pool<Sqlite>, booking_id: &str) -> BookingResult
         &pricing_type,
     )
     .await?;
+    let incremental_total =
+        whole_money_vnd_from_f64(incremental_pricing.total, "incremental_total")?;
 
-    let new_total = current_total + incremental_pricing.total;
+    let new_total = current_total
+        .checked_add(incremental_total)
+        .ok_or_else(|| BookingError::validation("total_price overflowed".to_string()))?;
     let new_checkout = new_expected.to_rfc3339();
 
     let result = sqlx::query(
@@ -678,7 +697,7 @@ pub async fn extend_stay(pool: &Pool<Sqlite>, booking_id: &str) -> BookingResult
     record_charge_tx(
         &mut tx,
         booking_id,
-        incremental_pricing.total,
+        incremental_total as f64,
         "Extended stay +1 night",
         Local::now().to_rfc3339(),
     )
@@ -690,7 +709,7 @@ pub async fn extend_stay(pool: &Pool<Sqlite>, booking_id: &str) -> BookingResult
         pool,
         booking_id,
         format!("Không tìm thấy booking {}", booking_id),
-        read_f64_or_zero,
+        read_money_vnd_or_zero,
     )
     .await
 }

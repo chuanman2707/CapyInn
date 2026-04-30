@@ -113,10 +113,7 @@ fn validate_onboarding_request(req: &OnboardingCompleteRequest) -> Result<(), St
         if trimmed.is_empty() {
             return Err("Tên loại phòng là bắt buộc".to_string());
         }
-        if room_type.base_price < 0.0
-            || room_type.extra_person_fee < 0.0
-            || room_type.max_guests < 1
-        {
+        if room_type.base_price < 0 || room_type.extra_person_fee < 0 || room_type.max_guests < 1 {
             return Err(format!(
                 "Loại phòng '{}' có giá trị không hợp lệ",
                 room_type.name
@@ -138,10 +135,7 @@ fn validate_onboarding_request(req: &OnboardingCompleteRequest) -> Result<(), St
         if room.id.trim().is_empty() || room.name.trim().is_empty() {
             return Err("Mỗi phòng phải có mã và tên".to_string());
         }
-        if room.floor < 1
-            || room.base_price < 0.0
-            || room.extra_person_fee < 0.0
-            || room.max_guests < 1
+        if room.floor < 1 || room.base_price < 0 || room.extra_person_fee < 0 || room.max_guests < 1
         {
             return Err(format!("Phòng '{}' có dữ liệu không hợp lệ", room.id));
         }
@@ -293,7 +287,7 @@ async fn insert_pricing_rules(
         )
         .bind(uuid::Uuid::new_v4().to_string())
         .bind(room_type.name.trim())
-        .bind((room_type.base_price / 5.0).max(0.0))
+        .bind((room_type.base_price / 5).max(0))
         .bind(room_type.base_price)
         .bind(room_type.base_price)
         .bind("22:00")

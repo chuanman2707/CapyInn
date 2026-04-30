@@ -1,4 +1,4 @@
-use super::{emit_db_update, get_f64, require_admin, AppState};
+use super::{emit_db_update, get_f64, get_money_vnd, require_admin, AppState};
 use sqlx::{Pool, Row, Sqlite};
 use tauri::State;
 
@@ -24,9 +24,9 @@ pub async fn do_get_pricing_rules(pool: &Pool<Sqlite>) -> Result<Vec<serde_json:
             serde_json::json!({
                 "id": r.get::<String, _>("id"),
                 "room_type": r.get::<String, _>("room_type"),
-                "hourly_rate": get_f64(r, "hourly_rate"),
-                "overnight_rate": get_f64(r, "overnight_rate"),
-                "daily_rate": get_f64(r, "daily_rate"),
+                "hourly_rate": get_money_vnd(r, "hourly_rate"),
+                "overnight_rate": get_money_vnd(r, "overnight_rate"),
+                "daily_rate": get_money_vnd(r, "daily_rate"),
                 "overnight_start": r.get::<String, _>("overnight_start"),
                 "overnight_end": r.get::<String, _>("overnight_end"),
                 "daily_checkin": r.get::<String, _>("daily_checkin"),
@@ -133,9 +133,9 @@ pub async fn do_calculate_price_preview(
     let rule = match row {
         Some(r) => crate::pricing::PricingRule {
             room_type: r.get("room_type"),
-            hourly_rate: get_f64(&r, "hourly_rate"),
-            overnight_rate: get_f64(&r, "overnight_rate"),
-            daily_rate: get_f64(&r, "daily_rate"),
+            hourly_rate: get_money_vnd(&r, "hourly_rate") as f64,
+            overnight_rate: get_money_vnd(&r, "overnight_rate") as f64,
+            daily_rate: get_money_vnd(&r, "daily_rate") as f64,
             overnight_start: r.get("overnight_start"),
             overnight_end: r.get("overnight_end"),
             daily_checkin: r.get("daily_checkin"),
@@ -153,7 +153,7 @@ pub async fn do_calculate_price_preview(
                     .map_err(|e| e.to_string())?;
             let fallback_price = fallback_row
                 .as_ref()
-                .map(|r| get_f64(r, "base_price"))
+                .map(|r| get_money_vnd(r, "base_price") as f64)
                 .unwrap_or(350_000.0);
 
             crate::pricing::PricingRule {

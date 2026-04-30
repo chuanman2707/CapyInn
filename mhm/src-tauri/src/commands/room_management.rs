@@ -1,4 +1,4 @@
-use super::{emit_db_update, get_f64, require_admin, AppState};
+use super::{emit_db_update, get_money_vnd, require_admin, AppState};
 use crate::app_error::{codes, log_system_error, CommandError, CommandResult};
 use crate::app_identity;
 use crate::models::*;
@@ -64,7 +64,10 @@ async fn do_update_room(pool: &Pool<Sqlite>, req: UpdateRoomRequest) -> CommandR
     })?;
 
     if result.rows_affected() == 0 {
-        return Err(CommandError::user(codes::ROOM_NOT_FOUND, "Phòng không tồn tại"));
+        return Err(CommandError::user(
+            codes::ROOM_NOT_FOUND,
+            "Phòng không tồn tại",
+        ));
     }
 
     let r = sqlx::query("SELECT id, name, type, floor, has_balcony, base_price, max_guests, extra_person_fee, status FROM rooms WHERE id = ?")
@@ -85,9 +88,9 @@ async fn do_update_room(pool: &Pool<Sqlite>, req: UpdateRoomRequest) -> CommandR
         room_type: r.get("type"),
         floor: r.get("floor"),
         has_balcony: r.get::<i32, _>("has_balcony") == 1,
-        base_price: get_f64(&r, "base_price"),
+        base_price: get_money_vnd(&r, "base_price"),
         max_guests: r.try_get::<i32, _>("max_guests").unwrap_or(2),
-        extra_person_fee: r.try_get::<f64, _>("extra_person_fee").unwrap_or(0.0),
+        extra_person_fee: get_money_vnd(&r, "extra_person_fee"),
         status: r.get("status"),
     })
 }
@@ -132,7 +135,10 @@ async fn do_create_room(pool: &Pool<Sqlite>, req: CreateRoomRequest) -> CommandR
             )
         })?;
     if existing.is_some() {
-        return Err(CommandError::user(codes::ROOM_ALREADY_EXISTS, "Phòng đã tồn tại"));
+        return Err(CommandError::user(
+            codes::ROOM_ALREADY_EXISTS,
+            "Phòng đã tồn tại",
+        ));
     }
 
     sqlx::query(
@@ -204,7 +210,12 @@ async fn do_delete_room(pool: &Pool<Sqlite>, room_id: String) -> CommandResult<(
         })?;
     let room_row = match room_row {
         Some(row) => row,
-        None => return Err(CommandError::user(codes::ROOM_NOT_FOUND, "Phòng không tồn tại")),
+        None => {
+            return Err(CommandError::user(
+                codes::ROOM_NOT_FOUND,
+                "Phòng không tồn tại",
+            ))
+        }
     };
     let status: String = room_row.get("status");
 
@@ -371,7 +382,12 @@ async fn do_delete_room_type(pool: &Pool<Sqlite>, room_type_id: String) -> Comma
         })?;
     let rt_row = match rt_row {
         Some(row) => row,
-        None => return Err(CommandError::user(codes::ROOM_TYPE_NOT_FOUND, "Loại phòng không tồn tại")),
+        None => {
+            return Err(CommandError::user(
+                codes::ROOM_TYPE_NOT_FOUND,
+                "Loại phòng không tồn tại",
+            ))
+        }
     };
     let type_name: String = rt_row.get("name");
 
@@ -444,8 +460,8 @@ pub async fn export_csv(state: State<'_, AppState>) -> Result<String, String> {
             r.get::<String, _>("check_in_at"),
             r.get::<String, _>("expected_checkout"),
             r.get::<i32, _>("nights"),
-            get_f64(r, "total_price"),
-            get_f64(r, "paid_amount"),
+            get_money_vnd(r, "total_price"),
+            get_money_vnd(r, "paid_amount"),
             r.get::<String, _>("status"),
             r.get::<Option<String>, _>("source").unwrap_or_default(),
         ));
@@ -497,9 +513,9 @@ mod tests {
                 type TEXT NOT NULL,
                 floor INTEGER NOT NULL,
                 has_balcony INTEGER NOT NULL,
-                base_price REAL NOT NULL,
+                base_price INTEGER NOT NULL,
                 max_guests INTEGER NOT NULL,
-                extra_person_fee REAL NOT NULL,
+                extra_person_fee INTEGER NOT NULL,
                 status TEXT NOT NULL
             )",
         )
@@ -587,9 +603,9 @@ mod tests {
         assert_eq!(updated.room_type, "standard");
         assert_eq!(updated.floor, 1);
         assert!(updated.has_balcony);
-        assert_eq!(updated.base_price, 300_000.0);
+        assert_eq!(updated.base_price, 300_000);
         assert_eq!(updated.max_guests, 2);
-        assert_eq!(updated.extra_person_fee, 100_000.0);
+        assert_eq!(updated.extra_person_fee, 100_000);
     }
 
     #[tokio::test]
@@ -605,9 +621,9 @@ mod tests {
                 room_type: Some("suite".to_string()),
                 floor: Some(5),
                 has_balcony: Some(false),
-                base_price: Some(450_000.0),
+                base_price: Some(450_000),
                 max_guests: Some(4),
-                extra_person_fee: Some(150_000.0),
+                extra_person_fee: Some(150_000),
             },
         )
         .await
@@ -616,9 +632,9 @@ mod tests {
         assert_eq!(updated.room_type, "suite");
         assert_eq!(updated.floor, 5);
         assert!(!updated.has_balcony);
-        assert_eq!(updated.base_price, 450_000.0);
+        assert_eq!(updated.base_price, 450_000);
         assert_eq!(updated.max_guests, 4);
-        assert_eq!(updated.extra_person_fee, 150_000.0);
+        assert_eq!(updated.extra_person_fee, 150_000);
 
         let row = sqlx::query(
             "SELECT type, floor, has_balcony, base_price, max_guests, extra_person_fee
@@ -633,9 +649,9 @@ mod tests {
         assert_eq!(row.get::<String, _>("type"), "suite");
         assert_eq!(row.get::<i32, _>("floor"), 5);
         assert_eq!(row.get::<i32, _>("has_balcony"), 0);
-        assert_eq!(row.get::<f64, _>("base_price"), 450_000.0);
+        assert_eq!(row.get::<i64, _>("base_price"), 450_000);
         assert_eq!(row.get::<i32, _>("max_guests"), 4);
-        assert_eq!(row.get::<f64, _>("extra_person_fee"), 150_000.0);
+        assert_eq!(row.get::<i64, _>("extra_person_fee"), 150_000);
     }
 
     #[tokio::test]
@@ -675,9 +691,9 @@ mod tests {
                 room_type: "standard".to_string(),
                 floor: 2,
                 has_balcony: false,
-                base_price: 500_000.0,
+                base_price: 500_000,
                 max_guests: 2,
-                extra_person_fee: 150_000.0,
+                extra_person_fee: 150_000,
             },
         )
         .await
@@ -694,7 +710,7 @@ mod tests {
 
         let error = do_delete_room(&pool, "R301".to_string())
             .await
-        .expect_err("occupied room must fail");
+            .expect_err("occupied room must fail");
 
         assert_eq!(error.code, codes::ROOM_DELETE_OCCUPIED);
         assert_eq!(error.message, "Không thể xóa phòng đang có khách");
@@ -714,10 +730,13 @@ mod tests {
 
         let error = do_delete_room(&pool, "R302".to_string())
             .await
-        .expect_err("active booking must fail");
+            .expect_err("active booking must fail");
 
         assert_eq!(error.code, codes::ROOM_DELETE_ACTIVE_BOOKING);
-        assert_eq!(error.message, "Không thể xóa phòng có booking đang hoạt động");
+        assert_eq!(
+            error.message,
+            "Không thể xóa phòng có booking đang hoạt động"
+        );
     }
 
     #[tokio::test]
@@ -758,7 +777,7 @@ mod tests {
 
         let error = do_delete_room_type(&pool, "standard".to_string())
             .await
-        .expect_err("room type in use must fail");
+            .expect_err("room type in use must fail");
 
         assert_eq!(error.code, codes::ROOM_TYPE_IN_USE);
         assert_eq!(error.message, "Không thể xóa loại phòng đang được sử dụng");

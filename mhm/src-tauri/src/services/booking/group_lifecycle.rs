@@ -13,6 +13,7 @@ use crate::{
         pricing::calculate_stay_price_tx, BookingError, BookingResult, OriginSideEffect,
     },
     models::{status, BookingGroup, GroupCheckinRequest, GroupCheckoutRequest},
+    money::MoneyVnd,
 };
 
 use super::{
@@ -20,7 +21,7 @@ use super::{
     guest_service::{create_group_guest_manifest, link_booking_guests},
     support::{
         begin_immediate_tx, ensure_one_row_affected, ensure_rows_affected,
-        insert_room_calendar_rows, invalid_state_transition,
+        insert_room_calendar_rows, invalid_state_transition, whole_money_vnd_from_f64,
     },
 };
 
@@ -28,6 +29,18 @@ const GROUP_ACTIVE: &str = "active";
 const GROUP_BOOKED: &str = "booked";
 const GROUP_COMPLETED: &str = "completed";
 const GROUP_PARTIAL_CHECKOUT: &str = "partial_checkout";
+
+fn allocate_positive_money_evenly(total: MoneyVnd, count: usize) -> Vec<MoneyVnd> {
+    if total <= 0 || count == 0 {
+        return vec![0; count];
+    }
+    let count = count as MoneyVnd;
+    let base = total / count;
+    let remainder = total % count;
+    (0..count)
+        .map(|index| base + if index < remainder { 1 } else { 0 })
+        .collect()
+}
 
 fn map_group_checkin_command_error(error: BookingError) -> CommandError {
     match error {
@@ -73,7 +86,7 @@ fn normalized_room_ids(room_ids: &[String]) -> Vec<String> {
 fn build_group_checkin_hash_payload(req: &GroupCheckinRequest) -> serde_json::Value {
     let paid_minor_units = req
         .paid_amount
-        .map(|amount| json!(format!("{:.0}", amount * 100.0)))
+        .map(|amount| json!((i128::from(amount) * 100).to_string()))
         .unwrap_or(serde_json::Value::Null);
     let guests_per_room = req
         .guests_per_room
@@ -175,7 +188,7 @@ pub async fn group_checkin_idempotent(
         .check_in_date
         .clone()
         .unwrap_or_else(|| Local::now().format("%Y-%m-%d").to_string());
-    let paid_amount = req.paid_amount.unwrap_or(0.0);
+    let paid_amount = req.paid_amount.unwrap_or(0);
 
     let hash_payload = build_group_checkin_hash_payload(&req);
     let ledger_intent = SanitizedLedgerIntent::from_pairs([
@@ -199,7 +212,7 @@ pub async fn group_checkin_idempotent(
         ("has_source", json!(req.source.is_some())),
         ("has_notes", json!(req.notes.is_some())),
         ("has_paid_amount", json!(req.paid_amount.is_some())),
-        ("paid_amount_positive", json!(paid_amount > 0.0)),
+        ("paid_amount_positive", json!(paid_amount > 0)),
     ])?;
     let summary =
         CommandLedgerSummary::new("Group check-in")?.with_business_date(effective_checkin_date)?;
@@ -223,7 +236,7 @@ pub async fn group_checkin_idempotent(
             },
             move |tx| {
                 Box::pin(async move {
-                    let payment_origins = if req_for_service.paid_amount.unwrap_or(0.0) > 0.0 {
+                    let payment_origins = if req_for_service.paid_amount.unwrap_or(0) > 0 {
                         Some(build_group_checkin_payment_origins(
                             &origin_idempotency_key,
                             &req_for_service.room_ids,
@@ -300,15 +313,12 @@ async fn group_checkin_tx(
     .execute(&mut **tx)
     .await?;
 
-    let paid_total = req.paid_amount.unwrap_or(0.0);
-    let paid_per_room = if paid_total <= 0.0 || req.room_ids.is_empty() {
-        0.0
-    } else {
-        paid_total / req.room_ids.len() as f64
-    };
+    let paid_allocations =
+        allocate_positive_money_evenly(req.paid_amount.unwrap_or(0), req.room_ids.len());
     let mut master_booking_id: Option<String> = None;
 
-    for room_id in &req.room_ids {
+    for (room_index, room_id) in req.room_ids.iter().enumerate() {
+        let paid_for_room = paid_allocations.get(room_index).copied().unwrap_or(0);
         let is_master = room_id == &req.master_room_id;
         let room_guests = req
             .guests_per_room
@@ -360,7 +370,8 @@ async fn group_checkin_tx(
             "nightly",
         )
         .await?;
-        let deposit_amount = if is_reservation { paid_per_room } else { 0.0 };
+        let total_price = whole_money_vnd_from_f64(pricing.total, "total_price")?;
+        let deposit_amount = if is_reservation { paid_for_room } else { 0 };
         let guest_phone = room_guests.first().and_then(|guest| guest.phone.as_deref());
 
         sqlx::query(
@@ -377,7 +388,7 @@ async fn group_checkin_tx(
         .bind(&booking_checkin_at)
         .bind(&booking_checkout_at)
         .bind(req.nights)
-        .bind(pricing.total)
+        .bind(total_price)
         .bind(booking_status)
         .bind(req.source.as_deref().unwrap_or("walk-in"))
         .bind(req.notes.as_deref())
@@ -411,19 +422,19 @@ async fn group_checkin_tx(
             record_charge_tx(
                 tx,
                 &booking_id,
-                pricing.total,
+                total_price as f64,
                 "Tiền phòng (đoàn)",
                 booking_checkin_at.clone(),
             )
             .await?;
 
-            if paid_per_room > 0.0 {
+            if paid_for_room > 0 {
                 if let Some(origins) = payment_origins_by_room {
                     if let Some(origin) = origins.get(room_id) {
                         record_payment_with_origin_tx(
                             tx,
                             &booking_id,
-                            paid_per_room,
+                            paid_for_room as f64,
                             "Thanh toán group check-in",
                             origin,
                         )
@@ -432,32 +443,38 @@ async fn group_checkin_tx(
                         record_payment_tx(
                             tx,
                             &booking_id,
-                            paid_per_room,
+                            paid_for_room as f64,
                             "Thanh toán group check-in",
                         )
                         .await?;
                     }
                 } else {
-                    record_payment_tx(tx, &booking_id, paid_per_room, "Thanh toán group check-in")
-                        .await?;
+                    record_payment_tx(
+                        tx,
+                        &booking_id,
+                        paid_for_room as f64,
+                        "Thanh toán group check-in",
+                    )
+                    .await?;
                 }
             }
-        } else if paid_per_room > 0.0 {
+        } else if paid_for_room > 0 {
             if let Some(origins) = payment_origins_by_room {
                 if let Some(origin) = origins.get(room_id) {
                     record_payment_with_origin_tx(
                         tx,
                         &booking_id,
-                        paid_per_room,
+                        paid_for_room as f64,
                         "Đặt cọc đoàn",
                         origin,
                     )
                     .await?;
                 } else {
-                    record_payment_tx(tx, &booking_id, paid_per_room, "Đặt cọc đoàn").await?;
+                    record_payment_tx(tx, &booking_id, paid_for_room as f64, "Đặt cọc đoàn")
+                        .await?;
                 }
             } else {
-                record_payment_tx(tx, &booking_id, paid_per_room, "Đặt cọc đoàn").await?;
+                record_payment_tx(tx, &booking_id, paid_for_room as f64, "Đặt cọc đoàn").await?;
             }
         }
 
@@ -678,7 +695,7 @@ pub async fn group_checkout(pool: &Pool<Sqlite>, req: GroupCheckoutRequest) -> B
         .execute(&mut *tx)
         .await?;
 
-    if let Some(final_paid) = req.final_paid.filter(|amount| *amount > 0.0) {
+    if let Some(final_paid) = req.final_paid.filter(|amount| *amount > 0) {
         let target_booking: (String,) = sqlx::query_as(
             "SELECT id
              FROM bookings
@@ -694,7 +711,7 @@ pub async fn group_checkout(pool: &Pool<Sqlite>, req: GroupCheckoutRequest) -> B
         record_payment_tx(
             &mut tx,
             &target_booking.0,
-            final_paid,
+            final_paid as f64,
             "Thanh toán group checkout",
         )
         .await?;
@@ -925,6 +942,14 @@ fn parse_date(value: &str) -> BookingResult<NaiveDate> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn allocate_positive_money_evenly_preserves_total_without_fractional_rows() {
+        let allocation = allocate_positive_money_evenly(100_000, 3);
+
+        assert_eq!(allocation, vec![33_334, 33_333, 33_333]);
+        assert_eq!(allocation.iter().sum::<MoneyVnd>(), 100_000);
+    }
 
     #[test]
     fn map_group_checkin_command_error_maps_invalid_state_transition_code() {

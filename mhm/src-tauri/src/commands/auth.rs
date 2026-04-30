@@ -1,8 +1,8 @@
-use super::{get_f64, get_user, require_admin, AppState};
+use super::{get_money_vnd, get_user, require_admin, AppState};
 use crate::app_error::{codes, log_system_error, CommandError, CommandResult};
 use crate::models::*;
-use sqlx::Row;
 use serde_json::json;
+use sqlx::Row;
 use tauri::State;
 
 // ═══════════════════════════════════════════════
@@ -10,10 +10,7 @@ use tauri::State;
 // ═══════════════════════════════════════════════
 
 #[tauri::command]
-pub async fn login(
-    state: State<'_, AppState>,
-    req: LoginRequest,
-) -> CommandResult<LoginResponse> {
+pub async fn login(state: State<'_, AppState>, req: LoginRequest) -> CommandResult<LoginResponse> {
     use sha2::{Digest, Sha256};
     let mut hasher = Sha256::new();
     hasher.update(req.pin.as_bytes());
@@ -25,11 +22,18 @@ pub async fn login(
     .bind(&pin_hash)
     .fetch_optional(&state.db)
     .await
-    .map_err(|error| log_system_error("login", error.to_string(), json!({ "step": "fetch_user" })))?;
+    .map_err(|error| {
+        log_system_error("login", error.to_string(), json!({ "step": "fetch_user" }))
+    })?;
 
     let row = match row {
         Some(row) => row,
-        None => return Err(CommandError::user(codes::AUTH_INVALID_PIN, "Mã PIN không đúng")),
+        None => {
+            return Err(CommandError::user(
+                codes::AUTH_INVALID_PIN,
+                "Mã PIN không đúng",
+            ))
+        }
     };
 
     let user = User {
@@ -75,7 +79,11 @@ pub async fn list_users(state: State<'_, AppState>) -> CommandResult<Vec<User>> 
             .fetch_all(&state.db)
             .await
             .map_err(|error| {
-                log_system_error("list_users", error.to_string(), json!({ "step": "fetch_users" }))
+                log_system_error(
+                    "list_users",
+                    error.to_string(),
+                    json!({ "step": "fetch_users" }),
+                )
             })?;
 
     Ok(rows
@@ -172,7 +180,7 @@ pub async fn search_guest_by_phone(
             doc_number: r.get("doc_number"),
             nationality: r.get("nationality"),
             total_stays: r.get::<i32, _>("total_stays"),
-            total_spent: get_f64(r, "total_spent"),
+            total_spent: get_money_vnd(r, "total_spent"),
             last_visit: r.get("last_visit"),
         })
         .collect())

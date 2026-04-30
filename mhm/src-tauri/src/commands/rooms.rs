@@ -1,4 +1,4 @@
-use super::{emit_db_update, get_f64, get_user_id, AppState};
+use super::{emit_db_update, get_money_vnd, get_user_id, AppState};
 use crate::{
     app_error::{
         codes, correlation_context, log_system_error, normalize_correlation_id,
@@ -35,9 +35,9 @@ pub async fn do_get_rooms(pool: &Pool<Sqlite>) -> Result<Vec<Room>, String> {
             room_type: r.get("type"),
             floor: r.get("floor"),
             has_balcony: r.get::<i32, _>("has_balcony") == 1,
-            base_price: get_f64(r, "base_price"),
+            base_price: get_money_vnd(r, "base_price"),
             max_guests: r.try_get::<i32, _>("max_guests").unwrap_or(2),
-            extra_person_fee: r.try_get::<f64, _>("extra_person_fee").unwrap_or(0.0),
+            extra_person_fee: get_money_vnd(r, "extra_person_fee"),
             status: r.get("status"),
         })
         .collect();
@@ -386,9 +386,9 @@ pub async fn do_get_room_detail(
         room_type: row.get("type"),
         floor: row.get("floor"),
         has_balcony: row.get::<i32, _>("has_balcony") == 1,
-        base_price: get_f64(&row, "base_price"),
+        base_price: get_money_vnd(&row, "base_price"),
         max_guests: row.try_get::<i32, _>("max_guests").unwrap_or(2),
-        extra_person_fee: row.try_get::<f64, _>("extra_person_fee").unwrap_or(0.0),
+        extra_person_fee: get_money_vnd(&row, "extra_person_fee"),
         status: row.get("status"),
     };
 
@@ -406,8 +406,8 @@ pub async fn do_get_room_detail(
         expected_checkout: r.get("expected_checkout"),
         actual_checkout: r.get("actual_checkout"),
         nights: r.get("nights"),
-        total_price: get_f64(&r, "total_price"),
-        paid_amount: get_f64(&r, "paid_amount"),
+        total_price: get_money_vnd(&r, "total_price"),
+        paid_amount: get_money_vnd(&r, "paid_amount"),
         status: r.get("status"),
         source: r.get("source"),
         notes: r.get("notes"),
@@ -765,7 +765,7 @@ pub async fn get_expenses(
         .map(|r| Expense {
             id: r.get("id"),
             category: r.get("category"),
-            amount: get_f64(r, "amount"),
+            amount: get_money_vnd(r, "amount"),
             note: r.get("note"),
             expense_date: r.get("expense_date"),
             created_at: r.get("created_at"),
@@ -844,8 +844,8 @@ pub async fn scan_image(path: String) -> Result<crate::ocr::CccdInfo, String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        check_in_failure_context, check_out_failure_context,
-        complete_housekeeping_clean_to_vacant, map_stay_error,
+        check_in_failure_context, check_out_failure_context, complete_housekeeping_clean_to_vacant,
+        map_stay_error,
     };
     use crate::app_error::{
         codes, record_command_failure_with_db_group, AppErrorKind, CorrelationIdSource,
@@ -1097,7 +1097,7 @@ mod tests {
             nights: 2,
             source: Some("walk-in".to_string()),
             notes: Some("Late arrival".to_string()),
-            paid_amount: Some(500000.0),
+            paid_amount: Some(500_000),
             pricing_type: None,
         });
 
@@ -1120,7 +1120,7 @@ mod tests {
         let context = check_out_failure_context(&CheckOutRequest {
             booking_id: "booking-1".to_string(),
             settlement_mode: CheckoutSettlementMode::Hourly,
-            final_total: 400000.0,
+            final_total: 400_000,
         });
 
         assert_eq!(
@@ -1128,7 +1128,7 @@ mod tests {
             json!({
                 "booking_id": "booking-1",
                 "settlement_mode": "hourly",
-                "final_total": 400000.0,
+                "final_total": 400000,
             })
         );
     }
@@ -1146,7 +1146,7 @@ mod tests {
         let context = check_out_failure_context(&CheckOutRequest {
             booking_id: "booking-1".to_string(),
             settlement_mode: CheckoutSettlementMode::BookedNights,
-            final_total: 2500000.0,
+            final_total: 2_500_000,
         });
         let (error, db_error_group) = map_stay_error(
             "check_out",

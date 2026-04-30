@@ -16,6 +16,7 @@ use crate::{
         pricing::calculate_stay_price_tx, BookingError, BookingResult, OriginSideEffect,
     },
     models::{status, Booking, CreateReservationRequest, ModifyReservationRequest},
+    money::MoneyVnd,
 };
 
 use super::{
@@ -26,7 +27,7 @@ use super::{
     guest_service::{create_reservation_guest_manifest, link_booking_guests},
     support::{
         ensure_one_row_affected, insert_room_calendar_rows, invalid_state_transition,
-        read_f64_strict,
+        read_f64_or_zero, read_money_vnd_or_zero, read_money_vnd_strict, whole_money_vnd_from_f64,
     },
 };
 
@@ -130,28 +131,18 @@ fn map_reservation_command_error(error: BookingError) -> CommandError {
     }
 }
 
-pub(crate) fn canonical_vnd_units(amount: Option<f64>) -> CommandResult<i64> {
+pub(crate) fn canonical_vnd_units(amount: Option<MoneyVnd>) -> CommandResult<i64> {
     let Some(amount) = amount else {
         return Ok(0);
     };
 
-    if !amount.is_finite() || amount < 0.0 || amount.fract() != 0.0 {
+    if amount < 0 {
         return Err(CommandError::user(
             codes::BOOKING_INVALID_STATE,
             "Reservation deposit must be a whole non-negative VND amount",
         ));
     }
-
-    let units_text = format!("{amount:.0}");
-    let units = units_text.parse::<u128>().map_err(system_error)?;
-    if units > i64::MAX as u128 {
-        return Err(CommandError::user(
-            codes::BOOKING_INVALID_STATE,
-            "Reservation deposit must be a whole non-negative VND amount",
-        ));
-    }
-
-    Ok(units as i64)
+    Ok(amount)
 }
 
 fn create_room_lock_keys(intent: &serde_json::Value) -> CommandResult<Vec<String>> {
@@ -247,7 +238,7 @@ pub async fn create_reservation_tx(
     }
 
     let now = Local::now().to_rfc3339();
-    let deposit_amount = req.deposit_amount.unwrap_or(0.0);
+    let deposit_amount = req.deposit_amount.unwrap_or(0);
     let pricing = calculate_stay_price_tx(
         tx,
         &req.room_id,
@@ -256,6 +247,7 @@ pub async fn create_reservation_tx(
         "nightly",
     )
     .await?;
+    let total_price = whole_money_vnd_from_f64(pricing.total, "total_price")?;
 
     let guest_manifest = create_reservation_guest_manifest(
         tx,
@@ -282,7 +274,7 @@ pub async fn create_reservation_tx(
     .bind(&req.check_in_date)
     .bind(&req.check_out_date)
     .bind(derived_nights)
-    .bind(pricing.total)
+    .bind(total_price)
     .bind(status::booking::BOOKED)
     .bind(req.source.as_deref().unwrap_or("phone"))
     .bind(req.notes.as_deref())
@@ -310,13 +302,13 @@ pub async fn create_reservation_tx(
     .await
     .map_err(mark_write_db_error)?;
 
-    if deposit_amount > 0.0 {
+    if deposit_amount > 0 {
         match origin {
             Some(origin) => {
                 record_deposit_with_origin_tx(
                     tx,
                     &booking_id,
-                    deposit_amount,
+                    deposit_amount as f64,
                     "Reservation deposit",
                     origin,
                 )
@@ -324,9 +316,14 @@ pub async fn create_reservation_tx(
                 .map_err(mark_write_db_error)?;
             }
             None => {
-                record_deposit_tx(tx, &booking_id, deposit_amount, "Reservation deposit")
-                    .await
-                    .map_err(mark_write_db_error)?;
+                record_deposit_tx(
+                    tx,
+                    &booking_id,
+                    deposit_amount as f64,
+                    "Reservation deposit",
+                )
+                .await
+                .map_err(mark_write_db_error)?;
             }
         }
     }
@@ -340,7 +337,7 @@ pub async fn fetch_booking_by_id(pool: &Pool<Sqlite>, booking_id: &str) -> Booki
         pool,
         booking_id,
         format!("Booking not found: {}", booking_id),
-        read_f64_strict,
+        read_money_vnd_strict,
     )
     .await
 }
@@ -370,8 +367,8 @@ pub async fn fetch_booking_by_id_tx(
         expected_checkout: row.get("expected_checkout"),
         actual_checkout: row.get("actual_checkout"),
         nights: row.get("nights"),
-        total_price: read_f64_strict(&row, "total_price"),
-        paid_amount: read_f64_strict(&row, "paid_amount"),
+        total_price: read_money_vnd_strict(&row, "total_price"),
+        paid_amount: read_money_vnd_strict(&row, "paid_amount"),
         status: row.get("status"),
         source: row.get("source"),
         notes: row.get("notes"),
@@ -501,7 +498,7 @@ pub async fn cancel_reservation_tx(
         )));
     }
 
-    let deposit_amount: f64 = booking.get("deposit_amount");
+    let deposit_amount = read_f64_or_zero(&booking, "deposit_amount");
 
     let result = sqlx::query("UPDATE bookings SET status = ? WHERE id = ? AND status = ?")
         .bind(status::booking::CANCELLED)
@@ -619,6 +616,7 @@ pub async fn confirm_reservation_tx(
         &reservation.pricing_type,
     )
     .await?;
+    let total_price = whole_money_vnd_from_f64(pricing.total, "total_price")?;
     let actual_nights = (effective_checkout_date - today).num_days() as i32;
     let check_in_at = now.to_rfc3339();
 
@@ -646,7 +644,7 @@ pub async fn confirm_reservation_tx(
     .bind(&check_in_at)
     .bind(&effective_checkout)
     .bind(actual_nights)
-    .bind(pricing.total)
+    .bind(total_price)
     .bind(reservation.paid_amount)
     .bind(booking_id)
     .bind(status::booking::BOOKED)
@@ -677,7 +675,7 @@ pub async fn confirm_reservation_tx(
             record_charge_with_origin_tx(
                 tx,
                 booking_id,
-                pricing.total,
+                total_price as f64,
                 "Room charge (reservation)",
                 check_in_at,
                 origin,
@@ -688,7 +686,7 @@ pub async fn confirm_reservation_tx(
             record_charge_tx(
                 tx,
                 booking_id,
-                pricing.total,
+                total_price as f64,
                 "Room charge (reservation)",
                 check_in_at,
             )
@@ -767,6 +765,7 @@ pub async fn modify_reservation_tx(
         &reservation.pricing_type,
     )
     .await?;
+    let total_price = whole_money_vnd_from_f64(pricing.total, "total_price")?;
 
     let result = sqlx::query(
         "UPDATE bookings
@@ -778,7 +777,7 @@ pub async fn modify_reservation_tx(
     .bind(&req.new_check_in_date)
     .bind(&req.new_check_out_date)
     .bind(derived_nights)
-    .bind(pricing.total)
+    .bind(total_price)
     .bind(&req.booking_id)
     .bind(status::booking::BOOKED)
     .bind(locked_room_id)
@@ -1058,7 +1057,7 @@ async fn load_booked_reservation(
 
     Ok(BookedReservation {
         room_id: row.get("room_id"),
-        paid_amount: row.get::<Option<f64>, _>("paid_amount").unwrap_or(0.0),
+        paid_amount: read_money_vnd_or_zero(&row, "paid_amount"),
         scheduled_checkout,
         pricing_type: row
             .get::<Option<String>, _>("pricing_type")
@@ -1090,7 +1089,7 @@ async fn reject_no_show_confirmation(
 
 struct BookedReservation {
     room_id: String,
-    paid_amount: f64,
+    paid_amount: MoneyVnd,
     scheduled_checkout: String,
     pricing_type: String,
 }
