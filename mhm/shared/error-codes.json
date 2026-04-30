@@ -105,6 +105,11 @@
     "defaultMessage": "Ngày kiểm toán này đã được chạy"
   },
   {
+    "code": "VALIDATION_INVALID_INPUT",
+    "kind": "user",
+    "defaultMessage": "Dữ liệu không hợp lệ"
+  },
+  {
     "code": "WRITE_TOOL_DISABLED",
     "kind": "user",
     "defaultMessage": "Thao tác ghi qua MCP đang bị tắt."

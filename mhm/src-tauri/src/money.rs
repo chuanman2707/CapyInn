@@ -100,6 +100,8 @@ mod tests {
     fn validate_transport_money_rejects_unsafe_integer() {
         let error = validate_transport_money_vnd(MAX_TRANSPORT_SAFE_MONEY_VND + 1, "amount")
             .expect_err("unsafe integer must fail");
+        assert_eq!(error.code, codes::VALIDATION_INVALID_INPUT);
+        assert_eq!(error.kind, crate::app_error::AppErrorKind::User);
         assert!(error.message.contains("amount"));
     }
 

@@ -539,6 +539,11 @@ mod tests {
                 "Ngày kiểm toán này đã được chạy",
             ),
             (
+                codes::VALIDATION_INVALID_INPUT,
+                AppErrorKind::User,
+                "Dữ liệu không hợp lệ",
+            ),
+            (
                 codes::WRITE_TOOL_DISABLED,
                 AppErrorKind::User,
                 "Thao tác ghi qua MCP đang bị tắt.",
