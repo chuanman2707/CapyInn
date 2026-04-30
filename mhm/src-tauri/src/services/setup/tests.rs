@@ -49,17 +49,17 @@ fn sample_onboarding_request(with_pin: bool) -> OnboardingCompleteRequest {
         room_types: vec![
             OnboardingRoomTypeInput {
                 name: "Deluxe".to_string(),
-                base_price: 500_000.0,
+                base_price: 500_000,
                 max_guests: 4,
-                extra_person_fee: 50_000.0,
+                extra_person_fee: 50_000,
                 default_has_balcony: true,
                 bed_note: Some("2 giường đôi".to_string()),
             },
             OnboardingRoomTypeInput {
                 name: "Standard".to_string(),
-                base_price: 300_000.0,
+                base_price: 300_000,
                 max_guests: 2,
-                extra_person_fee: 100_000.0,
+                extra_person_fee: 100_000,
                 default_has_balcony: false,
                 bed_note: Some("1 giường đôi".to_string()),
             },
@@ -71,9 +71,9 @@ fn sample_onboarding_request(with_pin: bool) -> OnboardingCompleteRequest {
                 floor: 1,
                 room_type_name: "Deluxe".to_string(),
                 has_balcony: true,
-                base_price: 500_000.0,
+                base_price: 500_000,
                 max_guests: 4,
-                extra_person_fee: 50_000.0,
+                extra_person_fee: 50_000,
             },
             OnboardingRoomInput {
                 id: "1B".to_string(),
@@ -81,9 +81,9 @@ fn sample_onboarding_request(with_pin: bool) -> OnboardingCompleteRequest {
                 floor: 1,
                 room_type_name: "Standard".to_string(),
                 has_balcony: false,
-                base_price: 300_000.0,
+                base_price: 300_000,
                 max_guests: 2,
-                extra_person_fee: 100_000.0,
+                extra_person_fee: 100_000,
             },
         ],
         app_lock: OnboardingAppLockInput {
@@ -215,7 +215,9 @@ async fn complete_setup_without_app_lock_creates_a_default_user_ready_for_login(
         .expect("default_user_id should load")
         .expect("default_user_id should exist");
 
-    let current_user = status.current_user.expect("unlocked setup should hydrate the default user");
+    let current_user = status
+        .current_user
+        .expect("unlocked setup should hydrate the default user");
     assert_eq!(current_user.id, default_user_id);
     assert_eq!(current_user.name, "Owner");
 }

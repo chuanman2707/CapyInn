@@ -1,6 +1,8 @@
 import { useMemo, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 
+import { formatAppError } from "@/lib/appError";
+import { assertNonNegativeMoneyVnd } from "@/lib/money";
 import type { BootstrapStatus } from "@/types";
 
 import { generateRoomPlan } from "./generateRoomPlan";
@@ -101,9 +103,12 @@ export default function OnboardingWizard({ onCompleted }: { onCompleted?: (statu
           },
           room_types: draft.roomTypes.map((roomType) => ({
             name: roomType.name,
-            base_price: roomType.basePrice,
+            base_price: assertNonNegativeMoneyVnd(roomType.basePrice, "base_price"),
             max_guests: roomType.maxGuests,
-            extra_person_fee: roomType.extraPersonFee,
+            extra_person_fee: assertNonNegativeMoneyVnd(
+              roomType.extraPersonFee,
+              "extra_person_fee",
+            ),
             default_has_balcony: roomType.defaultHasBalcony,
             bed_note: roomType.bedNote ?? null,
           })),
@@ -113,9 +118,12 @@ export default function OnboardingWizard({ onCompleted }: { onCompleted?: (statu
             floor: room.floor,
             room_type_name: room.roomTypeName,
             has_balcony: room.hasBalcony,
-            base_price: room.basePrice,
+            base_price: assertNonNegativeMoneyVnd(room.basePrice, "base_price"),
             max_guests: room.maxGuests,
-            extra_person_fee: room.extraPersonFee,
+            extra_person_fee: assertNonNegativeMoneyVnd(
+              room.extraPersonFee,
+              "extra_person_fee",
+            ),
           })),
           app_lock: {
             enabled: draft.appLock.enabled,
@@ -128,7 +136,7 @@ export default function OnboardingWizard({ onCompleted }: { onCompleted?: (statu
       clearDraft();
       onCompleted?.(status);
     } catch (err) {
-      setError(String(err));
+      setError(formatAppError(err));
     } finally {
       setSaving(false);
     }

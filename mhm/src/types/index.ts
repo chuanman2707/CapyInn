@@ -1,3 +1,5 @@
+import type { MoneyVnd } from "@/lib/money";
+
 export type RoomStatus = "vacant" | "occupied" | "cleaning" | "booked";
 export type BookingStatus =
   | "active"
@@ -19,7 +21,7 @@ export interface Room {
   type: string;
   floor: number;
   has_balcony: boolean;
-  base_price: number;
+  base_price: MoneyVnd;
   status: RoomStatus;
 }
 
@@ -47,8 +49,8 @@ export interface Booking {
   expected_checkout: string;
   actual_checkout?: string;
   nights: number;
-  total_price: number;
-  paid_amount: number;
+  total_price: MoneyVnd;
+  paid_amount: MoneyVnd;
   status: BookingStatus;
   source?: BookingSource | null;
   notes?: string;
@@ -60,13 +62,13 @@ export type CheckoutSettlementMode = "actual_nights" | "hourly" | "booked_nights
 export interface CheckoutSettlementPreview {
   settlement_mode: CheckoutSettlementMode;
   settled_nights: number;
-  recommended_total: number;
+  recommended_total: MoneyVnd;
   explanation: string;
 }
 
 export interface CheckoutSettlementPayload {
   settlementMode: CheckoutSettlementMode;
-  finalTotal: number;
+  finalTotal: MoneyVnd;
 }
 
 export interface RoomWithBooking {
@@ -80,7 +82,7 @@ export interface DashboardStats {
   occupied: number;
   vacant: number;
   cleaning: number;
-  revenue_today: number;
+  revenue_today: MoneyVnd;
 }
 
 export interface HousekeepingTask {
@@ -96,17 +98,17 @@ export interface HousekeepingTask {
 export interface Expense {
   id: string;
   category: string;
-  amount: number;
+  amount: MoneyVnd;
   note?: string;
   expense_date: string;
   created_at: string;
 }
 
 export interface RevenueStats {
-  total_revenue: number;
+  total_revenue: MoneyVnd;
   rooms_sold: number;
   occupancy_rate: number;
-  daily_revenue: { date: string; revenue: number }[];
+  daily_revenue: { date: string; revenue: MoneyVnd }[];
 }
 
 export type HotelTab =
@@ -159,7 +161,7 @@ export interface GuestSummary {
   doc_number: string;
   nationality: string | null;
   total_stays: number;
-  total_spent: number;
+  total_spent: MoneyVnd;
   last_visit: string | null;
 }
 
@@ -181,8 +183,8 @@ export interface EditableBooking {
   check_in_at: string;
   expected_checkout: string;
   nights: number;
-  total_price: number;
-  deposit_amount: number | null;
+  total_price: MoneyVnd;
+  deposit_amount: MoneyVnd | null;
   source: string | null;
   notes?: string | null;
 }
@@ -195,14 +197,14 @@ export interface RoomTypeItem {
 
 export interface ConfigurableRoom extends Room {
   max_guests: number;
-  extra_person_fee: number;
+  extra_person_fee: MoneyVnd;
 }
 
 export interface PricingRuleData {
   room_type: string;
-  hourly_rate: number;
-  overnight_rate: number;
-  daily_rate: number;
+  hourly_rate: MoneyVnd;
+  overnight_rate: MoneyVnd;
+  daily_rate: MoneyVnd;
   early_checkin_surcharge_pct: number;
   late_checkout_surcharge_pct: number;
   weekend_uplift_pct: number;
@@ -269,12 +271,12 @@ export interface BookingWithGuest {
   expected_checkout: string;
   actual_checkout: string | null;
   nights: number;
-  total_price: number;
-  paid_amount: number;
+  total_price: MoneyVnd;
+  paid_amount: MoneyVnd;
   status: BookingStatus;
   source: BookingSource | null;
   booking_type: string | null;
-  deposit_amount: number | null;
+  deposit_amount: MoneyVnd | null;
   scheduled_checkin: string | null;
   scheduled_checkout: string | null;
   guest_phone: string | null;
@@ -294,12 +296,12 @@ export interface ActivityItem {
 
 export interface ExpenseItem {
   category: string;
-  amount: number;
+  amount: MoneyVnd;
 }
 
 export interface ChartDataPoint {
   name: string;
-  revenue: number;
+  revenue: MoneyVnd;
 }
 
 export interface RoomAvailability {
@@ -311,10 +313,10 @@ export interface RoomAvailability {
 export interface AuditLog {
   id: string;
   audit_date: string;
-  total_revenue: number;
-  room_revenue: number;
-  folio_revenue: number;
-  total_expenses: number;
+  total_revenue: MoneyVnd;
+  room_revenue: MoneyVnd;
+  folio_revenue: MoneyVnd;
+  total_expenses: MoneyVnd;
   occupancy_pct: number;
   rooms_sold: number;
   total_rooms: number;
@@ -323,14 +325,14 @@ export interface AuditLog {
 }
 
 export interface AnalyticsData {
-  total_revenue: number;
+  total_revenue: MoneyVnd;
   occupancy_rate: number;
   adr: number;
   revpar: number;
-  daily_revenue: { date: string; revenue: number }[];
-  revenue_by_source: { name: string; value: number }[];
-  expenses_by_category: { category: string; amount: number }[];
-  top_rooms: { room: string; revenue: number }[];
+  daily_revenue: { date: string; revenue: MoneyVnd }[];
+  revenue_by_source: { name: string; value: MoneyVnd }[];
+  expenses_by_category: { category: string; amount: MoneyVnd }[];
+  top_rooms: { room: string; revenue: MoneyVnd }[];
 }
 
 export type { CrashReportSummary } from "@/lib/crashReporting/types";
@@ -358,8 +360,8 @@ export interface GroupService {
   booking_id: string | null;
   name: string;
   quantity: number;
-  unit_price: number;
-  total_price: number;
+  unit_price: MoneyVnd;
+  total_price: MoneyVnd;
   note: string | null;
   created_by: string | null;
   created_at: string;
@@ -376,13 +378,13 @@ export interface GroupCheckinRequest {
   nights: number;
   source?: string;
   notes?: string;
-  paid_amount?: number;
+  paid_amount?: MoneyVnd;
 }
 
 export interface GroupCheckoutRequest {
   group_id: string;
   booking_ids: string[];
-  final_paid?: number;
+  final_paid?: MoneyVnd;
 }
 
 export interface AddGroupServiceRequest {
@@ -390,7 +392,7 @@ export interface AddGroupServiceRequest {
   booking_id?: string;
   name: string;
   quantity: number;
-  unit_price: number;
+  unit_price: MoneyVnd;
   note?: string;
 }
 
@@ -398,10 +400,10 @@ export interface GroupDetailResponse {
   group: BookingGroup;
   bookings: BookingWithGuest[];
   services: GroupService[];
-  total_room_cost: number;
-  total_service_cost: number;
-  grand_total: number;
-  paid_amount: number;
+  total_room_cost: MoneyVnd;
+  total_service_cost: MoneyVnd;
+  grand_total: MoneyVnd;
+  paid_amount: MoneyVnd;
 }
 
 export interface AutoAssignResult {
@@ -417,11 +419,11 @@ export interface GroupInvoiceData {
   group: BookingGroup;
   rooms: GroupInvoiceRoomLine[];
   services: GroupService[];
-  subtotal_rooms: number;
-  subtotal_services: number;
-  grand_total: number;
-  paid_amount: number;
-  balance_due: number;
+  subtotal_rooms: MoneyVnd;
+  subtotal_services: MoneyVnd;
+  grand_total: MoneyVnd;
+  paid_amount: MoneyVnd;
+  balance_due: MoneyVnd;
   hotel_name: string;
   hotel_address: string;
   hotel_phone: string;
@@ -431,7 +433,7 @@ export interface GroupInvoiceRoomLine {
   room_name: string;
   room_type: string;
   nights: number;
-  price_per_night: number;
-  total: number;
+  price_per_night: MoneyVnd;
+  total: MoneyVnd;
   guest_name: string;
 }

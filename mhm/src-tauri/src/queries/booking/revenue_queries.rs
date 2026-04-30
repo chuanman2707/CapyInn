@@ -2,11 +2,12 @@ use chrono::{Duration, NaiveDate};
 use sqlx::{Pool, Row, Sqlite};
 
 use crate::{
-    commands::get_f64,
+    commands::get_money_vnd,
     models::{
         AnalyticsData, CategoryExpense, DailyRevenue, DashboardStats, RevenueStats, RoomRevenue,
         SourceRevenue,
     },
+    money::MoneyVnd,
 };
 
 pub async fn load_dashboard_stats_for_date(
@@ -80,19 +81,19 @@ pub async fn load_analytics(
         0.0
     };
     let adr = if room_nights_sold > 0.0 {
-        room_revenue / room_nights_sold
+        room_revenue as f64 / room_nights_sold
     } else {
         0.0
     };
     let period_days = period_days.max(1) as f64;
     let revpar = if total_rooms.0 > 0 {
-        room_revenue / (total_rooms.0 as f64 * period_days)
+        room_revenue as f64 / (total_rooms.0 as f64 * period_days)
     } else {
         0.0
     };
 
     let source_rows_sql = format!(
-        "SELECT source, CAST(COALESCE(SUM(amount), 0) AS REAL) AS value
+        "SELECT source, COALESCE(SUM(amount), 0) AS value
          FROM (
              SELECT COALESCE(b.source, 'walk-in') AS source,
                     {recognized_room_revenue_amount} AS amount
@@ -123,12 +124,12 @@ pub async fn load_analytics(
         .iter()
         .map(|row| SourceRevenue {
             name: row.get("source"),
-            value: get_f64(row, "value"),
+            value: get_money_vnd(row, "value"),
         })
         .collect();
 
     let expense_rows = sqlx::query(
-        "SELECT category, CAST(COALESCE(SUM(amount), 0) AS REAL) AS amount
+        "SELECT category, COALESCE(SUM(amount), 0) AS amount
          FROM expenses
          WHERE DATE(expense_date) BETWEEN DATE(?) AND DATE(?)
          GROUP BY category
@@ -143,12 +144,12 @@ pub async fn load_analytics(
         .iter()
         .map(|row| CategoryExpense {
             category: row.get("category"),
-            amount: get_f64(row, "amount"),
+            amount: get_money_vnd(row, "amount"),
         })
         .collect();
 
     let room_rows_sql = format!(
-        "SELECT room_id, CAST(COALESCE(SUM(amount), 0) AS REAL) AS value
+        "SELECT room_id, COALESCE(SUM(amount), 0) AS value
          FROM (
              SELECT b.room_id AS room_id,
                     {recognized_room_revenue_amount} AS amount
@@ -180,7 +181,7 @@ pub async fn load_analytics(
         .iter()
         .map(|row| RoomRevenue {
             room: row.get("room_id"),
-            revenue: get_f64(row, "value"),
+            revenue: get_money_vnd(row, "value"),
         })
         .collect();
 
@@ -200,32 +201,32 @@ pub async fn load_room_revenue(
     pool: &Pool<Sqlite>,
     from: &str,
     to: &str,
-) -> Result<f64, sqlx::Error> {
+) -> Result<MoneyVnd, sqlx::Error> {
     let room_revenue_sql = format!(
-        "SELECT CAST(COALESCE(SUM(
+        "SELECT COALESCE(SUM(
             {}
-         ), 0) AS REAL)
+         ), 0) AS value
          FROM bookings
          WHERE {}",
         recognized_room_revenue_amount_sql(""),
         recognized_room_revenue_filter_sql(""),
     );
-    let row: (f64,) = sqlx::query_as(&room_revenue_sql)
+    let row = sqlx::query(&room_revenue_sql)
         .bind(to)
         .bind(from)
         .fetch_one(pool)
         .await?;
 
-    Ok(row.0)
+    Ok(get_money_vnd(&row, "value"))
 }
 
 pub async fn load_folio_revenue(
     pool: &Pool<Sqlite>,
     from: &str,
     to: &str,
-) -> Result<f64, sqlx::Error> {
-    let row: (f64,) = sqlx::query_as(
-        "SELECT CAST(COALESCE(SUM(amount), 0) AS REAL)
+) -> Result<MoneyVnd, sqlx::Error> {
+    let row = sqlx::query(
+        "SELECT COALESCE(SUM(amount), 0) AS value
          FROM folio_lines
          WHERE DATE(created_at) BETWEEN DATE(?) AND DATE(?)",
     )
@@ -234,16 +235,16 @@ pub async fn load_folio_revenue(
     .fetch_one(pool)
     .await?;
 
-    Ok(row.0)
+    Ok(get_money_vnd(&row, "value"))
 }
 
 pub async fn load_cancellation_fee_revenue(
     pool: &Pool<Sqlite>,
     from: &str,
     to: &str,
-) -> Result<f64, sqlx::Error> {
-    let row: (f64,) = sqlx::query_as(
-        "SELECT CAST(COALESCE(SUM(amount), 0) AS REAL)
+) -> Result<MoneyVnd, sqlx::Error> {
+    let row = sqlx::query(
+        "SELECT COALESCE(SUM(amount), 0) AS value
          FROM transactions
          WHERE type = 'cancellation_fee'
            AND DATE(created_at) BETWEEN DATE(?) AND DATE(?)",
@@ -253,14 +254,14 @@ pub async fn load_cancellation_fee_revenue(
     .fetch_one(pool)
     .await?;
 
-    Ok(row.0)
+    Ok(get_money_vnd(&row, "value"))
 }
 
 pub async fn load_total_revenue(
     pool: &Pool<Sqlite>,
     from: &str,
     to: &str,
-) -> Result<f64, sqlx::Error> {
+) -> Result<MoneyVnd, sqlx::Error> {
     Ok(load_room_revenue(pool, from, to).await?
         + load_folio_revenue(pool, from, to).await?
         + load_cancellation_fee_revenue(pool, from, to).await?)
@@ -279,7 +280,7 @@ pub async fn load_daily_revenue(
     while current <= end {
         let day = current.format("%Y-%m-%d").to_string();
         let revenue = load_total_revenue(pool, &day, &day).await?;
-        if revenue > 0.0 {
+        if revenue > 0 {
             daily_revenue.push(DailyRevenue { date: day, revenue });
         }
         current += Duration::days(1);

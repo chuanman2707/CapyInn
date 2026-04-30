@@ -18,6 +18,7 @@ use crate::command_idempotency::{
 };
 use crate::commands;
 use crate::models::{BookingFilter, CreateReservationRequest, InvoiceData};
+use crate::money::validate_non_negative_money_vnd;
 use crate::services::settings_store::get_setting;
 
 fn hotel_info_field_from_json(json_str: &str, field: &str) -> Option<String> {
@@ -83,12 +84,12 @@ fn format_invoice_text(inv: &InvoiceData) -> String {
     ));
 
     for line in &inv.pricing_breakdown {
-        text.push_str(&format!("  {} -- {}d\n", line.label, line.amount as i64));
+        text.push_str(&format!("  {} -- {}d\n", line.label, line.amount));
     }
 
     text.push_str(&format!(
         "\nSubtotal: {}d\nDeposit: {}d\nBALANCE DUE: {}d\n",
-        inv.total as i64, inv.deposit_amount as i64, inv.balance_due as i64,
+        inv.total, inv.deposit_amount, inv.balance_due,
     ));
 
     if let Some(ref policy) = inv.policy_text {
@@ -154,6 +155,7 @@ mod tests {
     use crate::app_error::{codes, CommandError};
     use crate::app_identity;
     use crate::commands::invoices;
+    use crate::money::MoneyVnd;
     use rmcp::handler::server::common::RequestId as McpRequestId;
     use rmcp::handler::server::wrapper::Parameters;
     use rmcp::model::NumberOrString;
@@ -190,7 +192,7 @@ mod tests {
         .expect("seed room");
     }
 
-    async fn seed_pricing_rule(pool: &Pool<Sqlite>, room_type: &str, daily_rate: f64) {
+    async fn seed_pricing_rule(pool: &Pool<Sqlite>, room_type: &str, daily_rate: MoneyVnd) {
         let now = "2026-04-15T10:00:00+07:00";
 
         sqlx::query(
@@ -217,7 +219,7 @@ mod tests {
         let phone = "0901234567";
         let check_in = "2026-04-20";
         let check_out = "2026-04-22";
-        let deposit = 50_000.0_f64;
+        let deposit = 50_000;
 
         sqlx::query(
             "INSERT INTO guests (
@@ -354,7 +356,7 @@ mod tests {
             check_in_date: "2026-04-20".to_string(),
             check_out_date: "2026-04-22".to_string(),
             nights: 2,
-            deposit_amount: Some(50_000.0),
+            deposit_amount: Some(50_000),
             source: Some("phone".to_string()),
             notes: Some("test reservation".to_string()),
         }
@@ -541,7 +543,7 @@ mod tests {
 
         let pool = test_pool().await;
         seed_room(&pool, "R199", "standard").await;
-        seed_pricing_rule(&pool, "standard", 600_000.0).await;
+        seed_pricing_rule(&pool, "standard", 600_000).await;
         let tools = HotelTools::new(pool.clone(), None);
 
         let output = tools
@@ -589,7 +591,7 @@ mod tests {
 
         let pool = test_pool().await;
         seed_room(&pool, "R200", "standard").await;
-        seed_pricing_rule(&pool, "standard", 600_000.0).await;
+        seed_pricing_rule(&pool, "standard", 600_000).await;
         let tools = HotelTools::new(pool.clone(), None);
 
         let output = tools
@@ -611,6 +613,25 @@ mod tests {
             .expect("booking row")
             .get("status");
         assert_eq!(stored, "booked");
+    }
+
+    #[tokio::test]
+    async fn create_reservation_input_rejects_fractional_deposit_amount() {
+        let payload = serde_json::json!({
+            "room_id": "R201",
+            "guest_name": "Nguyen Van A",
+            "guest_phone": "0900000000",
+            "guest_doc_number": "079123456789",
+            "check_in_date": "2026-04-20",
+            "check_out_date": "2026-04-22",
+            "nights": 2,
+            "deposit_amount": 50_000.5,
+            "source": "phone",
+            "notes": "test reservation"
+        });
+
+        serde_json::from_value::<CreateReservationInput>(payload)
+            .expect_err("fractional gateway money must fail deserialization");
     }
 
     #[tokio::test]
@@ -653,7 +674,7 @@ mod tests {
 
         let pool = test_pool().await;
         seed_room(&pool, "R202", "standard").await;
-        seed_pricing_rule(&pool, "standard", 600_000.0).await;
+        seed_pricing_rule(&pool, "standard", 600_000).await;
         seed_booked_reservation(&pool, "B202", "R202").await;
         let tools = HotelTools::new(pool.clone(), None);
 
@@ -717,7 +738,7 @@ mod tests {
 
         let pool = test_pool().await;
         seed_room(&pool, "R203", "standard").await;
-        seed_pricing_rule(&pool, "standard", 600_000.0).await;
+        seed_pricing_rule(&pool, "standard", 600_000).await;
         let tools = HotelTools::new(pool.clone(), None);
 
         let first_output = tools
@@ -785,7 +806,7 @@ mod tests {
         let pool = test_pool().await;
         seed_room(&pool, "R204A", "standard").await;
         seed_room(&pool, "R204B", "standard").await;
-        seed_pricing_rule(&pool, "standard", 600_000.0).await;
+        seed_pricing_rule(&pool, "standard", 600_000).await;
         let tools = HotelTools::new(pool.clone(), None);
 
         let first_output = tools
@@ -823,7 +844,7 @@ mod tests {
 
         let pool = test_pool().await;
         seed_room(&pool, "R205", "standard").await;
-        seed_pricing_rule(&pool, "standard", 600_000.0).await;
+        seed_pricing_rule(&pool, "standard", 600_000).await;
         let tools = HotelTools::new(pool.clone(), None);
 
         let first_output = tools
@@ -1150,6 +1171,17 @@ impl HotelTools {
             }
         };
 
+        let deposit_amount = match input
+            .deposit_amount
+            .map(|amount| validate_non_negative_money_vnd(amount, "deposit_amount"))
+            .transpose()
+        {
+            Ok(amount) => amount,
+            Err(error) => {
+                return tool_error_envelope("create_reservation", &request_id_text, error);
+            }
+        };
+
         let req = CreateReservationRequest {
             room_id: input.room_id,
             guest_name: input.guest_name,
@@ -1158,7 +1190,7 @@ impl HotelTools {
             check_in_date: input.check_in_date,
             check_out_date: input.check_out_date,
             nights: input.nights,
-            deposit_amount: input.deposit_amount,
+            deposit_amount,
             source: input.source.or(Some("ai-agent".to_string())),
             notes: input.notes,
         };

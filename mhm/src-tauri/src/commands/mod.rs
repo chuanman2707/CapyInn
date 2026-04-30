@@ -1,5 +1,6 @@
 use crate::app_error::{codes, CommandError, CommandResult};
 use crate::models::*;
+use crate::money::MoneyVnd;
 use sqlx::{Pool, Row, Sqlite};
 use std::sync::{Arc, Mutex};
 use tauri::{Emitter, State};
@@ -10,6 +11,32 @@ use tauri::{Emitter, State};
 pub(crate) fn get_f64(row: &sqlx::sqlite::SqliteRow, col: &str) -> f64 {
     row.try_get::<f64, _>(col)
         .unwrap_or_else(|_| row.get::<i64, _>(col) as f64)
+}
+
+pub(crate) fn get_money_vnd(row: &sqlx::sqlite::SqliteRow, col: &str) -> MoneyVnd {
+    row.try_get::<MoneyVnd, _>(col).unwrap_or_else(|_| {
+        let value = row.get::<f64, _>(col);
+        assert!(
+            value.is_finite() && value.fract() == 0.0,
+            "money column {col} must be a whole VND amount"
+        );
+        value as MoneyVnd
+    })
+}
+
+pub(crate) fn get_optional_money_vnd(row: &sqlx::sqlite::SqliteRow, col: &str) -> Option<MoneyVnd> {
+    row.try_get::<Option<MoneyVnd>, _>(col).unwrap_or_else(|_| {
+        row.try_get::<Option<f64>, _>(col)
+            .ok()
+            .flatten()
+            .map(|value| {
+                assert!(
+                    value.is_finite() && value.fract() == 0.0,
+                    "money column {col} must be a whole VND amount"
+                );
+                value as MoneyVnd
+            })
+    })
 }
 
 pub struct AppState {
@@ -28,9 +55,8 @@ pub(crate) fn get_user_id(state: &State<'_, AppState>) -> Option<String> {
 }
 
 pub(crate) fn require_admin_user(user: Option<User>) -> CommandResult<User> {
-    let user = user.ok_or_else(|| {
-        CommandError::user(codes::AUTH_NOT_AUTHENTICATED, "Chưa đăng nhập")
-    })?;
+    let user =
+        user.ok_or_else(|| CommandError::user(codes::AUTH_NOT_AUTHENTICATED, "Chưa đăng nhập"))?;
     if user.role != "admin" {
         return Err(CommandError::user(
             codes::AUTH_FORBIDDEN,
@@ -114,7 +140,10 @@ mod tests {
         let error =
             require_admin_user(Some(mock_user("receptionist"))).expect_err("non-admin must fail");
         assert_eq!(error.code, codes::AUTH_FORBIDDEN);
-        assert_eq!(error.message, "Không có quyền thực hiện. Yêu cầu quyền Admin.");
+        assert_eq!(
+            error.message,
+            "Không có quyền thực hiện. Yêu cầu quyền Admin."
+        );
         assert_eq!(error.kind, AppErrorKind::User);
         assert!(error.support_id.is_none());
     }

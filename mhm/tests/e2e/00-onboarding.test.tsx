@@ -146,4 +146,30 @@ describe("00 — Onboarding", () => {
             expect(screen.getByTitle("Dashboard")).toBeInTheDocument();
         });
     });
+
+    it("shows clean money validation errors during onboarding", async () => {
+        const user = userEvent.setup();
+        setMockResponse("get_bootstrap_status", () => ({
+            setup_completed: false,
+            app_lock_enabled: false,
+            current_user: null,
+        }));
+
+        render(<App />);
+
+        await fillHotelInfo(user);
+        await user.type(screen.getByLabelText(/tên loại phòng 1/i), "Garden");
+        await user.clear(screen.getByLabelText(/giá cơ bản 1/i));
+        await user.type(screen.getByLabelText(/giá cơ bản 1/i), "450000.5");
+        await user.click(screen.getByRole("button", { name: /tiếp tục/i }));
+        await user.click(screen.getByRole("button", { name: /tạo sơ đồ phòng/i }));
+        await user.click(screen.getByRole("button", { name: /tiếp tục/i }));
+        await user.click(screen.getByRole("radio", { name: /không dùng pin/i }));
+        await user.click(screen.getByRole("button", { name: /tiếp tục/i }));
+        await user.click(screen.getByRole("button", { name: /hoàn tất thiết lập/i }));
+
+        expect(await screen.findByText("base_price must be a safe integer VND value")).toBeInTheDocument();
+        expect(screen.queryByText(/^Error: base_price must be/)).not.toBeInTheDocument();
+        expect(invoke).not.toHaveBeenCalledWith("complete_onboarding", expect.anything());
+    });
 });

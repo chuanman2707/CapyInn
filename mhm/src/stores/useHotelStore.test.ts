@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const invoke = vi.hoisted(() => vi.fn());
 const invokeCommand = vi.hoisted(() => vi.fn());
@@ -23,6 +23,7 @@ import { useHotelStore } from "./useHotelStore";
 describe("useHotelStore monitoring context", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    vi.spyOn(console, "error").mockImplementation(() => {});
     createCorrelationId.mockReturnValue("COR-1A2B3C4D");
     createIdempotencyKey.mockReturnValue("group_checkin:IDEM-1");
     invokeCommand.mockResolvedValue(undefined);
@@ -60,6 +61,10 @@ describe("useHotelStore monitoring context", () => {
       isGroupCheckinOpen: false,
       groups: [],
     });
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
   });
 
   it("passes scrubbed monitoring context for checkIn", async () => {
@@ -181,6 +186,84 @@ describe("useHotelStore monitoring context", () => {
       {
         correlationId: "COR-1A2B3C4D",
       },
+    );
+  });
+
+  it("rejects fractional checkIn paid_amount before invoking backend", async () => {
+    await expect(
+      useHotelStore.getState().checkIn(
+        "101",
+        [{ full_name: "Nguyen Van A", doc_number: "012345678901" }],
+        1,
+        100000.5,
+      ),
+    ).rejects.toThrow(/paid_amount/);
+
+    expect(invokeCommand).not.toHaveBeenCalledWith(
+      "check_in",
+      expect.anything(),
+      expect.anything(),
+    );
+  });
+
+  it("rejects fractional checkOut final_total before invoking backend", async () => {
+    await expect(
+      useHotelStore.getState().checkOut("booking-1", "hourly", 400000.5),
+    ).rejects.toThrow(/final_total/);
+
+    expect(invokeCommand).not.toHaveBeenCalledWith(
+      "check_out",
+      expect.anything(),
+      expect.anything(),
+    );
+  });
+
+  it("rejects fractional group money before invoking backend", async () => {
+    await expect(
+      useHotelStore.getState().groupCheckIn({
+        group_name: "Retry Group",
+        organizer_name: "Organizer",
+        room_ids: ["101", "102"],
+        master_room_id: "101",
+        guests_per_room: {},
+        nights: 1,
+        paid_amount: 100000.5,
+      }),
+    ).rejects.toThrow(/paid_amount/);
+
+    await expect(
+      useHotelStore.getState().groupCheckout({
+        group_id: "group-1",
+        booking_ids: ["booking-1"],
+        final_paid: 100000.5,
+      }),
+    ).rejects.toThrow(/final_paid/);
+
+    expect(invokeCommand).not.toHaveBeenCalledWith(
+      "group_checkin",
+      expect.anything(),
+      expect.anything(),
+    );
+    expect(invokeCommand).not.toHaveBeenCalledWith(
+      "group_checkout",
+      expect.anything(),
+      expect.anything(),
+    );
+  });
+
+  it("rejects fractional group service unit_price before invoking backend", async () => {
+    await expect(
+      useHotelStore.getState().addGroupService({
+        group_id: "group-1",
+        name: "Laundry",
+        quantity: 1,
+        unit_price: 50000.5,
+      }),
+    ).rejects.toThrow(/unit_price/);
+
+    expect(invoke).not.toHaveBeenCalledWith(
+      "add_group_service",
+      expect.anything(),
     );
   });
 });

@@ -6,6 +6,7 @@ import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { assertNonNegativeMoneyVnd } from "@/lib/money";
 import type { PricingRuleData } from "@/types";
 
 import DynamicRoomTypeSelect from "./DynamicRoomTypeSelect";
@@ -39,11 +40,14 @@ export default function PricingSection() {
     }
 
     try {
+      const hourlyRate = assertNonNegativeMoneyVnd(form.hourly_rate, "hourly_rate");
+      const overnightRate = assertNonNegativeMoneyVnd(form.overnight_rate, "overnight_rate");
+      const dailyRate = assertNonNegativeMoneyVnd(form.daily_rate, "daily_rate");
       await invoke("save_pricing_rule", {
         roomType: form.room_type,
-        hourlyRate: form.hourly_rate,
-        overnightRate: form.overnight_rate,
-        dailyRate: form.daily_rate,
+        hourlyRate,
+        overnightRate,
+        dailyRate,
         earlyPct: form.early_checkin_surcharge_pct,
         latePct: form.late_checkout_surcharge_pct,
         weekendPct: form.weekend_uplift_pct,
@@ -52,7 +56,7 @@ export default function PricingSection() {
       setEditing(null);
       invoke<PricingRuleData[]>("get_pricing_rules").then(setRules);
     } catch (error) {
-      toast.error(String(error) || "Lỗi lưu bảng giá");
+      toast.error(error instanceof Error ? error.message : String(error) || "Lỗi lưu bảng giá");
     }
   };
 

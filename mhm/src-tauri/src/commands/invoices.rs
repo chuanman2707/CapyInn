@@ -1,4 +1,4 @@
-use super::{get_f64, AppState};
+use super::{get_money_vnd, get_optional_money_vnd, AppState};
 use crate::models::*;
 use crate::services::settings_store::get_setting;
 use sqlx::{Pool, Row, Sqlite};
@@ -79,9 +79,9 @@ pub async fn do_generate_invoice(
     let guest_name: String = b.get("guest_name");
     let guest_phone: Option<String> = b.get("guest_phone");
     let nights: i32 = b.get("nights");
-    let total_price: f64 = get_f64(&b, "total_price");
-    let paid_amount: f64 = get_f64(&b, "paid_amount");
-    let deposit_amount: f64 = b.try_get::<f64, _>("deposit_amount").unwrap_or(0.0);
+    let total_price = get_money_vnd(&b, "total_price");
+    let paid_amount = get_money_vnd(&b, "paid_amount");
+    let deposit_amount = get_optional_money_vnd(&b, "deposit_amount").unwrap_or(0);
     let notes: Option<String> = b.get("notes");
     let pricing_snapshot: Option<String> = b.get("pricing_snapshot");
 
@@ -108,9 +108,15 @@ pub async fn do_generate_invoice(
         .ok()
         .or_else(|| Some(b.get::<String, _>("check_in_at")))
         .unwrap();
-    let scheduled_checkout = b.try_get::<Option<String>, _>("scheduled_checkout").ok().flatten();
+    let scheduled_checkout = b
+        .try_get::<Option<String>, _>("scheduled_checkout")
+        .ok()
+        .flatten();
     let expected_checkout = b.try_get::<String, _>("expected_checkout").ok();
-    let actual_checkout = b.try_get::<Option<String>, _>("actual_checkout").ok().flatten();
+    let actual_checkout = b
+        .try_get::<Option<String>, _>("actual_checkout")
+        .ok()
+        .flatten();
     let check_out: String = if settlement_mode.as_deref() == Some("booked_nights") {
         settlement_reporting_checkout
             .or(scheduled_checkout)
@@ -127,18 +133,17 @@ pub async fn do_generate_invoice(
     // Keep invoice wording aligned with the settlement metadata when checkout finalized with
     // an explicit settlement mode.
     let per_night = if nights > 0 {
-        total_price / nights as f64
+        total_price / i64::from(nights)
     } else {
         total_price
     };
     let breakdown: Vec<crate::pricing::PricingLine> = vec![crate::pricing::PricingLine {
-        label: settlement_label
-            .unwrap_or_else(|| format!("{} night(s) x {}d", nights, per_night as i64)),
+        label: settlement_label.unwrap_or_else(|| format!("{} night(s) x {}d", nights, per_night)),
         amount: total_price,
     }];
 
     let subtotal = total_price;
-    let balance_due = (total_price - paid_amount).max(0.0);
+    let balance_due = (total_price - paid_amount).max(0);
 
     // Generate invoice number: INV-YYYYMMDD-XXX
     let today = chrono::Local::now().format("%Y%m%d").to_string();
@@ -246,10 +251,10 @@ pub async fn do_get_invoice(
                 check_out: r.get("check_out"),
                 nights: r.get("nights"),
                 pricing_breakdown: breakdown,
-                subtotal: get_f64(&r, "subtotal"),
-                deposit_amount: get_f64(&r, "deposit_amount"),
-                total: get_f64(&r, "total"),
-                balance_due: get_f64(&r, "balance_due"),
+                subtotal: get_money_vnd(&r, "subtotal"),
+                deposit_amount: get_money_vnd(&r, "deposit_amount"),
+                total: get_money_vnd(&r, "total"),
+                balance_due: get_money_vnd(&r, "balance_due"),
                 policy_text: r.get("policy_text"),
                 notes: r.get("notes"),
                 status: r.get("status"),
@@ -310,9 +315,9 @@ mod tests {
         .bind("standard")
         .bind(1_i32)
         .bind(0_i32)
-        .bind(250_000.0_f64)
+        .bind(250_000)
         .bind(2_i32)
-        .bind(0.0_f64)
+        .bind(0)
         .bind("vacant")
         .execute(pool)
         .await
@@ -347,8 +352,8 @@ mod tests {
         .bind(now)
         .bind("2026-04-20T10:00:00+07:00")
         .bind(1_i64)
-        .bind(250_000.0_f64)
-        .bind(0.0_f64)
+        .bind(250_000)
+        .bind(0)
         .bind("walk-in")
         .bind("seed booking")
         .bind("0901234567")
@@ -411,13 +416,11 @@ mod tests {
         .await
         .unwrap();
 
-        let invoice = do_generate_invoice(&pool, "booking-settled")
-            .await
-            .unwrap();
+        let invoice = do_generate_invoice(&pool, "booking-settled").await.unwrap();
 
         assert_eq!(invoice.check_out, "2026-04-20T18:00:00+07:00");
-        assert_eq!(invoice.total, 500_000.0);
-        assert_eq!(invoice.balance_due, 0.0);
+        assert_eq!(invoice.total, 500_000);
+        assert_eq!(invoice.balance_due, 0);
         assert_eq!(
             invoice.pricing_breakdown[0].label,
             "Thanh toán theo số đêm thực tế"
@@ -474,11 +477,9 @@ mod tests {
         .await
         .unwrap();
 
-        let invoice = do_generate_invoice(&pool, "booking-balance")
-            .await
-            .unwrap();
+        let invoice = do_generate_invoice(&pool, "booking-balance").await.unwrap();
 
-        assert_eq!(invoice.balance_due, 0.0);
+        assert_eq!(invoice.balance_due, 0);
     }
 
     #[tokio::test]

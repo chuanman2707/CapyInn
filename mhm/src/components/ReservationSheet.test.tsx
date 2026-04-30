@@ -279,4 +279,35 @@ describe("ReservationSheet", () => {
     });
     expect(toastError).toHaveBeenCalledWith(formatAppError(error));
   });
+
+  it("rejects fractional deposit before invoking create reservation", async () => {
+    const user = userEvent.setup();
+    render(<ReservationSheet open onOpenChange={vi.fn()} />);
+
+    await waitFor(() => {
+      expect(fetchRooms).toHaveBeenCalledTimes(1);
+    });
+
+    const [roomSelect] = screen.getAllByRole("combobox");
+    const [, depositInput] = screen.getAllByRole("spinbutton");
+
+    fireEvent.change(roomSelect, {
+      target: { value: "R101" },
+    });
+    await user.type(screen.getByPlaceholderText("Họ và tên *"), "Nguyen Van A");
+    fireEvent.change(depositInput, {
+      target: { value: "250000.5" },
+    });
+
+    await user.click(screen.getByRole("button", { name: /đặt phòng/i }));
+
+    expect(invokeWriteCommand).not.toHaveBeenCalledWith(
+      "create_reservation",
+      expect.anything(),
+      expect.anything(),
+    );
+    expect(toastError).toHaveBeenCalledWith(
+      "deposit_amount must be a safe integer VND value",
+    );
+  });
 });

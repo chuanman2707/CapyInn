@@ -9,6 +9,7 @@ import { formatAppError } from "@/lib/appError";
 import { createCorrelationId } from "@/lib/correlationId";
 import { fmtNumber } from "@/lib/format";
 import { invokeWriteCommand } from "@/lib/invokeCommand";
+import { optionalMoneyVnd } from "@/lib/money";
 import { toast } from "sonner";
 import InvoiceDialog from "./InvoiceDialog";
 import type { EditableBooking } from "@/types";
@@ -120,6 +121,8 @@ export default function ReservationSheet({ open, onOpenChange, preSelectedRoomId
                 });
                 toast.success("Đã cập nhật đặt phòng!");
             } else {
+                const depositAmount =
+                    optionalMoneyVnd(deposit.trim() ? Number(deposit) : null, "deposit_amount") ?? null;
                 await invokeWriteCommand("create_reservation", {
                     req: {
                         room_id: roomId,
@@ -129,7 +132,7 @@ export default function ReservationSheet({ open, onOpenChange, preSelectedRoomId
                         check_in_date: checkInDate,
                         check_out_date: checkOutDate,
                         nights,
-                        deposit_amount: deposit ? parseFloat(deposit) : null,
+                        deposit_amount: depositAmount,
                         source,
                         notes: notes || null,
                     },

@@ -1,9 +1,11 @@
+import type { MoneyVnd } from "@/lib/money";
+
 export interface OnboardingRoomTypeDraft {
   tempId: string;
   name: string;
-  basePrice: number;
+  basePrice: MoneyVnd;
   maxGuests: number;
-  extraPersonFee: number;
+  extraPersonFee: MoneyVnd;
   defaultHasBalcony: boolean;
   bedNote?: string;
 }
@@ -14,9 +16,9 @@ export interface OnboardingGeneratedRoom {
   floor: number;
   roomTypeName: string;
   hasBalcony: boolean;
-  basePrice: number;
+  basePrice: MoneyVnd;
   maxGuests: number;
-  extraPersonFee: number;
+  extraPersonFee: MoneyVnd;
 }
 
 export interface OnboardingDraft {

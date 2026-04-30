@@ -3,6 +3,7 @@ use sqlx::{Pool, Sqlite, Transaction};
 use crate::{
     domain::booking::{BookingResult, OriginSideEffect},
     models::FolioLine,
+    money::MoneyVnd,
 };
 
 // Retained as the public pool-based compatibility API; composed flows use insert_folio_line_tx.
@@ -12,7 +13,7 @@ pub async fn insert_folio_line(
     booking_id: &str,
     category: &str,
     description: &str,
-    amount: f64,
+    amount: MoneyVnd,
     created_by: Option<&str>,
     created_at: &str,
 ) -> BookingResult<FolioLine> {
@@ -38,7 +39,7 @@ pub async fn insert_folio_line_tx(
     booking_id: &str,
     category: &str,
     description: &str,
-    amount: f64,
+    amount: MoneyVnd,
     created_by: Option<&str>,
     created_at: &str,
 ) -> BookingResult<FolioLine> {
@@ -62,7 +63,7 @@ pub async fn insert_folio_line_with_origin_tx(
     booking_id: &str,
     category: &str,
     description: &str,
-    amount: f64,
+    amount: MoneyVnd,
     created_by: Option<&str>,
     created_at: &str,
     origin: &OriginSideEffect,
@@ -86,7 +87,7 @@ async fn insert_folio_line_internal_tx(
     booking_id: &str,
     category: &str,
     description: &str,
-    amount: f64,
+    amount: MoneyVnd,
     created_by: Option<&str>,
     created_at: &str,
     origin: Option<&OriginSideEffect>,
