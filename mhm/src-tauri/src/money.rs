@@ -55,7 +55,12 @@ pub fn percentage_money_line(base: MoneyVnd, pct: f64, field: &str) -> CommandRe
         )
     })?;
     let denominator = 100_i128 * 1_000_000_i128;
-    let rounded = round_ratio_half_away_from_zero(numerator, denominator);
+    let rounded = round_ratio_half_away_from_zero(numerator, denominator).ok_or_else(|| {
+        CommandError::user(
+            codes::VALIDATION_INVALID_INPUT,
+            format!("{field} percentage calculation overflowed"),
+        )
+    })?;
     if rounded < MoneyVnd::MIN as i128 || rounded > MoneyVnd::MAX as i128 {
         return Err(CommandError::user(
             codes::VALIDATION_INVALID_INPUT,
@@ -65,10 +70,10 @@ pub fn percentage_money_line(base: MoneyVnd, pct: f64, field: &str) -> CommandRe
     validate_transport_money_vnd(rounded as MoneyVnd, field)
 }
 
-fn round_ratio_half_away_from_zero(numerator: i128, denominator: i128) -> i128 {
+fn round_ratio_half_away_from_zero(numerator: i128, denominator: i128) -> Option<i128> {
     debug_assert!(denominator > 0);
     let sign = if numerator < 0 { -1 } else { 1 };
-    let abs = numerator.abs();
+    let abs = numerator.checked_abs()?;
     let quotient = abs / denominator;
     let remainder = abs % denominator;
     let rounded = if remainder * 2 >= denominator {
@@ -76,7 +81,7 @@ fn round_ratio_half_away_from_zero(numerator: i128, denominator: i128) -> i128 {
     } else {
         quotient
     };
-    rounded * sign
+    Some(rounded * sign)
 }
 
 #[cfg(test)]
@@ -128,5 +133,13 @@ mod tests {
         let error = percentage_money_line(MoneyVnd::MIN, pct, "base_amount")
             .expect_err("unsafe base must fail");
         assert!(error.message.contains("base_amount"));
+    }
+
+    #[test]
+    fn percentage_money_rejects_min_i128_rounding_overflow_without_panic() {
+        let pct = ((1_i128 << 126) as f64) / 1_000_000.0;
+        let error =
+            percentage_money_line(-2, pct, "adjustment").expect_err("rounding overflow must fail");
+        assert!(error.message.contains("adjustment"));
     }
 }
