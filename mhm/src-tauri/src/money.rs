@@ -128,6 +128,24 @@ mod tests {
     }
 
     #[test]
+    fn percentage_money_rejects_non_finite_percentage() {
+        let nan_error = percentage_money_line(100, f64::NAN, "surcharge")
+            .expect_err("NaN percentage must fail");
+        assert!(nan_error.message.contains("surcharge"));
+
+        let infinity_error = percentage_money_line(100, f64::INFINITY, "surcharge")
+            .expect_err("infinite percentage must fail");
+        assert!(infinity_error.message.contains("surcharge"));
+    }
+
+    #[test]
+    fn percentage_money_rejects_result_outside_transport_safe_range() {
+        let error = percentage_money_line(MAX_TRANSPORT_SAFE_MONEY_VND, 200.0, "surcharge")
+            .expect_err("out-of-range result must fail");
+        assert!(error.message.contains("surcharge"));
+    }
+
+    #[test]
     fn percentage_money_rejects_unsafe_base_before_arithmetic() {
         let pct = (u64::MAX as f64 + 1.0) / 1_000_000.0;
         let error = percentage_money_line(MoneyVnd::MIN, pct, "base_amount")
