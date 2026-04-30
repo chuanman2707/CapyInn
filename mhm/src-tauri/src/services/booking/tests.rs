@@ -976,6 +976,275 @@ async fn group_checkout_rejects_negative_final_paid() {
 }
 
 #[tokio::test]
+async fn group_checkout_idempotent_retry_replays_without_duplicate_effects() {
+    let pool = test_pool().await;
+    seed_room(&pool, "R-GCO-1").await.unwrap();
+    seed_room(&pool, "R-GCO-2").await.unwrap();
+    seed_pricing_rule(&pool, "standard", 250_000).await.unwrap();
+
+    let group = group_lifecycle::group_checkin(
+        &pool,
+        None,
+        minimal_group_checkin_request(&["R-GCO-1", "R-GCO-2"]),
+    )
+    .await
+    .unwrap();
+    let rows = sqlx::query("SELECT id FROM bookings WHERE group_id = ? ORDER BY id")
+        .bind(&group.id)
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+    let booking_id: String = rows[0].get("id");
+    let ctx = crate::command_idempotency::WriteCommandContext::for_internal_test(
+        "req-group-checkout-idem",
+        "idem-group-checkout-1",
+        "group_checkout",
+    );
+
+    let first = group_lifecycle::group_checkout_idempotent(
+        &pool,
+        &ctx,
+        GroupCheckoutRequest {
+            group_id: group.id.clone(),
+            booking_ids: vec![booking_id.clone()],
+            final_paid: Some(50_000),
+        },
+    )
+    .await
+    .unwrap();
+    let second = group_lifecycle::group_checkout_idempotent(
+        &pool,
+        &ctx,
+        GroupCheckoutRequest {
+            group_id: group.id.clone(),
+            booking_ids: vec![booking_id],
+            final_paid: Some(50_000),
+        },
+    )
+    .await
+    .unwrap();
+
+    assert!(!first.replayed);
+    assert!(second.replayed);
+    assert_eq!(first.response, second.response);
+
+    let payment_count: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM transactions WHERE note = 'Thanh toán group checkout'",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(payment_count, 1);
+
+    let housekeeping_count: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM housekeeping WHERE room_id IN ('R-GCO-1', 'R-GCO-2')",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(housekeeping_count, 1);
+}
+
+#[tokio::test]
+async fn group_checkout_idempotent_duplicate_in_flight_returns_conflict() {
+    let pool = test_pool().await;
+    seed_room(&pool, "R-GCO-LIVE-1").await.unwrap();
+    seed_room(&pool, "R-GCO-LIVE-2").await.unwrap();
+    seed_pricing_rule(&pool, "standard", 250_000).await.unwrap();
+
+    let group = group_lifecycle::group_checkin(
+        &pool,
+        None,
+        minimal_group_checkin_request(&["R-GCO-LIVE-1", "R-GCO-LIVE-2"]),
+    )
+    .await
+    .unwrap();
+    let booking_id: String =
+        sqlx::query_scalar("SELECT id FROM bookings WHERE group_id = ? ORDER BY id LIMIT 1")
+            .bind(&group.id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    let ctx = crate::command_idempotency::WriteCommandContext::for_internal_test(
+        "req-group-checkout-live",
+        "idem-group-checkout-live",
+        "group_checkout",
+    );
+    let payload = serde_json::json!({
+        "schema": "group.checkout.v1",
+        "group_id": group.id,
+        "booking_ids": [booking_id],
+        "final_paid_vnd_units": 50_000,
+    });
+    let now = chrono::Utc::now().to_rfc3339();
+    let lease_expires_at = (chrono::Utc::now() + chrono::Duration::seconds(30)).to_rfc3339();
+
+    sqlx::query(
+        "INSERT INTO command_idempotency (
+            idempotency_key, command_name, request_hash, intent_json, lock_keys_json,
+            status, claim_token, retryable, lease_expires_at, created_at, updated_at, last_attempt_at
+        ) VALUES (?, ?, ?, '{}', '[]', 'in_progress', 'other-claim', 0, ?, ?, ?, ?)",
+    )
+    .bind(&ctx.idempotency_key)
+    .bind(&ctx.command_name)
+    .bind(crate::command_idempotency::stable_request_hash(&payload).expect("payload hashes"))
+    .bind(&lease_expires_at)
+    .bind(&now)
+    .bind(&now)
+    .bind(&now)
+    .execute(&pool)
+    .await
+    .expect("seeds in-flight row");
+
+    let error = group_lifecycle::group_checkout_idempotent(
+        &pool,
+        &ctx,
+        GroupCheckoutRequest {
+            group_id: payload["group_id"].as_str().unwrap().to_string(),
+            booking_ids: vec![payload["booking_ids"][0].as_str().unwrap().to_string()],
+            final_paid: Some(50_000),
+        },
+    )
+    .await
+    .expect_err("duplicate in-flight conflicts");
+
+    assert_eq!(
+        error.code,
+        crate::app_error::codes::CONFLICT_DUPLICATE_IN_FLIGHT
+    );
+}
+
+#[tokio::test]
+async fn group_checkout_idempotent_final_payment_locks_group_and_candidate_folios() {
+    let pool = test_pool().await;
+    seed_room(&pool, "R-GCO-LOCK-1").await.unwrap();
+    seed_room(&pool, "R-GCO-LOCK-2").await.unwrap();
+    seed_room(&pool, "R-GCO-LOCK-3").await.unwrap();
+    seed_pricing_rule(&pool, "standard", 250_000).await.unwrap();
+
+    let group = group_lifecycle::group_checkin(
+        &pool,
+        None,
+        minimal_group_checkin_request(&["R-GCO-LOCK-1", "R-GCO-LOCK-2", "R-GCO-LOCK-3"]),
+    )
+    .await
+    .unwrap();
+    let booking_ids: Vec<String> =
+        sqlx::query_scalar("SELECT id FROM bookings WHERE group_id = ? ORDER BY id")
+            .bind(&group.id)
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+    let selected_booking_id = booking_ids[0].clone();
+    let ctx = crate::command_idempotency::WriteCommandContext::for_internal_test(
+        "req-group-checkout-locks",
+        "idem-group-checkout-locks",
+        "group_checkout",
+    );
+
+    group_lifecycle::group_checkout_idempotent(
+        &pool,
+        &ctx,
+        GroupCheckoutRequest {
+            group_id: group.id.clone(),
+            booking_ids: vec![selected_booking_id],
+            final_paid: Some(50_000),
+        },
+    )
+    .await
+    .unwrap();
+
+    let lock_keys_json: String = sqlx::query_scalar(
+        "SELECT lock_keys_json FROM command_idempotency
+         WHERE command_name = 'group_checkout' AND idempotency_key = ?",
+    )
+    .bind(&ctx.idempotency_key)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    let lock_keys: Vec<String> = serde_json::from_str(&lock_keys_json).unwrap();
+
+    assert!(lock_keys.contains(&format!("group:{}", group.id)));
+    let folio_lock_count = lock_keys
+        .iter()
+        .filter(|key| key.starts_with("folio:"))
+        .count();
+    assert!(
+        folio_lock_count > 1,
+        "expected payment candidate folio locks, got {lock_keys_json}"
+    );
+    for booking_id in booking_ids {
+        assert!(
+            lock_keys.contains(&format!("folio:{booking_id}")),
+            "missing folio lock for payment candidate {booking_id}: {lock_keys_json}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn group_checkout_tx_posts_final_payment_only_to_locked_candidate_set() {
+    let pool = test_pool().await;
+    seed_room(&pool, "R-GCO-CAND-1").await.unwrap();
+    seed_room(&pool, "R-GCO-CAND-2").await.unwrap();
+    seed_pricing_rule(&pool, "standard", 250_000).await.unwrap();
+
+    let group = group_lifecycle::group_checkin(
+        &pool,
+        None,
+        minimal_group_checkin_request(&["R-GCO-CAND-1", "R-GCO-CAND-2"]),
+    )
+    .await
+    .unwrap();
+    let rows = sqlx::query("SELECT id, room_id FROM bookings WHERE group_id = ? ORDER BY id")
+        .bind(&group.id)
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+    let selected_booking_id: String = rows[0].get("id");
+    let selected_room_id: String = rows[0].get("room_id");
+    let remaining_booking_id: String = rows[1].get("id");
+    let locked_booking_room_map =
+        std::collections::HashMap::from([(selected_booking_id.clone(), selected_room_id)]);
+    let locked_payment_candidate_booking_ids = vec![selected_booking_id.clone()];
+
+    let mut tx = pool.begin().await.unwrap();
+    group_lifecycle::group_checkout_tx(
+        &mut tx,
+        GroupCheckoutRequest {
+            group_id: group.id.clone(),
+            booking_ids: vec![selected_booking_id.clone()],
+            final_paid: Some(50_000),
+        },
+        &locked_booking_room_map,
+        &locked_payment_candidate_booking_ids,
+        None,
+    )
+    .await
+    .unwrap();
+    tx.commit().await.unwrap();
+
+    let selected_payment_count: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM transactions
+         WHERE booking_id = ? AND note = 'Thanh toán group checkout'",
+    )
+    .bind(&selected_booking_id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    let remaining_payment_count: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM transactions
+         WHERE booking_id = ? AND note = 'Thanh toán group checkout'",
+    )
+    .bind(&remaining_booking_id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+
+    assert_eq!(selected_payment_count, 1);
+    assert_eq!(remaining_payment_count, 0);
+}
+
+#[tokio::test]
 async fn calendar_insert_conflict_returns_room_unavailable_without_overwrite() {
     let pool = test_pool().await;
     seed_room(&pool, "CAL-1").await.unwrap();
@@ -5133,14 +5402,13 @@ async fn extend_stay_idempotent_retry_replays_without_extra_night_or_charge() {
         .unwrap();
     assert_eq!(nights, 3);
 
-    let charge_count: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM transactions WHERE booking_id = ? AND note = ?",
-    )
-    .bind("B-EXT-IDEM")
-    .bind("Extended stay +1 night")
-    .fetch_one(&pool)
-    .await
-    .unwrap();
+    let charge_count: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM transactions WHERE booking_id = ? AND note = ?")
+            .bind("B-EXT-IDEM")
+            .bind("Extended stay +1 night")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
     assert_eq!(charge_count, 1);
 }
 

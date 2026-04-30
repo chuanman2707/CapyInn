@@ -2,13 +2,16 @@ use super::{emit_db_update, get_money_vnd, get_optional_money_vnd, get_user_id, 
 use crate::services::booking::group_lifecycle;
 use crate::{
     app_error::{
-        codes, correlation_context, log_system_error, normalize_correlation_id, CommandError,
-        CommandResult, EffectiveCorrelationId,
+        codes, log_system_error, normalize_correlation_id, CommandError, CommandResult,
     },
     command_idempotency::WriteCommandContext,
+    models::*,
+};
+#[cfg(test)]
+use crate::{
+    app_error::{correlation_context, EffectiveCorrelationId},
     db_error_monitoring::{classify_db_error_code, is_room_unavailable_conflict_message},
     domain::booking::BookingError,
-    models::*,
 };
 use serde_json::{json, Value};
 use sqlx::{Pool, Row, Sqlite};
@@ -16,6 +19,7 @@ use tauri::State;
 
 // ─── Group Booking Commands ───
 
+#[cfg(test)]
 fn log_group_user_error(
     command_name: &str,
     effective_correlation_id: &EffectiveCorrelationId,
@@ -38,6 +42,7 @@ fn log_group_user_error(
     );
 }
 
+#[cfg(test)]
 fn map_group_user_error(
     code: &'static str,
     command_name: &str,
@@ -54,6 +59,7 @@ fn map_group_user_error(
     CommandError::user(code, message)
 }
 
+#[cfg(test)]
 fn map_known_group_error_code(
     command_name: &str,
     effective_correlation_id: &EffectiveCorrelationId,
@@ -88,6 +94,7 @@ fn map_known_group_error_code(
     }
 }
 
+#[cfg(test)]
 fn map_group_error(
     command_name: &str,
     effective_correlation_id: &EffectiveCorrelationId,
@@ -268,16 +275,12 @@ pub async fn group_checkout(
     state: State<'_, AppState>,
     app: tauri::AppHandle,
     req: GroupCheckoutRequest,
+    idempotency_key: String,
     correlation_id: Option<String>,
-) -> CommandResult<()> {
+) -> CommandResult<GroupCheckoutResponse> {
     let effective_correlation_id = normalize_correlation_id(correlation_id);
     let group_id = req.group_id.clone();
     let booking_count = req.booking_ids.len();
-    let error_context = json!({
-        "group_id": group_id,
-        "booking_count": booking_count,
-        "final_paid": req.final_paid,
-    });
     log::info!(
         "group_checkout start correlation_id={} source={:?} group_id={} booking_count={} final_paid={:?}",
         effective_correlation_id.value,
@@ -286,15 +289,24 @@ pub async fn group_checkout(
         req.booking_ids.len(),
         req.final_paid
     );
-    group_lifecycle::group_checkout(&state.db, req)
+    let actor_id = get_user_id(&state)
+        .ok_or_else(|| CommandError::user(codes::AUTH_NOT_AUTHENTICATED, "Chưa đăng nhập"))?;
+    let mut write_command_context = WriteCommandContext::for_scoped_command(
+        effective_correlation_id.value.clone(),
+        idempotency_key,
+        "group_checkout",
+    )?;
+    write_command_context.actor_id = Some(actor_id);
+    let result = group_lifecycle::group_checkout_idempotent(&state.db, &write_command_context, req)
         .await
-        .map_err(|error| {
-            map_group_error(
-                "group_checkout",
-                &effective_correlation_id,
-                error,
-                error_context,
+        .map_err(|error| error.with_request_id(write_command_context.request_id.clone()))?;
+    let response: GroupCheckoutResponse =
+        serde_json::from_value(result.response).map_err(|error| {
+            CommandError::system(
+                codes::SYSTEM_INTERNAL_ERROR,
+                format!("Invalid group_checkout idempotent response: {error}"),
             )
+            .with_request_id(write_command_context.request_id.clone())
         })?;
     log::info!(
         "group_checkout success correlation_id={} source={:?} group_id={} booking_count={}",
@@ -306,13 +318,15 @@ pub async fn group_checkout(
     emit_db_update(&app, "rooms");
     emit_db_update(&app, "groups");
 
-    if let Err(error) =
-        crate::backup::request_backup(&app, crate::backup::BackupReason::GroupCheckout).await
-    {
-        crate::backup::log_backup_request_error("group_checkout", &error);
+    if !result.replayed {
+        if let Err(error) =
+            crate::backup::request_backup(&app, crate::backup::BackupReason::GroupCheckout).await
+        {
+            crate::backup::log_backup_request_error("group_checkout", &error);
+        }
     }
 
-    Ok(())
+    Ok(response)
 }
 
 /// Get group detail with bookings, services, totals

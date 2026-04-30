@@ -208,6 +208,29 @@ describe("useHotelStore monitoring context", () => {
     );
   });
 
+  it("routes groupCheckout through invokeWriteCommand", async () => {
+    const req = {
+      group_id: "group-1",
+      booking_ids: ["booking-1"],
+      final_paid: 100000,
+    };
+
+    await useHotelStore.getState().groupCheckout(req);
+
+    expect(invokeWriteCommand).toHaveBeenCalledWith(
+      "group_checkout",
+      { req },
+      {
+        correlationId: "COR-1A2B3C4D",
+      },
+    );
+    expect(invokeCommand).not.toHaveBeenCalledWith(
+      "group_checkout",
+      expect.anything(),
+      expect.anything(),
+    );
+  });
+
   it("rejects fractional checkIn paid_amount before invoking backend", async () => {
     await expect(
       useHotelStore.getState().checkIn(

@@ -6,13 +6,16 @@ use crate::{
     app_error::{codes, CommandError, CommandResult},
     command_idempotency::{
         system_error, CommandLedgerResultSummary, CommandLedgerSummary, IdempotentCommandResult,
-        SanitizedLedgerIntent, WriteCommandContext, WriteCommandExecutor, WriteCommandRequest,
+        ResolvedWriteCommandGuard, SanitizedLedgerIntent, WriteCommandContext,
+        WriteCommandExecutor, WriteCommandRequest,
     },
     db_error_monitoring::{classify_db_error_code, is_room_unavailable_conflict_message},
     domain::booking::{
         pricing::calculate_stay_price_tx, BookingError, BookingResult, OriginSideEffect,
     },
-    models::{status, BookingGroup, GroupCheckinRequest, GroupCheckoutRequest},
+    models::{
+        status, BookingGroup, GroupCheckinRequest, GroupCheckoutRequest, GroupCheckoutResponse,
+    },
     money::MoneyVnd,
 };
 
@@ -508,8 +511,19 @@ async fn group_checkin_tx(
     Ok(group_id)
 }
 
-pub async fn group_checkout(pool: &Pool<Sqlite>, req: GroupCheckoutRequest) -> BookingResult<()> {
-    if req.booking_ids.is_empty() {
+fn normalized_booking_ids(booking_ids: &[String]) -> Vec<String> {
+    let mut normalized = booking_ids
+        .iter()
+        .map(|id| id.trim().to_string())
+        .filter(|id| !id.is_empty())
+        .collect::<Vec<_>>();
+    normalized.sort();
+    normalized.dedup();
+    normalized
+}
+
+fn validate_group_checkout_request(req: &GroupCheckoutRequest) -> BookingResult<()> {
+    if normalized_booking_ids(&req.booking_ids).is_empty() {
         return Err(BookingError::validation(
             "Phải chọn ít nhất 1 phòng để checkout".to_string(),
         ));
@@ -518,61 +532,262 @@ pub async fn group_checkout(pool: &Pool<Sqlite>, req: GroupCheckoutRequest) -> B
         validate_non_negative_booking_money(final_paid, "final_paid")?;
     }
 
-    let now = Local::now().to_rfc3339();
-    let mut unique_booking_ids = Vec::new();
-    let mut seen_booking_ids = std::collections::HashSet::new();
-    for id in &req.booking_ids {
-        if seen_booking_ids.insert(id.clone()) {
-            unique_booking_ids.push(id.clone());
+    Ok(())
+}
+
+fn map_group_checkout_command_error(error: BookingError) -> CommandError {
+    match error {
+        BookingError::Validation(message) if message == "Phải chọn ít nhất 1 phòng để checkout" => {
+            CommandError::user(codes::GROUP_CHECKOUT_SELECTION_REQUIRED, message)
+        }
+        BookingError::Validation(message) | BookingError::Conflict(message) => {
+            if message.contains(codes::CONFLICT_INVALID_STATE_TRANSITION) {
+                return CommandError::user(codes::CONFLICT_INVALID_STATE_TRANSITION, message);
+            }
+            CommandError::user(codes::BOOKING_INVALID_STATE, message)
+        }
+        BookingError::NotFound(message) if message.starts_with("Không tìm thấy group ") => {
+            CommandError::user(codes::GROUP_NOT_FOUND, message)
+        }
+        BookingError::NotFound(message)
+            if message.starts_with("Booking ") && message.contains("không tìm thấy") =>
+        {
+            CommandError::user(codes::BOOKING_NOT_FOUND, message)
+        }
+        BookingError::NotFound(message) => CommandError::user(codes::BOOKING_NOT_FOUND, message),
+        BookingError::DatabaseWrite(message) | BookingError::Database(message) => {
+            if classify_db_error_code(&message) == Some(codes::DB_LOCKED_RETRYABLE) {
+                return CommandError::system(codes::DB_LOCKED_RETRYABLE, message).retryable(true);
+            }
+            CommandError::system(codes::SYSTEM_INTERNAL_ERROR, message)
+        }
+        BookingError::DateTimeParse(message) => {
+            CommandError::system(codes::SYSTEM_INTERNAL_ERROR, message)
         }
     }
+}
 
-    let mut query_builder: sqlx::QueryBuilder<Sqlite> =
+fn build_group_checkout_hash_payload(req: &GroupCheckoutRequest) -> serde_json::Value {
+    json!({
+        "schema": "group.checkout.v1",
+        "group_id": req.group_id.clone(),
+        "booking_ids": normalized_booking_ids(&req.booking_ids),
+        "final_paid_vnd_units": req.final_paid.unwrap_or(0),
+    })
+}
+
+fn group_checkout_initial_lock_keys_from_payload(
+    hash_payload: &serde_json::Value,
+) -> CommandResult<Vec<String>> {
+    let group_id = hash_payload
+        .get("group_id")
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| system_error("group checkout lock payload missing group_id"))?;
+
+    Ok(vec![crate::aggregate_locks::group_key(group_id)?])
+}
+
+struct GroupCheckoutLockState {
+    selected_booking_room_map: std::collections::HashMap<String, String>,
+    booking_ids_to_lock: Vec<String>,
+    room_ids_to_lock: Vec<String>,
+}
+
+struct GroupCheckoutResolvedGuard {
+    _guard: crate::aggregate_locks::AggregateLockGuard,
+    locked_booking_room_map: std::collections::HashMap<String, String>,
+    locked_payment_candidate_booking_ids: Vec<String>,
+}
+
+async fn load_group_checkout_lock_state(
+    pool: &Pool<Sqlite>,
+    group_id: &str,
+    selected_booking_ids: &[String],
+    final_paid: Option<MoneyVnd>,
+) -> BookingResult<GroupCheckoutLockState> {
+    let group_exists: Option<String> =
+        sqlx::query_scalar("SELECT id FROM booking_groups WHERE id = ? LIMIT 1")
+            .bind(group_id)
+            .fetch_optional(pool)
+            .await?;
+    if group_exists.is_none() {
+        return Err(BookingError::not_found(format!(
+            "Không tìm thấy group {}",
+            group_id
+        )));
+    }
+
+    let mut selected_query: sqlx::QueryBuilder<Sqlite> =
         sqlx::QueryBuilder::new("SELECT id, room_id FROM bookings WHERE group_id = ");
-    query_builder.push_bind(&req.group_id);
-    query_builder.push(" AND id IN (");
-    let mut separated = query_builder.separated(", ");
-    for id in &unique_booking_ids {
-        separated.push_bind(id);
+    selected_query.push_bind(group_id);
+    selected_query.push(" AND id IN (");
+    let mut selected_sep = selected_query.separated(", ");
+    for booking_id in selected_booking_ids {
+        selected_sep.push_bind(booking_id);
     }
-    separated.push_unseparated(")");
+    selected_sep.push_unseparated(")");
 
-    let rows = query_builder.build().fetch_all(pool).await?;
-    let mut booking_room_map = std::collections::HashMap::new();
-    for row in rows {
-        let id: String = row.get("id");
-        let room_id: String = row.get("room_id");
-        booking_room_map.insert(id, room_id);
+    let selected_rows = selected_query.build().fetch_all(pool).await?;
+    let mut selected_booking_room_map = std::collections::HashMap::new();
+    for row in selected_rows {
+        selected_booking_room_map
+            .insert(row.get::<String, _>("id"), row.get::<String, _>("room_id"));
     }
 
-    for id in &req.booking_ids {
-        if !booking_room_map.contains_key(id) {
+    for booking_id in selected_booking_ids {
+        if !selected_booking_room_map.contains_key(booking_id) {
             return Err(BookingError::not_found(format!(
                 "Booking {} không tìm thấy hoặc đã checkout",
-                id
+                booking_id
             )));
         }
     }
 
-    let mut room_ids = Vec::new();
-    let mut seen_room_ids = std::collections::HashSet::new();
-    for booking_id in &unique_booking_ids {
-        if let Some(room_id) = booking_room_map.get(booking_id) {
-            if seen_room_ids.insert(room_id.clone()) {
-                room_ids.push(room_id.clone());
-            }
+    let mut booking_ids_to_lock = selected_booking_ids.to_vec();
+    let mut room_ids_to_lock = selected_booking_ids
+        .iter()
+        .filter_map(|booking_id| selected_booking_room_map.get(booking_id).cloned())
+        .collect::<Vec<_>>();
+
+    if final_paid.unwrap_or(0) > 0 {
+        let rows = sqlx::query("SELECT id, room_id FROM bookings WHERE group_id = ?")
+            .bind(group_id)
+            .fetch_all(pool)
+            .await?;
+        booking_ids_to_lock.clear();
+        room_ids_to_lock.clear();
+        for row in rows {
+            booking_ids_to_lock.push(row.get("id"));
+            room_ids_to_lock.push(row.get("room_id"));
         }
     }
 
+    booking_ids_to_lock.sort();
+    booking_ids_to_lock.dedup();
+    room_ids_to_lock.sort();
+    room_ids_to_lock.dedup();
+
+    Ok(GroupCheckoutLockState {
+        selected_booking_room_map,
+        booking_ids_to_lock,
+        room_ids_to_lock,
+    })
+}
+
+async fn resolve_group_checkout_locks(
+    pool: Pool<Sqlite>,
+    req: GroupCheckoutRequest,
+) -> CommandResult<ResolvedWriteCommandGuard<GroupCheckoutResolvedGuard>> {
+    let unique_booking_ids = normalized_booking_ids(&req.booking_ids);
+    let lock_state =
+        load_group_checkout_lock_state(&pool, &req.group_id, &unique_booking_ids, req.final_paid)
+            .await
+            .map_err(map_group_checkout_command_error)?;
+    let mut lock_keys = vec![crate::aggregate_locks::group_key(&req.group_id)?];
+
+    for booking_id in &lock_state.booking_ids_to_lock {
+        lock_keys.push(crate::aggregate_locks::booking_key(booking_id)?);
+        lock_keys.push(crate::aggregate_locks::folio_key(booking_id)?);
+    }
+    for room_id in &lock_state.room_ids_to_lock {
+        lock_keys.push(crate::aggregate_locks::room_key(room_id)?);
+    }
+
+    let guard = crate::aggregate_locks::global_manager()
+        .acquire(lock_keys.clone())
+        .await?;
+    Ok(ResolvedWriteCommandGuard::new(
+        GroupCheckoutResolvedGuard {
+            _guard: guard,
+            locked_booking_room_map: lock_state.selected_booking_room_map,
+            locked_payment_candidate_booking_ids: lock_state.booking_ids_to_lock,
+        },
+        lock_keys,
+    ))
+}
+
+pub async fn group_checkout_idempotent(
+    pool: &Pool<Sqlite>,
+    ctx: &WriteCommandContext,
+    req: GroupCheckoutRequest,
+) -> CommandResult<IdempotentCommandResult<serde_json::Value>> {
+    validate_group_checkout_request(&req).map_err(|error| {
+        map_group_checkout_command_error(error).with_request_id(ctx.request_id.clone())
+    })?;
+
+    let final_paid = req.final_paid.unwrap_or(0);
+    let hash_payload = build_group_checkout_hash_payload(&req);
+    let ledger_intent = SanitizedLedgerIntent::from_pairs([
+        ("schema", json!("group.checkout.v1")),
+        ("group_present", json!(true)),
+        (
+            "booking_count",
+            json!(normalized_booking_ids(&req.booking_ids).len()),
+        ),
+        ("final_paid_present", json!(req.final_paid.is_some())),
+        ("final_paid_positive", json!(final_paid > 0)),
+    ])?;
+    let summary = CommandLedgerSummary::new("Group checkout")?.with_aggregate_ref(
+        "group",
+        "group",
+        None::<String>,
+    )?;
+    let request = WriteCommandRequest::new_sanitized(hash_payload, ledger_intent, summary)?
+        .with_primary_aggregate_key(format!("group:{}", req.group_id))
+        .with_lock_key_deriver(group_checkout_initial_lock_keys_from_payload)
+        .with_success_summary(CommandLedgerResultSummary::success("Group checked out")?);
+
+    let pool_for_locks = pool.clone();
+    let req_for_locks = GroupCheckoutRequest {
+        group_id: req.group_id.clone(),
+        booking_ids: req.booking_ids.clone(),
+        final_paid: req.final_paid,
+    };
+    let origin_key = format!("{}:{}", ctx.command_name, ctx.idempotency_key);
+
+    WriteCommandExecutor::new(pool.clone())
+        .execute_with_resolved_guard(
+            ctx,
+            request,
+            move || resolve_group_checkout_locks(pool_for_locks, req_for_locks),
+            move |tx, resolved| {
+                Box::pin(async move {
+                    let response = group_checkout_tx(
+                        tx,
+                        req,
+                        &resolved.locked_booking_room_map,
+                        &resolved.locked_payment_candidate_booking_ids,
+                        Some(origin_key),
+                    )
+                    .await
+                    .map_err(map_group_checkout_command_error)?;
+                    serde_json::to_value(response).map_err(system_error)
+                })
+            },
+        )
+        .await
+}
+
+#[cfg(test)]
+pub async fn group_checkout(pool: &Pool<Sqlite>, req: GroupCheckoutRequest) -> BookingResult<()> {
+    validate_group_checkout_request(&req)?;
+    let unique_booking_ids = normalized_booking_ids(&req.booking_ids);
+    let lock_state =
+        load_group_checkout_lock_state(pool, &req.group_id, &unique_booking_ids, req.final_paid)
+            .await?;
     let mut lock_keys = vec![crate::aggregate_locks::group_key(&req.group_id)
         .map_err(|error| BookingError::validation(error.message))?];
-    for booking_id in &unique_booking_ids {
+    for booking_id in &lock_state.booking_ids_to_lock {
         lock_keys.push(
             crate::aggregate_locks::booking_key(booking_id)
                 .map_err(|error| BookingError::validation(error.message))?,
         );
+        lock_keys.push(
+            crate::aggregate_locks::folio_key(booking_id)
+                .map_err(|error| BookingError::validation(error.message))?,
+        );
     }
-    for room_id in &room_ids {
+    for room_id in &lock_state.room_ids_to_lock {
         lock_keys.push(
             crate::aggregate_locks::room_key(room_id)
                 .map_err(|error| BookingError::validation(error.message))?,
@@ -584,7 +799,31 @@ pub async fn group_checkout(pool: &Pool<Sqlite>, req: GroupCheckoutRequest) -> B
         .map_err(|error| BookingError::validation(error.message))?;
 
     let mut tx = begin_immediate_tx(pool).await?;
+    group_checkout_tx(
+        &mut tx,
+        req,
+        &lock_state.selected_booking_room_map,
+        &lock_state.booking_ids_to_lock,
+        None,
+    )
+    .await?;
+    tx.commit().await.map_err(BookingError::from)?;
+    Ok(())
+}
 
+pub(crate) async fn group_checkout_tx(
+    tx: &mut Transaction<'_, Sqlite>,
+    req: GroupCheckoutRequest,
+    locked_booking_room_map: &std::collections::HashMap<String, String>,
+    locked_payment_candidate_booking_ids: &[String],
+    origin_key: Option<String>,
+) -> BookingResult<GroupCheckoutResponse> {
+    let now = Local::now().to_rfc3339();
+    let unique_booking_ids = normalized_booking_ids(&req.booking_ids);
+    let payment_origin = origin_key
+        .as_ref()
+        .map(|key| OriginSideEffect::new(key.clone(), 0))
+        .transpose()?;
     let mut query_builder: sqlx::QueryBuilder<Sqlite> =
         sqlx::QueryBuilder::new("SELECT id, room_id FROM bookings WHERE group_id = ");
     query_builder.push_bind(&req.group_id);
@@ -595,7 +834,7 @@ pub async fn group_checkout(pool: &Pool<Sqlite>, req: GroupCheckoutRequest) -> B
     }
     separated.push_unseparated(")");
 
-    let rows = query_builder.build().fetch_all(&mut *tx).await?;
+    let rows = query_builder.build().fetch_all(&mut **tx).await?;
     let mut current_booking_room_map = std::collections::HashMap::new();
     for row in rows {
         let id: String = row.get("id");
@@ -605,9 +844,16 @@ pub async fn group_checkout(pool: &Pool<Sqlite>, req: GroupCheckoutRequest) -> B
     ensure_group_checkout_room_map_still_locked(
         &req.group_id,
         &unique_booking_ids,
-        &booking_room_map,
+        locked_booking_room_map,
         &current_booking_room_map,
     )?;
+
+    let mut room_ids = unique_booking_ids
+        .iter()
+        .filter_map(|booking_id| current_booking_room_map.get(booking_id).cloned())
+        .collect::<Vec<_>>();
+    room_ids.sort();
+    room_ids.dedup();
 
     let mut qb = sqlx::QueryBuilder::new("UPDATE bookings SET status = ");
     qb.push_bind(status::booking::CHECKED_OUT);
@@ -623,7 +869,7 @@ pub async fn group_checkout(pool: &Pool<Sqlite>, req: GroupCheckoutRequest) -> B
         sep.push_bind(id);
     }
     sep.push_unseparated(")");
-    let result = qb.build().execute(&mut *tx).await?;
+    let result = qb.build().execute(&mut **tx).await?;
     ensure_rows_affected(
         result,
         unique_booking_ids.len() as u64,
@@ -643,7 +889,7 @@ pub async fn group_checkout(pool: &Pool<Sqlite>, req: GroupCheckoutRequest) -> B
         sep.push_bind(rid);
     }
     sep.push_unseparated(")");
-    let result = qb.build().execute(&mut *tx).await?;
+    let result = qb.build().execute(&mut **tx).await?;
     ensure_rows_affected(
         result,
         room_ids.len() as u64,
@@ -663,7 +909,7 @@ pub async fn group_checkout(pool: &Pool<Sqlite>, req: GroupCheckoutRequest) -> B
             .push_bind(&now)
             .push_bind(&now);
     });
-    qb.build().execute(&mut *tx).await?;
+    qb.build().execute(&mut **tx).await?;
 
     let mut qb = sqlx::QueryBuilder::new("DELETE FROM room_calendar WHERE booking_id IN (");
     let mut sep = qb.separated(", ");
@@ -671,51 +917,82 @@ pub async fn group_checkout(pool: &Pool<Sqlite>, req: GroupCheckoutRequest) -> B
         sep.push_bind(id);
     }
     sep.push_unseparated(")");
-    qb.build().execute(&mut *tx).await?;
+    qb.build().execute(&mut **tx).await?;
 
-    maybe_reassign_master_booking(&mut tx, &req.group_id, &unique_booking_ids).await?;
+    maybe_reassign_master_booking(tx, &req.group_id, &unique_booking_ids).await?;
 
-    let remaining_active: (i64,) =
-        sqlx::query_as("SELECT COUNT(*) FROM bookings WHERE group_id = ? AND status = ?")
+    let remaining_active_count: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM bookings WHERE group_id = ? AND status = ?")
             .bind(&req.group_id)
             .bind(status::booking::ACTIVE)
-            .fetch_one(&mut *tx)
+            .fetch_one(&mut **tx)
             .await?;
+    let group_status = if remaining_active_count == 0 {
+        GROUP_COMPLETED
+    } else {
+        GROUP_PARTIAL_CHECKOUT
+    };
 
     sqlx::query("UPDATE booking_groups SET status = ? WHERE id = ?")
-        .bind(if remaining_active.0 == 0 {
-            GROUP_COMPLETED
-        } else {
-            GROUP_PARTIAL_CHECKOUT
-        })
+        .bind(group_status)
         .bind(&req.group_id)
-        .execute(&mut *tx)
+        .execute(&mut **tx)
         .await?;
 
     if let Some(final_paid) = req.final_paid.filter(|amount| *amount > 0) {
-        let target_booking: (String,) = sqlx::query_as(
-            "SELECT id
-             FROM bookings
-             WHERE group_id = ?
-             ORDER BY CASE WHEN status = ? THEN 0 ELSE 1 END, created_at ASC
-             LIMIT 1",
-        )
-        .bind(&req.group_id)
-        .bind(status::booking::ACTIVE)
-        .fetch_one(&mut *tx)
-        .await?;
+        let payment_candidate_ids = normalized_booking_ids(locked_payment_candidate_booking_ids);
+        if payment_candidate_ids.is_empty() {
+            return Err(invalid_state_transition(
+                "group checkout payment candidates changed before checkout",
+            ));
+        }
 
-        record_payment_tx(
-            &mut tx,
-            &target_booking.0,
-            final_paid,
-            "Thanh toán group checkout",
-        )
-        .await?;
+        let mut qb = sqlx::QueryBuilder::new("SELECT id FROM bookings WHERE group_id = ");
+        qb.push_bind(&req.group_id);
+        qb.push(" AND id IN (");
+        {
+            let mut sep = qb.separated(", ");
+            for booking_id in &payment_candidate_ids {
+                sep.push_bind(booking_id);
+            }
+            sep.push_unseparated(") ORDER BY CASE WHEN status = ");
+        }
+        qb.push_bind(status::booking::ACTIVE);
+        qb.push(" THEN 0 ELSE 1 END, created_at ASC LIMIT 1");
+        let target_booking: Option<(String,)> =
+            qb.build_query_as().fetch_optional(&mut **tx).await?;
+        let target_booking = target_booking.ok_or_else(|| {
+            invalid_state_transition("group checkout payment target changed before checkout")
+        })?;
+
+        if let Some(origin) = payment_origin.as_ref() {
+            record_payment_with_origin_tx(
+                tx,
+                &target_booking.0,
+                final_paid,
+                "Thanh toán group checkout",
+                origin,
+            )
+            .await?;
+        } else {
+            record_payment_tx(
+                tx,
+                &target_booking.0,
+                final_paid,
+                "Thanh toán group checkout",
+            )
+            .await?;
+        }
     }
 
-    tx.commit().await.map_err(BookingError::from)?;
-    Ok(())
+    let checked_out_count = unique_booking_ids.len();
+    Ok(GroupCheckoutResponse {
+        ok: true,
+        group_id: req.group_id,
+        booking_ids: unique_booking_ids,
+        checked_out_count,
+        status: group_status.to_string(),
+    })
 }
 
 pub(crate) fn ensure_group_checkout_room_map_still_locked(

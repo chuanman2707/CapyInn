@@ -260,7 +260,7 @@ export const useHotelStore = create<HotelStore>((set, get) => {
           ...req,
           final_paid: optionalMoneyVnd(req.final_paid, "final_paid"),
         };
-        await invokeCommand("group_checkout", { req: guardedReq }, { correlationId });
+        await invokeWriteCommand("group_checkout", { req: guardedReq }, { correlationId });
         await get().fetchRooms();
         await get().fetchStats();
         await get().fetchGroups();
