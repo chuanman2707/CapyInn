@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const invoke = vi.hoisted(() => vi.fn());
 const invokeCommand = vi.hoisted(() => vi.fn());
+const invokeWriteCommand = vi.hoisted(() => vi.fn());
 const createIdempotencyKey = vi.hoisted(() => vi.fn());
 const createCorrelationId = vi.hoisted(() => vi.fn());
 
@@ -12,6 +13,7 @@ vi.mock("@tauri-apps/api/core", () => ({
 vi.mock("@/lib/invokeCommand", () => ({
   createIdempotencyKey,
   invokeCommand,
+  invokeWriteCommand,
 }));
 
 vi.mock("@/lib/correlationId", () => ({
@@ -27,6 +29,7 @@ describe("useHotelStore monitoring context", () => {
     createCorrelationId.mockReturnValue("COR-1A2B3C4D");
     createIdempotencyKey.mockReturnValue("group_checkin:IDEM-1");
     invokeCommand.mockResolvedValue(undefined);
+    invokeWriteCommand.mockResolvedValue(undefined);
     invoke.mockImplementation(async (command: string) => {
       if (command === "get_rooms") {
         return [];
@@ -80,7 +83,7 @@ describe("useHotelStore monitoring context", () => {
       "Late arrival",
     );
 
-    expect(invokeCommand).toHaveBeenCalledWith(
+    expect(invokeWriteCommand).toHaveBeenCalledWith(
       "check_in",
       {
         req: {
@@ -117,7 +120,7 @@ describe("useHotelStore monitoring context", () => {
       "",
     );
 
-    expect(invokeCommand).toHaveBeenCalledWith(
+    expect(invokeWriteCommand).toHaveBeenCalledWith(
       "check_in",
       {
         req: {
@@ -199,7 +202,7 @@ describe("useHotelStore monitoring context", () => {
       ),
     ).rejects.toThrow(/paid_amount/);
 
-    expect(invokeCommand).not.toHaveBeenCalledWith(
+    expect(invokeWriteCommand).not.toHaveBeenCalledWith(
       "check_in",
       expect.anything(),
       expect.anything(),

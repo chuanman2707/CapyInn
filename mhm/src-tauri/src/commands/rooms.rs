@@ -4,6 +4,7 @@ use crate::{
         codes, correlation_context, log_system_error, normalize_correlation_id,
         record_command_failure_with_db_group, CommandError, CommandResult, EffectiveCorrelationId,
     },
+    command_idempotency::WriteCommandContext,
     db_error_monitoring::{
         classify_db_error_code, classify_db_failure, inject_db_error_group,
         is_room_unavailable_conflict_message, DbErrorGroup, MonitoredDbFailure,
@@ -329,9 +330,18 @@ pub async fn check_in(
     app: tauri::AppHandle,
     req: CheckInRequest,
     correlation_id: Option<String>,
+    idempotency_key: String,
 ) -> CommandResult<Booking> {
     let effective_correlation_id = normalize_correlation_id(correlation_id);
     let error_context = check_in_failure_context(&req);
+    let actor_id = get_user_id(&state)
+        .ok_or_else(|| CommandError::user(codes::AUTH_NOT_AUTHENTICATED, "Chưa đăng nhập"))?;
+    let mut write_command_context = WriteCommandContext::for_scoped_command(
+        effective_correlation_id.value.clone(),
+        idempotency_key,
+        "check_in",
+    )?;
+    write_command_context.actor_id = Some(actor_id.clone());
     log::info!(
         "check_in start correlation_id={} source={:?} room_id={} guest_count={} nights={}",
         effective_correlation_id.value,
@@ -340,24 +350,26 @@ pub async fn check_in(
         req.guests.len(),
         req.nights
     );
-    let booking = stay_lifecycle::check_in(&state.db, req, get_user_id(&state))
-        .await
-        .map_err(|error| {
-            let (command_error, db_error_group) = map_stay_error(
-                "check_in",
-                &effective_correlation_id,
-                error,
-                error_context.clone(),
-            );
-            record_command_failure_with_db_group(
-                "check_in",
-                &command_error,
-                &effective_correlation_id.value,
-                db_error_group,
-                error_context.clone(),
-            );
-            command_error
-        })?;
+    let result =
+        stay_lifecycle::check_in_idempotent(&state.db, &write_command_context, req, Some(actor_id))
+            .await
+            .map_err(|command_error| {
+                record_command_failure_with_db_group(
+                    "check_in",
+                    &command_error,
+                    &effective_correlation_id.value,
+                    None,
+                    error_context.clone(),
+                );
+                command_error
+            })?;
+    let booking: Booking = serde_json::from_value(result.response).map_err(|error| {
+        CommandError::system(
+            codes::SYSTEM_INTERNAL_ERROR,
+            format!("Invalid check_in idempotent response: {error}"),
+        )
+        .with_request_id(write_command_context.request_id.clone())
+    })?;
 
     log::info!(
         "check_in success correlation_id={} source={:?} booking_id={} room_id={}",

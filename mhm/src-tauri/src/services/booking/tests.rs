@@ -4021,6 +4021,173 @@ async fn check_in_posts_charge_and_marks_room_occupied() {
 }
 
 #[tokio::test]
+async fn check_in_idempotent_retry_replays_and_does_not_duplicate_rows() {
+    let pool = test_pool().await;
+    seed_room(&pool, "R-CHECKIN-IDEM").await.unwrap();
+    seed_pricing_rule(&pool, "standard", 250_000).await.unwrap();
+    let ctx = crate::command_idempotency::WriteCommandContext::for_internal_test(
+        "req-checkin-idem",
+        "idem-checkin-1",
+        "check_in",
+    );
+    let mut first_req = minimal_checkin_request("R-CHECKIN-IDEM");
+    first_req.paid_amount = Some(50_000);
+    let mut second_req = minimal_checkin_request("R-CHECKIN-IDEM");
+    second_req.paid_amount = Some(50_000);
+
+    let first =
+        stay_lifecycle::check_in_idempotent(&pool, &ctx, first_req, Some("user-1".to_string()))
+            .await
+            .unwrap();
+    let second =
+        stay_lifecycle::check_in_idempotent(&pool, &ctx, second_req, Some("user-1".to_string()))
+            .await
+            .unwrap();
+
+    assert!(!first.replayed);
+    assert!(second.replayed);
+    assert_eq!(first.response, second.response);
+
+    let booking_id = first.response["id"].as_str().unwrap();
+    let booking_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM bookings WHERE room_id = ?")
+        .bind("R-CHECKIN-IDEM")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(booking_count, 1);
+
+    let guest_link_count: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM booking_guests WHERE booking_id = ?")
+            .bind(booking_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(guest_link_count, 1);
+
+    let transaction_count: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM transactions WHERE booking_id = ?")
+            .bind(booking_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(transaction_count, 2);
+
+    let paid_amount: i64 = sqlx::query_scalar("SELECT paid_amount FROM bookings WHERE id = ?")
+        .bind(booking_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(paid_amount, 50_000);
+
+    let calendar_count: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM room_calendar WHERE booking_id = ?")
+            .bind(booking_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(calendar_count, 2);
+}
+
+#[tokio::test]
+async fn check_in_idempotent_same_key_changed_guest_conflicts() {
+    let pool = test_pool().await;
+    seed_room(&pool, "R-CHECKIN-HASH").await.unwrap();
+    seed_pricing_rule(&pool, "standard", 250_000).await.unwrap();
+    let ctx = crate::command_idempotency::WriteCommandContext::for_internal_test(
+        "req-checkin-hash",
+        "idem-checkin-hash",
+        "check_in",
+    );
+
+    stay_lifecycle::check_in_idempotent(
+        &pool,
+        &ctx,
+        minimal_checkin_request("R-CHECKIN-HASH"),
+        Some("user-1".to_string()),
+    )
+    .await
+    .unwrap();
+
+    let mut changed = minimal_checkin_request("R-CHECKIN-HASH");
+    changed.guests[0].full_name = "Nguyen Van Changed".to_string();
+    let error =
+        stay_lifecycle::check_in_idempotent(&pool, &ctx, changed, Some("user-1".to_string()))
+            .await
+            .expect_err("same key with changed guest conflicts");
+
+    assert_eq!(
+        error.code,
+        crate::app_error::codes::CONFLICT_IDEMPOTENCY_HASH_MISMATCH
+    );
+}
+
+#[tokio::test]
+async fn check_in_idempotent_duplicate_in_flight_returns_conflict() {
+    let pool = test_pool().await;
+    seed_room(&pool, "R-CHECKIN-LIVE").await.unwrap();
+    seed_pricing_rule(&pool, "standard", 250_000).await.unwrap();
+    let ctx = crate::command_idempotency::WriteCommandContext::for_internal_test(
+        "req-checkin-live",
+        "idem-checkin-live",
+        "check_in",
+    );
+    let payload = serde_json::json!({
+        "schema": "stay.check_in.v1",
+        "room_id": "R-CHECKIN-LIVE",
+        "guests": [{
+            "guest_type": "domestic",
+            "full_name": "Nguyen Van A",
+            "doc_number": "079123456789",
+            "dob": null,
+            "gender": null,
+            "nationality": "VN",
+            "address": null,
+            "visa_expiry": null,
+            "scan_path": null,
+            "phone": "0900000000",
+        }],
+        "nights": 2,
+        "source": "walk-in",
+        "notes": "test check-in",
+        "paid_amount": 0,
+        "pricing_type": "nightly",
+    });
+    let now = chrono::Utc::now().to_rfc3339();
+    let lease_expires_at = (chrono::Utc::now() + chrono::Duration::seconds(30)).to_rfc3339();
+
+    sqlx::query(
+        "INSERT INTO command_idempotency (
+            idempotency_key, command_name, request_hash, intent_json, lock_keys_json,
+            status, claim_token, retryable, lease_expires_at, created_at, updated_at, last_attempt_at
+        ) VALUES (?, ?, ?, '{}', '[]', 'in_progress', 'other-claim', 0, ?, ?, ?, ?)",
+    )
+    .bind(&ctx.idempotency_key)
+    .bind(&ctx.command_name)
+    .bind(crate::command_idempotency::stable_request_hash(&payload).expect("payload hashes"))
+    .bind(&lease_expires_at)
+    .bind(&now)
+    .bind(&now)
+    .bind(&now)
+    .execute(&pool)
+    .await
+    .expect("seeds in-flight row");
+
+    let error = stay_lifecycle::check_in_idempotent(
+        &pool,
+        &ctx,
+        minimal_checkin_request("R-CHECKIN-LIVE"),
+        Some("user-1".to_string()),
+    )
+    .await
+    .expect_err("duplicate in-flight conflicts");
+
+    assert_eq!(
+        error.code,
+        crate::app_error::codes::CONFLICT_DUPLICATE_IN_FLIGHT
+    );
+}
+
+#[tokio::test]
 async fn check_in_rolls_back_when_room_status_changes_before_guarded_room_update() {
     let pool = test_pool().await;
     seed_room(&pool, "R-CAS-CHECKIN").await.unwrap();

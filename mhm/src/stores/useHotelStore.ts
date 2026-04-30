@@ -1,7 +1,7 @@
 import { create } from "zustand";
 import { invoke } from "@tauri-apps/api/core";
 import { createCorrelationId } from "@/lib/correlationId";
-import { createIdempotencyKey, invokeCommand } from "@/lib/invokeCommand";
+import { createIdempotencyKey, invokeCommand, invokeWriteCommand } from "@/lib/invokeCommand";
 import { assertNonNegativeMoneyVnd, optionalMoneyVnd, type MoneyVnd } from "@/lib/money";
 import type {
   CheckInGuestInput,
@@ -112,7 +112,7 @@ export const useHotelStore = create<HotelStore>((set, get) => {
       beginAction();
       try {
         const correlationId = createCorrelationId();
-        await invokeCommand(
+        await invokeWriteCommand(
           "check_in",
           {
             req: {
