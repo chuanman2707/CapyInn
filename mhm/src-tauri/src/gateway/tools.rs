@@ -84,12 +84,12 @@ fn format_invoice_text(inv: &InvoiceData) -> String {
     ));
 
     for line in &inv.pricing_breakdown {
-        text.push_str(&format!("  {} -- {}d\n", line.label, line.amount as i64));
+        text.push_str(&format!("  {} -- {}d\n", line.label, line.amount));
     }
 
     text.push_str(&format!(
         "\nSubtotal: {}d\nDeposit: {}d\nBALANCE DUE: {}d\n",
-        inv.total as i64, inv.deposit_amount as i64, inv.balance_due as i64,
+        inv.total, inv.deposit_amount, inv.balance_due,
     ));
 
     if let Some(ref policy) = inv.policy_text {
