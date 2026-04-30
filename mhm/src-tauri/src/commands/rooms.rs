@@ -324,6 +324,10 @@ fn check_out_failure_context(req: &CheckOutRequest) -> Value {
     })
 }
 
+fn should_request_checkout_backup(replayed: bool) -> bool {
+    !replayed
+}
+
 #[tauri::command]
 pub async fn check_in(
     state: State<'_, AppState>,
@@ -482,9 +486,18 @@ pub async fn check_out(
     app: tauri::AppHandle,
     req: CheckOutRequest,
     correlation_id: Option<String>,
-) -> CommandResult<()> {
+    idempotency_key: String,
+) -> CommandResult<CheckOutResponse> {
     let effective_correlation_id = normalize_correlation_id(correlation_id);
     let error_context = check_out_failure_context(&req);
+    let actor_id = get_user_id(&state)
+        .ok_or_else(|| CommandError::user(codes::AUTH_NOT_AUTHENTICATED, "Chưa đăng nhập"))?;
+    let mut write_command_context = WriteCommandContext::for_scoped_command(
+        effective_correlation_id.value.clone(),
+        idempotency_key,
+        "check_out",
+    )?;
+    write_command_context.actor_id = Some(actor_id);
     log::info!(
         "check_out start correlation_id={} source={:?} booking_id={} settlement_mode={:?} final_total={}",
         effective_correlation_id.value,
@@ -493,40 +506,45 @@ pub async fn check_out(
         req.settlement_mode,
         req.final_total
     );
-    stay_lifecycle::check_out(&state.db, req)
+    let result = stay_lifecycle::check_out_idempotent(&state.db, &write_command_context, req)
         .await
-        .map_err(|error| {
-            let (command_error, db_error_group) = map_stay_error(
-                "check_out",
-                &effective_correlation_id,
-                error,
-                error_context.clone(),
-            );
+        .map_err(|command_error| {
             record_command_failure_with_db_group(
                 "check_out",
                 &command_error,
                 &effective_correlation_id.value,
-                db_error_group,
+                None,
                 error_context.clone(),
             );
             command_error
         })?;
+    let response: CheckOutResponse = serde_json::from_value(result.response).map_err(|error| {
+        CommandError::system(
+            codes::SYSTEM_INTERNAL_ERROR,
+            format!("Invalid check_out idempotent response: {error}"),
+        )
+        .with_request_id(write_command_context.request_id.clone())
+    })?;
 
     log::info!(
-        "check_out success correlation_id={} source={:?}",
+        "check_out success correlation_id={} source={:?} booking_id={} room_id={}",
         effective_correlation_id.value,
-        effective_correlation_id.source
+        effective_correlation_id.source,
+        response.booking_id,
+        response.room_id
     );
 
     emit_db_update(&app, "rooms");
 
-    if let Err(error) =
-        crate::backup::request_backup(&app, crate::backup::BackupReason::Checkout).await
-    {
-        crate::backup::log_backup_request_error("check_out", &error);
+    if should_request_checkout_backup(result.replayed) {
+        if let Err(error) =
+            crate::backup::request_backup(&app, crate::backup::BackupReason::Checkout).await
+        {
+            crate::backup::log_backup_request_error("check_out", &error);
+        }
     }
 
-    Ok(())
+    Ok(response)
 }
 
 #[allow(dead_code)]
@@ -867,7 +885,7 @@ pub async fn scan_image(path: String) -> Result<crate::ocr::CccdInfo, String> {
 mod tests {
     use super::{
         check_in_failure_context, check_out_failure_context, complete_housekeeping_clean_to_vacant,
-        map_stay_error, validate_create_expense_request,
+        map_stay_error, should_request_checkout_backup, validate_create_expense_request,
     };
     use crate::app_error::{
         codes, record_command_failure_with_db_group, AppErrorKind, CorrelationIdSource,
@@ -1231,5 +1249,11 @@ mod tests {
         assert_eq!(db_error_group, Some(DbErrorGroup::Unknown));
 
         let _ = fs::remove_dir_all(&runtime_root);
+    }
+
+    #[test]
+    fn should_request_checkout_backup_skips_replayed_idempotency_response() {
+        assert!(should_request_checkout_backup(false));
+        assert!(!should_request_checkout_backup(true));
     }
 }

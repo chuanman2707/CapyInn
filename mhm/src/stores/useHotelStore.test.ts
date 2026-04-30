@@ -147,7 +147,7 @@ describe("useHotelStore monitoring context", () => {
   it("passes scrubbed monitoring context for checkOut", async () => {
     await useHotelStore.getState().checkOut("booking-1", "hourly", 400000);
 
-    expect(invokeCommand).toHaveBeenCalledWith(
+    expect(invokeWriteCommand).toHaveBeenCalledWith(
       "check_out",
       {
         req: {
@@ -214,7 +214,7 @@ describe("useHotelStore monitoring context", () => {
       useHotelStore.getState().checkOut("booking-1", "hourly", 400000.5),
     ).rejects.toThrow(/final_total/);
 
-    expect(invokeCommand).not.toHaveBeenCalledWith(
+    expect(invokeWriteCommand).not.toHaveBeenCalledWith(
       "check_out",
       expect.anything(),
       expect.anything(),

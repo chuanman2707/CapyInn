@@ -152,7 +152,7 @@ export const useHotelStore = create<HotelStore>((set, get) => {
       beginAction();
       try {
         const correlationId = createCorrelationId();
-        await invokeCommand(
+        await invokeWriteCommand(
           "check_out",
           {
             req: {
