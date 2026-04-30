@@ -197,6 +197,38 @@ describe("useRoomConfig", () => {
     expect(toastError).toHaveBeenCalledWith(formatAppError(duplicateRoomError));
   });
 
+  it("rejects fractional room money before saving a room", async () => {
+    const { result } = renderHook(() => useRoomConfig());
+
+    await waitFor(() => expect(result.current.roomTypes).toHaveLength(1));
+
+    await act(async () => {
+      result.current.openAdd();
+      result.current.setForm({
+        id: "R502",
+        name: "Room 502",
+        room_type: "Standard",
+        floor: 5,
+        has_balcony: false,
+        base_price: 500000.5,
+        max_guests: 2,
+        extra_person_fee: 100000,
+      });
+    });
+
+    await act(async () => {
+      await result.current.handleSaveRoom();
+    });
+
+    expect(invokeCommand).not.toHaveBeenCalledWith(
+      "create_room",
+      expect.anything(),
+    );
+    expect(toastError).toHaveBeenCalledWith(
+      "base_price must be a safe integer VND value",
+    );
+  });
+
   it("keeps the room form open and formats the error when updating a room fails", async () => {
     const { result } = renderHook(() => useRoomConfig());
 
