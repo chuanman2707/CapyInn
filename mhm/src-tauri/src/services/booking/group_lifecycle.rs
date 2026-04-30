@@ -21,7 +21,7 @@ use super::{
     guest_service::{create_group_guest_manifest, link_booking_guests},
     support::{
         begin_immediate_tx, ensure_one_row_affected, ensure_rows_affected,
-        insert_room_calendar_rows, invalid_state_transition, whole_money_vnd_from_f64,
+        insert_room_calendar_rows, invalid_state_transition,
     },
 };
 
@@ -370,7 +370,7 @@ async fn group_checkin_tx(
             "nightly",
         )
         .await?;
-        let total_price = whole_money_vnd_from_f64(pricing.total, "total_price")?;
+        let total_price = pricing.total;
         let deposit_amount = if is_reservation { paid_for_room } else { 0 };
         let guest_phone = room_guests.first().and_then(|guest| guest.phone.as_deref());
 

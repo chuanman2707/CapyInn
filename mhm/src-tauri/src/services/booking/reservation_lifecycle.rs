@@ -27,7 +27,7 @@ use super::{
     guest_service::{create_reservation_guest_manifest, link_booking_guests},
     support::{
         ensure_one_row_affected, insert_room_calendar_rows, invalid_state_transition,
-        read_f64_or_zero, read_money_vnd_or_zero, read_money_vnd_strict, whole_money_vnd_from_f64,
+        read_f64_or_zero, read_money_vnd_or_zero, read_money_vnd_strict,
     },
 };
 
@@ -247,7 +247,7 @@ pub async fn create_reservation_tx(
         "nightly",
     )
     .await?;
-    let total_price = whole_money_vnd_from_f64(pricing.total, "total_price")?;
+    let total_price = pricing.total;
 
     let guest_manifest = create_reservation_guest_manifest(
         tx,
@@ -616,7 +616,7 @@ pub async fn confirm_reservation_tx(
         &reservation.pricing_type,
     )
     .await?;
-    let total_price = whole_money_vnd_from_f64(pricing.total, "total_price")?;
+    let total_price = pricing.total;
     let actual_nights = (effective_checkout_date - today).num_days() as i32;
     let check_in_at = now.to_rfc3339();
 
@@ -765,7 +765,7 @@ pub async fn modify_reservation_tx(
         &reservation.pricing_type,
     )
     .await?;
-    let total_price = whole_money_vnd_from_f64(pricing.total, "total_price")?;
+    let total_price = pricing.total;
 
     let result = sqlx::query(
         "UPDATE bookings

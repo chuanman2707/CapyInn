@@ -1,4 +1,5 @@
 use super::{emit_db_update, get_f64, get_money_vnd, require_admin, AppState};
+use crate::money::{validate_non_negative_money_vnd, MoneyVnd};
 use sqlx::{Pool, Row, Sqlite};
 use tauri::State;
 
@@ -52,9 +53,9 @@ pub async fn save_pricing_rule(
     state: State<'_, AppState>,
     app: tauri::AppHandle,
     room_type: String,
-    hourly_rate: f64,
-    overnight_rate: f64,
-    daily_rate: f64,
+    hourly_rate: MoneyVnd,
+    overnight_rate: MoneyVnd,
+    daily_rate: MoneyVnd,
     overnight_start: Option<String>,
     overnight_end: Option<String>,
     daily_checkin: Option<String>,
@@ -64,6 +65,9 @@ pub async fn save_pricing_rule(
     weekend_pct: Option<f64>,
 ) -> Result<(), String> {
     require_admin(&state)?;
+    let hourly_rate = validate_non_negative_money_vnd(hourly_rate, "hourly_rate")?;
+    let overnight_rate = validate_non_negative_money_vnd(overnight_rate, "overnight_rate")?;
+    let daily_rate = validate_non_negative_money_vnd(daily_rate, "daily_rate")?;
 
     let now = chrono::Local::now().to_rfc3339();
     let id = uuid::Uuid::new_v4().to_string();
@@ -133,9 +137,9 @@ pub async fn do_calculate_price_preview(
     let rule = match row {
         Some(r) => crate::pricing::PricingRule {
             room_type: r.get("room_type"),
-            hourly_rate: get_money_vnd(&r, "hourly_rate") as f64,
-            overnight_rate: get_money_vnd(&r, "overnight_rate") as f64,
-            daily_rate: get_money_vnd(&r, "daily_rate") as f64,
+            hourly_rate: get_money_vnd(&r, "hourly_rate"),
+            overnight_rate: get_money_vnd(&r, "overnight_rate"),
+            daily_rate: get_money_vnd(&r, "daily_rate"),
             overnight_start: r.get("overnight_start"),
             overnight_end: r.get("overnight_end"),
             daily_checkin: r.get("daily_checkin"),
@@ -153,13 +157,13 @@ pub async fn do_calculate_price_preview(
                     .map_err(|e| e.to_string())?;
             let fallback_price = fallback_row
                 .as_ref()
-                .map(|r| get_money_vnd(r, "base_price") as f64)
-                .unwrap_or(350_000.0);
+                .map(|r| get_money_vnd(r, "base_price"))
+                .unwrap_or(350_000);
 
             crate::pricing::PricingRule {
                 room_type: room_type.to_string(),
-                hourly_rate: fallback_price / 5.0,
-                overnight_rate: fallback_price * 0.75,
+                hourly_rate: fallback_price / 5,
+                overnight_rate: fallback_price * 75 / 100,
                 daily_rate: fallback_price,
                 ..Default::default()
             }

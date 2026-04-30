@@ -1898,7 +1898,7 @@ async fn calculate_stay_price_tx_reads_uncommitted_pricing_rule() {
     .await
     .unwrap();
 
-    assert_eq!(pricing.total, 1_200_000.0);
+    assert_eq!(pricing.total, 1_200_000);
 
     tx.rollback().await.unwrap();
 }
@@ -1922,12 +1922,12 @@ async fn calculate_stay_price_matches_tx_path_and_applies_special_date_uplift() 
     .await
     .unwrap();
 
-    assert_eq!(pool_pricing.total, 1_320_000.0);
-    assert_eq!(pool_pricing.base_amount, 1_200_000.0);
-    assert_eq!(pool_pricing.surcharge_amount, 120_000.0);
-    assert_eq!(pool_pricing.weekend_amount, 0.0);
+    assert_eq!(pool_pricing.total, 1_320_000);
+    assert_eq!(pool_pricing.base_amount, 1_200_000);
+    assert_eq!(pool_pricing.surcharge_amount, 120_000);
+    assert_eq!(pool_pricing.weekend_amount, 0);
     assert_eq!(pool_pricing.breakdown.len(), 2);
-    assert_eq!(pool_pricing.breakdown[0].amount, 1_200_000.0);
+    assert_eq!(pool_pricing.breakdown[0].amount, 1_200_000);
     assert!(pool_pricing.breakdown[0].label.contains("night(s)"));
     assert!(pool_pricing
         .breakdown
@@ -2024,7 +2024,7 @@ async fn calculate_stay_price_tx_reads_uncommitted_room_base_price() {
     .await
     .unwrap();
 
-    assert_eq!(pricing.total, 1_200_000.0);
+    assert_eq!(pricing.total, 1_200_000);
 
     tx.rollback().await.unwrap();
 }
@@ -2052,7 +2052,7 @@ async fn calculate_stay_price_tx_reads_uncommitted_special_date() {
     .await
     .unwrap();
 
-    assert_eq!(pricing.total, 1_320_000.0);
+    assert_eq!(pricing.total, 1_320_000);
 
     tx.rollback().await.unwrap();
 }
@@ -4193,7 +4193,7 @@ async fn check_out_hourly_persists_manual_settlement() {
     );
     assert_eq!(
         pricing_snapshot["checkout_settlement"]["settled_total"],
-        serde_json::json!(500_000.0)
+        serde_json::json!(500_000)
     );
 }
 
@@ -4315,7 +4315,7 @@ async fn check_out_persists_manual_override_when_final_total_differs_from_recomm
     );
     assert_eq!(
         pricing_snapshot["checkout_settlement"]["settled_total"],
-        serde_json::json!(800_000.0)
+        serde_json::json!(800_000)
     );
 }
 

@@ -3,7 +3,7 @@ use sqlx::{sqlite::SqliteRow, Pool, Row, Sqlite, Transaction};
 
 use crate::domain::booking::{BookingError, BookingResult};
 use crate::models::Booking;
-use crate::money::{MoneyVnd, MAX_TRANSPORT_SAFE_MONEY_VND, MIN_TRANSPORT_SAFE_MONEY_VND};
+use crate::money::MoneyVnd;
 
 pub async fn begin_tx<'a>(pool: &'a Pool<Sqlite>) -> BookingResult<Transaction<'a, Sqlite>> {
     pool.begin().await.map_err(BookingError::from)
@@ -188,19 +188,6 @@ pub fn read_money_vnd_strict(row: &SqliteRow, column: &str) -> MoneyVnd {
         );
         value as MoneyVnd
     })
-}
-
-pub fn whole_money_vnd_from_f64(value: f64, field: &str) -> BookingResult<MoneyVnd> {
-    if !value.is_finite()
-        || value.fract() != 0.0
-        || value < MIN_TRANSPORT_SAFE_MONEY_VND as f64
-        || value > MAX_TRANSPORT_SAFE_MONEY_VND as f64
-    {
-        return Err(BookingError::validation(format!(
-            "{field} must be a whole VND amount"
-        )));
-    }
-    Ok(value as MoneyVnd)
 }
 
 #[cfg(test)]

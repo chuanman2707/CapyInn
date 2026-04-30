@@ -1,13 +1,14 @@
 use sqlx::{Pool, Row, Sqlite, Transaction};
 
 use super::{BookingError, BookingResult};
+use crate::money::MoneyVnd;
 
 #[allow(dead_code)]
 #[derive(Debug, Clone)]
 struct StayPricingInputs {
     room_type: String,
     stored_rule: Option<StoredPricingRule>,
-    fallback_base_price: Option<f64>,
+    fallback_base_price: Option<MoneyVnd>,
     special_uplift_pct: f64,
     check_in: String,
     check_out: String,
@@ -17,9 +18,9 @@ struct StayPricingInputs {
 #[derive(Debug, Clone)]
 struct StoredPricingRule {
     room_type: String,
-    hourly_rate: f64,
-    overnight_rate: f64,
-    daily_rate: f64,
+    hourly_rate: MoneyVnd,
+    overnight_rate: MoneyVnd,
+    daily_rate: MoneyVnd,
     overnight_start: String,
     overnight_end: String,
     daily_checkin: String,
@@ -52,12 +53,12 @@ fn build_effective_pricing_rule(inputs: &StayPricingInputs) -> crate::pricing::P
         return stored_rule.to_pricing_rule();
     }
 
-    let fallback_price = inputs.fallback_base_price.unwrap_or(350_000.0);
+    let fallback_price = inputs.fallback_base_price.unwrap_or(350_000);
 
     crate::pricing::PricingRule {
         room_type: inputs.room_type.clone(),
-        hourly_rate: fallback_price / 5.0,
-        overnight_rate: fallback_price * 0.75,
+        hourly_rate: fallback_price / 5,
+        overnight_rate: fallback_price * 75 / 100,
         daily_rate: fallback_price,
         ..Default::default()
     }
@@ -83,9 +84,9 @@ fn calculate_from_loaded_inputs(
 fn stored_rule_from_row(row: &sqlx::sqlite::SqliteRow) -> StoredPricingRule {
     StoredPricingRule {
         room_type: row.get("room_type"),
-        hourly_rate: read_f64(row, "hourly_rate"),
-        overnight_rate: read_f64(row, "overnight_rate"),
-        daily_rate: read_f64(row, "daily_rate"),
+        hourly_rate: read_money_vnd(row, "hourly_rate"),
+        overnight_rate: read_money_vnd(row, "overnight_rate"),
+        daily_rate: read_money_vnd(row, "daily_rate"),
         overnight_start: row.get("overnight_start"),
         overnight_end: row.get("overnight_end"),
         daily_checkin: row.get("daily_checkin"),
@@ -219,7 +220,7 @@ async fn load_stored_pricing_rule(
 async fn load_fallback_base_price(
     pool: &Pool<Sqlite>,
     room_type: &str,
-) -> BookingResult<Option<f64>> {
+) -> BookingResult<Option<MoneyVnd>> {
     let room_type_lower = room_type.to_lowercase();
     let fallback_row = sqlx::query("SELECT base_price FROM rooms WHERE LOWER(type) = ? LIMIT 1")
         .bind(&room_type_lower)
@@ -227,7 +228,9 @@ async fn load_fallback_base_price(
         .await
         .map_err(|error| BookingError::database(error.to_string()))?;
 
-    Ok(fallback_row.as_ref().map(|row| read_f64(row, "base_price")))
+    Ok(fallback_row
+        .as_ref()
+        .map(|row| read_money_vnd(row, "base_price")))
 }
 
 async fn load_stored_pricing_rule_tx(
@@ -253,7 +256,7 @@ async fn load_stored_pricing_rule_tx(
 async fn load_fallback_base_price_tx(
     tx: &mut Transaction<'_, Sqlite>,
     room_type: &str,
-) -> BookingResult<Option<f64>> {
+) -> BookingResult<Option<MoneyVnd>> {
     let room_type_lower = room_type.to_lowercase();
     let fallback_row = sqlx::query("SELECT base_price FROM rooms WHERE LOWER(type) = ? LIMIT 1")
         .bind(&room_type_lower)
@@ -261,7 +264,9 @@ async fn load_fallback_base_price_tx(
         .await
         .map_err(|error| BookingError::database(error.to_string()))?;
 
-    Ok(fallback_row.as_ref().map(|row| read_f64(row, "base_price")))
+    Ok(fallback_row
+        .as_ref()
+        .map(|row| read_money_vnd(row, "base_price")))
 }
 
 #[allow(dead_code)]
@@ -305,14 +310,25 @@ fn read_f64(row: &sqlx::sqlite::SqliteRow, column: &str) -> f64 {
         .unwrap_or_else(|_| row.get::<i64, _>(column) as f64)
 }
 
+fn read_money_vnd(row: &sqlx::sqlite::SqliteRow, column: &str) -> MoneyVnd {
+    row.try_get::<MoneyVnd, _>(column).unwrap_or_else(|_| {
+        let value = row.get::<f64, _>(column);
+        assert!(
+            value.is_finite() && value.fract() == 0.0,
+            "money column {column} must be a whole VND amount"
+        );
+        value as MoneyVnd
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        StayPricingInputs, StoredPricingRule, build_effective_pricing_rule,
-        calculate_from_loaded_inputs, load_stay_pricing_inputs, stored_rule_from_row,
+        build_effective_pricing_rule, calculate_from_loaded_inputs, load_stay_pricing_inputs,
+        stored_rule_from_row, StayPricingInputs, StoredPricingRule,
     };
     use crate::domain::booking::BookingError;
-    use sqlx::{Connection, Executor, SqliteConnection, sqlite::SqlitePoolOptions};
+    use sqlx::{sqlite::SqlitePoolOptions, Connection, Executor, SqliteConnection};
 
     fn sample_inputs() -> StayPricingInputs {
         StayPricingInputs {
@@ -329,12 +345,12 @@ mod tests {
     #[test]
     fn build_effective_pricing_rule_prefers_stored_rule_values() {
         let mut inputs = sample_inputs();
-        inputs.fallback_base_price = Some(500_000.0);
+        inputs.fallback_base_price = Some(500_000);
         inputs.stored_rule = Some(StoredPricingRule {
             room_type: "deluxe".to_string(),
-            hourly_rate: 120_000.0,
-            overnight_rate: 500_000.0,
-            daily_rate: 700_000.0,
+            hourly_rate: 120_000,
+            overnight_rate: 500_000,
+            daily_rate: 700_000,
             overnight_start: "21:00".to_string(),
             overnight_end: "10:00".to_string(),
             daily_checkin: "13:00".to_string(),
@@ -347,9 +363,9 @@ mod tests {
         let rule = build_effective_pricing_rule(&inputs);
 
         assert_eq!(rule.room_type, "deluxe");
-        assert_eq!(rule.hourly_rate, 120_000.0);
-        assert_eq!(rule.overnight_rate, 500_000.0);
-        assert_eq!(rule.daily_rate, 700_000.0);
+        assert_eq!(rule.hourly_rate, 120_000);
+        assert_eq!(rule.overnight_rate, 500_000);
+        assert_eq!(rule.daily_rate, 700_000);
         assert_eq!(rule.overnight_start, "21:00");
         assert_eq!(rule.overnight_end, "10:00");
         assert_eq!(rule.daily_checkin, "13:00");
@@ -363,14 +379,14 @@ mod tests {
     fn build_effective_pricing_rule_derives_fallback_rates_from_base_price() {
         let mut inputs = sample_inputs();
         inputs.room_type = "deluxe".to_string();
-        inputs.fallback_base_price = Some(500_000.0);
+        inputs.fallback_base_price = Some(500_000);
 
         let rule = build_effective_pricing_rule(&inputs);
 
         assert_eq!(rule.room_type, "deluxe");
-        assert_eq!(rule.hourly_rate, 100_000.0);
-        assert_eq!(rule.overnight_rate, 375_000.0);
-        assert_eq!(rule.daily_rate, 500_000.0);
+        assert_eq!(rule.hourly_rate, 100_000);
+        assert_eq!(rule.overnight_rate, 375_000);
+        assert_eq!(rule.daily_rate, 500_000);
         assert_eq!(rule.overnight_start, "22:00");
         assert_eq!(rule.overnight_end, "11:00");
         assert_eq!(rule.daily_checkin, "14:00");
@@ -385,9 +401,9 @@ mod tests {
         let rule = build_effective_pricing_rule(&sample_inputs());
 
         assert_eq!(rule.room_type, "standard");
-        assert_eq!(rule.hourly_rate, 70_000.0);
-        assert_eq!(rule.overnight_rate, 262_500.0);
-        assert_eq!(rule.daily_rate, 350_000.0);
+        assert_eq!(rule.hourly_rate, 70_000);
+        assert_eq!(rule.overnight_rate, 262_500);
+        assert_eq!(rule.daily_rate, 350_000);
         assert_eq!(rule.overnight_start, "22:00");
         assert_eq!(rule.overnight_end, "11:00");
         assert_eq!(rule.daily_checkin, "14:00");
@@ -400,7 +416,7 @@ mod tests {
     #[test]
     fn calculate_from_loaded_inputs_applies_special_uplift() {
         let mut inputs = sample_inputs();
-        inputs.fallback_base_price = Some(500_000.0);
+        inputs.fallback_base_price = Some(500_000);
         inputs.check_in = "2026-04-20T10:00:00+07:00".to_string();
         inputs.check_out = "2026-04-22T10:00:00+07:00".to_string();
         inputs.special_uplift_pct = 10.0;
@@ -408,19 +424,19 @@ mod tests {
         let pricing = calculate_from_loaded_inputs(&inputs).unwrap();
 
         assert_eq!(pricing.pricing_type, "nightly");
-        assert_eq!(pricing.base_amount, 1_000_000.0);
-        assert_eq!(pricing.weekend_amount, 0.0);
-        assert_eq!(pricing.surcharge_amount, 100_000.0);
-        assert_eq!(pricing.total, 1_100_000.0);
+        assert_eq!(pricing.base_amount, 1_000_000);
+        assert_eq!(pricing.weekend_amount, 0);
+        assert_eq!(pricing.surcharge_amount, 100_000);
+        assert_eq!(pricing.total, 1_100_000);
         assert_eq!(pricing.breakdown.len(), 2);
-        assert_eq!(pricing.breakdown[0].amount, 1_000_000.0);
-        assert_eq!(pricing.breakdown[1].amount, 100_000.0);
+        assert_eq!(pricing.breakdown[0].amount, 1_000_000);
+        assert_eq!(pricing.breakdown[1].amount, 100_000);
     }
 
     #[test]
     fn calculate_from_loaded_inputs_maps_invalid_datetime_errors() {
         let mut inputs = sample_inputs();
-        inputs.fallback_base_price = Some(500_000.0);
+        inputs.fallback_base_price = Some(500_000);
         inputs.check_in = "not-a-datetime".to_string();
 
         let error = calculate_from_loaded_inputs(&inputs).unwrap_err();
@@ -437,9 +453,9 @@ mod tests {
         let row = sqlx::query(
             "SELECT
                 'deluxe' AS room_type,
-                120000.0 AS hourly_rate,
-                500000.0 AS overnight_rate,
-                700000.0 AS daily_rate,
+                120000 AS hourly_rate,
+                500000 AS overnight_rate,
+                700000 AS daily_rate,
                 '21:00' AS overnight_start,
                 '10:00' AS overnight_end,
                 '13:00' AS daily_checkin,
@@ -455,9 +471,9 @@ mod tests {
         let rule = stored_rule_from_row(&row);
 
         assert_eq!(rule.room_type, "deluxe");
-        assert_eq!(rule.hourly_rate, 120_000.0);
-        assert_eq!(rule.overnight_rate, 500_000.0);
-        assert_eq!(rule.daily_rate, 700_000.0);
+        assert_eq!(rule.hourly_rate, 120_000);
+        assert_eq!(rule.overnight_rate, 500_000);
+        assert_eq!(rule.daily_rate, 700_000);
         assert_eq!(rule.overnight_start, "21:00");
         assert_eq!(rule.overnight_end, "10:00");
         assert_eq!(rule.daily_checkin, "13:00");
@@ -475,16 +491,16 @@ mod tests {
             .unwrap();
 
         pool.execute(
-            "CREATE TABLE rooms (id TEXT PRIMARY KEY, type TEXT NOT NULL, base_price REAL)",
+            "CREATE TABLE rooms (id TEXT PRIMARY KEY, type TEXT NOT NULL, base_price INTEGER)",
         )
         .await
         .unwrap();
         pool.execute(
             "CREATE TABLE pricing_rules (
                 room_type TEXT,
-                hourly_rate REAL,
-                overnight_rate REAL,
-                daily_rate REAL,
+                hourly_rate INTEGER,
+                overnight_rate INTEGER,
+                daily_rate INTEGER,
                 overnight_start TEXT,
                 overnight_end TEXT,
                 daily_checkin TEXT,
@@ -525,9 +541,9 @@ mod tests {
             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         )
         .bind("deluxe")
-        .bind(120000.0)
-        .bind(500000.0)
-        .bind(700000.0)
+        .bind(120000)
+        .bind(500000)
+        .bind(700000)
         .bind("21:00")
         .bind("10:00")
         .bind("13:00")
@@ -568,7 +584,7 @@ mod tests {
         sqlx::query("INSERT INTO rooms (id, type, base_price) VALUES (?, ?, ?)")
             .bind("room-2")
             .bind("standard")
-            .bind(480000.0)
+            .bind(480000)
             .execute(&pool)
             .await
             .unwrap();
@@ -585,7 +601,7 @@ mod tests {
 
         assert_eq!(inputs.room_type, "standard");
         assert!(inputs.stored_rule.is_none());
-        assert_eq!(inputs.fallback_base_price, Some(480000.0));
+        assert_eq!(inputs.fallback_base_price, Some(480000));
         assert_eq!(inputs.special_uplift_pct, 0.0);
     }
 }

@@ -139,7 +139,7 @@ pub async fn do_generate_invoice(
     };
     let breakdown: Vec<crate::pricing::PricingLine> = vec![crate::pricing::PricingLine {
         label: settlement_label.unwrap_or_else(|| format!("{} night(s) x {}d", nights, per_night)),
-        amount: total_price as f64,
+        amount: total_price,
     }];
 
     let subtotal = total_price;
