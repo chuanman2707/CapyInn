@@ -19,7 +19,8 @@ use super::{
     audit_service,
     billing_service::{
         add_folio_line, add_folio_line_idempotent, record_cancellation_fee_tx, record_deposit_tx,
-        record_deposit_with_origin_tx, record_payment, record_payment_tx,
+        record_deposit_with_origin_tx, record_payment, record_payment_returning_id_tx,
+        record_payment_tx,
     },
     group_lifecycle, guest_service, reservation_lifecycle, stay_lifecycle,
 };
@@ -1734,6 +1735,51 @@ async fn record_payment_updates_paid_amount_cache() {
     assert_eq!(txn.get::<String, _>("type"), "payment");
     assert_eq!(txn.get::<i64, _>("amount"), 25_000);
     assert_eq!(txn.get::<String, _>("note"), "deposit");
+}
+
+#[tokio::test]
+async fn record_payment_returning_id_tx_returns_inserted_transaction_id() {
+    let pool = test_pool().await;
+    seed_room(&pool, "R-PAY-ID").await.unwrap();
+    seed_active_booking(&pool, "B-PAY-ID", "R-PAY-ID")
+        .await
+        .unwrap();
+
+    let mut tx = super::support::begin_tx(&pool).await.unwrap();
+    let transaction_id =
+        record_payment_returning_id_tx(&mut tx, "B-PAY-ID", 25_000, "payment id test")
+            .await
+            .unwrap();
+    tx.commit().await.unwrap();
+
+    let stored: (i64,) = sqlx::query_as(
+        "SELECT COUNT(*) FROM transactions WHERE id = ? AND booking_id = ? AND amount = ?",
+    )
+    .bind(&transaction_id)
+    .bind("B-PAY-ID")
+    .bind(25_000_i64)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+
+    assert_eq!(stored.0, 1);
+
+    let txn = sqlx::query("SELECT type, note FROM transactions WHERE id = ?")
+        .bind(&transaction_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+
+    assert_eq!(txn.get::<String, _>("type"), "payment");
+    assert_eq!(txn.get::<String, _>("note"), "payment id test");
+
+    let booking = sqlx::query("SELECT paid_amount FROM bookings WHERE id = ?")
+        .bind("B-PAY-ID")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+
+    assert_eq!(booking.get::<Option<i64>, _>("paid_amount"), Some(25_000));
 }
 
 #[tokio::test]

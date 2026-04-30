@@ -244,6 +244,79 @@ pub async fn record_payment_with_origin_tx(
     .await
 }
 
+#[allow(dead_code)]
+pub async fn record_payment_returning_id_tx(
+    tx: &mut Transaction<'_, Sqlite>,
+    booking_id: &str,
+    amount: MoneyVnd,
+    note: impl Into<String>,
+) -> BookingResult<String> {
+    record_payment_money_returning_id_tx(tx, booking_id, amount, note, None).await
+}
+
+#[allow(dead_code)]
+pub async fn record_payment_with_origin_returning_id_tx(
+    tx: &mut Transaction<'_, Sqlite>,
+    booking_id: &str,
+    amount: MoneyVnd,
+    note: impl Into<String>,
+    origin: &OriginSideEffect,
+) -> BookingResult<String> {
+    record_payment_money_returning_id_tx(tx, booking_id, amount, note, Some(origin)).await
+}
+
+async fn record_payment_money_returning_id_tx(
+    tx: &mut Transaction<'_, Sqlite>,
+    booking_id: &str,
+    amount: MoneyVnd,
+    note: impl Into<String>,
+    origin: Option<&OriginSideEffect>,
+) -> BookingResult<String> {
+    let id = uuid::Uuid::new_v4().to_string();
+    let note = note.into();
+    let created_at = rfc3339_now();
+    let amount = validate_whole_vnd(amount, "transaction amount")?;
+    let origin_idempotency_key = origin.map(OriginSideEffect::key);
+    let origin_transaction_ordinal = origin.map(OriginSideEffect::ordinal).unwrap_or(0);
+
+    sqlx::query(
+        "INSERT INTO transactions (
+            id, booking_id, amount, type, note, origin_idempotency_key,
+            origin_transaction_ordinal, created_at
+        )
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+    )
+    .bind(&id)
+    .bind(booking_id)
+    .bind(amount)
+    .bind("payment")
+    .bind(&note)
+    .bind(origin_idempotency_key)
+    .bind(origin_transaction_ordinal)
+    .bind(&created_at)
+    .execute(&mut **tx)
+    .await?;
+
+    let result = sqlx::query(
+        "UPDATE bookings
+         SET paid_amount = COALESCE(paid_amount, 0) + ?
+         WHERE id = ?",
+    )
+    .bind(amount)
+    .bind(booking_id)
+    .execute(&mut **tx)
+    .await?;
+
+    if result.rows_affected() == 0 {
+        return Err(BookingError::not_found(format!(
+            "Không tìm thấy booking {}",
+            booking_id
+        )));
+    }
+
+    Ok(id)
+}
+
 pub async fn record_deposit_tx(
     tx: &mut Transaction<'_, Sqlite>,
     booking_id: &str,
