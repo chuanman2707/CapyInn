@@ -105,7 +105,6 @@ fn format_invoice_text(inv: &InvoiceData) -> String {
 pub struct HotelTools {
     pub pool: Pool<Sqlite>,
     pub app_handle: Option<AppHandle>,
-    gateway_instance_id: String,
     #[allow(dead_code)]
     tool_router: ToolRouter<Self>,
 }
@@ -778,6 +777,28 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn write_context_uses_stable_hidden_key_across_gateway_instances() {
+        let pool = test_pool().await;
+        let first_tools = HotelTools::new(pool.clone(), None);
+        let second_tools = HotelTools::new(pool, None);
+        let input = create_reservation_input("R206");
+        let request_id = mcp_request_id("req-create-after-restart");
+
+        let first_ctx = first_tools
+            .write_context("create_reservation", &request_id, &input)
+            .expect("first context");
+        let second_ctx = second_tools
+            .write_context("create_reservation", &request_id, &input)
+            .expect("second context");
+
+        assert_eq!(first_ctx.idempotency_key, second_ctx.idempotency_key);
+        assert_eq!(first_ctx.request_id, "string:req-create-after-restart");
+        assert!(first_ctx
+            .idempotency_key
+            .starts_with("mcp:create_reservation:string:req-create-after-restart:"));
+    }
+
+    #[tokio::test]
     async fn create_reservation_same_mcp_request_id_and_different_args_use_distinct_hidden_keys() {
         let _env_lock = async_env_lock().lock().await;
         let _env = EnvVarGuard::set("CAPYINN_ENABLE_HIGH_RISK_MCP_WRITES", "1");
@@ -935,7 +956,6 @@ impl HotelTools {
         Self {
             pool,
             app_handle,
-            gateway_instance_id: uuid::Uuid::new_v4().to_string(),
             tool_router: Self::tool_router(),
         }
     }
@@ -948,10 +968,7 @@ impl HotelTools {
     ) -> CommandResult<WriteCommandContext> {
         let request_id = mcp_request_id_string(request_id);
         let argument_hash = gateway_tool_args_hash(args)?;
-        let idempotency_key = format!(
-            "mcp:{}:{}:{}:{}",
-            self.gateway_instance_id, command_name, request_id, argument_hash
-        );
+        let idempotency_key = format!("mcp:{command_name}:{request_id}:{argument_hash}");
         let mut ctx = WriteCommandContext::for_scoped_command(
             request_id.clone(),
             idempotency_key,
