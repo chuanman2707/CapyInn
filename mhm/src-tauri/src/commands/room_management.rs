@@ -2,6 +2,7 @@ use super::{emit_db_update, get_money_vnd, require_admin, AppState};
 use crate::app_error::{codes, log_system_error, CommandError, CommandResult};
 use crate::app_identity;
 use crate::models::*;
+use crate::money::validate_non_negative_money_vnd;
 use serde_json::json;
 use sqlx::{Pool, Row, Sqlite};
 use tauri::State;
@@ -33,6 +34,12 @@ async fn do_update_room(pool: &Pool<Sqlite>, req: UpdateRoomRequest) -> CommandR
         max_guests,
         extra_person_fee,
     } = req;
+    let base_price = base_price
+        .map(|value| validate_non_negative_money_vnd(value, "base_price"))
+        .transpose()?;
+    let extra_person_fee = extra_person_fee
+        .map(|value| validate_non_negative_money_vnd(value, "extra_person_fee"))
+        .transpose()?;
 
     let result = sqlx::query(
         "UPDATE rooms
@@ -122,6 +129,8 @@ async fn do_create_room(pool: &Pool<Sqlite>, req: CreateRoomRequest) -> CommandR
         max_guests,
         extra_person_fee,
     } = req;
+    let base_price = validate_non_negative_money_vnd(base_price, "base_price")?;
+    let extra_person_fee = validate_non_negative_money_vnd(extra_person_fee, "extra_person_fee")?;
 
     let existing: Option<(String,)> = sqlx::query_as("SELECT id FROM rooms WHERE id = ?")
         .bind(&id)
@@ -679,6 +688,50 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn update_room_rejects_negative_money_fields() {
+        let pool = test_pool().await;
+        seed_room(&pool, "R103", "standard", "vacant").await;
+
+        let error = do_update_room(
+            &pool,
+            UpdateRoomRequest {
+                room_id: "R103".to_string(),
+                name: None,
+                room_type: None,
+                floor: None,
+                has_balcony: None,
+                base_price: Some(-1),
+                max_guests: None,
+                extra_person_fee: None,
+            },
+        )
+        .await
+        .expect_err("negative base_price must fail");
+
+        assert_eq!(error.code, codes::VALIDATION_INVALID_INPUT);
+        assert!(error.message.contains("base_price"));
+
+        let error = do_update_room(
+            &pool,
+            UpdateRoomRequest {
+                room_id: "R103".to_string(),
+                name: None,
+                room_type: None,
+                floor: None,
+                has_balcony: None,
+                base_price: None,
+                max_guests: None,
+                extra_person_fee: Some(-1),
+            },
+        )
+        .await
+        .expect_err("negative extra_person_fee must fail");
+
+        assert_eq!(error.code, codes::VALIDATION_INVALID_INPUT);
+        assert!(error.message.contains("extra_person_fee"));
+    }
+
+    #[tokio::test]
     async fn create_room_returns_duplicate_room_error_for_taken_id() {
         let pool = test_pool().await;
         seed_room(&pool, "R201", "standard", "vacant").await;
@@ -701,6 +754,49 @@ mod tests {
 
         assert_eq!(error.code, codes::ROOM_ALREADY_EXISTS);
         assert_eq!(error.message, "Phòng đã tồn tại");
+    }
+
+    #[tokio::test]
+    async fn create_room_rejects_negative_money_fields() {
+        let pool = test_pool().await;
+
+        let error = do_create_room(
+            &pool,
+            CreateRoomRequest {
+                id: "R202".to_string(),
+                name: "Room 202".to_string(),
+                room_type: "standard".to_string(),
+                floor: 2,
+                has_balcony: false,
+                base_price: -1,
+                max_guests: 2,
+                extra_person_fee: 150_000,
+            },
+        )
+        .await
+        .expect_err("negative base_price must fail");
+
+        assert_eq!(error.code, codes::VALIDATION_INVALID_INPUT);
+        assert!(error.message.contains("base_price"));
+
+        let error = do_create_room(
+            &pool,
+            CreateRoomRequest {
+                id: "R203".to_string(),
+                name: "Room 203".to_string(),
+                room_type: "standard".to_string(),
+                floor: 2,
+                has_balcony: false,
+                base_price: 500_000,
+                max_guests: 2,
+                extra_person_fee: -1,
+            },
+        )
+        .await
+        .expect_err("negative extra_person_fee must fail");
+
+        assert_eq!(error.code, codes::VALIDATION_INVALID_INPUT);
+        assert!(error.message.contains("extra_person_fee"));
     }
 
     #[tokio::test]

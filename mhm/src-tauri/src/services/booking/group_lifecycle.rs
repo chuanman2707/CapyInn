@@ -21,7 +21,7 @@ use super::{
     guest_service::{create_group_guest_manifest, link_booking_guests},
     support::{
         begin_immediate_tx, ensure_one_row_affected, ensure_rows_affected,
-        insert_room_calendar_rows, invalid_state_transition,
+        insert_room_calendar_rows, invalid_state_transition, validate_non_negative_booking_money,
     },
 };
 
@@ -520,6 +520,9 @@ pub async fn group_checkout(pool: &Pool<Sqlite>, req: GroupCheckoutRequest) -> B
             "Phải chọn ít nhất 1 phòng để checkout".to_string(),
         ));
     }
+    if let Some(final_paid) = req.final_paid {
+        validate_non_negative_booking_money(final_paid, "final_paid")?;
+    }
 
     let now = Local::now().to_rfc3339();
     let mut unique_booking_ids = Vec::new();
@@ -746,6 +749,9 @@ fn validate_group_checkin_request(req: &GroupCheckinRequest) -> BookingResult<()
     }
     if req.nights <= 0 {
         return Err(BookingError::validation("Số đêm phải > 0".to_string()));
+    }
+    if let Some(paid_amount) = req.paid_amount {
+        validate_non_negative_booking_money(paid_amount, "paid_amount")?;
     }
     if !req.room_ids.contains(&req.master_room_id) {
         return Err(BookingError::validation(

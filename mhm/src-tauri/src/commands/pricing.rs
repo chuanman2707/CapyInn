@@ -47,6 +47,18 @@ pub async fn get_pricing_rules(
     do_get_pricing_rules(&state.db).await
 }
 
+fn validate_pricing_rule_money(
+    hourly_rate: MoneyVnd,
+    overnight_rate: MoneyVnd,
+    daily_rate: MoneyVnd,
+) -> crate::app_error::CommandResult<(MoneyVnd, MoneyVnd, MoneyVnd)> {
+    Ok((
+        validate_non_negative_money_vnd(hourly_rate, "hourly_rate")?,
+        validate_non_negative_money_vnd(overnight_rate, "overnight_rate")?,
+        validate_non_negative_money_vnd(daily_rate, "daily_rate")?,
+    ))
+}
+
 #[tauri::command]
 #[allow(clippy::too_many_arguments)]
 pub async fn save_pricing_rule(
@@ -65,9 +77,8 @@ pub async fn save_pricing_rule(
     weekend_pct: Option<f64>,
 ) -> Result<(), String> {
     require_admin(&state)?;
-    let hourly_rate = validate_non_negative_money_vnd(hourly_rate, "hourly_rate")?;
-    let overnight_rate = validate_non_negative_money_vnd(overnight_rate, "overnight_rate")?;
-    let daily_rate = validate_non_negative_money_vnd(daily_rate, "daily_rate")?;
+    let (hourly_rate, overnight_rate, daily_rate) =
+        validate_pricing_rule_money(hourly_rate, overnight_rate, daily_rate)?;
 
     let now = chrono::Local::now().to_rfc3339();
     let id = uuid::Uuid::new_v4().to_string();
@@ -112,6 +123,27 @@ pub async fn save_pricing_rule(
 
     emit_db_update(&app, "pricing");
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::validate_pricing_rule_money;
+    use crate::app_error::codes;
+
+    #[test]
+    fn save_pricing_rule_rejects_negative_money_rates() {
+        for (hourly_rate, overnight_rate, daily_rate, field) in [
+            (-1, 300_000, 400_000, "hourly_rate"),
+            (80_000, -1, 400_000, "overnight_rate"),
+            (80_000, 300_000, -1, "daily_rate"),
+        ] {
+            let error = validate_pricing_rule_money(hourly_rate, overnight_rate, daily_rate)
+                .expect_err("negative pricing money must fail");
+
+            assert_eq!(error.code, codes::VALIDATION_INVALID_INPUT);
+            assert!(error.message.contains(field));
+        }
+    }
 }
 
 pub async fn do_calculate_price_preview(

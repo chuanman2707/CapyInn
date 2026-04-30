@@ -883,6 +883,97 @@ pub fn rich_group_checkin_request(
 }
 
 #[tokio::test]
+async fn check_in_rejects_negative_paid_amount() {
+    let pool = test_pool().await;
+    let mut req = minimal_checkin_request("R-NEG-PAID");
+    req.paid_amount = Some(-1);
+
+    let error = stay_lifecycle::check_in(&pool, req, None)
+        .await
+        .expect_err("negative paid_amount must fail");
+
+    assert!(
+        error.to_string().contains("paid_amount"),
+        "error should name the invalid field: {error}"
+    );
+}
+
+#[tokio::test]
+async fn check_out_rejects_negative_final_total() {
+    let pool = test_pool().await;
+
+    let error = stay_lifecycle::check_out_at(
+        &pool,
+        CheckOutRequest {
+            booking_id: "B-NEG-FINAL".to_string(),
+            settlement_mode: CheckoutSettlementMode::BookedNights,
+            final_total: -1,
+        },
+        Local::now(),
+    )
+    .await
+    .expect_err("negative final_total must fail");
+
+    assert!(
+        error.to_string().contains("final_total"),
+        "error should name the invalid field: {error}"
+    );
+}
+
+#[tokio::test]
+async fn reservation_rejects_negative_deposit_amount() {
+    let pool = test_pool().await;
+    let mut req = minimal_reservation_request("R-NEG-DEPOSIT");
+    req.deposit_amount = Some(-1);
+
+    let error = reservation_lifecycle::create_reservation(&pool, req)
+        .await
+        .expect_err("negative deposit_amount must fail");
+
+    assert!(
+        error.to_string().contains("deposit_amount"),
+        "error should name the invalid field: {error}"
+    );
+}
+
+#[tokio::test]
+async fn group_checkin_rejects_negative_paid_amount() {
+    let pool = test_pool().await;
+    let mut req = minimal_group_checkin_request(&["G-NEG-PAID"]);
+    req.paid_amount = Some(-1);
+
+    let error = group_lifecycle::group_checkin(&pool, Some("seed-user".to_string()), req)
+        .await
+        .expect_err("negative group paid_amount must fail");
+
+    assert!(
+        error.to_string().contains("paid_amount"),
+        "error should name the invalid field: {error}"
+    );
+}
+
+#[tokio::test]
+async fn group_checkout_rejects_negative_final_paid() {
+    let pool = test_pool().await;
+
+    let error = group_lifecycle::group_checkout(
+        &pool,
+        GroupCheckoutRequest {
+            group_id: "G-NEG-FINAL".to_string(),
+            booking_ids: vec!["B-NEG-FINAL".to_string()],
+            final_paid: Some(-1),
+        },
+    )
+    .await
+    .expect_err("negative final_paid must fail");
+
+    assert!(
+        error.to_string().contains("final_paid"),
+        "error should name the invalid field: {error}"
+    );
+}
+
+#[tokio::test]
 async fn calendar_insert_conflict_returns_room_unavailable_without_overwrite() {
     let pool = test_pool().await;
     seed_room(&pool, "CAL-1").await.unwrap();
@@ -1299,14 +1390,10 @@ async fn group_checkin_duplicate_in_flight_does_not_wait_for_room_lock() {
 }
 
 #[tokio::test]
-async fn group_checkin_idempotent_non_positive_paid_amount_writes_no_payment_origin_rows() {
+async fn group_checkin_idempotent_zero_paid_amount_writes_no_payment_origin_rows() {
     let pool = test_pool().await;
     seed_room(&pool, "GI610").await.unwrap();
     seed_room(&pool, "GI611").await.unwrap();
-    seed_room(&pool, "GI612").await.unwrap();
-    seed_room(&pool, "GI613").await.unwrap();
-    seed_room(&pool, "GI614").await.unwrap();
-    seed_room(&pool, "GI615").await.unwrap();
     seed_pricing_rule(&pool, "standard", 250_000.0)
         .await
         .unwrap();
@@ -1326,76 +1413,14 @@ async fn group_checkin_idempotent_non_positive_paid_amount_writes_no_payment_ori
     .expect("zero paid amount still creates group");
     assert_eq!(zero_paid.response["status"].as_str(), Some("active"));
 
-    let negative_ctx = crate::command_idempotency::WriteCommandContext::for_internal_test(
-        "req-group-idem-2-neg",
-        "idem-group-checkin-2-neg",
-        "group_checkin",
-    );
-    let negative_paid = group_lifecycle::group_checkin_idempotent(
-        &pool,
-        Some("seed-user".to_string()),
-        &negative_ctx,
-        rich_group_checkin_request(&["GI612", "GI613"], "GI612", Some(-40_000)),
-    )
-    .await
-    .expect("negative paid amount still creates group");
-    assert_eq!(negative_paid.response["status"].as_str(), Some("active"));
-
-    let negative_reservation_ctx =
-        crate::command_idempotency::WriteCommandContext::for_internal_test(
-            "req-group-idem-2-neg-reservation",
-            "idem-group-checkin-2-neg-reservation",
-            "group_checkin",
-        );
-    let mut negative_reservation_req =
-        rich_group_checkin_request(&["GI614", "GI615"], "GI614", Some(-40_000));
-    negative_reservation_req.check_in_date = Some("2026-05-10".to_string());
-    let negative_reservation = group_lifecycle::group_checkin_idempotent(
-        &pool,
-        Some("seed-user".to_string()),
-        &negative_reservation_ctx,
-        negative_reservation_req,
-    )
-    .await
-    .expect("negative reservation paid amount still creates group");
-    assert_eq!(
-        negative_reservation.response["status"].as_str(),
-        Some("booked")
-    );
-
     let zero_count: i64 =
         sqlx::query_scalar("SELECT COUNT(*) FROM transactions WHERE origin_idempotency_key = ?")
             .bind("idem-group-checkin-2-zero")
             .fetch_one(&pool)
             .await
             .unwrap();
-    let negative_count: i64 =
-        sqlx::query_scalar("SELECT COUNT(*) FROM transactions WHERE origin_idempotency_key = ?")
-            .bind("idem-group-checkin-2-neg")
-            .fetch_one(&pool)
-            .await
-            .unwrap();
-    let negative_reservation_count: i64 =
-        sqlx::query_scalar("SELECT COUNT(*) FROM transactions WHERE origin_idempotency_key = ?")
-            .bind("idem-group-checkin-2-neg-reservation")
-            .fetch_one(&pool)
-            .await
-            .unwrap();
-    let negative_reservation_group_id = negative_reservation.response["id"].as_str().unwrap();
-    let negative_reservation_deposit_sum: f64 = sqlx::query_scalar(
-        "SELECT COALESCE(SUM(deposit_amount), 0)
-         FROM bookings
-         WHERE group_id = ?",
-    )
-    .bind(negative_reservation_group_id)
-    .fetch_one(&pool)
-    .await
-    .unwrap();
 
     assert_eq!(zero_count, 0);
-    assert_eq!(negative_count, 0);
-    assert_eq!(negative_reservation_count, 0);
-    assert_eq!(negative_reservation_deposit_sum, 0.0);
 }
 
 #[tokio::test]
@@ -2454,6 +2479,53 @@ async fn reservation_command_idempotency_create_hashes_deposit_as_integer_vnd_un
     let intent_json = row.get::<String, _>("intent_json");
     assert!(intent_json.contains("\"deposit_present\":true"));
     assert!(intent_json.contains("\"deposit_vnd_units\":500000"));
+}
+
+#[tokio::test]
+async fn reservation_command_idempotency_rejects_invalid_deposit_before_claim() {
+    let pool = test_pool().await;
+
+    for (deposit_amount, request_id, idempotency_key) in [
+        (
+            -1,
+            "req-reservation-deposit-negative",
+            "idem-reservation-deposit-negative",
+        ),
+        (
+            crate::money::MAX_TRANSPORT_SAFE_MONEY_VND + 1,
+            "req-reservation-deposit-unsafe",
+            "idem-reservation-deposit-unsafe",
+        ),
+    ] {
+        let ctx = crate::command_idempotency::WriteCommandContext::for_internal_test(
+            request_id,
+            idempotency_key,
+            "create_reservation",
+        );
+        let mut request = minimal_reservation_request("R691");
+        request.deposit_amount = Some(deposit_amount);
+
+        let error = reservation_lifecycle::create_reservation_idempotent(&pool, &ctx, request)
+            .await
+            .expect_err("invalid deposit_amount must fail");
+
+        assert_eq!(error.code, crate::app_error::codes::VALIDATION_INVALID_INPUT);
+        assert!(
+            error.message.contains("deposit_amount"),
+            "error should name the invalid field: {error:?}"
+        );
+
+        let claim_count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM command_idempotency
+             WHERE command_name = ? AND idempotency_key = ?",
+        )
+        .bind(&ctx.command_name)
+        .bind(&ctx.idempotency_key)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(claim_count, 0);
+    }
 }
 
 fn reservation_modify_request(

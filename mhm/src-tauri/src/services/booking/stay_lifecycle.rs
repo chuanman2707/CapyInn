@@ -17,6 +17,7 @@ use super::{
         begin_immediate_tx, begin_tx, ensure_one_row_affected, fetch_booking,
         insert_room_calendar_rows, invalid_state_transition, lookup_booking_room_id,
         map_room_calendar_insert_error, parse_booking_datetime, read_money_vnd_or_zero,
+        validate_non_negative_booking_money,
     },
 };
 
@@ -429,12 +430,7 @@ pub async fn check_out_at(
     req: CheckOutRequest,
     now: DateTime<Local>,
 ) -> BookingResult<()> {
-    if req.final_total < 0 {
-        return Err(BookingError::validation(
-            "Tổng quyết toán phải lớn hơn hoặc bằng 0".to_string(),
-        ));
-    }
-    let final_total = req.final_total;
+    let final_total = validate_non_negative_booking_money(req.final_total, "final_total")?;
 
     let room_id = lookup_booking_room_id(pool, &req.booking_id).await?;
     let _lock_guard = crate::aggregate_locks::global_manager()
@@ -720,6 +716,9 @@ fn validate_check_in_request(req: &CheckInRequest) -> BookingResult<()> {
         return Err(BookingError::validation(
             "Number of nights must be greater than 0".to_string(),
         ));
+    }
+    if let Some(paid_amount) = req.paid_amount {
+        validate_non_negative_booking_money(paid_amount, "paid_amount")?;
     }
 
     Ok(())

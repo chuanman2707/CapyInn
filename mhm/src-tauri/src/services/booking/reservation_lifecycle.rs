@@ -16,7 +16,7 @@ use crate::{
         pricing::calculate_stay_price_tx, BookingError, BookingResult, OriginSideEffect,
     },
     models::{status, Booking, CreateReservationRequest, ModifyReservationRequest},
-    money::MoneyVnd,
+    money::{validate_non_negative_money_vnd, MoneyVnd},
 };
 
 use super::{
@@ -28,6 +28,7 @@ use super::{
     support::{
         ensure_one_row_affected, insert_room_calendar_rows, invalid_state_transition,
         read_f64_or_zero, read_money_vnd_or_zero, read_money_vnd_strict,
+        validate_non_negative_booking_money,
     },
 };
 
@@ -136,13 +137,7 @@ pub(crate) fn canonical_vnd_units(amount: Option<MoneyVnd>) -> CommandResult<i64
         return Ok(0);
     };
 
-    if amount < 0 {
-        return Err(CommandError::user(
-            codes::BOOKING_INVALID_STATE,
-            "Reservation deposit must be a whole non-negative VND amount",
-        ));
-    }
-    Ok(amount)
+    validate_non_negative_money_vnd(amount, "deposit_amount")
 }
 
 fn create_room_lock_keys(intent: &serde_json::Value) -> CommandResult<Vec<String>> {
@@ -238,7 +233,11 @@ pub async fn create_reservation_tx(
     }
 
     let now = Local::now().to_rfc3339();
-    let deposit_amount = req.deposit_amount.unwrap_or(0);
+    let deposit_amount = req
+        .deposit_amount
+        .map(|amount| validate_non_negative_booking_money(amount, "deposit_amount"))
+        .transpose()?
+        .unwrap_or(0);
     let pricing = calculate_stay_price_tx(
         tx,
         &req.room_id,

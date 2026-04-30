@@ -10,6 +10,7 @@ use crate::{
     },
     domain::booking::BookingError,
     models::*,
+    money::validate_non_negative_money_vnd,
     queries::booking::revenue_queries,
     services::booking::stay_lifecycle,
 };
@@ -187,7 +188,8 @@ fn map_stay_error(
             )
         }
         BookingError::Validation(message)
-            if message == "Tổng quyết toán phải lớn hơn hoặc bằng 0" =>
+            if message == "Tổng quyết toán phải lớn hơn hoặc bằng 0"
+                || message == "final_total must be greater than or equal to 0" =>
         {
             (
                 map_stay_user_error(
@@ -718,6 +720,8 @@ pub async fn create_expense(
     state: State<'_, AppState>,
     req: CreateExpenseRequest,
 ) -> Result<Expense, String> {
+    validate_create_expense_request(&req)?;
+
     let id = uuid::Uuid::new_v4().to_string();
     let now = chrono::Local::now().to_rfc3339();
 
@@ -743,6 +747,12 @@ pub async fn create_expense(
         expense_date: req.expense_date,
         created_at: now,
     })
+}
+
+fn validate_create_expense_request(req: &CreateExpenseRequest) -> Result<(), String> {
+    validate_non_negative_money_vnd(req.amount, "amount")
+        .map(|_| ())
+        .map_err(|error| error.message)
 }
 
 #[tauri::command]
@@ -845,7 +855,7 @@ pub async fn scan_image(path: String) -> Result<crate::ocr::CccdInfo, String> {
 mod tests {
     use super::{
         check_in_failure_context, check_out_failure_context, complete_housekeeping_clean_to_vacant,
-        map_stay_error,
+        map_stay_error, validate_create_expense_request,
     };
     use crate::app_error::{
         codes, record_command_failure_with_db_group, AppErrorKind, CorrelationIdSource,
@@ -854,7 +864,8 @@ mod tests {
     use crate::db_error_monitoring::DbErrorGroup;
     use crate::domain::booking::BookingError;
     use crate::models::{
-        CheckInRequest, CheckOutRequest, CheckoutSettlementMode, CreateGuestRequest,
+        CheckInRequest, CheckOutRequest, CheckoutSettlementMode, CreateExpenseRequest,
+        CreateGuestRequest,
     };
     use serde_json::json;
     use sqlx::{sqlite::SqlitePoolOptions, Row};
@@ -985,15 +996,31 @@ mod tests {
         let (error, db_error_group) = map_stay_error(
             "check_out",
             &frontend_correlation_id(),
-            BookingError::validation("Tổng quyết toán phải lớn hơn hoặc bằng 0"),
+            BookingError::validation("final_total must be greater than or equal to 0"),
             json!({ "booking_id": "booking-1" }),
         );
 
         assert_eq!(error.code, codes::BOOKING_INVALID_SETTLEMENT_TOTAL);
-        assert_eq!(error.message, "Tổng quyết toán phải lớn hơn hoặc bằng 0");
+        assert_eq!(
+            error.message,
+            "final_total must be greater than or equal to 0"
+        );
         assert_eq!(error.kind, AppErrorKind::User);
         assert!(error.support_id.is_none());
         assert!(db_error_group.is_none());
+    }
+
+    #[test]
+    fn create_expense_rejects_negative_amount() {
+        let error = validate_create_expense_request(&CreateExpenseRequest {
+            category: "supplies".to_string(),
+            amount: -1,
+            note: None,
+            expense_date: "2026-04-30".to_string(),
+        })
+        .expect_err("negative amount must fail");
+
+        assert!(error.contains("amount"));
     }
 
     #[test]

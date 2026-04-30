@@ -3,7 +3,7 @@ use sqlx::{sqlite::SqliteRow, Pool, Row, Sqlite, Transaction};
 
 use crate::domain::booking::{BookingError, BookingResult};
 use crate::models::Booking;
-use crate::money::MoneyVnd;
+use crate::money::{validate_non_negative_money_vnd, MoneyVnd};
 
 pub async fn begin_tx<'a>(pool: &'a Pool<Sqlite>) -> BookingResult<Transaction<'a, Sqlite>> {
     pool.begin().await.map_err(BookingError::from)
@@ -188,6 +188,14 @@ pub fn read_money_vnd_strict(row: &SqliteRow, column: &str) -> MoneyVnd {
         );
         value as MoneyVnd
     })
+}
+
+pub fn validate_non_negative_booking_money(
+    value: MoneyVnd,
+    field: &str,
+) -> BookingResult<MoneyVnd> {
+    validate_non_negative_money_vnd(value, field)
+        .map_err(|error| BookingError::validation(error.message))
 }
 
 #[cfg(test)]
