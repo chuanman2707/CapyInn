@@ -6,8 +6,10 @@ import { Button } from "@/components/ui/button";
 import { useHotelStore } from "@/stores/useHotelStore";
 import { invoke } from "@tauri-apps/api/core";
 import { getRoomTypeLabel } from "@/lib/constants";
+import { createCorrelationId } from "@/lib/correlationId";
 import { formatAppError } from "@/lib/appError";
 import { fmtNumber } from "@/lib/format";
+import { invokeWriteCommand } from "@/lib/invokeCommand";
 import { toast } from "sonner";
 import ReservationSheet from "@/components/ReservationSheet";
 import RoomDrawer from "@/components/RoomDrawer";
@@ -163,20 +165,22 @@ export default function Reservations() {
     }
 
     async function handleConfirmReservation(bookingId: string) {
+        const correlationId = createCorrelationId();
         try {
-            await invoke("confirm_reservation", { bookingId });
+            await invokeWriteCommand("confirm_reservation", { bookingId }, { correlationId });
             toast.success("Check-in reservation thành công!");
             loadBookings();
             fetchRooms();
             setSelectedBooking(null);
         } catch (e) {
-            toast.error(String(e));
+            toast.error(formatAppError(e));
         }
     }
 
     async function handleCancelReservation(bookingId: string) {
+        const correlationId = createCorrelationId();
         try {
-            await invoke("cancel_reservation", { bookingId });
+            await invokeWriteCommand("cancel_reservation", { bookingId }, { correlationId });
             toast.success("Đã hủy reservation. Tiền cọc được giữ lại.");
             loadBookings();
             fetchRooms();

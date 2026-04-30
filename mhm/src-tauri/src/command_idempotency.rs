@@ -345,6 +345,25 @@ pub type LockKeyDeriver = fn(&serde_json::Value) -> CommandResult<Vec<String>>;
 pub type WriteCommandServiceFuture<'tx> =
     Pin<Box<dyn Future<Output = CommandResult<serde_json::Value>> + Send + 'tx>>;
 
+#[derive(Debug)]
+pub struct ResolvedWriteCommandGuard<T> {
+    pub guard: T,
+    pub lock_keys: Vec<String>,
+}
+
+impl<T> ResolvedWriteCommandGuard<T> {
+    pub fn new<I, S>(guard: T, lock_keys: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        Self {
+            guard,
+            lock_keys: lock_keys.into_iter().map(Into::into).collect(),
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct WriteCommandRequest {
     hash_payload: serde_json::Value,
@@ -533,6 +552,57 @@ impl WriteCommandExecutor {
         }
     }
 
+    pub async fn execute_with_resolved_guard<F, G, GFut, Guard>(
+        &self,
+        ctx: &WriteCommandContext,
+        request: WriteCommandRequest,
+        before_transaction: G,
+        service: F,
+    ) -> CommandResult<IdempotentCommandResult<serde_json::Value>>
+    where
+        F: for<'tx> FnOnce(
+            &'tx mut Transaction<'_, Sqlite>,
+            Guard,
+        ) -> WriteCommandServiceFuture<'tx>,
+        G: FnOnce() -> GFut,
+        GFut: Future<Output = CommandResult<ResolvedWriteCommandGuard<Guard>>> + Send,
+        Guard: Send,
+    {
+        let prepared = prepare_write_command_request(request)?;
+        let claim = self.claim_or_reclaim(ctx, &prepared).await?;
+
+        match claim {
+            ClaimOutcome::Claimed { claim_token } => {
+                let resolved = match self
+                    .await_pre_transaction_guard(ctx, &claim_token, before_transaction())
+                    .await
+                {
+                    Ok(guard) => guard,
+                    Err(mut error) => {
+                        error.request_id = Some(ctx.request_id.clone());
+                        self.finalize_failure(ctx, &claim_token, &error).await?;
+                        return Err(error);
+                    }
+                };
+
+                if let Err(mut error) = self
+                    .refresh_claim_lock_keys(ctx, &claim_token, resolved.lock_keys)
+                    .await
+                {
+                    error.request_id = Some(ctx.request_id.clone());
+                    self.finalize_failure(ctx, &claim_token, &error).await?;
+                    return Err(error);
+                }
+
+                self.run_claimed(ctx, &claim_token, &prepared, move |tx| {
+                    service(tx, resolved.guard)
+                })
+                .await
+            }
+            ClaimOutcome::Replayed(result) => Ok(result),
+        }
+    }
+
     async fn await_pre_transaction_guard<GFut, Guard>(
         &self,
         ctx: &WriteCommandContext,
@@ -556,6 +626,65 @@ impl WriteCommandExecutor {
                     self.refresh_claim_lease(ctx, claim_token).await?;
                 }
             }
+        }
+    }
+
+    async fn refresh_claim_lock_keys<I, S>(
+        &self,
+        ctx: &WriteCommandContext,
+        claim_token: &str,
+        lock_keys: I,
+    ) -> CommandResult<()>
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        let mut lock_keys = lock_keys
+            .into_iter()
+            .map(Into::into)
+            .collect::<Vec<String>>();
+        lock_keys.sort();
+        lock_keys.dedup();
+        if lock_keys.is_empty() {
+            return Err(system_error("Resolved idempotency lock keys are required"));
+        }
+        let lock_keys_json = stable_json_string(&serde_json::json!(lock_keys))?;
+        let now = Utc::now().to_rfc3339();
+        let result = sqlx::query(
+            "UPDATE command_idempotency
+             SET lock_keys_json = ?,
+                 updated_at = ?
+             WHERE command_name = ?
+               AND idempotency_key = ?
+               AND status = ?
+               AND claim_token = ?",
+        )
+        .bind(&lock_keys_json)
+        .bind(&now)
+        .bind(&ctx.command_name)
+        .bind(&ctx.idempotency_key)
+        .bind(CommandStatus::InProgress.as_str())
+        .bind(claim_token)
+        .execute(&self.pool)
+        .await
+        .map_err(|error| {
+            let message = error.to_string();
+            if crate::db_error_monitoring::classify_db_error_code(&message)
+                == Some(codes::DB_LOCKED_RETRYABLE)
+            {
+                return CommandError::system(codes::DB_LOCKED_RETRYABLE, message).retryable(true);
+            }
+            system_error(message)
+        })?;
+
+        if result.rows_affected() == 1 {
+            Ok(())
+        } else {
+            Err(CommandError::system(
+                codes::SYSTEM_INTERNAL_ERROR,
+                "Failed to refresh claimed idempotency lock keys",
+            )
+            .with_request_id(ctx.request_id.clone()))
         }
     }
 
@@ -1143,8 +1272,7 @@ fn stable_json_string(value: &serde_json::Value) -> CommandResult<String> {
     serde_json::to_string(&canonicalize_json_value(value.clone())).map_err(system_error)
 }
 
-#[cfg(test)]
-fn stable_request_hash(intent: &serde_json::Value) -> CommandResult<String> {
+pub(crate) fn stable_request_hash(intent: &serde_json::Value) -> CommandResult<String> {
     let intent_json = stable_json_string(intent)?;
     stable_request_hash_from_json(&intent_json)
 }
@@ -2047,6 +2175,252 @@ mod tests {
 
         assert_eq!(result.response, serde_json::json!({ "ok": true }));
         assert!(!result.replayed);
+    }
+
+    #[tokio::test]
+    async fn execute_with_resolved_guard_finalizes_guard_error_as_terminal() {
+        let pool = test_pool().await;
+        let ctx = WriteCommandContext::for_internal_test(
+            "test-request-resolved-guard-error",
+            "idem-resolved-guard-error",
+            "test.resolved_guard_error",
+        );
+        let request = WriteCommandRequest::new_low_risk(
+            serde_json::json!({ "case": "resolved-guard-error" }),
+            "Resolved guard error",
+        )
+        .expect("request builds");
+        let guard_attempts = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+
+        let first_attempts = guard_attempts.clone();
+        let first_error = WriteCommandExecutor::new(pool.clone())
+            .execute_with_resolved_guard(
+                &ctx,
+                request.clone(),
+                move || {
+                    let first_attempts = first_attempts.clone();
+                    async move {
+                        first_attempts.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                        Err(CommandError::user(codes::AUTH_FORBIDDEN, "guard denied"))
+                    }
+                },
+                |_tx, _guard: ()| {
+                    Box::pin(async move { Ok(serde_json::json!({ "unexpected": true })) })
+                },
+            )
+            .await
+            .expect_err("guard error should fail command");
+
+        let second_attempts = guard_attempts.clone();
+        let replay_error = WriteCommandExecutor::new(pool.clone())
+            .execute_with_resolved_guard(
+                &ctx,
+                request,
+                move || {
+                    let second_attempts = second_attempts.clone();
+                    async move {
+                        second_attempts.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                        Ok(ResolvedWriteCommandGuard::new((), vec!["lock:unexpected"]))
+                    }
+                },
+                |_tx, _guard: ()| {
+                    Box::pin(async move { Ok(serde_json::json!({ "unexpected": true })) })
+                },
+            )
+            .await
+            .expect_err("terminal guard error should replay");
+
+        assert_eq!(first_error.code, codes::AUTH_FORBIDDEN);
+        assert_eq!(replay_error.code, codes::AUTH_FORBIDDEN);
+        assert_eq!(guard_attempts.load(std::sync::atomic::Ordering::SeqCst), 1);
+
+        let status: String = sqlx::query_scalar(
+            "SELECT status FROM command_idempotency
+             WHERE command_name = ? AND idempotency_key = ?",
+        )
+        .bind(&ctx.command_name)
+        .bind(&ctx.idempotency_key)
+        .fetch_one(&pool)
+        .await
+        .expect("reads command status");
+        assert_eq!(status, "failed_terminal");
+    }
+
+    #[tokio::test]
+    async fn execute_with_resolved_guard_finalizes_retryable_guard_error_as_reclaimable() {
+        let pool = test_pool().await;
+        let ctx = WriteCommandContext::for_internal_test(
+            "test-request-resolved-guard-retryable",
+            "idem-resolved-guard-retryable",
+            "test.resolved_guard_retryable",
+        );
+        let request = WriteCommandRequest::new_low_risk(
+            serde_json::json!({ "case": "resolved-guard-retryable" }),
+            "Resolved guard retryable",
+        )
+        .expect("request builds");
+
+        let error = WriteCommandExecutor::new(pool.clone())
+            .execute_with_resolved_guard(
+                &ctx,
+                request.clone(),
+                || async {
+                    Err::<ResolvedWriteCommandGuard<()>, _>(
+                        CommandError::system(codes::DB_LOCKED_RETRYABLE, "database is locked")
+                            .retryable(true),
+                    )
+                },
+                |_tx, _guard: ()| {
+                    Box::pin(async move { Ok(serde_json::json!({ "unexpected": true })) })
+                },
+            )
+            .await
+            .expect_err("retryable guard error should fail first attempt");
+
+        assert_eq!(error.code, codes::DB_LOCKED_RETRYABLE);
+        assert!(error.retryable);
+
+        let row = sqlx::query(
+            "SELECT status, retryable FROM command_idempotency
+             WHERE command_name = ? AND idempotency_key = ?",
+        )
+        .bind(&ctx.command_name)
+        .bind(&ctx.idempotency_key)
+        .fetch_one(&pool)
+        .await
+        .expect("reads command row");
+
+        assert_eq!(row.get::<String, _>("status"), "failed_retryable");
+        assert_eq!(row.get::<i64, _>("retryable"), 1);
+
+        let result = WriteCommandExecutor::new(pool.clone())
+            .execute_with_resolved_guard(
+                &ctx,
+                request,
+                || async { Ok(ResolvedWriteCommandGuard::new((), vec!["booking:B1"])) },
+                |_tx, _guard: ()| Box::pin(async move { Ok(serde_json::json!({ "ok": true })) }),
+            )
+            .await
+            .expect("retryable guard error can be reclaimed");
+
+        assert!(!result.replayed);
+        assert_eq!(result.response, serde_json::json!({ "ok": true }));
+    }
+
+    #[tokio::test]
+    async fn execute_with_resolved_guard_lock_key_refresh_failure_finalizes_claim() {
+        let pool = test_pool().await;
+        let ctx = WriteCommandContext::for_internal_test(
+            "test-request-resolved-lock-refresh-fail",
+            "idem-resolved-lock-refresh-fail",
+            "test.resolved_lock_refresh_fail",
+        );
+        let request = WriteCommandRequest::new_low_risk(
+            serde_json::json!({ "case": "resolved-lock-refresh-fail" }),
+            "Resolved lock refresh fail",
+        )
+        .expect("request builds");
+
+        let error = WriteCommandExecutor::new(pool.clone())
+            .execute_with_resolved_guard(
+                &ctx,
+                request,
+                || async { Ok(ResolvedWriteCommandGuard::new((), Vec::<String>::new())) },
+                |_tx, _guard: ()| {
+                    Box::pin(async move { Ok(serde_json::json!({ "unexpected": true })) })
+                },
+            )
+            .await
+            .expect_err("empty resolved lock keys should fail after claim");
+
+        assert_eq!(error.code, codes::SYSTEM_INTERNAL_ERROR);
+
+        let status: String = sqlx::query_scalar(
+            "SELECT status FROM command_idempotency
+             WHERE command_name = ? AND idempotency_key = ?",
+        )
+        .bind(&ctx.command_name)
+        .bind(&ctx.idempotency_key)
+        .fetch_one(&pool)
+        .await
+        .expect("reads command status");
+
+        assert_ne!(status, "in_progress");
+    }
+
+    #[tokio::test]
+    async fn execute_with_resolved_guard_refreshes_lock_keys_before_transaction() {
+        let pool = test_pool().await;
+        let ctx = WriteCommandContext::for_internal_test(
+            "test-request-resolved-locks",
+            "idem-resolved-locks",
+            "test.resolved_locks",
+        );
+        let request = WriteCommandRequest::new_low_risk(
+            serde_json::json!({ "case": "resolved-locks" }),
+            "Resolved locks",
+        )
+        .expect("request builds");
+        let command_name = ctx.command_name.clone();
+        let idempotency_key = ctx.idempotency_key.clone();
+
+        let result = WriteCommandExecutor::new(pool.clone())
+            .execute_with_resolved_guard(
+                &ctx,
+                request,
+                || async {
+                    Ok(ResolvedWriteCommandGuard::new(
+                        "guard-payload".to_string(),
+                        vec!["room:R1", "booking:B1", "room:R1"],
+                    ))
+                },
+                move |tx, guard| {
+                    Box::pin(async move {
+                        let lock_keys_json: String = sqlx::query_scalar(
+                            "SELECT lock_keys_json FROM command_idempotency
+                             WHERE command_name = ? AND idempotency_key = ?",
+                        )
+                        .bind(&command_name)
+                        .bind(&idempotency_key)
+                        .fetch_one(&mut **tx)
+                        .await
+                        .map_err(system_error)?;
+
+                        Ok(serde_json::json!({
+                            "guard": guard,
+                            "lock_keys_json": lock_keys_json,
+                        }))
+                    })
+                },
+            )
+            .await
+            .expect("command succeeds");
+
+        assert_eq!(result.response["guard"], "guard-payload");
+        assert_eq!(
+            result.response["lock_keys_json"],
+            "[\"booking:B1\",\"room:R1\"]"
+        );
+        assert!(!result.replayed);
+    }
+
+    #[test]
+    fn stable_request_hash_matches_executor_request_hash() {
+        let payload = serde_json::json!({
+            "schema": "test.hash.v1",
+            "nested": {
+                "b": 2,
+                "a": 1
+            }
+        });
+        let request = WriteCommandRequest::new_low_risk(payload.clone(), "Hash match")
+            .expect("request builds");
+        let prepared = prepare_write_command_request(request).expect("request prepares");
+
+        assert_eq!(
+            stable_request_hash(&payload).expect("payload hashes"),
+            prepared.request_hash
+        );
     }
 
     #[tokio::test]

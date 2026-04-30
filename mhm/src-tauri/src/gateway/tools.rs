@@ -1,7 +1,9 @@
+use rmcp::handler::server::common::RequestId as McpRequestId;
 use rmcp::handler::server::router::tool::ToolRouter;
 use rmcp::handler::server::wrapper::Parameters;
 use rmcp::model::*;
 use rmcp::{tool, tool_handler, tool_router, ServerHandler};
+use serde::Serialize;
 use sqlx::{Pool, Sqlite};
 use tauri::AppHandle;
 
@@ -9,7 +11,11 @@ use super::models::*;
 use super::policy::{
     guard_write_tool, CANCEL_RESERVATION_META, CREATE_RESERVATION_META, MODIFY_RESERVATION_META,
 };
+use crate::app_error::{CommandError, CommandResult};
 use crate::app_identity;
+use crate::command_idempotency::{
+    stable_request_hash, system_error, ActorType, WriteCommandContext,
+};
 use crate::commands;
 use crate::models::{BookingFilter, CreateReservationRequest, InvoiceData};
 use crate::services::settings_store::get_setting;
@@ -98,24 +104,65 @@ fn format_invoice_text(inv: &InvoiceData) -> String {
 pub struct HotelTools {
     pub pool: Pool<Sqlite>,
     pub app_handle: Option<AppHandle>,
+    gateway_instance_id: String,
     #[allow(dead_code)]
     tool_router: ToolRouter<Self>,
+}
+
+fn gateway_tool_args_hash<T: Serialize>(args: &T) -> CommandResult<String> {
+    let value = serde_json::to_value(args).map_err(system_error)?;
+    stable_request_hash(&value)
+}
+
+fn mcp_request_id_string(request_id: &McpRequestId) -> String {
+    match &request_id.0 {
+        NumberOrString::Number(value) => format!("number:{value}"),
+        NumberOrString::String(value) => format!("string:{value}"),
+    }
+}
+
+fn tool_success_envelope<T: Serialize>(data: &T) -> String {
+    serde_json::to_string_pretty(&serde_json::json!({
+        "ok": true,
+        "data": data,
+    }))
+    .unwrap()
+}
+
+fn tool_error_envelope(tool: &str, request_id: &str, error: CommandError) -> String {
+    serde_json::to_string_pretty(&serde_json::json!({
+        "ok": false,
+        "error": {
+            "code": error.code,
+            "kind": error.kind,
+            "message": error.message,
+            "support_id": error.support_id,
+            "tool": tool,
+            "retryable": error.retryable,
+            "request_id": request_id,
+        },
+    }))
+    .unwrap()
 }
 
 #[cfg(test)]
 #[allow(clippy::items_after_test_module)]
 mod tests {
     use super::{
-        CancelReservationInput, CreateReservationInput, GetInvoiceInput, GetSettingsInput,
-        HotelTools, ModifyReservationInput,
+        tool_error_envelope, CancelReservationInput, CreateReservationInput, GetInvoiceInput,
+        GetSettingsInput, HotelTools, ModifyReservationInput,
     };
-    use crate::app_error::codes;
+    use crate::app_error::{codes, CommandError};
     use crate::app_identity;
     use crate::commands::invoices;
+    use rmcp::handler::server::common::RequestId as McpRequestId;
     use rmcp::handler::server::wrapper::Parameters;
+    use rmcp::model::NumberOrString;
+    use rmcp::schemars;
     use serde_json::Value;
     use sqlx::{sqlite::SqlitePoolOptions, Pool, Row, Sqlite};
     use std::ffi::OsString;
+    use std::sync::Arc;
     use std::sync::OnceLock;
 
     async fn test_pool() -> Pool<Sqlite> {
@@ -289,6 +336,29 @@ mod tests {
         .execute(pool)
         .await
         .expect("seed invoice booking");
+    }
+
+    fn mcp_request_id(value: &str) -> McpRequestId {
+        McpRequestId(NumberOrString::String(Arc::from(value)))
+    }
+
+    fn numeric_mcp_request_id(value: i64) -> McpRequestId {
+        McpRequestId(NumberOrString::Number(value))
+    }
+
+    fn create_reservation_input(room_id: &str) -> CreateReservationInput {
+        CreateReservationInput {
+            room_id: room_id.to_string(),
+            guest_name: "Nguyen Van A".to_string(),
+            guest_phone: Some("0900000000".to_string()),
+            guest_doc_number: Some("079123456789".to_string()),
+            check_in_date: "2026-04-20".to_string(),
+            check_out_date: "2026-04-22".to_string(),
+            nights: 2,
+            deposit_amount: Some(50_000.0),
+            source: Some("phone".to_string()),
+            notes: Some("test reservation".to_string()),
+        }
     }
 
     struct EnvVarGuard {
@@ -476,18 +546,10 @@ mod tests {
         let tools = HotelTools::new(pool.clone(), None);
 
         let output = tools
-            .create_reservation(Parameters(CreateReservationInput {
-                room_id: "R199".to_string(),
-                guest_name: "Nguyen Van A".to_string(),
-                guest_phone: Some("0900000000".to_string()),
-                guest_doc_number: Some("079123456789".to_string()),
-                check_in_date: "2026-04-20".to_string(),
-                check_out_date: "2026-04-22".to_string(),
-                nights: 2,
-                deposit_amount: Some(50_000.0),
-                source: Some("phone".to_string()),
-                notes: Some("test reservation".to_string()),
-            }))
+            .create_reservation(
+                Parameters(create_reservation_input("R199")),
+                mcp_request_id("req-create-denied"),
+            )
             .await;
 
         let envelope: Value = serde_json::from_str(&output).expect("error envelope json");
@@ -532,23 +594,16 @@ mod tests {
         let tools = HotelTools::new(pool.clone(), None);
 
         let output = tools
-            .create_reservation(Parameters(CreateReservationInput {
-                room_id: "R200".to_string(),
-                guest_name: "Nguyen Van A".to_string(),
-                guest_phone: Some("0900000000".to_string()),
-                guest_doc_number: Some("079123456789".to_string()),
-                check_in_date: "2026-04-20".to_string(),
-                check_out_date: "2026-04-22".to_string(),
-                nights: 2,
-                deposit_amount: Some(50_000.0),
-                source: Some("phone".to_string()),
-                notes: Some("test reservation".to_string()),
-            }))
+            .create_reservation(
+                Parameters(create_reservation_input("R200")),
+                mcp_request_id("req-create-success"),
+            )
             .await;
 
-        let booking: Value = serde_json::from_str(&output).expect("booking json");
-        assert_eq!(booking["room_id"].as_str(), Some("R200"));
-        assert_eq!(booking["status"].as_str(), Some("booked"));
+        let envelope: Value = serde_json::from_str(&output).expect("success envelope json");
+        assert_eq!(envelope["ok"].as_bool(), Some(true));
+        assert_eq!(envelope["data"]["room_id"].as_str(), Some("R200"));
+        assert_eq!(envelope["data"]["status"].as_str(), Some("booked"));
 
         let stored: String = sqlx::query("SELECT status FROM bookings WHERE room_id = ?")
             .bind("R200")
@@ -570,12 +625,18 @@ mod tests {
         let tools = HotelTools::new(pool.clone(), None);
 
         let output = tools
-            .cancel_reservation(Parameters(CancelReservationInput {
-                booking_id: "B201".to_string(),
-            }))
+            .cancel_reservation(
+                Parameters(CancelReservationInput {
+                    booking_id: "B201".to_string(),
+                }),
+                mcp_request_id("req-cancel-success"),
+            )
             .await;
 
-        assert_eq!(output, "Reservation B201 cancelled successfully");
+        let envelope: Value = serde_json::from_str(&output).expect("success envelope json");
+        assert_eq!(envelope["ok"].as_bool(), Some(true));
+        assert_eq!(envelope["data"]["ok"].as_bool(), Some(true));
+        assert_eq!(envelope["data"]["booking_id"].as_str(), Some("B201"));
 
         let stored: String = sqlx::query("SELECT status FROM bookings WHERE id = ?")
             .bind("B201")
@@ -598,18 +659,206 @@ mod tests {
         let tools = HotelTools::new(pool.clone(), None);
 
         let output = tools
-            .modify_reservation(Parameters(ModifyReservationInput {
-                booking_id: "B202".to_string(),
-                new_check_in_date: "2026-04-24".to_string(),
-                new_check_out_date: "2026-04-26".to_string(),
-                new_nights: 2,
-            }))
+            .modify_reservation(
+                Parameters(ModifyReservationInput {
+                    booking_id: "B202".to_string(),
+                    new_check_in_date: "2026-04-24".to_string(),
+                    new_check_out_date: "2026-04-26".to_string(),
+                    new_nights: 2,
+                }),
+                mcp_request_id("req-modify-success"),
+            )
             .await;
 
-        let booking: Value = serde_json::from_str(&output).expect("booking json");
-        assert_eq!(booking["status"].as_str(), Some("booked"));
-        assert_eq!(booking["check_in_at"].as_str(), Some("2026-04-24"));
-        assert_eq!(booking["expected_checkout"].as_str(), Some("2026-04-26"));
+        let envelope: Value = serde_json::from_str(&output).expect("success envelope json");
+        assert_eq!(envelope["ok"].as_bool(), Some(true));
+        assert_eq!(envelope["data"]["status"].as_str(), Some("booked"));
+        assert_eq!(envelope["data"]["check_in_at"].as_str(), Some("2026-04-24"));
+        assert_eq!(
+            envelope["data"]["expected_checkout"].as_str(),
+            Some("2026-04-26")
+        );
+    }
+
+    #[tokio::test]
+    async fn reservation_write_tool_schemas_do_not_expose_idempotency_fields() {
+        let pool = test_pool().await;
+        let tools = HotelTools::new(pool, None);
+
+        for tool_name in [
+            "create_reservation",
+            "modify_reservation",
+            "cancel_reservation",
+        ] {
+            let tool = tools
+                .tool_router
+                .get(tool_name)
+                .expect("reservation write tool exists");
+            let schema = serde_json::to_string(&tool.input_schema).expect("schema serializes");
+            assert!(!schema.contains("idempotency_key"));
+            assert!(!schema.contains("idempotencyKey"));
+        }
+
+        let create_schema = serde_json::to_string(&schemars::schema_for!(CreateReservationInput))
+            .expect("schema serializes");
+        let modify_schema = serde_json::to_string(&schemars::schema_for!(ModifyReservationInput))
+            .expect("schema serializes");
+        let cancel_schema = serde_json::to_string(&schemars::schema_for!(CancelReservationInput))
+            .expect("schema serializes");
+        for schema in [create_schema, modify_schema, cancel_schema] {
+            assert!(!schema.contains("idempotency_key"));
+            assert!(!schema.contains("idempotencyKey"));
+        }
+    }
+
+    #[tokio::test]
+    async fn create_reservation_same_mcp_request_id_and_args_replays_stored_command_row() {
+        let _env_lock = async_env_lock().lock().await;
+        let _env = EnvVarGuard::set("CAPYINN_ENABLE_HIGH_RISK_MCP_WRITES", "1");
+
+        let pool = test_pool().await;
+        seed_room(&pool, "R203", "standard").await;
+        seed_pricing_rule(&pool, "standard", 600_000.0).await;
+        let tools = HotelTools::new(pool.clone(), None);
+
+        let first_output = tools
+            .create_reservation(
+                Parameters(create_reservation_input("R203")),
+                mcp_request_id("req-create-replay"),
+            )
+            .await;
+        let replay_output = tools
+            .create_reservation(
+                Parameters(create_reservation_input("R203")),
+                mcp_request_id("req-create-replay"),
+            )
+            .await;
+
+        let first: Value = serde_json::from_str(&first_output).expect("success envelope json");
+        let replay: Value = serde_json::from_str(&replay_output).expect("success envelope json");
+        assert_eq!(first["ok"].as_bool(), Some(true));
+        assert_eq!(replay["ok"].as_bool(), Some(true));
+        assert_eq!(first["data"]["id"], replay["data"]["id"]);
+
+        let command_rows: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM command_idempotency WHERE command_name = 'create_reservation'",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("command row count");
+        assert_eq!(command_rows, 1);
+
+        let bookings: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM bookings WHERE room_id = ?")
+            .bind("R203")
+            .fetch_one(&pool)
+            .await
+            .expect("booking count");
+        assert_eq!(bookings, 1);
+    }
+
+    #[tokio::test]
+    async fn create_reservation_same_mcp_request_id_and_different_args_use_distinct_hidden_keys() {
+        let _env_lock = async_env_lock().lock().await;
+        let _env = EnvVarGuard::set("CAPYINN_ENABLE_HIGH_RISK_MCP_WRITES", "1");
+
+        let pool = test_pool().await;
+        seed_room(&pool, "R204A", "standard").await;
+        seed_room(&pool, "R204B", "standard").await;
+        seed_pricing_rule(&pool, "standard", 600_000.0).await;
+        let tools = HotelTools::new(pool.clone(), None);
+
+        let first_output = tools
+            .create_reservation(
+                Parameters(create_reservation_input("R204A")),
+                mcp_request_id("req-create-same-id-different-args"),
+            )
+            .await;
+        let second_output = tools
+            .create_reservation(
+                Parameters(create_reservation_input("R204B")),
+                mcp_request_id("req-create-same-id-different-args"),
+            )
+            .await;
+
+        let first: Value = serde_json::from_str(&first_output).expect("success envelope json");
+        let second: Value = serde_json::from_str(&second_output).expect("success envelope json");
+        assert_eq!(first["ok"].as_bool(), Some(true));
+        assert_eq!(second["ok"].as_bool(), Some(true));
+        assert_ne!(first["data"]["id"], second["data"]["id"]);
+
+        let command_rows: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM command_idempotency WHERE command_name = 'create_reservation'",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("command row count");
+        assert_eq!(command_rows, 2);
+    }
+
+    #[tokio::test]
+    async fn create_reservation_numeric_and_string_mcp_request_ids_use_distinct_hidden_keys() {
+        let _env_lock = async_env_lock().lock().await;
+        let _env = EnvVarGuard::set("CAPYINN_ENABLE_HIGH_RISK_MCP_WRITES", "1");
+
+        let pool = test_pool().await;
+        seed_room(&pool, "R205", "standard").await;
+        seed_pricing_rule(&pool, "standard", 600_000.0).await;
+        let tools = HotelTools::new(pool.clone(), None);
+
+        let first_output = tools
+            .create_reservation(
+                Parameters(create_reservation_input("R205")),
+                numeric_mcp_request_id(1),
+            )
+            .await;
+        let second_output = tools
+            .create_reservation(
+                Parameters(create_reservation_input("R205")),
+                mcp_request_id("1"),
+            )
+            .await;
+
+        let first: Value = serde_json::from_str(&first_output).expect("success envelope json");
+        let second: Value = serde_json::from_str(&second_output).expect("error envelope json");
+        assert_eq!(first["ok"].as_bool(), Some(true));
+        assert_eq!(second["ok"].as_bool(), Some(false));
+
+        let command_rows: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM command_idempotency WHERE command_name = 'create_reservation'",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("command row count");
+        assert_eq!(command_rows, 2);
+
+        let idempotency_keys: Vec<String> = sqlx::query_scalar(
+            "SELECT idempotency_key FROM command_idempotency WHERE command_name = 'create_reservation'",
+        )
+        .fetch_all(&pool)
+        .await
+        .expect("idempotency keys");
+        assert_eq!(idempotency_keys.len(), 2);
+        assert_ne!(idempotency_keys[0], idempotency_keys[1]);
+    }
+
+    #[test]
+    fn tool_error_envelope_includes_support_id() {
+        let output = tool_error_envelope(
+            "create_reservation",
+            "req-support-id",
+            CommandError::with_support_id(
+                codes::SYSTEM_INTERNAL_ERROR,
+                "system failure",
+                "SUP-TEST0001",
+            ),
+        );
+
+        let envelope: Value = serde_json::from_str(&output).expect("error envelope json");
+        assert_eq!(envelope["ok"].as_bool(), Some(false));
+        assert_eq!(
+            envelope["error"]["support_id"].as_str(),
+            Some("SUP-TEST0001")
+        );
     }
 
     #[tokio::test]
@@ -665,8 +914,32 @@ impl HotelTools {
         Self {
             pool,
             app_handle,
+            gateway_instance_id: uuid::Uuid::new_v4().to_string(),
             tool_router: Self::tool_router(),
         }
+    }
+
+    fn write_context<T: Serialize>(
+        &self,
+        command_name: &str,
+        request_id: &McpRequestId,
+        args: &T,
+    ) -> CommandResult<WriteCommandContext> {
+        let request_id = mcp_request_id_string(request_id);
+        let argument_hash = gateway_tool_args_hash(args)?;
+        let idempotency_key = format!(
+            "mcp:{}:{}:{}:{}",
+            self.gateway_instance_id, command_name, request_id, argument_hash
+        );
+        let mut ctx = WriteCommandContext::for_scoped_command(
+            request_id.clone(),
+            idempotency_key,
+            command_name,
+        )?;
+        ctx.actor_type = ActorType::AiAgent;
+        ctx.actor_id = Some("mcp-gateway".to_string());
+        ctx.channel_id = Some("mcp".to_string());
+        Ok(ctx)
     }
 }
 
@@ -846,10 +1119,19 @@ impl HotelTools {
     async fn create_reservation(
         &self,
         Parameters(input): Parameters<CreateReservationInput>,
+        request_id: McpRequestId,
     ) -> String {
         if let Err(envelope) = guard_write_tool(&CREATE_RESERVATION_META) {
             return envelope.to_json_string();
         }
+
+        let request_id_text = mcp_request_id_string(&request_id);
+        let ctx = match self.write_context("create_reservation", &request_id, &input) {
+            Ok(ctx) => ctx,
+            Err(error) => {
+                return tool_error_envelope("create_reservation", &request_id_text, error)
+            }
+        };
 
         let req = CreateReservationRequest {
             room_id: input.room_id,
@@ -864,7 +1146,8 @@ impl HotelTools {
             notes: input.notes,
         };
 
-        match commands::do_create_reservation(&self.pool, self.app_handle.as_ref(), req).await {
+        match commands::do_create_reservation(&self.pool, self.app_handle.as_ref(), &ctx, req).await
+        {
             Ok(booking) => {
                 if let Some(ref handle) = self.app_handle {
                     use tauri::Emitter;
@@ -877,9 +1160,9 @@ impl HotelTools {
                     );
                 }
 
-                serde_json::to_string_pretty(&booking).unwrap()
+                tool_success_envelope(&booking)
             }
-            Err(e) => format!("Error: {}", e),
+            Err(error) => tool_error_envelope("create_reservation", &request_id_text, error),
         }
     }
 
@@ -889,20 +1172,30 @@ impl HotelTools {
     async fn cancel_reservation(
         &self,
         Parameters(input): Parameters<CancelReservationInput>,
+        request_id: McpRequestId,
     ) -> String {
         if let Err(envelope) = guard_write_tool(&CANCEL_RESERVATION_META) {
             return envelope.to_json_string();
         }
 
+        let request_id_text = mcp_request_id_string(&request_id);
+        let ctx = match self.write_context("cancel_reservation", &request_id, &input) {
+            Ok(ctx) => ctx,
+            Err(error) => {
+                return tool_error_envelope("cancel_reservation", &request_id_text, error)
+            }
+        };
+
         match commands::do_cancel_reservation(
             &self.pool,
             self.app_handle.as_ref(),
+            &ctx,
             &input.booking_id,
         )
         .await
         {
-            Ok(()) => format!("Reservation {} cancelled successfully", input.booking_id),
-            Err(e) => format!("Error: {}", e),
+            Ok(response) => tool_success_envelope(&response),
+            Err(error) => tool_error_envelope("cancel_reservation", &request_id_text, error),
         }
     }
 
@@ -912,10 +1205,19 @@ impl HotelTools {
     async fn modify_reservation(
         &self,
         Parameters(input): Parameters<ModifyReservationInput>,
+        request_id: McpRequestId,
     ) -> String {
         if let Err(envelope) = guard_write_tool(&MODIFY_RESERVATION_META) {
             return envelope.to_json_string();
         }
+
+        let request_id_text = mcp_request_id_string(&request_id);
+        let ctx = match self.write_context("modify_reservation", &request_id, &input) {
+            Ok(ctx) => ctx,
+            Err(error) => {
+                return tool_error_envelope("modify_reservation", &request_id_text, error)
+            }
+        };
 
         let req = crate::models::ModifyReservationRequest {
             booking_id: input.booking_id,
@@ -924,9 +1226,10 @@ impl HotelTools {
             new_nights: input.new_nights,
         };
 
-        match commands::do_modify_reservation(&self.pool, self.app_handle.as_ref(), req).await {
-            Ok(booking) => serde_json::to_string_pretty(&booking).unwrap(),
-            Err(e) => format!("Error: {}", e),
+        match commands::do_modify_reservation(&self.pool, self.app_handle.as_ref(), &ctx, req).await
+        {
+            Ok(booking) => tool_success_envelope(&booking),
+            Err(error) => tool_error_envelope("modify_reservation", &request_id_text, error),
         }
     }
 

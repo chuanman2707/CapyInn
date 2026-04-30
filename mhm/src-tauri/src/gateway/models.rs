@@ -1,5 +1,5 @@
-use serde::Deserialize;
 use rmcp::schemars::{self, JsonSchema};
+use serde::{Deserialize, Serialize};
 
 // ─── MCP Tool Input Schemas ───
 
@@ -47,7 +47,7 @@ pub struct CalculatePriceInput {
     pub pricing_type: String,
 }
 
-#[derive(Debug, Deserialize, JsonSchema)]
+#[derive(Debug, Deserialize, Serialize, JsonSchema)]
 pub struct CreateReservationInput {
     /// Room ID to reserve
     pub room_id: String,
@@ -71,13 +71,13 @@ pub struct CreateReservationInput {
     pub notes: Option<String>,
 }
 
-#[derive(Debug, Deserialize, JsonSchema)]
+#[derive(Debug, Deserialize, Serialize, JsonSchema)]
 pub struct CancelReservationInput {
     /// Booking ID to cancel
     pub booking_id: String,
 }
 
-#[derive(Debug, Deserialize, JsonSchema)]
+#[derive(Debug, Deserialize, Serialize, JsonSchema)]
 pub struct ModifyReservationInput {
     /// Booking ID to modify
     pub booking_id: String,

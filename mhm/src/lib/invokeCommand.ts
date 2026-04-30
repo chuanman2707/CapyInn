@@ -37,3 +37,18 @@ export async function invokeCommand<TResponse>(
     });
   }
 }
+
+export async function invokeWriteCommand<TResponse>(
+  command: string,
+  args?: Record<string, unknown>,
+  options?: { correlationId?: string; monitoringContext?: MonitoringContext },
+): Promise<TResponse> {
+  return invokeCommand<TResponse>(
+    command,
+    {
+      ...(args ?? {}),
+      idempotencyKey: createIdempotencyKey(command),
+    },
+    options,
+  );
+}

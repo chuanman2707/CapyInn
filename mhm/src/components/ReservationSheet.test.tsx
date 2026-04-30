@@ -10,8 +10,7 @@ import {
 } from "@/lib/appError";
 
 const invoke = vi.hoisted(() => vi.fn());
-const invokeCommand = vi.hoisted(() => vi.fn());
-const createIdempotencyKey = vi.hoisted(() => vi.fn());
+const invokeWriteCommand = vi.hoisted(() => vi.fn());
 const createCorrelationId = vi.hoisted(() => vi.fn());
 const toastError = vi.hoisted(() => vi.fn());
 const toastSuccess = vi.hoisted(() => vi.fn());
@@ -25,8 +24,7 @@ vi.mock("@tauri-apps/api/core", () => ({
 }));
 
 vi.mock("@/lib/invokeCommand", () => ({
-  createIdempotencyKey,
-  invokeCommand,
+  invokeWriteCommand,
 }));
 
 vi.mock("@/lib/correlationId", () => ({
@@ -111,12 +109,11 @@ describe("ReservationSheet", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     invoke.mockResolvedValue(undefined);
-    invokeCommand.mockResolvedValue(undefined);
-    createIdempotencyKey.mockReturnValue("create_reservation:IDEM-1");
+    invokeWriteCommand.mockResolvedValue(undefined);
     createCorrelationId.mockReturnValue("COR-5E6F7A8B");
   });
 
-  it("uses invokeCommand with scrubbed monitoring context for the create flow", async () => {
+  it("uses invokeWriteCommand with scrubbed monitoring context for the create flow", async () => {
     const user = userEvent.setup();
     render(<ReservationSheet open onOpenChange={vi.fn()} />);
 
@@ -149,7 +146,7 @@ describe("ReservationSheet", () => {
 
     expect(createCorrelationId).toHaveBeenCalledTimes(1);
     await waitFor(() => {
-      expect(invokeCommand).toHaveBeenCalledWith(
+      expect(invokeWriteCommand).toHaveBeenCalledWith(
         "create_reservation",
         {
           req: {
@@ -164,7 +161,6 @@ describe("ReservationSheet", () => {
             source: "zalo",
             notes: "Khách thích tầng cao",
           },
-          idempotencyKey: "create_reservation:IDEM-1",
         },
         {
           correlationId: "COR-5E6F7A8B",
@@ -177,6 +173,67 @@ describe("ReservationSheet", () => {
         },
       );
     });
+    expect(invoke).not.toHaveBeenCalledWith("create_reservation", expect.anything());
+  });
+
+  it("uses invokeWriteCommand with correlation and monitoring context for the modify flow", async () => {
+    const user = userEvent.setup();
+    render(
+      <ReservationSheet
+        open
+        onOpenChange={vi.fn()}
+        editBooking={{
+          id: "B101",
+          room_id: "R101",
+          guest_name: "Nguyen Van A",
+          guest_phone: "0900000000",
+          check_in_at: "2026-04-20",
+          expected_checkout: "2026-04-22",
+          scheduled_checkin: "2026-04-20",
+          scheduled_checkout: "2026-04-22",
+          nights: 2,
+          total_price: 1000000,
+          source: "phone",
+          deposit_amount: 50000,
+        }}
+      />,
+    );
+
+    await waitFor(() => {
+      expect(fetchRooms).toHaveBeenCalledTimes(1);
+    });
+
+    const [nightsInput] = screen.getAllByRole("spinbutton");
+    fireEvent.change(nightsInput, {
+      target: { value: "3" },
+    });
+
+    await user.click(screen.getByRole("button", { name: /lưu thay đổi/i }));
+
+    expect(createCorrelationId).toHaveBeenCalledTimes(1);
+    await waitFor(() => {
+      expect(invokeWriteCommand).toHaveBeenCalledWith(
+        "modify_reservation",
+        {
+          req: {
+            booking_id: "B101",
+            new_check_in_date: "2026-04-20",
+            new_check_out_date: "2026-04-23",
+            new_nights: 3,
+          },
+        },
+        {
+          correlationId: "COR-5E6F7A8B",
+          monitoringContext: {
+            nights: 3,
+            deposit_present: false,
+            source: null,
+            notes_present: false,
+          },
+        },
+      );
+    });
+    expect(invoke).not.toHaveBeenCalledWith("modify_reservation", expect.anything());
   });
 
   it("formats create flow failures with formatAppError", async () => {
@@ -184,7 +241,7 @@ describe("ReservationSheet", () => {
     const error = createAppErrorException(createReservationError, undefined, {
       correlation_id: "COR-5E6F7A8B",
     });
-    invokeCommand.mockRejectedValue(error);
+    invokeWriteCommand.mockRejectedValue(error);
 
     render(<ReservationSheet open onOpenChange={vi.fn()} />);
 
@@ -201,14 +258,13 @@ describe("ReservationSheet", () => {
     await user.click(screen.getByRole("button", { name: /đặt phòng/i }));
 
     await waitFor(() => {
-      expect(invokeCommand).toHaveBeenCalledWith(
+      expect(invokeWriteCommand).toHaveBeenCalledWith(
         "create_reservation",
         expect.objectContaining({
           req: expect.objectContaining({
             room_id: "R101",
             guest_name: "Nguyen Van A",
           }),
-          idempotencyKey: "create_reservation:IDEM-1",
         }),
         {
           correlationId: "COR-5E6F7A8B",
