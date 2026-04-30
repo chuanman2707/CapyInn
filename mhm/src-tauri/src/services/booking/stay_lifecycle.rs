@@ -27,12 +27,14 @@ use super::{
     },
     guest_service::{create_guest_manifest, link_booking_guests},
     support::{
-        begin_immediate_tx, begin_tx, ensure_one_row_affected, fetch_booking,
-        insert_room_calendar_rows, invalid_state_transition, lookup_booking_room_id,
-        map_room_calendar_insert_error, parse_booking_datetime, read_money_vnd_or_zero,
-        validate_non_negative_booking_money,
+        begin_tx, ensure_one_row_affected, insert_room_calendar_rows, invalid_state_transition,
+        lookup_booking_room_id, map_room_calendar_insert_error, parse_booking_datetime,
+        read_money_vnd_or_zero, validate_non_negative_booking_money,
     },
 };
+
+#[cfg(test)]
+use super::support::{begin_immediate_tx, fetch_booking};
 
 fn mark_write_db_error(error: BookingError) -> BookingError {
     match error {
@@ -109,6 +111,33 @@ fn map_check_out_command_error(error: BookingError) -> CommandError {
     }
 }
 
+fn map_extend_stay_command_error(error: BookingError) -> CommandError {
+    match error {
+        BookingError::Conflict(message) => {
+            if is_room_unavailable_conflict_message(&message) {
+                return CommandError::user(codes::CONFLICT_ROOM_UNAVAILABLE, message);
+            }
+            CommandError::user(codes::BOOKING_INVALID_STATE, message)
+        }
+        BookingError::Validation(message) => {
+            CommandError::user(codes::BOOKING_INVALID_STATE, message)
+        }
+        BookingError::NotFound(message) if message.starts_with("Không tìm thấy phòng ") => {
+            CommandError::user(codes::ROOM_NOT_FOUND, message)
+        }
+        BookingError::NotFound(message) => CommandError::user(codes::BOOKING_NOT_FOUND, message),
+        BookingError::DatabaseWrite(message) | BookingError::Database(message) => {
+            if classify_db_error_code(&message) == Some(codes::DB_LOCKED_RETRYABLE) {
+                return CommandError::system(codes::DB_LOCKED_RETRYABLE, message).retryable(true);
+            }
+            CommandError::system(codes::SYSTEM_INTERNAL_ERROR, message)
+        }
+        BookingError::DateTimeParse(message) => {
+            CommandError::system(codes::SYSTEM_INTERNAL_ERROR, message)
+        }
+    }
+}
+
 fn build_check_in_hash_payload(req: &CheckInRequest) -> serde_json::Value {
     let guests = req
         .guests
@@ -150,6 +179,14 @@ fn build_check_out_hash_payload(req: &CheckOutRequest) -> serde_json::Value {
     })
 }
 
+fn build_extend_stay_hash_payload(booking_id: &str) -> serde_json::Value {
+    json!({
+        "schema": "stay.extend.v1",
+        "booking_id": booking_id,
+        "operation": "add_one_night",
+    })
+}
+
 fn check_in_lock_keys_from_payload(hash_payload: &serde_json::Value) -> CommandResult<Vec<String>> {
     let room_id = hash_payload
         .get("room_id")
@@ -165,6 +202,19 @@ fn check_out_initial_lock_keys_from_payload(
         .get("booking_id")
         .and_then(serde_json::Value::as_str)
         .ok_or_else(|| system_error("checkout lock payload missing booking_id"))?;
+    Ok(vec![
+        crate::aggregate_locks::booking_key(booking_id)?,
+        crate::aggregate_locks::folio_key(booking_id)?,
+    ])
+}
+
+fn extend_stay_initial_lock_keys_from_payload(
+    hash_payload: &serde_json::Value,
+) -> CommandResult<Vec<String>> {
+    let booking_id = hash_payload
+        .get("booking_id")
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| system_error("extend-stay lock payload missing booking_id"))?;
     Ok(vec![
         crate::aggregate_locks::booking_key(booking_id)?,
         crate::aggregate_locks::folio_key(booking_id)?,
@@ -940,27 +990,19 @@ pub async fn check_out_idempotent(
         .await
 }
 
-pub async fn extend_stay(pool: &Pool<Sqlite>, booking_id: &str) -> BookingResult<Booking> {
-    let locked_room_id = lookup_booking_room_id(pool, booking_id).await?;
-    let _lock_guard = crate::aggregate_locks::global_manager()
-        .acquire([
-            crate::aggregate_locks::booking_key(booking_id)
-                .map_err(|error| BookingError::validation(error.message))?,
-            crate::aggregate_locks::room_key(&locked_room_id)
-                .map_err(|error| BookingError::validation(error.message))?,
-        ])
-        .await
-        .map_err(|error| BookingError::validation(error.message))?;
-
-    let mut tx = begin_immediate_tx(pool).await?;
-
+async fn extend_stay_tx(
+    tx: &mut Transaction<'_, Sqlite>,
+    booking_id: &str,
+    locked_room_id: &str,
+    origin_key: Option<String>,
+) -> BookingResult<Booking> {
     let booking = sqlx::query(
         "SELECT room_id, nights, total_price, expected_checkout, pricing_type
          FROM bookings WHERE id = ? AND status = ?",
     )
     .bind(booking_id)
     .bind(status::booking::ACTIVE)
-    .fetch_optional(&mut *tx)
+    .fetch_optional(&mut **tx)
     .await?;
 
     let booking = booking.ok_or_else(|| {
@@ -969,7 +1011,7 @@ pub async fn extend_stay(pool: &Pool<Sqlite>, booking_id: &str) -> BookingResult
 
     let room_id: String = booking.get("room_id");
     ensure_locked_room_matches_booking(
-        &locked_room_id,
+        locked_room_id,
         &room_id,
         format!("booking {booking_id} changed rooms before extend-stay"),
     )?;
@@ -986,7 +1028,7 @@ pub async fn extend_stay(pool: &Pool<Sqlite>, booking_id: &str) -> BookingResult
 
     let room_exists = sqlx::query_scalar::<_, String>("SELECT id FROM rooms WHERE id = ? LIMIT 1")
         .bind(&room_id)
-        .fetch_optional(&mut *tx)
+        .fetch_optional(&mut **tx)
         .await?;
     if room_exists.is_none() {
         return Err(BookingError::not_found(format!(
@@ -1001,7 +1043,7 @@ pub async fn extend_stay(pool: &Pool<Sqlite>, booking_id: &str) -> BookingResult
     .bind(&room_id)
     .bind(extension_date.format("%Y-%m-%d").to_string())
     .bind(booking_id)
-    .fetch_optional(&mut *tx)
+    .fetch_optional(&mut **tx)
     .await?;
 
     if conflict.is_some() {
@@ -1013,7 +1055,7 @@ pub async fn extend_stay(pool: &Pool<Sqlite>, booking_id: &str) -> BookingResult
     }
 
     let incremental_pricing = calculate_stay_price_tx(
-        &mut tx,
+        tx,
         &room_id,
         &old_expected_checkout,
         &new_expected.to_rfc3339(),
@@ -1038,8 +1080,10 @@ pub async fn extend_stay(pool: &Pool<Sqlite>, booking_id: &str) -> BookingResult
     .bind(booking_id)
     .bind(status::booking::ACTIVE)
     .bind(&old_expected_checkout)
-    .execute(&mut *tx)
-    .await?;
+    .execute(&mut **tx)
+    .await
+    .map_err(BookingError::from)
+    .map_err(mark_write_db_error)?;
     ensure_one_row_affected(
         result,
         format!("booking {booking_id} changed before extend-stay"),
@@ -1053,18 +1097,117 @@ pub async fn extend_stay(pool: &Pool<Sqlite>, booking_id: &str) -> BookingResult
     .bind(extension_date.format("%Y-%m-%d").to_string())
     .bind(booking_id)
     .bind(status::calendar::OCCUPIED)
-    .execute(&mut *tx)
+    .execute(&mut **tx)
     .await
-    .map_err(|error| map_room_calendar_insert_error(error, extension_date))?;
+    .map_err(|error| map_room_calendar_insert_error(error, extension_date))
+    .map_err(mark_write_db_error)?;
 
-    record_charge_tx(
-        &mut tx,
-        booking_id,
-        incremental_total,
-        "Extended stay +1 night",
-        Local::now().to_rfc3339(),
-    )
-    .await?;
+    if let Some(origin_key) = origin_key {
+        let origin = OriginSideEffect::new(origin_key, 0)?;
+        record_charge_with_origin_tx(
+            tx,
+            booking_id,
+            incremental_total,
+            "Extended stay +1 night",
+            Local::now().to_rfc3339(),
+            &origin,
+        )
+        .await
+        .map_err(mark_write_db_error)?;
+    } else {
+        record_charge_tx(
+            tx,
+            booking_id,
+            incremental_total,
+            "Extended stay +1 night",
+            Local::now().to_rfc3339(),
+        )
+        .await
+        .map_err(mark_write_db_error)?;
+    }
+
+    fetch_booking_tx(tx, booking_id).await
+}
+
+pub async fn extend_stay_idempotent(
+    pool: &Pool<Sqlite>,
+    ctx: &WriteCommandContext,
+    booking_id: &str,
+) -> CommandResult<IdempotentCommandResult<serde_json::Value>> {
+    let hash_payload = build_extend_stay_hash_payload(booking_id);
+    let ledger_intent = SanitizedLedgerIntent::from_pairs([
+        ("schema", json!("stay.extend.v1")),
+        ("booking_present", json!(true)),
+        ("operation", json!("add_one_night")),
+    ])?;
+    let summary = CommandLedgerSummary::new("Extend stay")?.with_aggregate_ref(
+        "booking",
+        "booking",
+        None::<String>,
+    )?;
+    let request = WriteCommandRequest::new_sanitized(hash_payload, ledger_intent, summary)?
+        .with_primary_aggregate_key(format!("booking:{booking_id}"))
+        .with_lock_key_deriver(extend_stay_initial_lock_keys_from_payload)
+        .with_success_summary(CommandLedgerResultSummary::success("Stay extended")?);
+
+    let pool_for_lookup = pool.clone();
+    let booking_id_for_lookup = booking_id.to_string();
+    let booking_id_for_service = booking_id.to_string();
+    let origin_key = format!("{}:{}", ctx.command_name, ctx.idempotency_key);
+
+    WriteCommandExecutor::new(pool.clone())
+        .execute_with_resolved_guard(
+            ctx,
+            request,
+            move || async move {
+                let room_id = lookup_booking_room_id(&pool_for_lookup, &booking_id_for_lookup)
+                    .await
+                    .map_err(map_extend_stay_command_error)?;
+                let lock_keys = vec![
+                    crate::aggregate_locks::booking_key(&booking_id_for_lookup)?,
+                    crate::aggregate_locks::room_key(&room_id)?,
+                    crate::aggregate_locks::folio_key(&booking_id_for_lookup)?,
+                ];
+                let guard = crate::aggregate_locks::global_manager()
+                    .acquire(lock_keys.clone())
+                    .await?;
+
+                Ok(ResolvedWriteCommandGuard::new((guard, room_id), lock_keys))
+            },
+            move |tx, resolved| {
+                Box::pin(async move {
+                    let (_guard, locked_room_id) = resolved;
+                    let booking = extend_stay_tx(
+                        tx,
+                        &booking_id_for_service,
+                        &locked_room_id,
+                        Some(origin_key),
+                    )
+                    .await
+                    .map_err(map_extend_stay_command_error)?;
+                    serde_json::to_value(&booking).map_err(system_error)
+                })
+            },
+        )
+        .await
+}
+
+#[cfg(test)]
+pub async fn extend_stay(pool: &Pool<Sqlite>, booking_id: &str) -> BookingResult<Booking> {
+    let locked_room_id = lookup_booking_room_id(pool, booking_id).await?;
+    let _lock_guard = crate::aggregate_locks::global_manager()
+        .acquire([
+            crate::aggregate_locks::booking_key(booking_id)
+                .map_err(|error| BookingError::validation(error.message))?,
+            crate::aggregate_locks::room_key(&locked_room_id)
+                .map_err(|error| BookingError::validation(error.message))?,
+        ])
+        .await
+        .map_err(|error| BookingError::validation(error.message))?;
+
+    let mut tx = begin_immediate_tx(pool).await?;
+
+    let _booking = extend_stay_tx(&mut tx, booking_id, &locked_room_id, None).await?;
 
     tx.commit().await.map_err(BookingError::from)?;
 

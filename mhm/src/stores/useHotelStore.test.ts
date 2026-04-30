@@ -165,6 +165,22 @@ describe("useHotelStore monitoring context", () => {
     );
   });
 
+  it("routes extendStay through invokeWriteCommand with monitoring context", async () => {
+    await useHotelStore.getState().extendStay("booking-extend-1");
+
+    expect(invokeWriteCommand).toHaveBeenCalledWith(
+      "extend_stay",
+      { bookingId: "booking-extend-1" },
+      {
+        correlationId: "COR-1A2B3C4D",
+        monitoringContext: {
+          operation: "add_one_night",
+        },
+      },
+    );
+    expect(invoke).not.toHaveBeenCalledWith("extend_stay", expect.anything());
+  });
+
   it("passes an idempotency key for groupCheckIn", async () => {
     const req = {
       group_name: "Retry Group",

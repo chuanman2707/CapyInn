@@ -185,7 +185,17 @@ export const useHotelStore = create<HotelStore>((set, get) => {
     extendStay: async (bookingId) => {
       beginAction();
       try {
-        await invoke("extend_stay", { bookingId });
+        const correlationId = createCorrelationId();
+        await invokeWriteCommand(
+          "extend_stay",
+          { bookingId },
+          {
+            correlationId,
+            monitoringContext: {
+              operation: "add_one_night",
+            },
+          },
+        );
         await get().fetchRooms();
         await get().fetchStats();
         get().markDashboardDataChanged();

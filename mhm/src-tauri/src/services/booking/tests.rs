@@ -5094,6 +5094,134 @@ async fn extend_stay_uses_existing_expected_checkout() {
 }
 
 #[tokio::test]
+async fn extend_stay_idempotent_retry_replays_without_extra_night_or_charge() {
+    let pool = test_pool().await;
+    seed_room(&pool, "R-EXT-IDEM").await.unwrap();
+    seed_active_booking_with_terms(
+        &pool,
+        "B-EXT-IDEM",
+        "R-EXT-IDEM",
+        "2026-04-15T10:00:00+07:00",
+        "2026-04-17T10:00:00+07:00",
+        2,
+        500_000,
+        Some(0),
+    )
+    .await
+    .unwrap();
+    let ctx = crate::command_idempotency::WriteCommandContext::for_internal_test(
+        "req-extend-idem",
+        "idem-extend-1",
+        "extend_stay",
+    );
+
+    let first = stay_lifecycle::extend_stay_idempotent(&pool, &ctx, "B-EXT-IDEM")
+        .await
+        .unwrap();
+    let second = stay_lifecycle::extend_stay_idempotent(&pool, &ctx, "B-EXT-IDEM")
+        .await
+        .unwrap();
+
+    assert!(!first.replayed);
+    assert!(second.replayed);
+    assert_eq!(first.response, second.response);
+
+    let nights: i32 = sqlx::query_scalar("SELECT nights FROM bookings WHERE id = ?")
+        .bind("B-EXT-IDEM")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(nights, 3);
+
+    let charge_count: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM transactions WHERE booking_id = ? AND note = ?",
+    )
+    .bind("B-EXT-IDEM")
+    .bind("Extended stay +1 night")
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(charge_count, 1);
+}
+
+#[tokio::test]
+async fn extend_stay_idempotent_same_key_different_booking_conflicts() {
+    let pool = test_pool().await;
+    seed_room(&pool, "R-EXT-HASH-A").await.unwrap();
+    seed_room(&pool, "R-EXT-HASH-B").await.unwrap();
+    seed_active_booking(&pool, "B-EXT-HASH-A", "R-EXT-HASH-A")
+        .await
+        .unwrap();
+    seed_active_booking(&pool, "B-EXT-HASH-B", "R-EXT-HASH-B")
+        .await
+        .unwrap();
+    let ctx = crate::command_idempotency::WriteCommandContext::for_internal_test(
+        "req-extend-hash",
+        "idem-extend-hash",
+        "extend_stay",
+    );
+
+    stay_lifecycle::extend_stay_idempotent(&pool, &ctx, "B-EXT-HASH-A")
+        .await
+        .unwrap();
+    let error = stay_lifecycle::extend_stay_idempotent(&pool, &ctx, "B-EXT-HASH-B")
+        .await
+        .unwrap_err();
+
+    assert_eq!(
+        error.code,
+        crate::app_error::codes::CONFLICT_IDEMPOTENCY_HASH_MISMATCH
+    );
+}
+
+#[tokio::test]
+async fn extend_stay_idempotent_duplicate_in_flight_returns_conflict() {
+    let pool = test_pool().await;
+    seed_room(&pool, "R-EXT-LIVE").await.unwrap();
+    seed_active_booking(&pool, "B-EXT-LIVE", "R-EXT-LIVE")
+        .await
+        .unwrap();
+    let ctx = crate::command_idempotency::WriteCommandContext::for_internal_test(
+        "req-extend-live",
+        "idem-extend-live",
+        "extend_stay",
+    );
+    let payload = serde_json::json!({
+        "schema": "stay.extend.v1",
+        "booking_id": "B-EXT-LIVE",
+        "operation": "add_one_night",
+    });
+    let now = chrono::Utc::now().to_rfc3339();
+    let lease_expires_at = (chrono::Utc::now() + chrono::Duration::seconds(30)).to_rfc3339();
+
+    sqlx::query(
+        "INSERT INTO command_idempotency (
+            idempotency_key, command_name, request_hash, intent_json, lock_keys_json,
+            status, claim_token, retryable, lease_expires_at, created_at, updated_at, last_attempt_at
+        ) VALUES (?, ?, ?, '{}', '[]', 'in_progress', 'other-claim', 0, ?, ?, ?, ?)",
+    )
+    .bind(&ctx.idempotency_key)
+    .bind(&ctx.command_name)
+    .bind(crate::command_idempotency::stable_request_hash(&payload).expect("payload hashes"))
+    .bind(&lease_expires_at)
+    .bind(&now)
+    .bind(&now)
+    .bind(&now)
+    .execute(&pool)
+    .await
+    .expect("seeds in-flight row");
+
+    let error = stay_lifecycle::extend_stay_idempotent(&pool, &ctx, "B-EXT-LIVE")
+        .await
+        .expect_err("duplicate in-flight conflicts");
+
+    assert_eq!(
+        error.code,
+        crate::app_error::codes::CONFLICT_DUPLICATE_IN_FLIGHT
+    );
+}
+
+#[tokio::test]
 async fn revenue_queries_use_recognized_room_revenue_and_ignore_payments() {
     let pool = test_pool().await;
     seed_room(&pool, "R301").await.unwrap();

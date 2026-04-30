@@ -324,6 +324,13 @@ fn check_out_failure_context(req: &CheckOutRequest) -> Value {
     })
 }
 
+fn extend_stay_failure_context(booking_id: &str) -> Value {
+    json!({
+        "booking_id": booking_id,
+        "operation": "add_one_night",
+    })
+}
+
 fn should_request_checkout_backup(replayed: bool) -> bool {
     !replayed
 }
@@ -564,10 +571,58 @@ pub async fn preview_checkout_settlement(
 pub async fn extend_stay(
     state: State<'_, AppState>,
     booking_id: String,
-) -> Result<Booking, String> {
-    stay_lifecycle::extend_stay(&state.db, &booking_id)
-        .await
-        .map_err(|error| error.to_string())
+    app: tauri::AppHandle,
+    correlation_id: Option<String>,
+    idempotency_key: String,
+) -> CommandResult<Booking> {
+    let effective_correlation_id = normalize_correlation_id(correlation_id);
+    let error_context = extend_stay_failure_context(&booking_id);
+    let actor_id = get_user_id(&state)
+        .ok_or_else(|| CommandError::user(codes::AUTH_NOT_AUTHENTICATED, "Chưa đăng nhập"))?;
+    let mut write_command_context = WriteCommandContext::for_scoped_command(
+        effective_correlation_id.value.clone(),
+        idempotency_key,
+        "extend_stay",
+    )?;
+    write_command_context.actor_id = Some(actor_id);
+    log::info!(
+        "extend_stay start correlation_id={} source={:?} booking_id={}",
+        effective_correlation_id.value,
+        effective_correlation_id.source,
+        booking_id
+    );
+    let result =
+        stay_lifecycle::extend_stay_idempotent(&state.db, &write_command_context, &booking_id)
+            .await
+            .map_err(|command_error| {
+                record_command_failure_with_db_group(
+                    "extend_stay",
+                    &command_error,
+                    &effective_correlation_id.value,
+                    None,
+                    error_context.clone(),
+                );
+                command_error
+            })?;
+    let booking: Booking = serde_json::from_value(result.response).map_err(|error| {
+        CommandError::system(
+            codes::SYSTEM_INTERNAL_ERROR,
+            format!("Invalid extend_stay idempotent response: {error}"),
+        )
+        .with_request_id(write_command_context.request_id.clone())
+    })?;
+
+    log::info!(
+        "extend_stay success correlation_id={} source={:?} booking_id={} room_id={}",
+        effective_correlation_id.value,
+        effective_correlation_id.source,
+        booking.id,
+        booking.room_id
+    );
+
+    emit_db_update(&app, "rooms");
+
+    Ok(booking)
 }
 
 // ─── Housekeeping Commands ───
