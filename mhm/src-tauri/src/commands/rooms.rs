@@ -1,4 +1,4 @@
-use super::{emit_db_update, get_f64, get_user_id, AppState};
+use super::{emit_db_update, get_money_vnd, get_user_id, AppState};
 use crate::{
     app_error::{
         codes, correlation_context, log_system_error, normalize_correlation_id,
@@ -10,6 +10,7 @@ use crate::{
     },
     domain::booking::BookingError,
     models::*,
+    money::validate_non_negative_money_vnd,
     queries::booking::revenue_queries,
     services::booking::stay_lifecycle,
 };
@@ -35,9 +36,9 @@ pub async fn do_get_rooms(pool: &Pool<Sqlite>) -> Result<Vec<Room>, String> {
             room_type: r.get("type"),
             floor: r.get("floor"),
             has_balcony: r.get::<i32, _>("has_balcony") == 1,
-            base_price: get_f64(r, "base_price"),
+            base_price: get_money_vnd(r, "base_price"),
             max_guests: r.try_get::<i32, _>("max_guests").unwrap_or(2),
-            extra_person_fee: r.try_get::<f64, _>("extra_person_fee").unwrap_or(0.0),
+            extra_person_fee: get_money_vnd(r, "extra_person_fee"),
             status: r.get("status"),
         })
         .collect();
@@ -187,7 +188,8 @@ fn map_stay_error(
             )
         }
         BookingError::Validation(message)
-            if message == "Tổng quyết toán phải lớn hơn hoặc bằng 0" =>
+            if message == "Tổng quyết toán phải lớn hơn hoặc bằng 0"
+                || message == "final_total must be greater than or equal to 0" =>
         {
             (
                 map_stay_user_error(
@@ -386,9 +388,9 @@ pub async fn do_get_room_detail(
         room_type: row.get("type"),
         floor: row.get("floor"),
         has_balcony: row.get::<i32, _>("has_balcony") == 1,
-        base_price: get_f64(&row, "base_price"),
+        base_price: get_money_vnd(&row, "base_price"),
         max_guests: row.try_get::<i32, _>("max_guests").unwrap_or(2),
-        extra_person_fee: row.try_get::<f64, _>("extra_person_fee").unwrap_or(0.0),
+        extra_person_fee: get_money_vnd(&row, "extra_person_fee"),
         status: row.get("status"),
     };
 
@@ -406,8 +408,8 @@ pub async fn do_get_room_detail(
         expected_checkout: r.get("expected_checkout"),
         actual_checkout: r.get("actual_checkout"),
         nights: r.get("nights"),
-        total_price: get_f64(&r, "total_price"),
-        paid_amount: get_f64(&r, "paid_amount"),
+        total_price: get_money_vnd(&r, "total_price"),
+        paid_amount: get_money_vnd(&r, "paid_amount"),
         status: r.get("status"),
         source: r.get("source"),
         notes: r.get("notes"),
@@ -718,6 +720,8 @@ pub async fn create_expense(
     state: State<'_, AppState>,
     req: CreateExpenseRequest,
 ) -> Result<Expense, String> {
+    validate_create_expense_request(&req)?;
+
     let id = uuid::Uuid::new_v4().to_string();
     let now = chrono::Local::now().to_rfc3339();
 
@@ -745,6 +749,12 @@ pub async fn create_expense(
     })
 }
 
+fn validate_create_expense_request(req: &CreateExpenseRequest) -> Result<(), String> {
+    validate_non_negative_money_vnd(req.amount, "amount")
+        .map(|_| ())
+        .map_err(|error| error.message)
+}
+
 #[tauri::command]
 pub async fn get_expenses(
     state: State<'_, AppState>,
@@ -765,7 +775,7 @@ pub async fn get_expenses(
         .map(|r| Expense {
             id: r.get("id"),
             category: r.get("category"),
-            amount: get_f64(r, "amount"),
+            amount: get_money_vnd(r, "amount"),
             note: r.get("note"),
             expense_date: r.get("expense_date"),
             created_at: r.get("created_at"),
@@ -844,8 +854,8 @@ pub async fn scan_image(path: String) -> Result<crate::ocr::CccdInfo, String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        check_in_failure_context, check_out_failure_context,
-        complete_housekeeping_clean_to_vacant, map_stay_error,
+        check_in_failure_context, check_out_failure_context, complete_housekeeping_clean_to_vacant,
+        map_stay_error, validate_create_expense_request,
     };
     use crate::app_error::{
         codes, record_command_failure_with_db_group, AppErrorKind, CorrelationIdSource,
@@ -854,7 +864,8 @@ mod tests {
     use crate::db_error_monitoring::DbErrorGroup;
     use crate::domain::booking::BookingError;
     use crate::models::{
-        CheckInRequest, CheckOutRequest, CheckoutSettlementMode, CreateGuestRequest,
+        CheckInRequest, CheckOutRequest, CheckoutSettlementMode, CreateExpenseRequest,
+        CreateGuestRequest,
     };
     use serde_json::json;
     use sqlx::{sqlite::SqlitePoolOptions, Row};
@@ -908,9 +919,9 @@ mod tests {
         .bind("standard")
         .bind(1)
         .bind(0)
-        .bind(100000.0)
+        .bind(100000)
         .bind(2)
-        .bind(0.0)
+        .bind(0)
         .bind("occupied")
         .execute(&pool)
         .await
@@ -985,15 +996,31 @@ mod tests {
         let (error, db_error_group) = map_stay_error(
             "check_out",
             &frontend_correlation_id(),
-            BookingError::validation("Tổng quyết toán phải lớn hơn hoặc bằng 0"),
+            BookingError::validation("final_total must be greater than or equal to 0"),
             json!({ "booking_id": "booking-1" }),
         );
 
         assert_eq!(error.code, codes::BOOKING_INVALID_SETTLEMENT_TOTAL);
-        assert_eq!(error.message, "Tổng quyết toán phải lớn hơn hoặc bằng 0");
+        assert_eq!(
+            error.message,
+            "final_total must be greater than or equal to 0"
+        );
         assert_eq!(error.kind, AppErrorKind::User);
         assert!(error.support_id.is_none());
         assert!(db_error_group.is_none());
+    }
+
+    #[test]
+    fn create_expense_rejects_negative_amount() {
+        let error = validate_create_expense_request(&CreateExpenseRequest {
+            category: "supplies".to_string(),
+            amount: -1,
+            note: None,
+            expense_date: "2026-04-30".to_string(),
+        })
+        .expect_err("negative amount must fail");
+
+        assert!(error.contains("amount"));
     }
 
     #[test]
@@ -1097,7 +1124,7 @@ mod tests {
             nights: 2,
             source: Some("walk-in".to_string()),
             notes: Some("Late arrival".to_string()),
-            paid_amount: Some(500000.0),
+            paid_amount: Some(500_000),
             pricing_type: None,
         });
 
@@ -1120,7 +1147,7 @@ mod tests {
         let context = check_out_failure_context(&CheckOutRequest {
             booking_id: "booking-1".to_string(),
             settlement_mode: CheckoutSettlementMode::Hourly,
-            final_total: 400000.0,
+            final_total: 400_000,
         });
 
         assert_eq!(
@@ -1128,7 +1155,7 @@ mod tests {
             json!({
                 "booking_id": "booking-1",
                 "settlement_mode": "hourly",
-                "final_total": 400000.0,
+                "final_total": 400000,
             })
         );
     }
@@ -1146,7 +1173,7 @@ mod tests {
         let context = check_out_failure_context(&CheckOutRequest {
             booking_id: "booking-1".to_string(),
             settlement_mode: CheckoutSettlementMode::BookedNights,
-            final_total: 2500000.0,
+            final_total: 2_500_000,
         });
         let (error, db_error_group) = map_stay_error(
             "check_out",

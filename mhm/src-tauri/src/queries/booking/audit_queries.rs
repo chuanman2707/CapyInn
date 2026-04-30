@@ -1,7 +1,7 @@
 use sqlx::{Pool, Row, Sqlite};
 
 use crate::{
-    commands::get_f64,
+    commands::{get_f64, get_money_vnd},
     models::{AuditLog, BookingExportRow, NightAuditSnapshot},
 };
 
@@ -16,8 +16,8 @@ pub async fn load_night_audit_snapshot(
     let cancellation_fee_revenue =
         revenue_queries::load_cancellation_fee_revenue(pool, audit_date, audit_date).await?;
 
-    let expenses: (f64,) = sqlx::query_as(
-        "SELECT CAST(COALESCE(SUM(amount), 0) AS REAL)
+    let expenses = sqlx::query(
+        "SELECT COALESCE(SUM(amount), 0) AS value
          FROM expenses
          WHERE expense_date = ?",
     )
@@ -54,7 +54,7 @@ pub async fn load_night_audit_snapshot(
         total_revenue: room_revenue + folio_revenue + cancellation_fee_revenue,
         room_revenue,
         folio_revenue,
-        total_expenses: expenses.0,
+        total_expenses: get_money_vnd(&expenses, "value"),
         occupancy_pct,
         rooms_sold: rooms_sold.0,
         total_rooms: total_rooms.0,
@@ -77,10 +77,10 @@ pub async fn list_audit_logs(pool: &Pool<Sqlite>) -> Result<Vec<AuditLog>, sqlx:
         .map(|row| AuditLog {
             id: row.get("id"),
             audit_date: row.get("audit_date"),
-            total_revenue: get_f64(row, "total_revenue"),
-            room_revenue: get_f64(row, "room_revenue"),
-            folio_revenue: get_f64(row, "folio_revenue"),
-            total_expenses: get_f64(row, "total_expenses"),
+            total_revenue: get_money_vnd(row, "total_revenue"),
+            room_revenue: get_money_vnd(row, "room_revenue"),
+            folio_revenue: get_money_vnd(row, "folio_revenue"),
+            total_expenses: get_money_vnd(row, "total_expenses"),
             occupancy_pct: get_f64(row, "occupancy_pct"),
             rooms_sold: row.get("rooms_sold"),
             total_rooms: row.get("total_rooms"),
@@ -120,19 +120,19 @@ pub async fn load_booking_export_rows(
          FROM bookings b
          LEFT JOIN guests g ON b.primary_guest_id = g.id
          LEFT JOIN (
-             SELECT booking_id, CAST(COALESCE(SUM(amount), 0) AS REAL) AS charge_total
+             SELECT booking_id, COALESCE(SUM(amount), 0) AS charge_total
              FROM transactions
              WHERE type = 'charge'
              GROUP BY booking_id
          ) charges ON charges.booking_id = b.id
          LEFT JOIN (
-             SELECT booking_id, CAST(COALESCE(SUM(amount), 0) AS REAL) AS cancellation_fee_total
+             SELECT booking_id, COALESCE(SUM(amount), 0) AS cancellation_fee_total
              FROM transactions
              WHERE type = 'cancellation_fee'
              GROUP BY booking_id
          ) fees ON fees.booking_id = b.id
          LEFT JOIN (
-             SELECT booking_id, CAST(COALESCE(SUM(amount), 0) AS REAL) AS folio_total
+             SELECT booking_id, COALESCE(SUM(amount), 0) AS folio_total
              FROM folio_lines
              GROUP BY booking_id
          ) folio ON folio.booking_id = b.id
@@ -170,12 +170,12 @@ pub async fn load_booking_export_rows(
             expected_checkout: row.get("expected_checkout"),
             actual_checkout: row.get("actual_checkout"),
             nights: row.get("nights"),
-            room_price: get_f64(row, "total_price"),
-            charge_total: get_f64(row, "charge_total"),
-            cancellation_fee_total: get_f64(row, "cancellation_fee_total"),
-            folio_total: get_f64(row, "folio_total"),
-            recognized_revenue: get_f64(row, "recognized_revenue"),
-            paid_amount: get_f64(row, "paid_amount"),
+            room_price: get_money_vnd(row, "total_price"),
+            charge_total: get_money_vnd(row, "charge_total"),
+            cancellation_fee_total: get_money_vnd(row, "cancellation_fee_total"),
+            folio_total: get_money_vnd(row, "folio_total"),
+            recognized_revenue: get_money_vnd(row, "recognized_revenue"),
+            paid_amount: get_money_vnd(row, "paid_amount"),
             status: row.get("status"),
             pricing_type: row.get("pricing_type"),
             source: row.get("source"),

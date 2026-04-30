@@ -29,6 +29,7 @@ pub mod codes {
     pub const BOOKING_INVALID_SETTLEMENT_TOTAL: &str = "BOOKING_INVALID_SETTLEMENT_TOTAL";
     pub const AUDIT_INVALID_DATE: &str = "AUDIT_INVALID_DATE";
     pub const AUDIT_DATE_ALREADY_RUN: &str = "AUDIT_DATE_ALREADY_RUN";
+    pub const VALIDATION_INVALID_INPUT: &str = "VALIDATION_INVALID_INPUT";
     pub const WRITE_TOOL_DISABLED: &str = "WRITE_TOOL_DISABLED";
     pub const APPROVAL_REQUIRED: &str = "APPROVAL_REQUIRED";
     pub const IDEMPOTENCY_KEY_REQUIRED: &str = "IDEMPOTENCY_KEY_REQUIRED";
@@ -64,6 +65,7 @@ pub mod codes {
         BOOKING_INVALID_SETTLEMENT_TOTAL,
         AUDIT_INVALID_DATE,
         AUDIT_DATE_ALREADY_RUN,
+        VALIDATION_INVALID_INPUT,
         WRITE_TOOL_DISABLED,
         APPROVAL_REQUIRED,
         IDEMPOTENCY_KEY_REQUIRED,
@@ -535,6 +537,11 @@ mod tests {
                 codes::AUDIT_DATE_ALREADY_RUN,
                 AppErrorKind::User,
                 "Ngày kiểm toán này đã được chạy",
+            ),
+            (
+                codes::VALIDATION_INVALID_INPUT,
+                AppErrorKind::User,
+                "Dữ liệu không hợp lệ",
             ),
             (
                 codes::WRITE_TOOL_DISABLED,

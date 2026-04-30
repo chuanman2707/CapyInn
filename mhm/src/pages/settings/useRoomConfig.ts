@@ -3,6 +3,7 @@ import { toast } from "sonner";
 import type { ConfigurableRoom, RoomTypeItem } from "@/types";
 import { formatAppError } from "@/lib/appError";
 import { invokeCommand } from "@/lib/invokeCommand";
+import { assertNonNegativeMoneyVnd, type MoneyVnd } from "@/lib/money";
 
 export interface RoomFormValues {
     id: string;
@@ -10,9 +11,9 @@ export interface RoomFormValues {
     room_type: string;
     floor: number;
     has_balcony: boolean;
-    base_price: number;
+    base_price: MoneyVnd;
     max_guests: number;
-    extra_person_fee: number;
+    extra_person_fee: MoneyVnd;
 }
 
 const EMPTY_FORM: RoomFormValues = {
@@ -98,6 +99,11 @@ export default function useRoomConfig() {
         }
 
         try {
+            const basePrice = assertNonNegativeMoneyVnd(form.base_price, "base_price");
+            const extraPersonFee = assertNonNegativeMoneyVnd(
+                form.extra_person_fee,
+                "extra_person_fee",
+            );
             if (editingRoom) {
                 const updated = await invokeCommand<ConfigurableRoom>("update_room", {
                     req: {
@@ -106,9 +112,9 @@ export default function useRoomConfig() {
                         room_type: form.room_type,
                         floor: form.floor,
                         has_balcony: form.has_balcony,
-                        base_price: form.base_price,
+                        base_price: basePrice,
                         max_guests: form.max_guests,
-                        extra_person_fee: form.extra_person_fee,
+                        extra_person_fee: extraPersonFee,
                     },
                 });
                 setRooms((prev) => prev.map((room) => (room.id === updated.id ? updated : room)));
@@ -121,9 +127,9 @@ export default function useRoomConfig() {
                         room_type: form.room_type,
                         floor: form.floor,
                         has_balcony: form.has_balcony,
-                        base_price: form.base_price,
+                        base_price: basePrice,
                         max_guests: form.max_guests,
-                        extra_person_fee: form.extra_person_fee,
+                        extra_person_fee: extraPersonFee,
                     },
                 });
                 setRooms((prev) => [...prev, created]);

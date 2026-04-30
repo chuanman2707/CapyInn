@@ -1,6 +1,8 @@
 use rmcp::schemars::{self, JsonSchema};
 use serde::{Deserialize, Serialize};
 
+use crate::money::MoneyVnd;
+
 // ─── MCP Tool Input Schemas ───
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -63,8 +65,8 @@ pub struct CreateReservationInput {
     pub check_out_date: String,
     /// Number of nights
     pub nights: i32,
-    /// Deposit amount (VND)
-    pub deposit_amount: Option<f64>,
+    /// Deposit amount (integer VND)
+    pub deposit_amount: Option<MoneyVnd>,
     /// Booking source (e.g. "phone", "online", "walk-in")
     pub source: Option<String>,
     /// Additional notes
