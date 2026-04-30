@@ -4,7 +4,7 @@ use sqlx::{
         SqliteConnectOptions, SqliteConnection, SqliteJournalMode, SqlitePoolOptions,
         SqliteSynchronous,
     },
-    Pool, Row, Sqlite, Transaction,
+    Acquire, Pool, Row, Sqlite, Transaction,
 };
 use std::{str::FromStr, time::Duration};
 
@@ -189,7 +189,7 @@ pub(crate) async fn run_migrations(pool: &Pool<Sqlite>) -> Result<(), sqlx::Erro
                 type        TEXT NOT NULL,
                 floor       INTEGER NOT NULL,
                 has_balcony INTEGER NOT NULL,
-                base_price  REAL NOT NULL,
+                base_price  INTEGER NOT NULL,
                 status      TEXT NOT NULL DEFAULT 'vacant'
             )",
         )
@@ -223,8 +223,8 @@ pub(crate) async fn run_migrations(pool: &Pool<Sqlite>) -> Result<(), sqlx::Erro
                 expected_checkout   TEXT NOT NULL,
                 actual_checkout     TEXT,
                 nights              INTEGER NOT NULL,
-                total_price         REAL NOT NULL,
-                paid_amount         REAL DEFAULT 0,
+                total_price         INTEGER NOT NULL,
+                paid_amount         INTEGER DEFAULT 0,
                 status              TEXT NOT NULL DEFAULT 'active',
                 source              TEXT DEFAULT 'walk-in',
                 notes               TEXT,
@@ -248,7 +248,7 @@ pub(crate) async fn run_migrations(pool: &Pool<Sqlite>) -> Result<(), sqlx::Erro
             "CREATE TABLE IF NOT EXISTS transactions (
                 id          TEXT PRIMARY KEY,
                 booking_id  TEXT NOT NULL REFERENCES bookings(id),
-                amount      REAL NOT NULL,
+                amount      INTEGER NOT NULL,
                 type        TEXT NOT NULL,
                 note        TEXT,
                 created_at  TEXT NOT NULL
@@ -261,7 +261,7 @@ pub(crate) async fn run_migrations(pool: &Pool<Sqlite>) -> Result<(), sqlx::Erro
             "CREATE TABLE IF NOT EXISTS expenses (
                 id           TEXT PRIMARY KEY,
                 category     TEXT NOT NULL,
-                amount       REAL NOT NULL,
+                amount       INTEGER NOT NULL,
                 note         TEXT,
                 expense_date TEXT NOT NULL,
                 created_at   TEXT NOT NULL
@@ -363,9 +363,9 @@ pub(crate) async fn run_migrations(pool: &Pool<Sqlite>) -> Result<(), sqlx::Erro
             "CREATE TABLE IF NOT EXISTS pricing_rules (
                 id              TEXT PRIMARY KEY,
                 room_type       TEXT NOT NULL,
-                hourly_rate     REAL NOT NULL DEFAULT 0,
-                overnight_rate  REAL NOT NULL DEFAULT 0,
-                daily_rate      REAL NOT NULL DEFAULT 0,
+                hourly_rate     INTEGER NOT NULL DEFAULT 0,
+                overnight_rate  INTEGER NOT NULL DEFAULT 0,
+                daily_rate      INTEGER NOT NULL DEFAULT 0,
                 overnight_start TEXT NOT NULL DEFAULT '22:00',
                 overnight_end   TEXT NOT NULL DEFAULT '11:00',
                 daily_checkin   TEXT NOT NULL DEFAULT '14:00',
@@ -424,7 +424,7 @@ pub(crate) async fn run_migrations(pool: &Pool<Sqlite>) -> Result<(), sqlx::Erro
                 booking_id  TEXT NOT NULL REFERENCES bookings(id),
                 category    TEXT NOT NULL,
                 description TEXT NOT NULL,
-                amount      REAL NOT NULL,
+                amount      INTEGER NOT NULL,
                 created_by  TEXT,
                 created_at  TEXT NOT NULL
             )",
@@ -437,10 +437,10 @@ pub(crate) async fn run_migrations(pool: &Pool<Sqlite>) -> Result<(), sqlx::Erro
             "CREATE TABLE IF NOT EXISTS night_audit_logs (
                 id              TEXT PRIMARY KEY,
                 audit_date      TEXT NOT NULL,
-                total_revenue   REAL NOT NULL DEFAULT 0,
-                room_revenue    REAL NOT NULL DEFAULT 0,
-                folio_revenue   REAL NOT NULL DEFAULT 0,
-                total_expenses  REAL NOT NULL DEFAULT 0,
+                total_revenue   INTEGER NOT NULL DEFAULT 0,
+                room_revenue    INTEGER NOT NULL DEFAULT 0,
+                folio_revenue   INTEGER NOT NULL DEFAULT 0,
+                total_expenses  INTEGER NOT NULL DEFAULT 0,
                 occupancy_pct   REAL NOT NULL DEFAULT 0,
                 rooms_sold      INTEGER NOT NULL DEFAULT 0,
                 total_rooms     INTEGER NOT NULL DEFAULT 0,
@@ -495,7 +495,7 @@ pub(crate) async fn run_migrations(pool: &Pool<Sqlite>) -> Result<(), sqlx::Erro
         .await?;
         execute_compat_alter(
             &mut tx,
-            "ALTER TABLE rooms ADD COLUMN extra_person_fee REAL NOT NULL DEFAULT 0",
+            "ALTER TABLE rooms ADD COLUMN extra_person_fee INTEGER NOT NULL DEFAULT 0",
         )
         .await?;
 
@@ -537,7 +537,7 @@ pub(crate) async fn run_migrations(pool: &Pool<Sqlite>) -> Result<(), sqlx::Erro
         .await?;
         execute_compat_alter(
             &mut tx,
-            "ALTER TABLE bookings ADD COLUMN deposit_amount REAL DEFAULT 0",
+            "ALTER TABLE bookings ADD COLUMN deposit_amount INTEGER DEFAULT 0",
         )
         .await?;
         execute_compat_alter(&mut tx, "ALTER TABLE bookings ADD COLUMN guest_phone TEXT").await?;
@@ -596,10 +596,10 @@ pub(crate) async fn run_migrations(pool: &Pool<Sqlite>) -> Result<(), sqlx::Erro
                 check_out         TEXT NOT NULL,
                 nights            INTEGER NOT NULL,
                 pricing_breakdown TEXT NOT NULL,
-                subtotal          REAL NOT NULL,
-                deposit_amount    REAL NOT NULL DEFAULT 0,
-                total             REAL NOT NULL,
-                balance_due       REAL NOT NULL,
+                subtotal          INTEGER NOT NULL,
+                deposit_amount    INTEGER NOT NULL DEFAULT 0,
+                total             INTEGER NOT NULL,
+                balance_due       INTEGER NOT NULL,
                 policy_text       TEXT,
                 notes             TEXT,
                 status            TEXT NOT NULL DEFAULT 'issued',
@@ -647,8 +647,8 @@ pub(crate) async fn run_migrations(pool: &Pool<Sqlite>) -> Result<(), sqlx::Erro
                 booking_id  TEXT REFERENCES bookings(id),
                 name        TEXT NOT NULL,
                 quantity    INTEGER NOT NULL DEFAULT 1,
-                unit_price  REAL NOT NULL,
-                total_price REAL NOT NULL,
+                unit_price  INTEGER NOT NULL,
+                total_price INTEGER NOT NULL,
                 note        TEXT,
                 created_by  TEXT,
                 created_at  TEXT NOT NULL
@@ -833,6 +833,49 @@ pub(crate) async fn run_migrations(pool: &Pool<Sqlite>) -> Result<(), sqlx::Erro
         set_schema_version(&mut tx, 13).await?;
         tx.commit().await?;
     }
+
+    // ── V14: Integer VND money foundation ──
+    if current < 14 {
+        let mut conn = pool.acquire().await?;
+        sqlx::query("PRAGMA foreign_keys=OFF")
+            .execute(&mut *conn)
+            .await?;
+        let mut tx = conn.begin().await?;
+
+        let migration_result = async {
+            execute_compat_alter(
+                &mut tx,
+                "ALTER TABLE command_idempotency ADD COLUMN legacy_request_hash TEXT",
+            )
+            .await?;
+            crate::money_migration::migrate_integer_vnd_money(&mut tx).await?;
+            set_schema_version(&mut tx, 14).await?;
+            Ok::<(), sqlx::Error>(())
+        }
+        .await;
+
+        match migration_result {
+            Ok(()) => {
+                if let Err(error) = tx.commit().await {
+                    sqlx::query("PRAGMA foreign_keys=ON")
+                        .execute(&mut *conn)
+                        .await?;
+                    return Err(error);
+                }
+            }
+            Err(error) => {
+                let _ = tx.rollback().await;
+                sqlx::query("PRAGMA foreign_keys=ON")
+                    .execute(&mut *conn)
+                    .await?;
+                return Err(error);
+            }
+        }
+
+        sqlx::query("PRAGMA foreign_keys=ON")
+            .execute(&mut *conn)
+            .await?;
+    }
     Ok(())
 }
 
@@ -951,6 +994,58 @@ mod tests {
         .expect("checks sqlite index")
     }
 
+    async fn column_type(pool: &SqlitePool, table: &str, column: &str) -> String {
+        let sql = format!(
+            "SELECT type FROM pragma_table_info('{}') WHERE name = ?",
+            table
+        );
+        sqlx::query_scalar::<_, String>(&sql)
+            .bind(column)
+            .fetch_one(pool)
+            .await
+            .expect("reads column type")
+            .to_uppercase()
+    }
+
+    async fn assert_money_columns_are_integer(pool: &SqlitePool) {
+        for (table, columns) in [
+            ("rooms", vec!["base_price", "extra_person_fee"]),
+            (
+                "pricing_rules",
+                vec!["hourly_rate", "overnight_rate", "daily_rate"],
+            ),
+            (
+                "bookings",
+                vec!["total_price", "paid_amount", "deposit_amount"],
+            ),
+            ("transactions", vec!["amount"]),
+            ("expenses", vec!["amount"]),
+            ("folio_lines", vec!["amount"]),
+            (
+                "night_audit_logs",
+                vec![
+                    "total_revenue",
+                    "room_revenue",
+                    "folio_revenue",
+                    "total_expenses",
+                ],
+            ),
+            (
+                "invoices",
+                vec!["subtotal", "deposit_amount", "total", "balance_due"],
+            ),
+            ("group_services", vec!["unit_price", "total_price"]),
+        ] {
+            for column in columns {
+                assert_eq!(
+                    column_type(pool, table, column).await,
+                    "INTEGER",
+                    "{table}.{column}"
+                );
+            }
+        }
+    }
+
     async fn assert_command_ledger_v12_shape(pool: &SqlitePool) {
         for column in [
             "request_id",
@@ -1026,7 +1121,218 @@ mod tests {
             .expect("reads final schema version")
             .get("version");
 
+        assert_eq!(version, 14);
+    }
+
+    #[tokio::test]
+    async fn migration_v14_converts_money_columns_to_integer_on_fresh_database() {
+        let pool = SqlitePool::connect("sqlite::memory:")
+            .await
+            .expect("connects");
+        run_migrations(&pool).await.expect("runs migrations");
+
+        let version: i32 = sqlx::query("SELECT version FROM schema_version LIMIT 1")
+            .fetch_one(&pool)
+            .await
+            .expect("reads version")
+            .get("version");
+
+        assert_eq!(version, 14);
+        assert_money_columns_are_integer(&pool).await;
+    }
+
+    #[tokio::test]
+    async fn migration_v14_converts_whole_vnd_legacy_real_values() {
+        let pool = SqlitePool::connect("sqlite::memory:")
+            .await
+            .expect("connects");
+        run_migrations(&pool).await.expect("runs migrations");
+        sqlx::query(
+            "INSERT INTO rooms (
+                id, name, type, floor, has_balcony, base_price, max_guests, extra_person_fee, status
+             ) VALUES ('R1', 'Room R1', 'standard', 1, 0, 100000.0, 2, 0.0, 'vacant')",
+        )
+        .execute(&pool)
+        .await
+        .expect("seeds whole-VND room");
+        sqlx::query("UPDATE schema_version SET version = 13")
+            .execute(&pool)
+            .await
+            .expect("rewinds schema version for test");
+
+        run_migrations(&pool)
+            .await
+            .expect("whole-VND money migrates");
+
+        let row = sqlx::query("SELECT base_price, extra_person_fee FROM rooms WHERE id = 'R1'")
+            .fetch_one(&pool)
+            .await
+            .expect("reads migrated room");
+        assert_eq!(row.get::<i64, _>("base_price"), 100000);
+        assert_eq!(row.get::<i64, _>("extra_person_fee"), 0);
+    }
+
+    #[tokio::test]
+    async fn migration_v14_rejects_fractional_legacy_money_and_rolls_back() {
+        let pool = SqlitePool::connect("sqlite::memory:")
+            .await
+            .expect("connects");
+        run_migrations(&pool).await.expect("runs migrations");
+        sqlx::query(
+            "INSERT INTO rooms (
+                id, name, type, floor, has_balcony, base_price, max_guests, extra_person_fee, status
+             ) VALUES ('R1', 'Room R1', 'standard', 1, 0, 100000, 2, 0, 'vacant')",
+        )
+        .execute(&pool)
+        .await
+        .expect("seeds room");
+        sqlx::query("UPDATE schema_version SET version = 13")
+            .execute(&pool)
+            .await
+            .expect("rewinds schema version for test");
+        sqlx::query(
+            "UPDATE rooms SET base_price = 100000.5 WHERE id = (SELECT id FROM rooms LIMIT 1)",
+        )
+        .execute(&pool)
+        .await
+        .expect("writes fractional legacy money");
+
+        let error = run_migrations(&pool)
+            .await
+            .expect_err("fractional money blocks migration");
+        assert!(error.to_string().contains("rooms.base_price"));
+
+        let version: i32 = sqlx::query_scalar("SELECT version FROM schema_version LIMIT 1")
+            .fetch_one(&pool)
+            .await
+            .expect("reads version");
         assert_eq!(version, 13);
+    }
+
+    #[tokio::test]
+    async fn migration_v14_converts_persisted_money_json_to_integer_numbers() {
+        let pool = SqlitePool::connect("sqlite::memory:")
+            .await
+            .expect("connects");
+        run_migrations(&pool).await.expect("runs migrations");
+
+        sqlx::query(
+            "INSERT INTO rooms (
+                id, name, type, floor, has_balcony, base_price, max_guests, extra_person_fee, status
+             ) VALUES ('R1', 'Room R1', 'standard', 1, 0, 100000, 2, 0, 'vacant')",
+        )
+        .execute(&pool)
+        .await
+        .expect("seeds room");
+        sqlx::query(
+            "INSERT INTO guests (id, guest_type, full_name, doc_number, created_at)
+             VALUES ('G1', 'domestic', 'Legacy Guest', 'DOC1', '2026-04-30T08:00:00+07:00')",
+        )
+        .execute(&pool)
+        .await
+        .expect("seeds guest");
+
+        let pricing_snapshot = serde_json::json!({
+            "base_amount": 500000.0,
+            "total": 500000.0,
+            "breakdown": [
+                { "label": "Room", "amount": 500000.0 }
+            ],
+            "checkout_settlement": {
+                "original_total": 500000.0,
+                "settled_total": 500000.0
+            }
+        })
+        .to_string();
+        sqlx::query(
+            "INSERT INTO bookings (
+                id, room_id, primary_guest_id, check_in_at, expected_checkout,
+                nights, total_price, status, created_at, pricing_snapshot
+             ) VALUES ('B1', 'R1', 'G1', '2026-04-30', '2026-05-01', 1, 500000, 'active', '2026-04-30T08:00:00+07:00', ?)",
+        )
+        .bind(pricing_snapshot)
+        .execute(&pool)
+        .await
+        .expect("seeds booking");
+        sqlx::query("UPDATE schema_version SET version = 13")
+            .execute(&pool)
+            .await
+            .expect("rewinds schema version for test");
+
+        run_migrations(&pool).await.expect("runs v14 migration");
+
+        let raw_snapshot: String =
+            sqlx::query_scalar("SELECT pricing_snapshot FROM bookings WHERE id = 'B1'")
+                .fetch_one(&pool)
+                .await
+                .expect("reads pricing snapshot");
+        let snapshot: serde_json::Value =
+            serde_json::from_str(&raw_snapshot).expect("pricing snapshot remains JSON");
+        assert_eq!(snapshot["base_amount"], serde_json::json!(500000));
+        assert_eq!(snapshot["total"], serde_json::json!(500000));
+        assert_eq!(
+            snapshot["breakdown"][0]["amount"],
+            serde_json::json!(500000)
+        );
+        assert_eq!(
+            snapshot["checkout_settlement"]["settled_total"],
+            serde_json::json!(500000)
+        );
+    }
+
+    #[tokio::test]
+    async fn migration_v14_preserves_command_legacy_hash_and_converts_replay_json() {
+        let pool = SqlitePool::connect("sqlite::memory:")
+            .await
+            .expect("connects");
+        run_migrations(&pool).await.expect("runs migrations");
+
+        sqlx::query(
+            "INSERT INTO command_idempotency (
+                idempotency_key, command_name, request_hash, intent_json,
+                lock_keys_json, status, claim_token, response_json, retryable,
+                created_at, updated_at
+             ) VALUES (
+                'idem-1', 'test.command', 'legacy-hash', ?,
+                '[]', 'completed', 'claim-1', ?, 0,
+                '2026-04-30T08:00:00+07:00', '2026-04-30T08:00:00+07:00'
+             )",
+        )
+        .bind(serde_json::json!({ "amount": 100000.0 }).to_string())
+        .bind(serde_json::json!({ "amount": 100000.0 }).to_string())
+        .execute(&pool)
+        .await
+        .expect("seeds command row");
+        sqlx::query("UPDATE schema_version SET version = 13")
+            .execute(&pool)
+            .await
+            .expect("rewinds schema version for test");
+
+        run_migrations(&pool).await.expect("runs v14 migration");
+
+        let row = sqlx::query(
+            "SELECT request_hash, legacy_request_hash, intent_json, response_json
+             FROM command_idempotency
+             WHERE idempotency_key = 'idem-1'",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("reads migrated command row");
+        assert_eq!(row.get::<String, _>("request_hash"), "legacy-hash");
+        assert_eq!(
+            row.get::<Option<String>, _>("legacy_request_hash"),
+            Some("legacy-hash".to_string())
+        );
+
+        let intent: serde_json::Value =
+            serde_json::from_str(&row.get::<String, _>("intent_json")).expect("intent JSON");
+        let response: serde_json::Value = serde_json::from_str(
+            &row.get::<Option<String>, _>("response_json")
+                .expect("response JSON"),
+        )
+        .expect("response JSON");
+        assert_eq!(intent["amount"], serde_json::json!(100000));
+        assert_eq!(response["amount"], serde_json::json!(100000));
     }
 
     #[tokio::test]
@@ -1119,7 +1425,7 @@ mod tests {
             .expect("reads final schema version")
             .get("version");
 
-        assert_eq!(version, 13);
+        assert_eq!(version, 14);
     }
 
     #[tokio::test]
@@ -1186,7 +1492,7 @@ mod tests {
             .expect("reads final schema version")
             .get("version");
 
-        assert_eq!(version, 13);
+        assert_eq!(version, 14);
     }
 
     #[tokio::test]
