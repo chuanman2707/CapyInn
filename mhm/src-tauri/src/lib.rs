@@ -16,6 +16,7 @@ mod diagnostics;
 mod domain;
 pub mod gateway;
 mod models;
+pub mod money;
 mod ocr;
 mod pricing;
 mod queries;
