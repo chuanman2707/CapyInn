@@ -9,7 +9,7 @@ use crate::{
     db_error_monitoring::classify_db_error_code,
     domain::booking::BookingError,
     models::{AddGroupServiceRequest, GroupService, RemoveGroupServiceResponse},
-    money::{validate_transport_money_vnd, MoneyVnd},
+    money::{validate_non_negative_money_vnd, MoneyVnd},
 };
 use serde_json::json;
 
@@ -53,7 +53,7 @@ fn validate_quantity(quantity: i32) -> Result<i32, BookingError> {
 }
 
 fn validate_unit_price(unit_price: MoneyVnd) -> Result<MoneyVnd, BookingError> {
-    validate_transport_money_vnd(unit_price, "unit_price")
+    validate_non_negative_money_vnd(unit_price, "unit_price")
         .map_err(|error| BookingError::validation(error.message))
 }
 

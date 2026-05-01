@@ -2357,6 +2357,39 @@ async fn add_group_service_idempotent_same_key_different_payload_conflicts() {
 }
 
 #[tokio::test]
+async fn add_group_service_idempotent_rejects_negative_unit_price_without_writing() {
+    let pool = test_pool().await;
+    seed_booking_group(&pool, "G-SVC-NEGATIVE-PRICE").await;
+    let ctx = crate::command_idempotency::WriteCommandContext::for_internal_test(
+        "req-group-svc-negative-price",
+        "idem-group-svc-negative-price",
+        "add_group_service",
+    );
+    let req = crate::models::AddGroupServiceRequest {
+        group_id: "G-SVC-NEGATIVE-PRICE".to_string(),
+        booking_id: None,
+        name: "Laundry".to_string(),
+        quantity: 1,
+        unit_price: -25_000,
+        note: None,
+    };
+
+    let error =
+        group_service_management::add_group_service_idempotent(&pool, &ctx, req, "staff-1")
+            .await
+            .expect_err("negative unit price is rejected");
+
+    assert_eq!(error.code, crate::app_error::codes::BOOKING_INVALID_STATE);
+
+    let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM group_services WHERE group_id = ?")
+        .bind("G-SVC-NEGATIVE-PRICE")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(count, 0);
+}
+
+#[tokio::test]
 async fn remove_group_service_idempotent_retry_replays_without_extra_delete() {
     let pool = test_pool().await;
     seed_booking_group(&pool, "G-SVC-REMOVE").await;
