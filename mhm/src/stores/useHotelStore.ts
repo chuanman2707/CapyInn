@@ -283,7 +283,7 @@ export const useHotelStore = create<HotelStore>((set, get) => {
     },
 
     addGroupService: async (req) => {
-      return invoke<GroupService>("add_group_service", {
+      return invokeWriteCommand<GroupService>("add_group_service", {
         req: {
           ...req,
           unit_price: assertNonNegativeMoneyVnd(req.unit_price, "unit_price"),
@@ -292,7 +292,7 @@ export const useHotelStore = create<HotelStore>((set, get) => {
     },
 
     removeGroupService: async (serviceId: string) => {
-      await invoke("remove_group_service", { serviceId });
+      await invokeWriteCommand("remove_group_service", { serviceId });
     },
 
     autoAssignRooms: async (roomCount: number, roomType?: string) => {
