@@ -1,267 +1,83 @@
-use super::{get_money_vnd, get_optional_money_vnd, AppState};
-use crate::models::*;
-use crate::services::settings_store::get_setting;
-use sqlx::{Pool, Row, Sqlite};
+use super::AppState;
+use crate::{
+    app_error::{codes, normalize_correlation_id, CommandError, CommandResult},
+    command_idempotency::{system_error, WriteCommandContext},
+    models::*,
+    services::booking::invoice_generation,
+};
+use sqlx::{Pool, Sqlite};
 use tauri::State;
 
 // ═══════════════════════════════════════════════
 // Invoice PDF Commands
 // ═══════════════════════════════════════════════
 
-const DEFAULT_POLICY_TEXT: &str = "• Check-in: 14:00 | Check-out: 12:00\n• Cancel 24h+ before: full deposit refund\n• Cancel within 24h: 50% deposit retained\n• No refund for no-show";
-
 pub async fn do_generate_invoice(
     pool: &Pool<Sqlite>,
     booking_id: &str,
 ) -> Result<InvoiceData, String> {
-    // Always regenerate: delete any existing invoice for this booking
-    sqlx::query("DELETE FROM invoices WHERE booking_id = ?")
-        .bind(booking_id)
-        .execute(pool)
-        .await
-        .map_err(|e| e.to_string())?;
-
-    // Fetch booking
-    let b = sqlx::query(
-        "SELECT b.id, b.room_id, b.primary_guest_id, b.check_in_at, b.expected_checkout,
-                b.actual_checkout, b.nights, b.total_price, b.paid_amount, b.status, b.notes,
-                b.booking_type, b.deposit_amount, b.scheduled_checkin, b.scheduled_checkout,
-                b.pricing_snapshot, b.pricing_type,
-                r.name as room_name, r.type as room_type, r.base_price,
-                g.full_name as guest_name, g.phone as guest_phone
-         FROM bookings b
-         JOIN rooms r ON r.id = b.room_id
-         JOIN guests g ON g.id = b.primary_guest_id
-         WHERE b.id = ?",
-    )
-    .bind(booking_id)
-    .fetch_optional(pool)
-    .await
-    .map_err(|e| e.to_string())?;
-
-    let b = b.ok_or_else(|| format!("Booking '{}' not found", booking_id))?;
-
-    // Get hotel info from settings (stored as JSON blob under "hotel_info")
-    let (hotel_name, hotel_address, hotel_phone) = match get_setting(pool, "hotel_info").await? {
-        Some(json_str) => {
-            if let Ok(v) = serde_json::from_str::<serde_json::Value>(&json_str) {
-                (
-                    v.get("name")
-                        .and_then(|s| s.as_str())
-                        .unwrap_or(crate::app_identity::APP_NAME)
-                        .to_string(),
-                    v.get("address")
-                        .and_then(|s| s.as_str())
-                        .unwrap_or("")
-                        .to_string(),
-                    v.get("phone")
-                        .and_then(|s| s.as_str())
-                        .unwrap_or("")
-                        .to_string(),
-                )
-            } else {
-                (
-                    crate::app_identity::APP_NAME.to_string(),
-                    String::new(),
-                    String::new(),
-                )
-            }
-        }
-        None => (
-            crate::app_identity::APP_NAME.to_string(),
-            String::new(),
-            String::new(),
-        ),
-    };
-
-    let room_name: String = b.get("room_name");
-    let room_type: String = b.get("room_type");
-    let guest_name: String = b.get("guest_name");
-    let guest_phone: Option<String> = b.get("guest_phone");
-    let nights: i32 = b.get("nights");
-    let total_price = get_money_vnd(&b, "total_price");
-    let paid_amount = get_money_vnd(&b, "paid_amount");
-    let deposit_amount = get_optional_money_vnd(&b, "deposit_amount").unwrap_or(0);
-    let notes: Option<String> = b.get("notes");
-    let pricing_snapshot: Option<String> = b.get("pricing_snapshot");
-
-    let checkout_settlement = pricing_snapshot
-        .as_deref()
-        .and_then(|raw| serde_json::from_str::<serde_json::Value>(raw).ok())
-        .and_then(|value| value.get("checkout_settlement").cloned());
-
-    let settlement_label = checkout_settlement
-        .as_ref()
-        .and_then(|value| value.get("label").cloned())
-        .and_then(|value| value.as_str().map(str::to_string));
-    let settlement_mode = checkout_settlement
-        .as_ref()
-        .and_then(|value| value.get("mode").cloned())
-        .and_then(|value| value.as_str().map(str::to_string));
-    let settlement_reporting_checkout = checkout_settlement
-        .as_ref()
-        .and_then(|value| value.get("reporting_checkout").cloned())
-        .and_then(|value| value.as_str().map(str::to_string));
-
-    let check_in: String = b
-        .try_get::<String, _>("scheduled_checkin")
-        .ok()
-        .or_else(|| Some(b.get::<String, _>("check_in_at")))
-        .unwrap();
-    let scheduled_checkout = b
-        .try_get::<Option<String>, _>("scheduled_checkout")
-        .ok()
-        .flatten();
-    let expected_checkout = b.try_get::<String, _>("expected_checkout").ok();
-    let actual_checkout = b
-        .try_get::<Option<String>, _>("actual_checkout")
-        .ok()
-        .flatten();
-    let check_out: String = if settlement_mode.as_deref() == Some("booked_nights") {
-        settlement_reporting_checkout
-            .or(scheduled_checkout)
-            .or(expected_checkout)
-            .or(actual_checkout)
-            .unwrap_or_default()
-    } else {
-        actual_checkout
-            .or(scheduled_checkout)
-            .or(expected_checkout)
-            .unwrap_or_default()
-    };
-
-    // Keep invoice wording aligned with the settlement metadata when checkout finalized with
-    // an explicit settlement mode.
-    let per_night = if nights > 0 {
-        total_price / i64::from(nights)
-    } else {
-        total_price
-    };
-    let breakdown: Vec<crate::pricing::PricingLine> = vec![crate::pricing::PricingLine {
-        label: settlement_label.unwrap_or_else(|| format!("{} night(s) x {}d", nights, per_night)),
-        amount: total_price,
-    }];
-
-    let subtotal = total_price;
-    let balance_due = (total_price - paid_amount).max(0);
-
-    // Generate invoice number: INV-YYYYMMDD-XXX
-    let today = chrono::Local::now().format("%Y%m%d").to_string();
-    let prefix = format!("INV-{}", today);
-    let max_row: (Option<String>,) =
-        sqlx::query_as("SELECT MAX(invoice_number) FROM invoices WHERE invoice_number LIKE ?")
-            .bind(format!("{}-%", prefix))
-            .fetch_one(pool)
-            .await
-            .map_err(|e| e.to_string())?;
-    let next_seq = match max_row.0 {
-        Some(ref last) => {
-            last.rsplit('-')
-                .next()
-                .and_then(|s| s.parse::<i64>().ok())
-                .unwrap_or(0)
-                + 1
-        }
-        None => 1,
-    };
-    let invoice_number = format!("{}-{:03}", prefix, next_seq);
-
-    let id = uuid::Uuid::new_v4().to_string();
-    let now = chrono::Local::now().to_rfc3339();
-    let breakdown_json = serde_json::to_string(&breakdown).unwrap_or_default();
-
-    sqlx::query(
-        "INSERT INTO invoices (id, invoice_number, booking_id, hotel_name, hotel_address, hotel_phone,
-         guest_name, guest_phone, room_name, room_type, check_in, check_out, nights,
-         pricing_breakdown, subtotal, deposit_amount, total, balance_due, policy_text, notes,
-         status, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'issued', ?)"
-    )
-    .bind(&id).bind(&invoice_number).bind(booking_id)
-    .bind(&hotel_name).bind(&hotel_address).bind(&hotel_phone)
-    .bind(&guest_name).bind(&guest_phone)
-    .bind(&room_name).bind(&room_type)
-    .bind(&check_in).bind(&check_out).bind(nights)
-    .bind(&breakdown_json)
-    .bind(subtotal).bind(deposit_amount).bind(total_price).bind(balance_due)
-    .bind(DEFAULT_POLICY_TEXT).bind(&notes)
-    .bind(&now)
-    .execute(pool).await.map_err(|e| e.to_string())?;
-
-    Ok(InvoiceData {
-        id,
-        invoice_number,
-        booking_id: booking_id.to_string(),
-        hotel_name,
-        hotel_address,
-        hotel_phone,
-        guest_name,
-        guest_phone,
-        room_name,
-        room_type,
-        check_in,
-        check_out,
-        nights,
-        pricing_breakdown: breakdown,
-        subtotal,
-        deposit_amount,
-        total: total_price,
-        balance_due,
-        policy_text: Some(DEFAULT_POLICY_TEXT.to_string()),
-        notes,
-        status: "issued".to_string(),
-        created_at: now,
-    })
+    invoice_generation::generate_invoice_direct(pool, booking_id).await
 }
 
 pub async fn do_get_invoice(
     pool: &Pool<Sqlite>,
     booking_id: &str,
 ) -> Result<Option<InvoiceData>, String> {
-    let row = sqlx::query(
-        "SELECT id, invoice_number, booking_id, hotel_name, hotel_address, hotel_phone,
-                guest_name, guest_phone, room_name, room_type, check_in, check_out, nights,
-                pricing_breakdown, subtotal, deposit_amount, total, balance_due,
-                policy_text, notes, status, created_at
-         FROM invoices WHERE booking_id = ? ORDER BY created_at DESC LIMIT 1",
-    )
-    .bind(booking_id)
-    .fetch_optional(pool)
-    .await
-    .map_err(|e| e.to_string())?;
+    invoice_generation::get_invoice(pool, booking_id).await
+}
 
-    match row {
-        Some(r) => {
-            let breakdown_json: String = r.get("pricing_breakdown");
-            let breakdown: Vec<crate::pricing::PricingLine> =
-                serde_json::from_str(&breakdown_json).unwrap_or_default();
+#[derive(serde::Deserialize)]
+struct InvoiceDataWire {
+    id: String,
+    invoice_number: String,
+    booking_id: String,
+    hotel_name: String,
+    hotel_address: String,
+    hotel_phone: String,
+    guest_name: String,
+    guest_phone: Option<String>,
+    room_name: String,
+    room_type: String,
+    check_in: String,
+    check_out: String,
+    nights: i32,
+    pricing_breakdown: Vec<crate::pricing::PricingLine>,
+    subtotal: crate::money::MoneyVnd,
+    deposit_amount: crate::money::MoneyVnd,
+    total: crate::money::MoneyVnd,
+    balance_due: crate::money::MoneyVnd,
+    policy_text: Option<String>,
+    notes: Option<String>,
+    status: String,
+    created_at: String,
+}
 
-            Ok(Some(InvoiceData {
-                id: r.get("id"),
-                invoice_number: r.get("invoice_number"),
-                booking_id: r.get("booking_id"),
-                hotel_name: r.get("hotel_name"),
-                hotel_address: r.get("hotel_address"),
-                hotel_phone: r.get("hotel_phone"),
-                guest_name: r.get("guest_name"),
-                guest_phone: r.get("guest_phone"),
-                room_name: r.get("room_name"),
-                room_type: r.get("room_type"),
-                check_in: r.get("check_in"),
-                check_out: r.get("check_out"),
-                nights: r.get("nights"),
-                pricing_breakdown: breakdown,
-                subtotal: get_money_vnd(&r, "subtotal"),
-                deposit_amount: get_money_vnd(&r, "deposit_amount"),
-                total: get_money_vnd(&r, "total"),
-                balance_due: get_money_vnd(&r, "balance_due"),
-                policy_text: r.get("policy_text"),
-                notes: r.get("notes"),
-                status: r.get("status"),
-                created_at: r.get("created_at"),
-            }))
+impl From<InvoiceDataWire> for InvoiceData {
+    fn from(value: InvoiceDataWire) -> Self {
+        Self {
+            id: value.id,
+            invoice_number: value.invoice_number,
+            booking_id: value.booking_id,
+            hotel_name: value.hotel_name,
+            hotel_address: value.hotel_address,
+            hotel_phone: value.hotel_phone,
+            guest_name: value.guest_name,
+            guest_phone: value.guest_phone,
+            room_name: value.room_name,
+            room_type: value.room_type,
+            check_in: value.check_in,
+            check_out: value.check_out,
+            nights: value.nights,
+            pricing_breakdown: value.pricing_breakdown,
+            subtotal: value.subtotal,
+            deposit_amount: value.deposit_amount,
+            total: value.total,
+            balance_due: value.balance_due,
+            policy_text: value.policy_text,
+            notes: value.notes,
+            status: value.status,
+            created_at: value.created_at,
         }
-        None => Ok(None),
     }
 }
 
@@ -269,8 +85,27 @@ pub async fn do_get_invoice(
 pub async fn generate_invoice(
     state: State<'_, AppState>,
     booking_id: String,
-) -> Result<InvoiceData, String> {
-    do_generate_invoice(&state.db, &booking_id).await
+    idempotency_key: String,
+    correlation_id: Option<String>,
+) -> CommandResult<InvoiceData> {
+    let effective_correlation_id = normalize_correlation_id(correlation_id);
+    let actor_id = super::get_user_id(&state).ok_or_else(|| {
+        CommandError::user(codes::AUTH_NOT_AUTHENTICATED, "Chưa đăng nhập")
+            .with_request_id(effective_correlation_id.value.clone())
+    })?;
+    let mut ctx = WriteCommandContext::for_scoped_command(
+        effective_correlation_id.value.clone(),
+        idempotency_key,
+        "generate_invoice",
+    )?;
+    ctx.actor_id = Some(actor_id);
+
+    let response = invoice_generation::generate_invoice_idempotent(&state.db, &ctx, &booking_id)
+        .await?
+        .response;
+    serde_json::from_value::<InvoiceDataWire>(response)
+        .map(Into::into)
+        .map_err(|error| system_error(error).with_request_id(ctx.request_id.clone()))
 }
 
 #[tauri::command]
@@ -284,7 +119,9 @@ pub async fn get_invoice(
 #[cfg(test)]
 mod tests {
     use super::{do_generate_invoice, do_get_invoice};
+    use crate::app_error::codes;
     use crate::app_identity;
+    use crate::command_idempotency::WriteCommandContext;
     use sqlx::{sqlite::SqlitePoolOptions, Pool, Sqlite};
 
     async fn test_pool() -> Pool<Sqlite> {
@@ -300,8 +137,8 @@ mod tests {
     }
 
     async fn seed_invoice_booking(pool: &Pool<Sqlite>, booking_id: &str) {
-        let room_id = "room-1";
-        let guest_id = "guest-1";
+        let room_id = format!("room-{booking_id}");
+        let guest_id = format!("guest-{booking_id}");
         let now = "2026-04-19T10:00:00+07:00";
 
         sqlx::query(
@@ -310,7 +147,7 @@ mod tests {
                 extra_person_fee, status
             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
         )
-        .bind(room_id)
+        .bind(&room_id)
         .bind("Room 1")
         .bind("standard")
         .bind(1_i32)
@@ -328,7 +165,7 @@ mod tests {
                 id, guest_type, full_name, doc_number, phone, created_at
             ) VALUES (?, 'domestic', ?, ?, ?, ?)",
         )
-        .bind(guest_id)
+        .bind(&guest_id)
         .bind("Guest 1")
         .bind("DOC-1")
         .bind("0901234567")
@@ -347,8 +184,8 @@ mod tests {
             ) VALUES (?, ?, ?, ?, ?, NULL, ?, ?, ?, 'active', ?, ?, NULL, 'walk-in', 'nightly', NULL, ?, NULL, NULL, NULL, ?)",
         )
         .bind(booking_id)
-        .bind(room_id)
-        .bind(guest_id)
+        .bind(&room_id)
+        .bind(&guest_id)
         .bind(now)
         .bind("2026-04-20T10:00:00+07:00")
         .bind(1_i64)
@@ -361,6 +198,87 @@ mod tests {
         .execute(pool)
         .await
         .expect("seed booking");
+    }
+
+    #[tokio::test]
+    async fn generate_invoice_idempotent_retry_replays_without_duplicate_rows() {
+        let pool = test_pool().await;
+        seed_invoice_booking(&pool, "booking-invoice-idem").await;
+        let ctx = WriteCommandContext::for_internal_test(
+            "req-invoice-idem",
+            "idem-invoice-1",
+            "generate_invoice",
+        );
+
+        let first = crate::services::booking::invoice_generation::generate_invoice_idempotent(
+            &pool,
+            &ctx,
+            "booking-invoice-idem",
+        )
+        .await
+        .expect("first invoice succeeds");
+        let second = crate::services::booking::invoice_generation::generate_invoice_idempotent(
+            &pool,
+            &ctx,
+            "booking-invoice-idem",
+        )
+        .await
+        .expect("retry replays");
+
+        assert!(!first.replayed);
+        assert!(second.replayed);
+        assert!(first.response["id"].is_string());
+        assert!(second.response["id"].is_string());
+        assert!(first.response["invoice_number"].is_string());
+        assert!(second.response["invoice_number"].is_string());
+        assert_eq!(first.response["id"], second.response["id"]);
+        assert_eq!(
+            first.response["invoice_number"],
+            second.response["invoice_number"]
+        );
+
+        let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM invoices WHERE booking_id = ?")
+            .bind("booking-invoice-idem")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(count, 1);
+    }
+
+    #[tokio::test]
+    async fn generate_invoice_idempotent_same_key_different_booking_conflicts() {
+        let pool = test_pool().await;
+        seed_invoice_booking(&pool, "booking-invoice-a").await;
+        seed_invoice_booking(&pool, "booking-invoice-b").await;
+        let ctx = WriteCommandContext::for_internal_test(
+            "req-invoice-hash",
+            "idem-invoice-hash",
+            "generate_invoice",
+        );
+
+        crate::services::booking::invoice_generation::generate_invoice_idempotent(
+            &pool,
+            &ctx,
+            "booking-invoice-a",
+        )
+        .await
+        .expect("first invoice succeeds");
+        let error = crate::services::booking::invoice_generation::generate_invoice_idempotent(
+            &pool,
+            &ctx,
+            "booking-invoice-b",
+        )
+        .await
+        .expect_err("same key with different booking conflicts");
+
+        assert_eq!(error.code, codes::CONFLICT_IDEMPOTENCY_HASH_MISMATCH);
+
+        let count_b: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM invoices WHERE booking_id = ?")
+            .bind("booking-invoice-b")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(count_b, 0);
     }
 
     #[tokio::test]
