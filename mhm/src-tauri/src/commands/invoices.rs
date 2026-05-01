@@ -101,7 +101,8 @@ pub async fn generate_invoice(
     ctx.actor_id = Some(actor_id);
 
     let response = invoice_generation::generate_invoice_idempotent(&state.db, &ctx, &booking_id)
-        .await?
+        .await
+        .map_err(|error| error.with_request_id(ctx.request_id.clone()))?
         .response;
     serde_json::from_value::<InvoiceDataWire>(response)
         .map(Into::into)

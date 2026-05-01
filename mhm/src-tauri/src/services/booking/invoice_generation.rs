@@ -295,9 +295,10 @@ pub async fn generate_invoice_idempotent(
         ("schema", json!("invoice.generate.v1")),
         ("booking_present", json!(true)),
     ])?;
+    let booking_ref_id = booking_id.to_string();
     let summary = CommandLedgerSummary::new("Generate invoice")?.with_aggregate_ref(
         "booking",
-        "booking",
+        booking_ref_id,
         None::<String>,
     )?;
     let runtime_lock_keys = generate_invoice_lock_keys_from_payload(&hash_payload)?;
