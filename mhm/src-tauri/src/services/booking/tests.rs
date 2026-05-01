@@ -22,7 +22,8 @@ use super::{
         record_deposit_with_origin_tx, record_payment, record_payment_idempotent,
         record_payment_returning_id_tx, record_payment_tx,
     },
-    group_lifecycle, guest_service, reservation_lifecycle, stay_lifecycle,
+    group_lifecycle, group_service_management, guest_service, reservation_lifecycle,
+    stay_lifecycle,
 };
 
 pub async fn test_pool() -> Pool<Sqlite> {
@@ -401,6 +402,23 @@ pub async fn seed_room(pool: &Pool<Sqlite>, room_id: &str) -> BookingResult<()> 
     .await?;
 
     Ok(())
+}
+
+async fn seed_booking_group(pool: &Pool<Sqlite>, group_id: &str) {
+    sqlx::query(
+        "INSERT INTO booking_groups (
+            id, group_name, organizer_name, organizer_phone, total_rooms,
+            status, notes, created_by, created_at
+        ) VALUES (?, ?, ?, NULL, 1, 'active', NULL, ?, ?)",
+    )
+    .bind(group_id)
+    .bind(format!("Group {group_id}"))
+    .bind("Organizer")
+    .bind("seed-user")
+    .bind("2026-05-01T09:00:00+07:00")
+    .execute(pool)
+    .await
+    .expect("seed booking group");
 }
 
 pub async fn seed_booking_for_origin_tests(
@@ -2237,6 +2255,189 @@ async fn group_checkin_idempotent_same_key_changed_guest_name_conflicts() {
         error.code,
         crate::app_error::codes::CONFLICT_IDEMPOTENCY_HASH_MISMATCH
     );
+}
+
+#[tokio::test]
+async fn add_group_service_idempotent_retry_replays_without_duplicate_row() {
+    let pool = test_pool().await;
+    seed_booking_group(&pool, "G-SVC-IDEM").await;
+    let ctx = crate::command_idempotency::WriteCommandContext::for_internal_test(
+        "req-group-svc-idem",
+        "idem-group-svc-1",
+        "add_group_service",
+    );
+    let first_req = crate::models::AddGroupServiceRequest {
+        group_id: "G-SVC-IDEM".to_string(),
+        booking_id: None,
+        name: "Laundry".to_string(),
+        quantity: 2,
+        unit_price: 25_000,
+        note: Some("same-day".to_string()),
+    };
+    let second_req = crate::models::AddGroupServiceRequest {
+        group_id: "G-SVC-IDEM".to_string(),
+        booking_id: None,
+        name: "Laundry".to_string(),
+        quantity: 2,
+        unit_price: 25_000,
+        note: Some("same-day".to_string()),
+    };
+
+    let first =
+        group_service_management::add_group_service_idempotent(&pool, &ctx, first_req, "staff-1")
+            .await
+            .expect("first service add succeeds");
+    let second =
+        group_service_management::add_group_service_idempotent(&pool, &ctx, second_req, "staff-1")
+            .await
+            .expect("retry replays");
+
+    assert!(!first.replayed);
+    assert!(second.replayed);
+    assert_eq!(first.response["id"], second.response["id"]);
+    assert_eq!(
+        first.response["total_price"],
+        second.response["total_price"]
+    );
+    assert_eq!(first.response["total_price"], 50_000);
+
+    let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM group_services WHERE group_id = ?")
+        .bind("G-SVC-IDEM")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(count, 1);
+}
+
+#[tokio::test]
+async fn add_group_service_idempotent_same_key_different_payload_conflicts() {
+    let pool = test_pool().await;
+    seed_booking_group(&pool, "G-SVC-HASH").await;
+    let ctx = crate::command_idempotency::WriteCommandContext::for_internal_test(
+        "req-group-svc-hash",
+        "idem-group-svc-hash",
+        "add_group_service",
+    );
+    let first_req = crate::models::AddGroupServiceRequest {
+        group_id: "G-SVC-HASH".to_string(),
+        booking_id: None,
+        name: "Laundry".to_string(),
+        quantity: 1,
+        unit_price: 25_000,
+        note: None,
+    };
+    let changed_req = crate::models::AddGroupServiceRequest {
+        group_id: "G-SVC-HASH".to_string(),
+        booking_id: None,
+        name: "Laundry".to_string(),
+        quantity: 2,
+        unit_price: 25_000,
+        note: None,
+    };
+
+    group_service_management::add_group_service_idempotent(&pool, &ctx, first_req, "staff-1")
+        .await
+        .expect("first service add succeeds");
+    let error =
+        group_service_management::add_group_service_idempotent(&pool, &ctx, changed_req, "staff-1")
+            .await
+            .expect_err("same key with changed quantity conflicts");
+
+    assert_eq!(
+        error.code,
+        crate::app_error::codes::CONFLICT_IDEMPOTENCY_HASH_MISMATCH
+    );
+
+    let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM group_services WHERE group_id = ?")
+        .bind("G-SVC-HASH")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(count, 1);
+}
+
+#[tokio::test]
+async fn remove_group_service_idempotent_retry_replays_without_extra_delete() {
+    let pool = test_pool().await;
+    seed_booking_group(&pool, "G-SVC-REMOVE").await;
+    sqlx::query(
+        "INSERT INTO group_services (
+            id, group_id, booking_id, name, quantity, unit_price,
+            total_price, note, created_by, created_at
+        ) VALUES ('SVC-REMOVE-1', 'G-SVC-REMOVE', NULL, 'Laundry', 1, 25000, 25000, NULL, 'staff-1', '2026-05-01T09:00:00+07:00')",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    let ctx = crate::command_idempotency::WriteCommandContext::for_internal_test(
+        "req-group-svc-remove",
+        "idem-group-svc-remove",
+        "remove_group_service",
+    );
+
+    let first =
+        group_service_management::remove_group_service_idempotent(&pool, &ctx, "SVC-REMOVE-1")
+            .await
+            .expect("first remove succeeds");
+    let second =
+        group_service_management::remove_group_service_idempotent(&pool, &ctx, "SVC-REMOVE-1")
+            .await
+            .expect("retry replays");
+
+    assert!(!first.replayed);
+    assert!(second.replayed);
+    assert_eq!(first.response, second.response);
+    assert_eq!(first.response["service_id"], "SVC-REMOVE-1");
+
+    let count: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM group_services WHERE id = 'SVC-REMOVE-1'")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(count, 0);
+}
+
+#[tokio::test]
+async fn remove_group_service_idempotent_same_key_different_service_conflicts() {
+    let pool = test_pool().await;
+    seed_booking_group(&pool, "G-SVC-REMOVE-HASH").await;
+    for service_id in ["SVC-REMOVE-A", "SVC-REMOVE-B"] {
+        sqlx::query(
+            "INSERT INTO group_services (
+                id, group_id, booking_id, name, quantity, unit_price,
+                total_price, note, created_by, created_at
+            ) VALUES (?, 'G-SVC-REMOVE-HASH', NULL, 'Laundry', 1, 25000, 25000, NULL, 'staff-1', '2026-05-01T09:00:00+07:00')",
+        )
+        .bind(service_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    }
+    let ctx = crate::command_idempotency::WriteCommandContext::for_internal_test(
+        "req-group-svc-remove-hash",
+        "idem-group-svc-remove-hash",
+        "remove_group_service",
+    );
+
+    group_service_management::remove_group_service_idempotent(&pool, &ctx, "SVC-REMOVE-A")
+        .await
+        .expect("first remove succeeds");
+    let error =
+        group_service_management::remove_group_service_idempotent(&pool, &ctx, "SVC-REMOVE-B")
+            .await
+            .expect_err("same key with changed service id conflicts");
+
+    assert_eq!(
+        error.code,
+        crate::app_error::codes::CONFLICT_IDEMPOTENCY_HASH_MISMATCH
+    );
+
+    let remaining_b: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM group_services WHERE id = 'SVC-REMOVE-B'")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(remaining_b, 1);
 }
 
 #[tokio::test]
