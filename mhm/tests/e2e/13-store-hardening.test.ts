@@ -194,6 +194,7 @@ describe("13 — Store Hardening", () => {
 
         expect(groupCheckoutCall?.[1]).toMatchObject({
             req,
+            idempotencyKey: expect.stringMatching(/^group_checkout:/),
             correlationId: expect.stringMatching(/^COR-[0-9A-F]{8}$/),
         });
 

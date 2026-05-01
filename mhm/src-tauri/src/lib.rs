@@ -272,6 +272,7 @@ pub fn run() {
             commands::pricing::save_special_date,
             // Folio/Billing
             commands::billing::add_folio_line,
+            commands::billing::record_payment,
             commands::billing::get_folio_lines,
             // Night Audit
             commands::audit::run_night_audit,

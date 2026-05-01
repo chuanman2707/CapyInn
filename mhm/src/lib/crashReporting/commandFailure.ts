@@ -17,6 +17,9 @@ export type MonitoringContext =
       settlement_mode: string;
     }
   | {
+      operation: "add_one_night";
+    }
+  | {
       nights: number;
       deposit_present: boolean;
       source: string | null;
@@ -30,6 +33,7 @@ const MONITORED_COMMANDS = new Set([
   "check_in",
   "check_out",
   "create_reservation",
+  "extend_stay",
   "run_night_audit",
 ]);
 

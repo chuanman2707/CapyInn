@@ -89,6 +89,20 @@ fn map_add_folio_line_command_error(error: BookingError) -> CommandError {
     }
 }
 
+fn add_folio_line_lock_keys_from_payload(
+    hash_payload: &serde_json::Value,
+) -> CommandResult<Vec<String>> {
+    let booking_id = hash_payload
+        .get("booking_id")
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| system_error("folio add line lock payload missing booking_id"))?;
+
+    Ok(vec![
+        crate::aggregate_locks::booking_key(booking_id)?,
+        crate::aggregate_locks::folio_key(booking_id)?,
+    ])
+}
+
 pub async fn add_folio_line_idempotent(
     pool: &Pool<Sqlite>,
     ctx: &WriteCommandContext,
@@ -126,6 +140,7 @@ pub async fn add_folio_line_idempotent(
     )?;
     let request = WriteCommandRequest::new_sanitized(hash_payload, ledger_intent, summary)?
         .with_primary_aggregate_key(format!("booking:{booking_id}"))
+        .with_lock_key_deriver(add_folio_line_lock_keys_from_payload)
         .with_success_summary(CommandLedgerResultSummary::success("Folio line added")?);
 
     let booking_id = booking_id.to_string();
@@ -168,6 +183,110 @@ pub async fn record_payment(
 
     tx.commit().await.map_err(BookingError::from)?;
     Ok(())
+}
+
+fn map_record_payment_command_error(error: BookingError) -> CommandError {
+    match error {
+        BookingError::Validation(message) => {
+            CommandError::user(codes::BOOKING_INVALID_STATE, message)
+        }
+        BookingError::NotFound(message) => CommandError::user(codes::BOOKING_NOT_FOUND, message),
+        BookingError::Conflict(message) => {
+            CommandError::user(codes::CONFLICT_INVALID_STATE_TRANSITION, message)
+        }
+        BookingError::DatabaseWrite(message) | BookingError::Database(message) => {
+            if classify_db_error_code(&message) == Some(codes::DB_LOCKED_RETRYABLE) {
+                return CommandError::system(codes::DB_LOCKED_RETRYABLE, message).retryable(true);
+            }
+            CommandError::system(codes::SYSTEM_INTERNAL_ERROR, message)
+        }
+        BookingError::DateTimeParse(message) => {
+            CommandError::system(codes::SYSTEM_INTERNAL_ERROR, message)
+        }
+    }
+}
+
+pub async fn record_payment_idempotent(
+    pool: &Pool<Sqlite>,
+    ctx: &WriteCommandContext,
+    booking_id: &str,
+    amount: MoneyVnd,
+    note: &str,
+) -> CommandResult<IdempotentCommandResult<serde_json::Value>> {
+    let amount = validate_whole_positive_vnd(amount).map_err(|error| {
+        map_record_payment_command_error(error).with_request_id(ctx.request_id.clone())
+    })?;
+    let hash_payload = json!({
+        "schema": "payment.record.v1",
+        "booking_id": booking_id,
+        "amount": amount,
+        "note": note,
+    });
+    let ledger_intent = SanitizedLedgerIntent::from_pairs([
+        ("schema", json!("booking_credit.record.v1")),
+        ("booking_present", json!(true)),
+        ("amount_vnd_units", json!(amount)),
+        ("note_present", json!(!note.trim().is_empty())),
+    ])?;
+    let summary = CommandLedgerSummary::new("Record credit")?.with_aggregate_ref(
+        "booking",
+        "booking",
+        None::<String>,
+    )?;
+    let request = WriteCommandRequest::new_sanitized(hash_payload, ledger_intent, summary)?
+        .with_primary_aggregate_key(format!("booking:{booking_id}"))
+        .with_lock_key_deriver(|payload| {
+            let booking_id = payload
+                .get("booking_id")
+                .and_then(serde_json::Value::as_str)
+                .ok_or_else(|| system_error("payment lock payload missing booking_id"))?;
+            Ok(vec![
+                crate::aggregate_locks::booking_key(booking_id)?,
+                crate::aggregate_locks::folio_key(booking_id)?,
+            ])
+        })
+        .with_success_summary(CommandLedgerResultSummary::success("Credit recorded")?);
+
+    let booking_id_for_guard = booking_id.to_string();
+    let booking_id_for_service = booking_id.to_string();
+    let note = note.to_string();
+    let origin_key = format!("{}:{}", ctx.command_name, ctx.idempotency_key);
+
+    WriteCommandExecutor::new(pool.clone())
+        .execute_with_pre_transaction_guard(
+            ctx,
+            request,
+            move || async move {
+                crate::aggregate_locks::global_manager()
+                    .acquire([
+                        crate::aggregate_locks::booking_key(&booking_id_for_guard)?,
+                        crate::aggregate_locks::folio_key(&booking_id_for_guard)?,
+                    ])
+                    .await
+            },
+            move |tx| {
+                Box::pin(async move {
+                    let origin = OriginSideEffect::new(origin_key, 0).map_err(system_error)?;
+                    let transaction_id = record_payment_with_origin_returning_id_tx(
+                        tx,
+                        &booking_id_for_service,
+                        amount,
+                        note,
+                        &origin,
+                    )
+                    .await
+                    .map_err(map_record_payment_command_error)?;
+                    let response = crate::models::RecordPaymentResponse {
+                        ok: true,
+                        booking_id: booking_id_for_service,
+                        transaction_id,
+                        amount,
+                    };
+                    serde_json::to_value(response).map_err(system_error)
+                })
+            },
+        )
+        .await
 }
 
 pub async fn record_charge_tx(
@@ -242,6 +361,79 @@ pub async fn record_payment_with_origin_tx(
         Some(origin),
     )
     .await
+}
+
+#[allow(dead_code)]
+pub async fn record_payment_returning_id_tx(
+    tx: &mut Transaction<'_, Sqlite>,
+    booking_id: &str,
+    amount: MoneyVnd,
+    note: impl Into<String>,
+) -> BookingResult<String> {
+    record_payment_money_returning_id_tx(tx, booking_id, amount, note, None).await
+}
+
+#[allow(dead_code)]
+pub async fn record_payment_with_origin_returning_id_tx(
+    tx: &mut Transaction<'_, Sqlite>,
+    booking_id: &str,
+    amount: MoneyVnd,
+    note: impl Into<String>,
+    origin: &OriginSideEffect,
+) -> BookingResult<String> {
+    record_payment_money_returning_id_tx(tx, booking_id, amount, note, Some(origin)).await
+}
+
+async fn record_payment_money_returning_id_tx(
+    tx: &mut Transaction<'_, Sqlite>,
+    booking_id: &str,
+    amount: MoneyVnd,
+    note: impl Into<String>,
+    origin: Option<&OriginSideEffect>,
+) -> BookingResult<String> {
+    let id = uuid::Uuid::new_v4().to_string();
+    let note = note.into();
+    let created_at = rfc3339_now();
+    let amount = validate_whole_vnd(amount, "transaction amount")?;
+    let origin_idempotency_key = origin.map(OriginSideEffect::key);
+    let origin_transaction_ordinal = origin.map(OriginSideEffect::ordinal).unwrap_or(0);
+
+    sqlx::query(
+        "INSERT INTO transactions (
+            id, booking_id, amount, type, note, origin_idempotency_key,
+            origin_transaction_ordinal, created_at
+        )
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+    )
+    .bind(&id)
+    .bind(booking_id)
+    .bind(amount)
+    .bind("payment")
+    .bind(&note)
+    .bind(origin_idempotency_key)
+    .bind(origin_transaction_ordinal)
+    .bind(&created_at)
+    .execute(&mut **tx)
+    .await?;
+
+    let result = sqlx::query(
+        "UPDATE bookings
+         SET paid_amount = COALESCE(paid_amount, 0) + ?
+         WHERE id = ?",
+    )
+    .bind(amount)
+    .bind(booking_id)
+    .execute(&mut **tx)
+    .await?;
+
+    if result.rows_affected() == 0 {
+        return Err(BookingError::not_found(format!(
+            "Không tìm thấy booking {}",
+            booking_id
+        )));
+    }
+
+    Ok(id)
 }
 
 pub async fn record_deposit_tx(

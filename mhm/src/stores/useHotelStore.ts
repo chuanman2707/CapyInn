@@ -1,7 +1,7 @@
 import { create } from "zustand";
 import { invoke } from "@tauri-apps/api/core";
 import { createCorrelationId } from "@/lib/correlationId";
-import { createIdempotencyKey, invokeCommand } from "@/lib/invokeCommand";
+import { createIdempotencyKey, invokeCommand, invokeWriteCommand } from "@/lib/invokeCommand";
 import { assertNonNegativeMoneyVnd, optionalMoneyVnd, type MoneyVnd } from "@/lib/money";
 import type {
   CheckInGuestInput,
@@ -112,7 +112,7 @@ export const useHotelStore = create<HotelStore>((set, get) => {
       beginAction();
       try {
         const correlationId = createCorrelationId();
-        await invokeCommand(
+        await invokeWriteCommand(
           "check_in",
           {
             req: {
@@ -152,7 +152,7 @@ export const useHotelStore = create<HotelStore>((set, get) => {
       beginAction();
       try {
         const correlationId = createCorrelationId();
-        await invokeCommand(
+        await invokeWriteCommand(
           "check_out",
           {
             req: {
@@ -185,7 +185,17 @@ export const useHotelStore = create<HotelStore>((set, get) => {
     extendStay: async (bookingId) => {
       beginAction();
       try {
-        await invoke("extend_stay", { bookingId });
+        const correlationId = createCorrelationId();
+        await invokeWriteCommand(
+          "extend_stay",
+          { bookingId },
+          {
+            correlationId,
+            monitoringContext: {
+              operation: "add_one_night",
+            },
+          },
+        );
         await get().fetchRooms();
         await get().fetchStats();
         get().markDashboardDataChanged();
@@ -250,7 +260,7 @@ export const useHotelStore = create<HotelStore>((set, get) => {
           ...req,
           final_paid: optionalMoneyVnd(req.final_paid, "final_paid"),
         };
-        await invokeCommand("group_checkout", { req: guardedReq }, { correlationId });
+        await invokeWriteCommand("group_checkout", { req: guardedReq }, { correlationId });
         await get().fetchRooms();
         await get().fetchStats();
         await get().fetchGroups();

@@ -109,6 +109,7 @@ pub(crate) fn map_room_calendar_insert_error(error: sqlx::Error, date: NaiveDate
     BookingError::from(error)
 }
 
+#[allow(dead_code)]
 pub async fn fetch_booking<F>(
     pool: &Pool<Sqlite>,
     booking_id: &str,

@@ -4,6 +4,7 @@ use crate::{
         codes, correlation_context, log_system_error, normalize_correlation_id,
         record_command_failure_with_db_group, CommandError, CommandResult, EffectiveCorrelationId,
     },
+    command_idempotency::WriteCommandContext,
     db_error_monitoring::{
         classify_db_error_code, classify_db_failure, inject_db_error_group,
         is_room_unavailable_conflict_message, DbErrorGroup, MonitoredDbFailure,
@@ -65,6 +66,7 @@ pub async fn get_dashboard_stats(state: State<'_, AppState>) -> Result<Dashboard
 
 // ─── Check-in Command ───
 
+#[allow(dead_code)]
 fn log_user_stay_error(
     command_name: &str,
     effective_correlation_id: &EffectiveCorrelationId,
@@ -87,6 +89,7 @@ fn log_user_stay_error(
     );
 }
 
+#[allow(dead_code)]
 fn map_stay_user_error(
     code: &'static str,
     command_name: &str,
@@ -103,6 +106,7 @@ fn map_stay_user_error(
     CommandError::user(code, message)
 }
 
+#[allow(dead_code)]
 fn map_known_stay_error_code(
     command_name: &str,
     effective_correlation_id: &EffectiveCorrelationId,
@@ -131,6 +135,7 @@ fn map_known_stay_error_code(
     }
 }
 
+#[allow(dead_code)]
 fn map_stay_error(
     command_name: &str,
     effective_correlation_id: &EffectiveCorrelationId,
@@ -323,15 +328,35 @@ fn check_out_failure_context(req: &CheckOutRequest) -> Value {
     })
 }
 
+fn extend_stay_failure_context(booking_id: &str) -> Value {
+    json!({
+        "booking_id": booking_id,
+        "operation": "add_one_night",
+    })
+}
+
+fn should_request_checkout_backup(replayed: bool) -> bool {
+    !replayed
+}
+
 #[tauri::command]
 pub async fn check_in(
     state: State<'_, AppState>,
     app: tauri::AppHandle,
     req: CheckInRequest,
     correlation_id: Option<String>,
+    idempotency_key: String,
 ) -> CommandResult<Booking> {
     let effective_correlation_id = normalize_correlation_id(correlation_id);
     let error_context = check_in_failure_context(&req);
+    let actor_id = get_user_id(&state)
+        .ok_or_else(|| CommandError::user(codes::AUTH_NOT_AUTHENTICATED, "Chưa đăng nhập"))?;
+    let mut write_command_context = WriteCommandContext::for_scoped_command(
+        effective_correlation_id.value.clone(),
+        idempotency_key,
+        "check_in",
+    )?;
+    write_command_context.actor_id = Some(actor_id.clone());
     log::info!(
         "check_in start correlation_id={} source={:?} room_id={} guest_count={} nights={}",
         effective_correlation_id.value,
@@ -340,24 +365,25 @@ pub async fn check_in(
         req.guests.len(),
         req.nights
     );
-    let booking = stay_lifecycle::check_in(&state.db, req, get_user_id(&state))
-        .await
-        .map_err(|error| {
-            let (command_error, db_error_group) = map_stay_error(
-                "check_in",
-                &effective_correlation_id,
-                error,
-                error_context.clone(),
-            );
-            record_command_failure_with_db_group(
-                "check_in",
-                &command_error,
-                &effective_correlation_id.value,
-                db_error_group,
-                error_context.clone(),
-            );
-            command_error
-        })?;
+    let result =
+        stay_lifecycle::check_in_idempotent(&state.db, &write_command_context, req, Some(actor_id))
+            .await
+            .inspect_err(|command_error| {
+                record_command_failure_with_db_group(
+                    "check_in",
+                    command_error,
+                    &effective_correlation_id.value,
+                    None,
+                    error_context.clone(),
+                );
+            })?;
+    let booking: Booking = serde_json::from_value(result.response).map_err(|error| {
+        CommandError::system(
+            codes::SYSTEM_INTERNAL_ERROR,
+            format!("Invalid check_in idempotent response: {error}"),
+        )
+        .with_request_id(write_command_context.request_id.clone())
+    })?;
 
     log::info!(
         "check_in success correlation_id={} source={:?} booking_id={} room_id={}",
@@ -470,9 +496,18 @@ pub async fn check_out(
     app: tauri::AppHandle,
     req: CheckOutRequest,
     correlation_id: Option<String>,
-) -> CommandResult<()> {
+    idempotency_key: String,
+) -> CommandResult<CheckOutResponse> {
     let effective_correlation_id = normalize_correlation_id(correlation_id);
     let error_context = check_out_failure_context(&req);
+    let actor_id = get_user_id(&state)
+        .ok_or_else(|| CommandError::user(codes::AUTH_NOT_AUTHENTICATED, "Chưa đăng nhập"))?;
+    let mut write_command_context = WriteCommandContext::for_scoped_command(
+        effective_correlation_id.value.clone(),
+        idempotency_key,
+        "check_out",
+    )?;
+    write_command_context.actor_id = Some(actor_id);
     log::info!(
         "check_out start correlation_id={} source={:?} booking_id={} settlement_mode={:?} final_total={}",
         effective_correlation_id.value,
@@ -481,40 +516,44 @@ pub async fn check_out(
         req.settlement_mode,
         req.final_total
     );
-    stay_lifecycle::check_out(&state.db, req)
+    let result = stay_lifecycle::check_out_idempotent(&state.db, &write_command_context, req)
         .await
-        .map_err(|error| {
-            let (command_error, db_error_group) = map_stay_error(
-                "check_out",
-                &effective_correlation_id,
-                error,
-                error_context.clone(),
-            );
+        .inspect_err(|command_error| {
             record_command_failure_with_db_group(
                 "check_out",
-                &command_error,
+                command_error,
                 &effective_correlation_id.value,
-                db_error_group,
+                None,
                 error_context.clone(),
             );
-            command_error
         })?;
+    let response: CheckOutResponse = serde_json::from_value(result.response).map_err(|error| {
+        CommandError::system(
+            codes::SYSTEM_INTERNAL_ERROR,
+            format!("Invalid check_out idempotent response: {error}"),
+        )
+        .with_request_id(write_command_context.request_id.clone())
+    })?;
 
     log::info!(
-        "check_out success correlation_id={} source={:?}",
+        "check_out success correlation_id={} source={:?} booking_id={} room_id={}",
         effective_correlation_id.value,
-        effective_correlation_id.source
+        effective_correlation_id.source,
+        response.booking_id,
+        response.room_id
     );
 
     emit_db_update(&app, "rooms");
 
-    if let Err(error) =
-        crate::backup::request_backup(&app, crate::backup::BackupReason::Checkout).await
-    {
-        crate::backup::log_backup_request_error("check_out", &error);
+    if should_request_checkout_backup(result.replayed) {
+        if let Err(error) =
+            crate::backup::request_backup(&app, crate::backup::BackupReason::Checkout).await
+        {
+            crate::backup::log_backup_request_error("check_out", &error);
+        }
     }
 
-    Ok(())
+    Ok(response)
 }
 
 #[allow(dead_code)]
@@ -534,10 +573,57 @@ pub async fn preview_checkout_settlement(
 pub async fn extend_stay(
     state: State<'_, AppState>,
     booking_id: String,
-) -> Result<Booking, String> {
-    stay_lifecycle::extend_stay(&state.db, &booking_id)
-        .await
-        .map_err(|error| error.to_string())
+    app: tauri::AppHandle,
+    correlation_id: Option<String>,
+    idempotency_key: String,
+) -> CommandResult<Booking> {
+    let effective_correlation_id = normalize_correlation_id(correlation_id);
+    let error_context = extend_stay_failure_context(&booking_id);
+    let actor_id = get_user_id(&state)
+        .ok_or_else(|| CommandError::user(codes::AUTH_NOT_AUTHENTICATED, "Chưa đăng nhập"))?;
+    let mut write_command_context = WriteCommandContext::for_scoped_command(
+        effective_correlation_id.value.clone(),
+        idempotency_key,
+        "extend_stay",
+    )?;
+    write_command_context.actor_id = Some(actor_id);
+    log::info!(
+        "extend_stay start correlation_id={} source={:?} booking_id={}",
+        effective_correlation_id.value,
+        effective_correlation_id.source,
+        booking_id
+    );
+    let result =
+        stay_lifecycle::extend_stay_idempotent(&state.db, &write_command_context, &booking_id)
+            .await
+            .inspect_err(|command_error| {
+                record_command_failure_with_db_group(
+                    "extend_stay",
+                    command_error,
+                    &effective_correlation_id.value,
+                    None,
+                    error_context.clone(),
+                );
+            })?;
+    let booking: Booking = serde_json::from_value(result.response).map_err(|error| {
+        CommandError::system(
+            codes::SYSTEM_INTERNAL_ERROR,
+            format!("Invalid extend_stay idempotent response: {error}"),
+        )
+        .with_request_id(write_command_context.request_id.clone())
+    })?;
+
+    log::info!(
+        "extend_stay success correlation_id={} source={:?} booking_id={} room_id={}",
+        effective_correlation_id.value,
+        effective_correlation_id.source,
+        booking.id,
+        booking.room_id
+    );
+
+    emit_db_update(&app, "rooms");
+
+    Ok(booking)
 }
 
 // ─── Housekeeping Commands ───
@@ -855,7 +941,7 @@ pub async fn scan_image(path: String) -> Result<crate::ocr::CccdInfo, String> {
 mod tests {
     use super::{
         check_in_failure_context, check_out_failure_context, complete_housekeeping_clean_to_vacant,
-        map_stay_error, validate_create_expense_request,
+        map_stay_error, should_request_checkout_backup, validate_create_expense_request,
     };
     use crate::app_error::{
         codes, record_command_failure_with_db_group, AppErrorKind, CorrelationIdSource,
@@ -1219,5 +1305,11 @@ mod tests {
         assert_eq!(db_error_group, Some(DbErrorGroup::Unknown));
 
         let _ = fs::remove_dir_all(&runtime_root);
+    }
+
+    #[test]
+    fn should_request_checkout_backup_skips_replayed_idempotency_response() {
+        assert!(should_request_checkout_backup(false));
+        assert!(!should_request_checkout_backup(true));
     }
 }

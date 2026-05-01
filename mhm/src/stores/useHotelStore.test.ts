@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const invoke = vi.hoisted(() => vi.fn());
 const invokeCommand = vi.hoisted(() => vi.fn());
+const invokeWriteCommand = vi.hoisted(() => vi.fn());
 const createIdempotencyKey = vi.hoisted(() => vi.fn());
 const createCorrelationId = vi.hoisted(() => vi.fn());
 
@@ -12,6 +13,7 @@ vi.mock("@tauri-apps/api/core", () => ({
 vi.mock("@/lib/invokeCommand", () => ({
   createIdempotencyKey,
   invokeCommand,
+  invokeWriteCommand,
 }));
 
 vi.mock("@/lib/correlationId", () => ({
@@ -27,6 +29,7 @@ describe("useHotelStore monitoring context", () => {
     createCorrelationId.mockReturnValue("COR-1A2B3C4D");
     createIdempotencyKey.mockReturnValue("group_checkin:IDEM-1");
     invokeCommand.mockResolvedValue(undefined);
+    invokeWriteCommand.mockResolvedValue(undefined);
     invoke.mockImplementation(async (command: string) => {
       if (command === "get_rooms") {
         return [];
@@ -80,7 +83,7 @@ describe("useHotelStore monitoring context", () => {
       "Late arrival",
     );
 
-    expect(invokeCommand).toHaveBeenCalledWith(
+    expect(invokeWriteCommand).toHaveBeenCalledWith(
       "check_in",
       {
         req: {
@@ -117,7 +120,7 @@ describe("useHotelStore monitoring context", () => {
       "",
     );
 
-    expect(invokeCommand).toHaveBeenCalledWith(
+    expect(invokeWriteCommand).toHaveBeenCalledWith(
       "check_in",
       {
         req: {
@@ -144,7 +147,7 @@ describe("useHotelStore monitoring context", () => {
   it("passes scrubbed monitoring context for checkOut", async () => {
     await useHotelStore.getState().checkOut("booking-1", "hourly", 400000);
 
-    expect(invokeCommand).toHaveBeenCalledWith(
+    expect(invokeWriteCommand).toHaveBeenCalledWith(
       "check_out",
       {
         req: {
@@ -160,6 +163,22 @@ describe("useHotelStore monitoring context", () => {
         },
       },
     );
+  });
+
+  it("routes extendStay through invokeWriteCommand with monitoring context", async () => {
+    await useHotelStore.getState().extendStay("booking-extend-1");
+
+    expect(invokeWriteCommand).toHaveBeenCalledWith(
+      "extend_stay",
+      { bookingId: "booking-extend-1" },
+      {
+        correlationId: "COR-1A2B3C4D",
+        monitoringContext: {
+          operation: "add_one_night",
+        },
+      },
+    );
+    expect(invoke).not.toHaveBeenCalledWith("extend_stay", expect.anything());
   });
 
   it("passes an idempotency key for groupCheckIn", async () => {
@@ -189,6 +208,29 @@ describe("useHotelStore monitoring context", () => {
     );
   });
 
+  it("routes groupCheckout through invokeWriteCommand", async () => {
+    const req = {
+      group_id: "group-1",
+      booking_ids: ["booking-1"],
+      final_paid: 100000,
+    };
+
+    await useHotelStore.getState().groupCheckout(req);
+
+    expect(invokeWriteCommand).toHaveBeenCalledWith(
+      "group_checkout",
+      { req },
+      {
+        correlationId: "COR-1A2B3C4D",
+      },
+    );
+    expect(invokeCommand).not.toHaveBeenCalledWith(
+      "group_checkout",
+      expect.anything(),
+      expect.anything(),
+    );
+  });
+
   it("rejects fractional checkIn paid_amount before invoking backend", async () => {
     await expect(
       useHotelStore.getState().checkIn(
@@ -199,7 +241,7 @@ describe("useHotelStore monitoring context", () => {
       ),
     ).rejects.toThrow(/paid_amount/);
 
-    expect(invokeCommand).not.toHaveBeenCalledWith(
+    expect(invokeWriteCommand).not.toHaveBeenCalledWith(
       "check_in",
       expect.anything(),
       expect.anything(),
@@ -211,7 +253,7 @@ describe("useHotelStore monitoring context", () => {
       useHotelStore.getState().checkOut("booking-1", "hourly", 400000.5),
     ).rejects.toThrow(/final_total/);
 
-    expect(invokeCommand).not.toHaveBeenCalledWith(
+    expect(invokeWriteCommand).not.toHaveBeenCalledWith(
       "check_out",
       expect.anything(),
       expect.anything(),

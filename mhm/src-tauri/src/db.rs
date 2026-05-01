@@ -4,7 +4,7 @@ use sqlx::{
         SqliteConnectOptions, SqliteConnection, SqliteJournalMode, SqlitePoolOptions,
         SqliteSynchronous,
     },
-    Acquire, Pool, Row, Sqlite, Transaction,
+    Connection, Pool, Row, Sqlite, Transaction,
 };
 use std::{str::FromStr, time::Duration};
 
@@ -89,6 +89,24 @@ async fn verify_sqlite_connection_pragmas(
     }
 
     Ok(())
+}
+
+async fn restore_foreign_keys_after_v14_migration(
+    connection: &mut SqliteConnection,
+    migration_result: Result<(), sqlx::Error>,
+) -> Result<(), sqlx::Error> {
+    let restore_result = sqlx::query("PRAGMA foreign_keys=ON")
+        .execute(&mut *connection)
+        .await;
+
+    match (migration_result, restore_result) {
+        (Ok(()), Ok(_)) => Ok(()),
+        (Err(error), Ok(_)) => Err(error),
+        (Ok(()), Err(error)) => Err(error),
+        (Err(migration_error), Err(restore_error)) => Err(sqlx::Error::Protocol(format!(
+            "v14 migration failed ({migration_error}) and restoring foreign_keys failed ({restore_error})"
+        ))),
+    }
 }
 
 fn sqlite_pragma_mismatch(name: &str, expected: &str, actual: i64) -> sqlx::Error {
@@ -840,41 +858,23 @@ pub(crate) async fn run_migrations(pool: &Pool<Sqlite>) -> Result<(), sqlx::Erro
         sqlx::query("PRAGMA foreign_keys=OFF")
             .execute(&mut *conn)
             .await?;
-        let mut tx = conn.begin().await?;
 
-        let migration_result = async {
-            execute_compat_alter(
-                &mut tx,
-                "ALTER TABLE command_idempotency ADD COLUMN legacy_request_hash TEXT",
-            )
-            .await?;
-            crate::money_migration::migrate_integer_vnd_money(&mut tx).await?;
-            set_schema_version(&mut tx, 14).await?;
-            Ok::<(), sqlx::Error>(())
-        }
-        .await;
-
-        match migration_result {
-            Ok(()) => {
-                if let Err(error) = tx.commit().await {
-                    sqlx::query("PRAGMA foreign_keys=ON")
-                        .execute(&mut *conn)
-                        .await?;
-                    return Err(error);
-                }
-            }
-            Err(error) => {
-                let _ = tx.rollback().await;
-                sqlx::query("PRAGMA foreign_keys=ON")
-                    .execute(&mut *conn)
+        let migration_result = (*conn)
+            .transaction(|tx| {
+                Box::pin(async move {
+                    execute_compat_alter(
+                        tx,
+                        "ALTER TABLE command_idempotency ADD COLUMN legacy_request_hash TEXT",
+                    )
                     .await?;
-                return Err(error);
-            }
-        }
+                    crate::money_migration::migrate_integer_vnd_money(tx).await?;
+                    set_schema_version(tx, 14).await?;
+                    Ok::<(), sqlx::Error>(())
+                })
+            })
+            .await;
 
-        sqlx::query("PRAGMA foreign_keys=ON")
-            .execute(&mut *conn)
-            .await?;
+        restore_foreign_keys_after_v14_migration(&mut conn, migration_result).await?;
     }
     Ok(())
 }
@@ -882,7 +882,8 @@ pub(crate) async fn run_migrations(pool: &Pool<Sqlite>) -> Result<(), sqlx::Erro
 #[cfg(test)]
 mod tests {
     use super::{
-        connect_configured_sqlite_pool, execute_compat_alter, get_schema_version, run_migrations,
+        connect_configured_sqlite_pool, execute_compat_alter, get_schema_version,
+        restore_foreign_keys_after_v14_migration, run_migrations,
     };
     use sqlx::{Row, SqlitePool};
 
@@ -913,6 +914,32 @@ mod tests {
             assert_eq!(busy_timeout, 5000);
             assert_eq!(synchronous, 1);
         }
+    }
+
+    #[tokio::test]
+    async fn v14_early_failure_path_restores_foreign_keys() {
+        let pool = connect_configured_sqlite_pool("sqlite::memory:")
+            .await
+            .expect("connects configured in-memory sqlite pool");
+        let mut conn = pool.acquire().await.expect("acquires connection");
+        sqlx::query("PRAGMA foreign_keys=OFF")
+            .execute(&mut *conn)
+            .await
+            .expect("disables foreign keys");
+
+        let error = restore_foreign_keys_after_v14_migration(
+            &mut conn,
+            Err(sqlx::Error::Protocol("begin failed".to_string())),
+        )
+        .await
+        .expect_err("returns original migration failure");
+
+        assert!(error.to_string().contains("begin failed"));
+        let foreign_keys: i64 = sqlx::query_scalar("PRAGMA foreign_keys;")
+            .fetch_one(&mut *conn)
+            .await
+            .expect("reads foreign_keys pragma");
+        assert_eq!(foreign_keys, 1);
     }
 
     #[tokio::test]

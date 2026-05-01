@@ -1,25 +1,40 @@
 use chrono::{DateTime, Duration, Local, NaiveDate};
+use serde_json::json;
 use sqlx::{Pool, Row, Sqlite, Transaction};
 
 use crate::{
-    domain::booking::{pricing::calculate_stay_price_tx, BookingError, BookingResult},
+    app_error::{codes, CommandError, CommandResult},
+    command_idempotency::{
+        system_error, CommandLedgerResultSummary, CommandLedgerSummary, IdempotentCommandResult,
+        ResolvedWriteCommandGuard, SanitizedLedgerIntent, WriteCommandContext,
+        WriteCommandExecutor, WriteCommandRequest,
+    },
+    db_error_monitoring::{classify_db_error_code, is_room_unavailable_conflict_message},
+    domain::booking::{
+        pricing::calculate_stay_price_tx, BookingError, BookingResult, OriginSideEffect,
+    },
     models::{
-        status, Booking, CheckInRequest, CheckOutRequest, CheckoutSettlementMode,
+        status, Booking, CheckInRequest, CheckOutRequest, CheckOutResponse, CheckoutSettlementMode,
         CheckoutSettlementPreview, CheckoutSettlementPreviewRequest,
     },
     money::MoneyVnd,
 };
 
 use super::{
-    billing_service::{record_charge_tx, record_payment_tx},
+    billing_service::{
+        record_charge_tx, record_charge_with_origin_tx, record_payment_tx,
+        record_payment_with_origin_tx,
+    },
     guest_service::{create_guest_manifest, link_booking_guests},
     support::{
-        begin_immediate_tx, begin_tx, ensure_one_row_affected, fetch_booking,
-        insert_room_calendar_rows, invalid_state_transition, lookup_booking_room_id,
-        map_room_calendar_insert_error, parse_booking_datetime, read_money_vnd_or_zero,
-        validate_non_negative_booking_money,
+        begin_tx, ensure_one_row_affected, insert_room_calendar_rows, invalid_state_transition,
+        lookup_booking_room_id, map_room_calendar_insert_error, parse_booking_datetime,
+        read_money_vnd_or_zero, validate_non_negative_booking_money,
     },
 };
+
+#[cfg(test)]
+use super::support::{begin_immediate_tx, fetch_booking};
 
 fn mark_write_db_error(error: BookingError) -> BookingError {
     match error {
@@ -40,18 +55,213 @@ fn ensure_locked_room_matches_booking(
     }
 }
 
-pub async fn check_in(
-    pool: &Pool<Sqlite>,
-    req: CheckInRequest,
-    user_id: Option<String>,
-) -> BookingResult<Booking> {
-    validate_check_in_request(&req)?;
+fn map_check_in_command_error(error: BookingError) -> CommandError {
+    match error {
+        BookingError::Validation(message) => {
+            CommandError::user(codes::BOOKING_INVALID_STATE, message)
+        }
+        BookingError::Conflict(message) => {
+            if is_room_unavailable_conflict_message(&message) {
+                return CommandError::user(codes::CONFLICT_ROOM_UNAVAILABLE, message);
+            }
+            CommandError::user(codes::BOOKING_INVALID_STATE, message)
+        }
+        BookingError::NotFound(message) if message.starts_with("Không tìm thấy phòng ") => {
+            CommandError::user(codes::ROOM_NOT_FOUND, message)
+        }
+        BookingError::NotFound(message) => CommandError::user(codes::BOOKING_NOT_FOUND, message),
+        BookingError::DatabaseWrite(message) | BookingError::Database(message) => {
+            if classify_db_error_code(&message) == Some(codes::DB_LOCKED_RETRYABLE) {
+                return CommandError::system(codes::DB_LOCKED_RETRYABLE, message).retryable(true);
+            }
+            CommandError::system(codes::SYSTEM_INTERNAL_ERROR, message)
+        }
+        BookingError::DateTimeParse(message) => {
+            CommandError::system(codes::SYSTEM_INTERNAL_ERROR, message)
+        }
+    }
+}
 
-    let _lock_guard = crate::aggregate_locks::global_manager()
-        .acquire([crate::aggregate_locks::room_key(&req.room_id)
-            .map_err(|error| BookingError::validation(error.message))?])
-        .await
-        .map_err(|error| BookingError::validation(error.message))?;
+fn map_check_out_command_error(error: BookingError) -> CommandError {
+    match error {
+        BookingError::Validation(message)
+            if message == "Tổng quyết toán phải lớn hơn hoặc bằng 0"
+                || message == "final_total must be greater than or equal to 0" =>
+        {
+            CommandError::user(codes::BOOKING_INVALID_SETTLEMENT_TOTAL, message)
+        }
+        BookingError::Validation(message)
+            if message == "Overpaid booking requires refund handling before checkout" =>
+        {
+            CommandError::user(codes::BOOKING_INVALID_STATE, message)
+        }
+        BookingError::Validation(message) | BookingError::Conflict(message) => {
+            CommandError::user(codes::BOOKING_INVALID_STATE, message)
+        }
+        BookingError::NotFound(message) => CommandError::user(codes::BOOKING_NOT_FOUND, message),
+        BookingError::DatabaseWrite(message) | BookingError::Database(message) => {
+            if classify_db_error_code(&message) == Some(codes::DB_LOCKED_RETRYABLE) {
+                return CommandError::system(codes::DB_LOCKED_RETRYABLE, message).retryable(true);
+            }
+            CommandError::system(codes::SYSTEM_INTERNAL_ERROR, message)
+        }
+        BookingError::DateTimeParse(message) => {
+            CommandError::system(codes::SYSTEM_INTERNAL_ERROR, message)
+        }
+    }
+}
+
+fn map_extend_stay_command_error(error: BookingError) -> CommandError {
+    match error {
+        BookingError::Conflict(message) => {
+            if is_room_unavailable_conflict_message(&message) {
+                return CommandError::user(codes::CONFLICT_ROOM_UNAVAILABLE, message);
+            }
+            CommandError::user(codes::BOOKING_INVALID_STATE, message)
+        }
+        BookingError::Validation(message) => {
+            CommandError::user(codes::BOOKING_INVALID_STATE, message)
+        }
+        BookingError::NotFound(message) if message.starts_with("Không tìm thấy phòng ") => {
+            CommandError::user(codes::ROOM_NOT_FOUND, message)
+        }
+        BookingError::NotFound(message) => CommandError::user(codes::BOOKING_NOT_FOUND, message),
+        BookingError::DatabaseWrite(message) | BookingError::Database(message) => {
+            if classify_db_error_code(&message) == Some(codes::DB_LOCKED_RETRYABLE) {
+                return CommandError::system(codes::DB_LOCKED_RETRYABLE, message).retryable(true);
+            }
+            CommandError::system(codes::SYSTEM_INTERNAL_ERROR, message)
+        }
+        BookingError::DateTimeParse(message) => {
+            CommandError::system(codes::SYSTEM_INTERNAL_ERROR, message)
+        }
+    }
+}
+
+fn build_check_in_hash_payload(req: &CheckInRequest) -> serde_json::Value {
+    let guests = req
+        .guests
+        .iter()
+        .map(|guest| {
+            json!({
+                "guest_type": guest.guest_type.clone(),
+                "full_name": guest.full_name.clone(),
+                "doc_number": guest.doc_number.clone(),
+                "dob": guest.dob.clone(),
+                "gender": guest.gender.clone(),
+                "nationality": guest.nationality.clone(),
+                "address": guest.address.clone(),
+                "visa_expiry": guest.visa_expiry.clone(),
+                "scan_path": guest.scan_path.clone(),
+                "phone": guest.phone.clone(),
+            })
+        })
+        .collect::<Vec<_>>();
+
+    json!({
+        "schema": "stay.check_in.v1",
+        "room_id": req.room_id.clone(),
+        "guests": guests,
+        "nights": req.nights,
+        "source": req.source.clone(),
+        "notes": req.notes.clone(),
+        "paid_amount": req.paid_amount.unwrap_or(0),
+        "pricing_type": req.pricing_type.clone().unwrap_or_else(|| "nightly".to_string()),
+    })
+}
+
+fn build_check_out_hash_payload(req: &CheckOutRequest) -> serde_json::Value {
+    json!({
+        "schema": "stay.check_out.v1",
+        "booking_id": req.booking_id.clone(),
+        "settlement_mode": req.settlement_mode,
+        "final_total": req.final_total,
+    })
+}
+
+fn build_extend_stay_hash_payload(booking_id: &str) -> serde_json::Value {
+    json!({
+        "schema": "stay.extend.v1",
+        "booking_id": booking_id,
+        "operation": "add_one_night",
+    })
+}
+
+fn check_in_lock_keys_from_payload(hash_payload: &serde_json::Value) -> CommandResult<Vec<String>> {
+    let room_id = hash_payload
+        .get("room_id")
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| system_error("check-in lock payload missing room_id"))?;
+    Ok(vec![crate::aggregate_locks::room_key(room_id)?])
+}
+
+fn check_out_initial_lock_keys_from_payload(
+    hash_payload: &serde_json::Value,
+) -> CommandResult<Vec<String>> {
+    let booking_id = hash_payload
+        .get("booking_id")
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| system_error("checkout lock payload missing booking_id"))?;
+    Ok(vec![
+        crate::aggregate_locks::booking_key(booking_id)?,
+        crate::aggregate_locks::folio_key(booking_id)?,
+    ])
+}
+
+fn extend_stay_initial_lock_keys_from_payload(
+    hash_payload: &serde_json::Value,
+) -> CommandResult<Vec<String>> {
+    let booking_id = hash_payload
+        .get("booking_id")
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| system_error("extend-stay lock payload missing booking_id"))?;
+    Ok(vec![
+        crate::aggregate_locks::booking_key(booking_id)?,
+        crate::aggregate_locks::folio_key(booking_id)?,
+    ])
+}
+
+async fn fetch_booking_tx(
+    tx: &mut Transaction<'_, Sqlite>,
+    booking_id: &str,
+) -> BookingResult<Booking> {
+    let row = sqlx::query(
+        "SELECT id, room_id, primary_guest_id, check_in_at, expected_checkout,
+                actual_checkout, nights, total_price, paid_amount, status,
+                source, notes, created_at
+         FROM bookings WHERE id = ?",
+    )
+    .bind(booking_id)
+    .fetch_optional(&mut **tx)
+    .await?;
+
+    let row = row
+        .ok_or_else(|| BookingError::not_found(format!("Không tìm thấy booking {}", booking_id)))?;
+
+    Ok(Booking {
+        id: row.get("id"),
+        room_id: row.get("room_id"),
+        primary_guest_id: row.get("primary_guest_id"),
+        check_in_at: row.get("check_in_at"),
+        expected_checkout: row.get("expected_checkout"),
+        actual_checkout: row.get("actual_checkout"),
+        nights: row.get("nights"),
+        total_price: read_money_vnd_or_zero(&row, "total_price"),
+        paid_amount: read_money_vnd_or_zero(&row, "paid_amount"),
+        status: row.get("status"),
+        source: row.get("source"),
+        notes: row.get("notes"),
+        created_at: row.get("created_at"),
+    })
+}
+
+async fn check_in_tx(
+    tx: &mut Transaction<'_, Sqlite>,
+    req: &CheckInRequest,
+    user_id: Option<&str>,
+    origin_key: Option<&str>,
+) -> BookingResult<Booking> {
+    validate_check_in_request(req)?;
 
     let now = Local::now();
     let check_in_at = now.to_rfc3339();
@@ -63,13 +273,9 @@ pub async fn check_in(
         .clone()
         .unwrap_or_else(|| "nightly".to_string());
 
-    let mut tx = begin_immediate_tx(pool)
-        .await
-        .map_err(mark_write_db_error)?;
-
     let room = sqlx::query("SELECT id, status FROM rooms WHERE id = ?")
         .bind(&req.room_id)
-        .fetch_optional(&mut *tx)
+        .fetch_optional(&mut **tx)
         .await?;
 
     let room = room
@@ -93,7 +299,7 @@ pub async fn check_in(
     .bind(&req.room_id)
     .bind(checkin_date.format("%Y-%m-%d").to_string())
     .bind(checkout_date.format("%Y-%m-%d").to_string())
-    .fetch_all(&mut *tx)
+    .fetch_all(&mut **tx)
     .await?;
 
     if let Some(first_conflict) = conflicts.first() {
@@ -110,7 +316,7 @@ pub async fn check_in(
     }
 
     let pricing = calculate_stay_price_tx(
-        &mut tx,
+        tx,
         &req.room_id,
         &check_in_at,
         &expected_checkout,
@@ -120,7 +326,7 @@ pub async fn check_in(
     let total_price = pricing.total;
 
     let booking_id = uuid::Uuid::new_v4().to_string();
-    let guest_manifest = create_guest_manifest(&mut tx, &req.guests, &check_in_at)
+    let guest_manifest = create_guest_manifest(tx, &req.guests, &check_in_at)
         .await
         .map_err(mark_write_db_error)?;
 
@@ -141,66 +347,174 @@ pub async fn check_in(
     .bind(status::booking::ACTIVE)
     .bind(req.source.as_deref().unwrap_or("walk-in"))
     .bind(&req.notes)
-    .bind(user_id.as_deref())
+    .bind(user_id)
     .bind(&pricing_type)
     .bind(&check_in_at)
-    .execute(&mut *tx)
+    .execute(&mut **tx)
     .await
     .map_err(BookingError::from)
     .map_err(mark_write_db_error)?;
 
-    link_booking_guests(&mut tx, &booking_id, &guest_manifest.guest_ids)
+    link_booking_guests(tx, &booking_id, &guest_manifest.guest_ids)
         .await
         .map_err(mark_write_db_error)?;
 
-    record_charge_tx(
-        &mut tx,
-        &booking_id,
-        total_price,
-        "Tiền phòng",
-        check_in_at.clone(),
-    )
-    .await
-    .map_err(mark_write_db_error)?;
-
-    if let Some(paid_amount) = req.paid_amount.filter(|amount| *amount > 0) {
-        record_payment_tx(&mut tx, &booking_id, paid_amount, "Thanh toán khi check-in")
-            .await
-            .map_err(mark_write_db_error)?;
+    if let Some(origin_key) = origin_key {
+        let origin = crate::domain::booking::OriginSideEffect::new(origin_key, 0)?;
+        record_charge_with_origin_tx(
+            tx,
+            &booking_id,
+            total_price,
+            "Tiền phòng",
+            check_in_at.clone(),
+            &origin,
+        )
+        .await
+        .map_err(mark_write_db_error)?;
+    } else {
+        record_charge_tx(
+            tx,
+            &booking_id,
+            total_price,
+            "Tiền phòng",
+            check_in_at.clone(),
+        )
+        .await
+        .map_err(mark_write_db_error)?;
     }
 
-    insert_occupied_calendar_rows(
-        &mut tx,
-        &req.room_id,
-        &booking_id,
-        checkin_date,
-        checkout_date,
-    )
-    .await
-    .map_err(mark_write_db_error)?;
+    if let Some(paid_amount) = req.paid_amount.filter(|amount| *amount > 0) {
+        if let Some(origin_key) = origin_key {
+            let origin = crate::domain::booking::OriginSideEffect::new(origin_key, 1)?;
+            record_payment_with_origin_tx(
+                tx,
+                &booking_id,
+                paid_amount,
+                "Thanh toán khi check-in",
+                &origin,
+            )
+            .await
+            .map_err(mark_write_db_error)?;
+        } else {
+            record_payment_tx(tx, &booking_id, paid_amount, "Thanh toán khi check-in")
+                .await
+                .map_err(mark_write_db_error)?;
+        }
+    }
+
+    insert_occupied_calendar_rows(tx, &req.room_id, &booking_id, checkin_date, checkout_date)
+        .await
+        .map_err(mark_write_db_error)?;
 
     let result = sqlx::query("UPDATE rooms SET status = ? WHERE id = ? AND status = ?")
         .bind(status::room::OCCUPIED)
         .bind(&req.room_id)
         .bind(status::room::VACANT)
-        .execute(&mut *tx)
+        .execute(&mut **tx)
         .await
         .map_err(BookingError::from)
         .map_err(mark_write_db_error)?;
     ensure_one_row_affected(result, format!("room {} is no longer vacant", req.room_id))?;
+
+    fetch_booking_tx(tx, &booking_id).await
+}
+
+#[cfg(test)]
+pub async fn check_in(
+    pool: &Pool<Sqlite>,
+    req: CheckInRequest,
+    user_id: Option<String>,
+) -> BookingResult<Booking> {
+    validate_check_in_request(&req)?;
+
+    let _lock_guard = crate::aggregate_locks::global_manager()
+        .acquire([crate::aggregate_locks::room_key(&req.room_id)
+            .map_err(|error| BookingError::validation(error.message))?])
+        .await
+        .map_err(|error| BookingError::validation(error.message))?;
+
+    let mut tx = begin_immediate_tx(pool)
+        .await
+        .map_err(mark_write_db_error)?;
+
+    let booking = check_in_tx(&mut tx, &req, user_id.as_deref(), None)
+        .await
+        .map_err(mark_write_db_error)?;
 
     tx.commit()
         .await
         .map_err(BookingError::from)
         .map_err(mark_write_db_error)?;
 
-    fetch_booking(
-        pool,
-        &booking_id,
-        format!("Không tìm thấy booking {}", booking_id),
-        read_money_vnd_or_zero,
-    )
-    .await
+    Ok(booking)
+}
+
+pub async fn check_in_idempotent(
+    pool: &Pool<Sqlite>,
+    ctx: &WriteCommandContext,
+    req: CheckInRequest,
+    user_id: Option<String>,
+) -> CommandResult<IdempotentCommandResult<serde_json::Value>> {
+    validate_check_in_request(&req).map_err(|error| {
+        map_check_in_command_error(error).with_request_id(ctx.request_id.clone())
+    })?;
+
+    let hash_payload = build_check_in_hash_payload(&req);
+    let notes_present = req
+        .notes
+        .as_ref()
+        .map(|notes| !notes.trim().is_empty())
+        .unwrap_or(false);
+    let paid_amount = req.paid_amount.unwrap_or(0);
+    let ledger_intent = SanitizedLedgerIntent::from_pairs([
+        ("schema", json!("stay.check_in.v1")),
+        ("room_present", json!(true)),
+        ("guest_count", json!(req.guests.len())),
+        ("nights", json!(req.nights)),
+        ("source_present", json!(req.source.is_some())),
+        ("notes_present", json!(notes_present)),
+        ("paid_amount_vnd", json!(paid_amount)),
+        ("pricing_type_present", json!(req.pricing_type.is_some())),
+    ])?;
+    let summary = CommandLedgerSummary::new("Check in")?.with_aggregate_ref(
+        "room",
+        "room",
+        None::<String>,
+    )?;
+    let request = WriteCommandRequest::new_sanitized(hash_payload.clone(), ledger_intent, summary)?
+        .with_primary_aggregate_key(format!("room:{}", req.room_id))
+        .with_lock_key_deriver(check_in_lock_keys_from_payload)
+        .with_success_summary(CommandLedgerResultSummary::success("Checked in")?);
+
+    let runtime_lock_keys = check_in_lock_keys_from_payload(&hash_payload)?;
+    let origin_key = format!("{}:{}", ctx.command_name, ctx.idempotency_key);
+    let req_for_service = req;
+    let user_id_for_service = user_id;
+
+    WriteCommandExecutor::new(pool.clone())
+        .execute_with_pre_transaction_guard(
+            ctx,
+            request,
+            move || async move {
+                crate::aggregate_locks::global_manager()
+                    .acquire(runtime_lock_keys)
+                    .await
+            },
+            move |tx| {
+                Box::pin(async move {
+                    let booking = check_in_tx(
+                        tx,
+                        &req_for_service,
+                        user_id_for_service.as_deref(),
+                        Some(origin_key.as_str()),
+                    )
+                    .await
+                    .map_err(map_check_in_command_error)?;
+                    serde_json::to_value(&booking).map_err(system_error)
+                })
+            },
+        )
+        .await
 }
 
 #[allow(dead_code)]
@@ -416,23 +730,26 @@ pub async fn preview_checkout_settlement_at(
     })
 }
 
+#[cfg(test)]
 pub async fn check_out(pool: &Pool<Sqlite>, req: CheckOutRequest) -> BookingResult<()> {
     check_out_at(pool, req, Local::now()).await
 }
 
+#[cfg(test)]
 pub async fn check_out_at(
     pool: &Pool<Sqlite>,
     req: CheckOutRequest,
     now: DateTime<Local>,
 ) -> BookingResult<()> {
-    let final_total = validate_non_negative_booking_money(req.final_total, "final_total")?;
-
+    validate_non_negative_booking_money(req.final_total, "final_total")?;
     let room_id = lookup_booking_room_id(pool, &req.booking_id).await?;
     let _lock_guard = crate::aggregate_locks::global_manager()
         .acquire([
             crate::aggregate_locks::booking_key(&req.booking_id)
                 .map_err(|error| BookingError::validation(error.message))?,
             crate::aggregate_locks::room_key(&room_id)
+                .map_err(|error| BookingError::validation(error.message))?,
+            crate::aggregate_locks::folio_key(&req.booking_id)
                 .map_err(|error| BookingError::validation(error.message))?,
         ])
         .await
@@ -441,13 +758,32 @@ pub async fn check_out_at(
     let mut tx = begin_immediate_tx(pool)
         .await
         .map_err(mark_write_db_error)?;
+
+    check_out_tx(&mut tx, req, now, &room_id, None).await?;
+
+    tx.commit()
+        .await
+        .map_err(BookingError::from)
+        .map_err(mark_write_db_error)?;
+
+    Ok(())
+}
+
+async fn check_out_tx(
+    tx: &mut Transaction<'_, Sqlite>,
+    req: CheckOutRequest,
+    now: DateTime<Local>,
+    locked_room_id: &str,
+    origin_key: Option<String>,
+) -> BookingResult<CheckOutResponse> {
+    let final_total = validate_non_negative_booking_money(req.final_total, "final_total")?;
     let preview_req = CheckoutSettlementPreviewRequest {
         booking_id: req.booking_id.clone(),
         settlement_mode: req.settlement_mode,
     };
-    let settlement = preview_checkout_settlement_tx(&mut tx, &preview_req, now).await?;
+    let settlement = preview_checkout_settlement_tx(tx, &preview_req, now).await?;
     ensure_locked_room_matches_booking(
-        &room_id,
+        locked_room_id,
         &settlement.room_id,
         format!("booking {} changed rooms before checkout", req.booking_id),
     )?;
@@ -467,27 +803,54 @@ pub async fn check_out_at(
             "Điều chỉnh tăng tiền phòng khi quyết toán check-out"
         };
 
-        record_charge_tx(
-            &mut tx,
-            &req.booking_id,
-            charge_delta,
-            adjustment_note,
-            actual_checkout.clone(),
-        )
-        .await
-        .map_err(mark_write_db_error)?;
+        if let Some(origin_key) = origin_key.as_deref() {
+            let origin = OriginSideEffect::new(origin_key, 0)?;
+            record_charge_with_origin_tx(
+                tx,
+                &req.booking_id,
+                charge_delta,
+                adjustment_note,
+                actual_checkout.clone(),
+                &origin,
+            )
+            .await
+            .map_err(mark_write_db_error)?;
+        } else {
+            record_charge_tx(
+                tx,
+                &req.booking_id,
+                charge_delta,
+                adjustment_note,
+                actual_checkout.clone(),
+            )
+            .await
+            .map_err(mark_write_db_error)?;
+        }
     }
 
     let payment_delta = final_total - settlement.already_paid;
     if payment_delta > 0 {
-        record_payment_tx(
-            &mut tx,
-            &req.booking_id,
-            payment_delta,
-            "Thanh toán khi check-out",
-        )
-        .await
-        .map_err(mark_write_db_error)?;
+        if let Some(origin_key) = origin_key.as_deref() {
+            let origin = OriginSideEffect::new(origin_key, 1)?;
+            record_payment_with_origin_tx(
+                tx,
+                &req.booking_id,
+                payment_delta,
+                "Thanh toán khi check-out",
+                &origin,
+            )
+            .await
+            .map_err(mark_write_db_error)?;
+        } else {
+            record_payment_tx(
+                tx,
+                &req.booking_id,
+                payment_delta,
+                "Thanh toán khi check-out",
+            )
+            .await
+            .map_err(mark_write_db_error)?;
+        }
     }
 
     let manual_override = final_total != settlement.recommended_total;
@@ -498,7 +861,7 @@ pub async fn check_out_at(
         settlement.settled_nights,
         &settlement.reporting_checkout,
         settlement.original_total,
-        req.final_total,
+        final_total,
         manual_override,
     );
 
@@ -510,11 +873,11 @@ pub async fn check_out_at(
     .bind(status::booking::CHECKED_OUT)
     .bind(&actual_checkout)
     .bind(settlement.settled_nights)
-    .bind(req.final_total)
+    .bind(final_total)
     .bind(pricing_snapshot)
     .bind(&req.booking_id)
     .bind(status::booking::ACTIVE)
-    .execute(&mut *tx)
+    .execute(&mut **tx)
     .await
     .map_err(BookingError::from)
     .map_err(mark_write_db_error)?;
@@ -527,7 +890,7 @@ pub async fn check_out_at(
         .bind(status::room::CLEANING)
         .bind(&settlement.room_id)
         .bind(status::room::OCCUPIED)
-        .execute(&mut *tx)
+        .execute(&mut **tx)
         .await
         .map_err(BookingError::from)
         .map_err(mark_write_db_error)?;
@@ -544,47 +907,103 @@ pub async fn check_out_at(
     .bind(&settlement.room_id)
     .bind(&actual_checkout)
     .bind(&actual_checkout)
-    .execute(&mut *tx)
+    .execute(&mut **tx)
     .await
     .map_err(BookingError::from)
     .map_err(mark_write_db_error)?;
 
     sqlx::query("DELETE FROM room_calendar WHERE booking_id = ?")
         .bind(&req.booking_id)
-        .execute(&mut *tx)
+        .execute(&mut **tx)
         .await
         .map_err(BookingError::from)
         .map_err(mark_write_db_error)?;
 
-    tx.commit()
-        .await
-        .map_err(BookingError::from)
-        .map_err(mark_write_db_error)?;
-
-    Ok(())
+    Ok(CheckOutResponse {
+        ok: true,
+        booking_id: req.booking_id,
+        room_id: settlement.room_id,
+        actual_checkout,
+        final_total,
+    })
 }
 
-pub async fn extend_stay(pool: &Pool<Sqlite>, booking_id: &str) -> BookingResult<Booking> {
-    let locked_room_id = lookup_booking_room_id(pool, booking_id).await?;
-    let _lock_guard = crate::aggregate_locks::global_manager()
-        .acquire([
-            crate::aggregate_locks::booking_key(booking_id)
-                .map_err(|error| BookingError::validation(error.message))?,
-            crate::aggregate_locks::room_key(&locked_room_id)
-                .map_err(|error| BookingError::validation(error.message))?,
-        ])
+pub async fn check_out_idempotent(
+    pool: &Pool<Sqlite>,
+    ctx: &WriteCommandContext,
+    req: CheckOutRequest,
+) -> CommandResult<IdempotentCommandResult<serde_json::Value>> {
+    validate_non_negative_booking_money(req.final_total, "final_total").map_err(|error| {
+        map_check_out_command_error(error).with_request_id(ctx.request_id.clone())
+    })?;
+
+    let hash_payload = build_check_out_hash_payload(&req);
+    let ledger_intent = SanitizedLedgerIntent::from_pairs([
+        ("schema", json!("stay.check_out.v1")),
+        ("booking_present", json!(true)),
+        ("settlement_mode", json!(req.settlement_mode)),
+        ("final_total_vnd", json!(req.final_total)),
+    ])?;
+    let summary = CommandLedgerSummary::new("Check out")?.with_aggregate_ref(
+        "booking",
+        "booking",
+        None::<String>,
+    )?;
+    let request = WriteCommandRequest::new_sanitized(hash_payload.clone(), ledger_intent, summary)?
+        .with_primary_aggregate_key(format!("booking:{}", req.booking_id))
+        .with_lock_key_deriver(check_out_initial_lock_keys_from_payload)
+        .with_success_summary(CommandLedgerResultSummary::success("Checked out")?);
+
+    let pool_for_lookup = pool.clone();
+    let booking_id_for_lookup = req.booking_id.clone();
+    let origin_key = format!("{}:{}", ctx.command_name, ctx.idempotency_key);
+
+    WriteCommandExecutor::new(pool.clone())
+        .execute_with_resolved_guard(
+            ctx,
+            request,
+            move || async move {
+                let room_id = lookup_booking_room_id(&pool_for_lookup, &booking_id_for_lookup)
+                    .await
+                    .map_err(map_check_out_command_error)?;
+                let lock_keys = vec![
+                    crate::aggregate_locks::booking_key(&booking_id_for_lookup)?,
+                    crate::aggregate_locks::room_key(&room_id)?,
+                    crate::aggregate_locks::folio_key(&booking_id_for_lookup)?,
+                ];
+                let guard = crate::aggregate_locks::global_manager()
+                    .acquire(lock_keys.clone())
+                    .await?;
+
+                Ok(ResolvedWriteCommandGuard::new((guard, room_id), lock_keys))
+            },
+            move |tx, resolved| {
+                Box::pin(async move {
+                    let (_guard, locked_room_id) = resolved;
+                    let response =
+                        check_out_tx(tx, req, Local::now(), &locked_room_id, Some(origin_key))
+                            .await
+                            .map_err(map_check_out_command_error)?;
+                    serde_json::to_value(&response).map_err(system_error)
+                })
+            },
+        )
         .await
-        .map_err(|error| BookingError::validation(error.message))?;
+}
 
-    let mut tx = begin_immediate_tx(pool).await?;
-
+async fn extend_stay_tx(
+    tx: &mut Transaction<'_, Sqlite>,
+    booking_id: &str,
+    locked_room_id: &str,
+    origin_key: Option<String>,
+) -> BookingResult<Booking> {
     let booking = sqlx::query(
         "SELECT room_id, nights, total_price, expected_checkout, pricing_type
          FROM bookings WHERE id = ? AND status = ?",
     )
     .bind(booking_id)
     .bind(status::booking::ACTIVE)
-    .fetch_optional(&mut *tx)
+    .fetch_optional(&mut **tx)
     .await?;
 
     let booking = booking.ok_or_else(|| {
@@ -593,7 +1012,7 @@ pub async fn extend_stay(pool: &Pool<Sqlite>, booking_id: &str) -> BookingResult
 
     let room_id: String = booking.get("room_id");
     ensure_locked_room_matches_booking(
-        &locked_room_id,
+        locked_room_id,
         &room_id,
         format!("booking {booking_id} changed rooms before extend-stay"),
     )?;
@@ -610,7 +1029,7 @@ pub async fn extend_stay(pool: &Pool<Sqlite>, booking_id: &str) -> BookingResult
 
     let room_exists = sqlx::query_scalar::<_, String>("SELECT id FROM rooms WHERE id = ? LIMIT 1")
         .bind(&room_id)
-        .fetch_optional(&mut *tx)
+        .fetch_optional(&mut **tx)
         .await?;
     if room_exists.is_none() {
         return Err(BookingError::not_found(format!(
@@ -625,7 +1044,7 @@ pub async fn extend_stay(pool: &Pool<Sqlite>, booking_id: &str) -> BookingResult
     .bind(&room_id)
     .bind(extension_date.format("%Y-%m-%d").to_string())
     .bind(booking_id)
-    .fetch_optional(&mut *tx)
+    .fetch_optional(&mut **tx)
     .await?;
 
     if conflict.is_some() {
@@ -637,7 +1056,7 @@ pub async fn extend_stay(pool: &Pool<Sqlite>, booking_id: &str) -> BookingResult
     }
 
     let incremental_pricing = calculate_stay_price_tx(
-        &mut tx,
+        tx,
         &room_id,
         &old_expected_checkout,
         &new_expected.to_rfc3339(),
@@ -662,8 +1081,10 @@ pub async fn extend_stay(pool: &Pool<Sqlite>, booking_id: &str) -> BookingResult
     .bind(booking_id)
     .bind(status::booking::ACTIVE)
     .bind(&old_expected_checkout)
-    .execute(&mut *tx)
-    .await?;
+    .execute(&mut **tx)
+    .await
+    .map_err(BookingError::from)
+    .map_err(mark_write_db_error)?;
     ensure_one_row_affected(
         result,
         format!("booking {booking_id} changed before extend-stay"),
@@ -677,18 +1098,117 @@ pub async fn extend_stay(pool: &Pool<Sqlite>, booking_id: &str) -> BookingResult
     .bind(extension_date.format("%Y-%m-%d").to_string())
     .bind(booking_id)
     .bind(status::calendar::OCCUPIED)
-    .execute(&mut *tx)
+    .execute(&mut **tx)
     .await
-    .map_err(|error| map_room_calendar_insert_error(error, extension_date))?;
+    .map_err(|error| map_room_calendar_insert_error(error, extension_date))
+    .map_err(mark_write_db_error)?;
 
-    record_charge_tx(
-        &mut tx,
-        booking_id,
-        incremental_total,
-        "Extended stay +1 night",
-        Local::now().to_rfc3339(),
-    )
-    .await?;
+    if let Some(origin_key) = origin_key {
+        let origin = OriginSideEffect::new(origin_key, 0)?;
+        record_charge_with_origin_tx(
+            tx,
+            booking_id,
+            incremental_total,
+            "Extended stay +1 night",
+            Local::now().to_rfc3339(),
+            &origin,
+        )
+        .await
+        .map_err(mark_write_db_error)?;
+    } else {
+        record_charge_tx(
+            tx,
+            booking_id,
+            incremental_total,
+            "Extended stay +1 night",
+            Local::now().to_rfc3339(),
+        )
+        .await
+        .map_err(mark_write_db_error)?;
+    }
+
+    fetch_booking_tx(tx, booking_id).await
+}
+
+pub async fn extend_stay_idempotent(
+    pool: &Pool<Sqlite>,
+    ctx: &WriteCommandContext,
+    booking_id: &str,
+) -> CommandResult<IdempotentCommandResult<serde_json::Value>> {
+    let hash_payload = build_extend_stay_hash_payload(booking_id);
+    let ledger_intent = SanitizedLedgerIntent::from_pairs([
+        ("schema", json!("stay.extend.v1")),
+        ("booking_present", json!(true)),
+        ("operation", json!("add_one_night")),
+    ])?;
+    let summary = CommandLedgerSummary::new("Extend stay")?.with_aggregate_ref(
+        "booking",
+        "booking",
+        None::<String>,
+    )?;
+    let request = WriteCommandRequest::new_sanitized(hash_payload, ledger_intent, summary)?
+        .with_primary_aggregate_key(format!("booking:{booking_id}"))
+        .with_lock_key_deriver(extend_stay_initial_lock_keys_from_payload)
+        .with_success_summary(CommandLedgerResultSummary::success("Stay extended")?);
+
+    let pool_for_lookup = pool.clone();
+    let booking_id_for_lookup = booking_id.to_string();
+    let booking_id_for_service = booking_id.to_string();
+    let origin_key = format!("{}:{}", ctx.command_name, ctx.idempotency_key);
+
+    WriteCommandExecutor::new(pool.clone())
+        .execute_with_resolved_guard(
+            ctx,
+            request,
+            move || async move {
+                let room_id = lookup_booking_room_id(&pool_for_lookup, &booking_id_for_lookup)
+                    .await
+                    .map_err(map_extend_stay_command_error)?;
+                let lock_keys = vec![
+                    crate::aggregate_locks::booking_key(&booking_id_for_lookup)?,
+                    crate::aggregate_locks::room_key(&room_id)?,
+                    crate::aggregate_locks::folio_key(&booking_id_for_lookup)?,
+                ];
+                let guard = crate::aggregate_locks::global_manager()
+                    .acquire(lock_keys.clone())
+                    .await?;
+
+                Ok(ResolvedWriteCommandGuard::new((guard, room_id), lock_keys))
+            },
+            move |tx, resolved| {
+                Box::pin(async move {
+                    let (_guard, locked_room_id) = resolved;
+                    let booking = extend_stay_tx(
+                        tx,
+                        &booking_id_for_service,
+                        &locked_room_id,
+                        Some(origin_key),
+                    )
+                    .await
+                    .map_err(map_extend_stay_command_error)?;
+                    serde_json::to_value(&booking).map_err(system_error)
+                })
+            },
+        )
+        .await
+}
+
+#[cfg(test)]
+pub async fn extend_stay(pool: &Pool<Sqlite>, booking_id: &str) -> BookingResult<Booking> {
+    let locked_room_id = lookup_booking_room_id(pool, booking_id).await?;
+    let _lock_guard = crate::aggregate_locks::global_manager()
+        .acquire([
+            crate::aggregate_locks::booking_key(booking_id)
+                .map_err(|error| BookingError::validation(error.message))?,
+            crate::aggregate_locks::room_key(&locked_room_id)
+                .map_err(|error| BookingError::validation(error.message))?,
+        ])
+        .await
+        .map_err(|error| BookingError::validation(error.message))?;
+
+    let mut tx = begin_immediate_tx(pool).await?;
+
+    let _booking = extend_stay_tx(&mut tx, booking_id, &locked_room_id, None).await?;
 
     tx.commit().await.map_err(BookingError::from)?;
 
