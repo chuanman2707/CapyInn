@@ -607,6 +607,14 @@ pub struct GroupService {
     pub created_at: String,
 }
 
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
+pub struct RemoveGroupServiceResponse {
+    pub ok: bool,
+    pub service_id: String,
+    pub group_id: String,
+    pub booking_id: Option<String>,
+}
+
 #[derive(Debug, Deserialize)]
 pub struct GroupCheckinRequest {
     pub group_name: String,

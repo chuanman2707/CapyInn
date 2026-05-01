@@ -130,6 +130,24 @@ pub async fn test_pool() -> Pool<Sqlite> {
     .expect("failed to create booking_groups table");
 
     sqlx::query(
+        "CREATE TABLE group_services (
+            id TEXT PRIMARY KEY,
+            group_id TEXT NOT NULL REFERENCES booking_groups(id),
+            booking_id TEXT REFERENCES bookings(id),
+            name TEXT NOT NULL,
+            quantity INTEGER NOT NULL DEFAULT 1,
+            unit_price INTEGER NOT NULL,
+            total_price INTEGER NOT NULL,
+            note TEXT,
+            created_by TEXT,
+            created_at TEXT NOT NULL
+        )",
+    )
+    .execute(&pool)
+    .await
+    .expect("failed to create group_services table");
+
+    sqlx::query(
         "CREATE TABLE booking_guests (
             booking_id TEXT NOT NULL REFERENCES bookings(id),
             guest_id TEXT NOT NULL REFERENCES guests(id),
