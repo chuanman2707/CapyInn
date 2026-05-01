@@ -741,6 +741,7 @@ pub async fn check_out_at(
     req: CheckOutRequest,
     now: DateTime<Local>,
 ) -> BookingResult<()> {
+    validate_non_negative_booking_money(req.final_total, "final_total")?;
     let room_id = lookup_booking_room_id(pool, &req.booking_id).await?;
     let _lock_guard = crate::aggregate_locks::global_manager()
         .acquire([

@@ -66,6 +66,7 @@ pub async fn get_dashboard_stats(state: State<'_, AppState>) -> Result<Dashboard
 
 // ─── Check-in Command ───
 
+#[allow(dead_code)]
 fn log_user_stay_error(
     command_name: &str,
     effective_correlation_id: &EffectiveCorrelationId,
@@ -88,6 +89,7 @@ fn log_user_stay_error(
     );
 }
 
+#[allow(dead_code)]
 fn map_stay_user_error(
     code: &'static str,
     command_name: &str,
@@ -104,6 +106,7 @@ fn map_stay_user_error(
     CommandError::user(code, message)
 }
 
+#[allow(dead_code)]
 fn map_known_stay_error_code(
     command_name: &str,
     effective_correlation_id: &EffectiveCorrelationId,
@@ -132,6 +135,7 @@ fn map_known_stay_error_code(
     }
 }
 
+#[allow(dead_code)]
 fn map_stay_error(
     command_name: &str,
     effective_correlation_id: &EffectiveCorrelationId,
@@ -364,15 +368,14 @@ pub async fn check_in(
     let result =
         stay_lifecycle::check_in_idempotent(&state.db, &write_command_context, req, Some(actor_id))
             .await
-            .map_err(|command_error| {
+            .inspect_err(|command_error| {
                 record_command_failure_with_db_group(
                     "check_in",
-                    &command_error,
+                    command_error,
                     &effective_correlation_id.value,
                     None,
                     error_context.clone(),
                 );
-                command_error
             })?;
     let booking: Booking = serde_json::from_value(result.response).map_err(|error| {
         CommandError::system(
@@ -515,15 +518,14 @@ pub async fn check_out(
     );
     let result = stay_lifecycle::check_out_idempotent(&state.db, &write_command_context, req)
         .await
-        .map_err(|command_error| {
+        .inspect_err(|command_error| {
             record_command_failure_with_db_group(
                 "check_out",
-                &command_error,
+                command_error,
                 &effective_correlation_id.value,
                 None,
                 error_context.clone(),
             );
-            command_error
         })?;
     let response: CheckOutResponse = serde_json::from_value(result.response).map_err(|error| {
         CommandError::system(
@@ -594,15 +596,14 @@ pub async fn extend_stay(
     let result =
         stay_lifecycle::extend_stay_idempotent(&state.db, &write_command_context, &booking_id)
             .await
-            .map_err(|command_error| {
+            .inspect_err(|command_error| {
                 record_command_failure_with_db_group(
                     "extend_stay",
-                    &command_error,
+                    command_error,
                     &effective_correlation_id.value,
                     None,
                     error_context.clone(),
                 );
-                command_error
             })?;
     let booking: Booking = serde_json::from_value(result.response).map_err(|error| {
         CommandError::system(

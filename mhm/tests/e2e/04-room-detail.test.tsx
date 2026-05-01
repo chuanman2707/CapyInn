@@ -68,7 +68,11 @@ describe("04 — Room Detail", () => {
 
         await useHotelStore.getState().extendStay("b1");
 
-        expect(invoke).toHaveBeenCalledWith("extend_stay", { bookingId: "b1" });
+        expect(invoke).toHaveBeenCalledWith("extend_stay", {
+            bookingId: "b1",
+            correlationId: expect.stringMatching(/^COR-[0-9A-F]{8}$/),
+            idempotencyKey: expect.stringMatching(/^extend_stay:/),
+        });
     });
 
     it("refreshes rooms and stats after extending stay", async () => {
