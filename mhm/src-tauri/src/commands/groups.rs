@@ -524,13 +524,15 @@ pub async fn add_group_service(
     correlation_id: Option<String>,
 ) -> CommandResult<GroupService> {
     let effective_correlation_id = normalize_correlation_id(correlation_id);
-    let actor_id = require_group_service_actor_id(get_user_id(&state))?;
+    let actor_id = require_group_service_actor_id(get_user_id(&state))
+        .map_err(|error| error.with_request_id(effective_correlation_id.value.clone()))?;
     let write_command_context = group_service_write_command_context(
         effective_correlation_id.value.clone(),
         idempotency_key,
         "add_group_service",
         actor_id.clone(),
-    )?;
+    )
+    .map_err(|error| error.with_request_id(effective_correlation_id.value.clone()))?;
     let result = crate::services::booking::group_service_management::add_group_service_idempotent(
         &state.db,
         &write_command_context,
@@ -560,13 +562,15 @@ pub async fn remove_group_service(
     correlation_id: Option<String>,
 ) -> CommandResult<RemoveGroupServiceResponse> {
     let effective_correlation_id = normalize_correlation_id(correlation_id);
-    let actor_id = require_group_service_actor_id(get_user_id(&state))?;
+    let actor_id = require_group_service_actor_id(get_user_id(&state))
+        .map_err(|error| error.with_request_id(effective_correlation_id.value.clone()))?;
     let write_command_context = group_service_write_command_context(
         effective_correlation_id.value.clone(),
         idempotency_key,
         "remove_group_service",
         actor_id,
-    )?;
+    )
+    .map_err(|error| error.with_request_id(effective_correlation_id.value.clone()))?;
     let result =
         crate::services::booking::group_service_management::remove_group_service_idempotent(
             &state.db,
@@ -817,6 +821,21 @@ mod tests {
 
         assert_eq!(ctx.command_name, "add_group_service");
         assert_eq!(ctx.idempotency_key, "idem-group-service");
+        assert_eq!(ctx.actor_id.as_deref(), Some("user-1"));
+    }
+
+    #[test]
+    fn remove_group_service_write_context_sets_actor_id() {
+        let ctx = group_service_write_command_context(
+            "REQ-REMOVE-GROUP-SERVICE".to_string(),
+            "idem-remove-group-service".to_string(),
+            "remove_group_service",
+            "user-1".to_string(),
+        )
+        .expect("context builds");
+
+        assert_eq!(ctx.command_name, "remove_group_service");
+        assert_eq!(ctx.idempotency_key, "idem-remove-group-service");
         assert_eq!(ctx.actor_id.as_deref(), Some("user-1"));
     }
 
