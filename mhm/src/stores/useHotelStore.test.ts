@@ -337,6 +337,11 @@ describe("useHotelStore monitoring context", () => {
       expect.anything(),
       expect.anything(),
     );
+    expect(invokeWriteCommand).not.toHaveBeenCalledWith(
+      "group_checkout",
+      expect.anything(),
+      expect.anything(),
+    );
   });
 
   it("rejects fractional group service unit_price before invoking backend", async () => {
