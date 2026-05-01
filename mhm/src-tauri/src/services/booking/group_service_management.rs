@@ -347,8 +347,11 @@ pub async fn remove_group_service_idempotent(
                     };
                     let group_id: String = row.get("group_id");
                     let booking_id: Option<String> = row.get("booking_id");
-                    debug_assert_eq!(group_id, resolved.group_id);
-                    debug_assert_eq!(booking_id, resolved.booking_id);
+                    if group_id != resolved.group_id || booking_id != resolved.booking_id {
+                        return Err(map_group_service_command_error(BookingError::conflict(
+                            "Group service lock state changed",
+                        )));
+                    }
                     sqlx::query("DELETE FROM group_services WHERE id = ?")
                         .bind(&service_id)
                         .execute(&mut **tx)
