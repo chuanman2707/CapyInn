@@ -222,6 +222,10 @@ fn require_group_checkin_actor_id(user_id: Option<String>) -> CommandResult<Stri
     user_id.ok_or_else(|| CommandError::user(codes::AUTH_NOT_AUTHENTICATED, "Chưa đăng nhập"))
 }
 
+fn require_group_service_actor_id(user_id: Option<String>) -> CommandResult<String> {
+    user_id.ok_or_else(|| CommandError::user(codes::AUTH_NOT_AUTHENTICATED, "Chưa đăng nhập"))
+}
+
 fn group_checkin_write_command_context(
     request_id: String,
     idempotency_key: String,
@@ -229,6 +233,18 @@ fn group_checkin_write_command_context(
 ) -> CommandResult<WriteCommandContext> {
     let mut context =
         WriteCommandContext::for_scoped_command(request_id, idempotency_key, "group_checkin")?;
+    context.actor_id = Some(actor_id);
+    Ok(context)
+}
+
+fn group_service_write_command_context(
+    request_id: String,
+    idempotency_key: String,
+    command_name: &'static str,
+    actor_id: String,
+) -> CommandResult<WriteCommandContext> {
+    let mut context =
+        WriteCommandContext::for_scoped_command(request_id, idempotency_key, command_name)?;
     context.actor_id = Some(actor_id);
     Ok(context)
 }
@@ -504,50 +520,36 @@ pub async fn add_group_service(
     state: State<'_, AppState>,
     app: tauri::AppHandle,
     req: AddGroupServiceRequest,
-) -> Result<GroupService, String> {
-    let user_id = get_user_id(&state);
-    let id = uuid::Uuid::new_v4().to_string();
-    let now = chrono::Local::now().to_rfc3339();
-    if req.quantity < 1 {
-        return Err("Quantity must be greater than zero".to_string());
-    }
-    if req.unit_price < 0 {
-        return Err("unit_price must be greater than or equal to zero".to_string());
-    }
-    let total_price = i64::from(req.quantity)
-        .checked_mul(req.unit_price)
-        .ok_or_else(|| "total_price overflowed".to_string())?;
-
-    sqlx::query(
-        "INSERT INTO group_services (id, group_id, booking_id, name, quantity, unit_price, total_price, note, created_by, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+    idempotency_key: String,
+    correlation_id: Option<String>,
+) -> CommandResult<GroupService> {
+    let effective_correlation_id = normalize_correlation_id(correlation_id);
+    let actor_id = require_group_service_actor_id(get_user_id(&state))
+        .map_err(|error| error.with_request_id(effective_correlation_id.value.clone()))?;
+    let write_command_context = group_service_write_command_context(
+        effective_correlation_id.value.clone(),
+        idempotency_key,
+        "add_group_service",
+        actor_id.clone(),
     )
-    .bind(&id)
-    .bind(&req.group_id)
-    .bind(&req.booking_id)
-    .bind(&req.name)
-    .bind(req.quantity)
-    .bind(req.unit_price)
-    .bind(total_price)
-    .bind(&req.note)
-    .bind(&user_id)
-    .bind(&now)
-    .execute(&state.db).await.map_err(|e| e.to_string())?;
-
+    .map_err(|error| error.with_request_id(effective_correlation_id.value.clone()))?;
+    let result = crate::services::booking::group_service_management::add_group_service_idempotent(
+        &state.db,
+        &write_command_context,
+        req,
+        &actor_id,
+    )
+    .await
+    .map_err(|error| error.with_request_id(write_command_context.request_id.clone()))?;
+    let service: GroupService = serde_json::from_value(result.response).map_err(|error| {
+        CommandError::system(
+            codes::SYSTEM_INTERNAL_ERROR,
+            format!("Invalid add_group_service idempotent response: {error}"),
+        )
+        .with_request_id(write_command_context.request_id.clone())
+    })?;
     emit_db_update(&app, "groups");
-
-    Ok(GroupService {
-        id,
-        group_id: req.group_id,
-        booking_id: req.booking_id,
-        name: req.name,
-        quantity: req.quantity,
-        unit_price: req.unit_price,
-        total_price,
-        note: req.note,
-        created_by: user_id,
-        created_at: now,
-    })
+    Ok(service)
 }
 
 /// Remove a group service
@@ -556,15 +558,37 @@ pub async fn remove_group_service(
     state: State<'_, AppState>,
     app: tauri::AppHandle,
     service_id: String,
-) -> Result<(), String> {
-    sqlx::query("DELETE FROM group_services WHERE id = ?")
-        .bind(&service_id)
-        .execute(&state.db)
+    idempotency_key: String,
+    correlation_id: Option<String>,
+) -> CommandResult<RemoveGroupServiceResponse> {
+    let effective_correlation_id = normalize_correlation_id(correlation_id);
+    let actor_id = require_group_service_actor_id(get_user_id(&state))
+        .map_err(|error| error.with_request_id(effective_correlation_id.value.clone()))?;
+    let write_command_context = group_service_write_command_context(
+        effective_correlation_id.value.clone(),
+        idempotency_key,
+        "remove_group_service",
+        actor_id,
+    )
+    .map_err(|error| error.with_request_id(effective_correlation_id.value.clone()))?;
+    let result =
+        crate::services::booking::group_service_management::remove_group_service_idempotent(
+            &state.db,
+            &write_command_context,
+            &service_id,
+        )
         .await
-        .map_err(|e| e.to_string())?;
-
+        .map_err(|error| error.with_request_id(write_command_context.request_id.clone()))?;
+    let response: RemoveGroupServiceResponse =
+        serde_json::from_value(result.response).map_err(|error| {
+            CommandError::system(
+                codes::SYSTEM_INTERNAL_ERROR,
+                format!("Invalid remove_group_service idempotent response: {error}"),
+            )
+            .with_request_id(write_command_context.request_id.clone())
+        })?;
     emit_db_update(&app, "groups");
-    Ok(())
+    Ok(response)
 }
 
 /// Auto-assign rooms: prefer same floor, greedy fill
@@ -747,8 +771,9 @@ pub async fn generate_group_invoice(
 #[cfg(test)]
 mod tests {
     use super::{
-        group_checkin_write_command_context, map_auto_assign_error, map_group_detail_error,
-        map_group_error, require_group_checkin_actor_id,
+        group_checkin_write_command_context, group_service_write_command_context,
+        map_auto_assign_error, map_group_detail_error, map_group_error,
+        require_group_checkin_actor_id, require_group_service_actor_id,
     };
     use crate::app_error::{codes, AppErrorKind, CorrelationIdSource, EffectiveCorrelationId};
     use crate::domain::booking::BookingError;
@@ -781,6 +806,42 @@ mod tests {
     fn group_checkin_requires_authenticated_actor() {
         let error = require_group_checkin_actor_id(None).expect_err("missing user rejects");
 
+        assert_eq!(error.code, codes::AUTH_NOT_AUTHENTICATED);
+    }
+
+    #[test]
+    fn group_service_write_context_sets_actor_id() {
+        let ctx = group_service_write_command_context(
+            "REQ-GROUP-SERVICE".to_string(),
+            "idem-group-service".to_string(),
+            "add_group_service",
+            "user-1".to_string(),
+        )
+        .expect("context builds");
+
+        assert_eq!(ctx.command_name, "add_group_service");
+        assert_eq!(ctx.idempotency_key, "idem-group-service");
+        assert_eq!(ctx.actor_id.as_deref(), Some("user-1"));
+    }
+
+    #[test]
+    fn remove_group_service_write_context_sets_actor_id() {
+        let ctx = group_service_write_command_context(
+            "REQ-REMOVE-GROUP-SERVICE".to_string(),
+            "idem-remove-group-service".to_string(),
+            "remove_group_service",
+            "user-1".to_string(),
+        )
+        .expect("context builds");
+
+        assert_eq!(ctx.command_name, "remove_group_service");
+        assert_eq!(ctx.idempotency_key, "idem-remove-group-service");
+        assert_eq!(ctx.actor_id.as_deref(), Some("user-1"));
+    }
+
+    #[test]
+    fn group_service_requires_authenticated_actor() {
+        let error = require_group_service_actor_id(None).expect_err("missing user rejects");
         assert_eq!(error.code, codes::AUTH_NOT_AUTHENTICATED);
     }
 

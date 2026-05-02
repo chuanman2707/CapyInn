@@ -231,6 +231,52 @@ describe("useHotelStore monitoring context", () => {
     );
   });
 
+  it("routes addGroupService through invokeWriteCommand with guarded money", async () => {
+    const service = {
+      id: "svc-1",
+      group_id: "group-1",
+      name: "Laundry",
+      quantity: 2,
+      unit_price: 50000,
+      total_amount: 100000,
+      created_at: "2026-01-01T00:00:00Z",
+    };
+    invokeWriteCommand.mockResolvedValueOnce(service);
+
+    const result = await useHotelStore.getState().addGroupService({
+      group_id: "group-1",
+      name: "Laundry",
+      quantity: 2,
+      unit_price: 50000,
+    });
+
+    expect(result).toBe(service);
+    expect(invokeWriteCommand).toHaveBeenCalledWith("add_group_service", {
+      req: {
+        group_id: "group-1",
+        name: "Laundry",
+        quantity: 2,
+        unit_price: 50000,
+      },
+    });
+    expect(invoke).not.toHaveBeenCalledWith(
+      "add_group_service",
+      expect.anything(),
+    );
+  });
+
+  it("routes removeGroupService through invokeWriteCommand", async () => {
+    await useHotelStore.getState().removeGroupService("svc-1");
+
+    expect(invokeWriteCommand).toHaveBeenCalledWith("remove_group_service", {
+      serviceId: "svc-1",
+    });
+    expect(invoke).not.toHaveBeenCalledWith(
+      "remove_group_service",
+      expect.anything(),
+    );
+  });
+
   it("rejects fractional checkIn paid_amount before invoking backend", async () => {
     await expect(
       useHotelStore.getState().checkIn(
@@ -291,6 +337,11 @@ describe("useHotelStore monitoring context", () => {
       expect.anything(),
       expect.anything(),
     );
+    expect(invokeWriteCommand).not.toHaveBeenCalledWith(
+      "group_checkout",
+      expect.anything(),
+      expect.anything(),
+    );
   });
 
   it("rejects fractional group service unit_price before invoking backend", async () => {
@@ -304,6 +355,10 @@ describe("useHotelStore monitoring context", () => {
     ).rejects.toThrow(/unit_price/);
 
     expect(invoke).not.toHaveBeenCalledWith(
+      "add_group_service",
+      expect.anything(),
+    );
+    expect(invokeWriteCommand).not.toHaveBeenCalledWith(
       "add_group_service",
       expect.anything(),
     );

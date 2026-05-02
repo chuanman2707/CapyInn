@@ -1,8 +1,8 @@
 import { useState } from "react";
-import { invoke } from "@tauri-apps/api/core";
 import { toast } from "sonner";
 
 import type { InvoiceData } from "@/components/InvoicePDF";
+import { invokeWriteCommand } from "@/lib/invokeCommand";
 
 export function useInvoiceDialog() {
     const [invoiceOpen, setInvoiceOpen] = useState(false);
@@ -12,7 +12,7 @@ export function useInvoiceDialog() {
     const openInvoice = async (bookingId: string) => {
         setInvoiceLoading(true);
         try {
-            const data = await invoke<InvoiceData>("generate_invoice", { bookingId });
+            const data = await invokeWriteCommand<InvoiceData>("generate_invoice", { bookingId });
             setInvoiceData(data);
             setInvoiceOpen(true);
         } catch (err) {
