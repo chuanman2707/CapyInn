@@ -853,6 +853,8 @@ impl WriteCommandExecutor {
                  error_summary_json = NULL,
                  retryable = 0,
                  lease_expires_at = NULL,
+                 recovery_dismissed_at = NULL,
+                 recovery_dismissed_by = NULL,
                  updated_at = ?,
                  completed_at = ?
              WHERE command_name = ?
@@ -1039,6 +1041,8 @@ impl WriteCommandExecutor {
                  error_summary_json = NULL,
                  retryable = 0,
                  lease_expires_at = NULL,
+                 recovery_dismissed_at = NULL,
+                 recovery_dismissed_by = NULL,
                  updated_at = ?,
                  completed_at = ?
              WHERE command_name = ?
@@ -1115,6 +1119,8 @@ impl WriteCommandExecutor {
                  error_summary_json = ?,
                  retryable = ?,
                  lease_expires_at = NULL,
+                 recovery_dismissed_at = NULL,
+                 recovery_dismissed_by = NULL,
                  updated_at = ?,
                  completed_at = ?
              WHERE command_name = ?
@@ -1338,6 +1344,8 @@ async fn reclaim_claim(
              error_summary_json = NULL,
              retryable = 0,
              lease_expires_at = ?,
+             recovery_dismissed_at = NULL,
+             recovery_dismissed_by = NULL,
              updated_at = ?,
              completed_at = NULL,
              last_attempt_at = ?
@@ -2894,6 +2902,74 @@ mod tests {
         assert_eq!(row.get::<i64, _>("retryable"), 0);
         assert_eq!(row.get::<Option<String>, _>("error_json"), None);
         assert_eq!(row.get::<Option<String>, _>("lease_expires_at"), None);
+    }
+
+    #[tokio::test]
+    async fn reclaim_clears_recovery_dismiss_marker() {
+        let pool = test_pool().await;
+        let ctx = WriteCommandContext::for_internal_test(
+            "test-request-dismissed-recovery",
+            "idem-dismissed-recovery",
+            "test.dismissed_recovery",
+        );
+        let request = WriteCommandRequest::new_low_risk(
+            serde_json::json!({ "case": "dismissed_recovery" }),
+            "Dismissed recovery",
+        )
+        .expect("request builds");
+
+        let first_error = WriteCommandExecutor::new(pool.clone())
+            .execute(&ctx, request.clone(), |_tx| {
+                Box::pin(async move {
+                    Err(
+                        CommandError::system(codes::DB_LOCKED_RETRYABLE, "database locked")
+                            .retryable(true),
+                    )
+                })
+            })
+            .await
+            .expect_err("first retryable failure is returned");
+
+        assert_eq!(first_error.code, codes::DB_LOCKED_RETRYABLE);
+        assert!(first_error.retryable);
+
+        sqlx::query(
+            "UPDATE command_idempotency
+             SET recovery_dismissed_at = ?,
+                 recovery_dismissed_by = ?
+             WHERE command_name = ? AND idempotency_key = ?",
+        )
+        .bind("2026-01-02T03:04:05Z")
+        .bind("operator-1")
+        .bind(&ctx.command_name)
+        .bind(&ctx.idempotency_key)
+        .execute(&pool)
+        .await
+        .expect("marks recovery dismissed");
+
+        let second = WriteCommandExecutor::new(pool.clone())
+            .execute(&ctx, request, |_tx| {
+                Box::pin(async move { Ok(serde_json::json!({ "ok": true })) })
+            })
+            .await
+            .expect("retryable failure is reclaimed and rerun");
+
+        assert_eq!(second.response, serde_json::json!({ "ok": true }));
+        assert!(!second.replayed);
+
+        let row = sqlx::query(
+            "SELECT recovery_dismissed_at, recovery_dismissed_by
+             FROM command_idempotency
+             WHERE command_name = ? AND idempotency_key = ?",
+        )
+        .bind(&ctx.command_name)
+        .bind(&ctx.idempotency_key)
+        .fetch_one(&pool)
+        .await
+        .expect("reads recovery dismiss marker");
+
+        assert_eq!(row.get::<Option<String>, _>("recovery_dismissed_at"), None);
+        assert_eq!(row.get::<Option<String>, _>("recovery_dismissed_by"), None);
     }
 
     #[tokio::test]
