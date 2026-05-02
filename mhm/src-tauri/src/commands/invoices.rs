@@ -12,6 +12,7 @@ use tauri::State;
 // Invoice PDF Commands
 // ═══════════════════════════════════════════════
 
+#[cfg(test)]
 pub async fn do_generate_invoice(
     pool: &Pool<Sqlite>,
     booking_id: &str,

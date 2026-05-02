@@ -221,6 +221,7 @@ pub async fn generate_invoice_tx(
     })
 }
 
+#[cfg(test)]
 pub async fn generate_invoice_direct(
     pool: &Pool<Sqlite>,
     booking_id: &str,
