@@ -1,5 +1,7 @@
 use crate::app_error::{codes, CommandError, CommandResult};
-use crate::command_ledger::{get_command_ledger_detail, CommandLedgerListItem};
+use crate::command_ledger::{
+    get_command_ledger_detail, CommandLedgerDetail, CommandLedgerListItem,
+};
 use serde::{Deserialize, Serialize};
 use sqlx::{Pool, Row, Sqlite};
 
@@ -123,6 +125,115 @@ pub async fn list_command_recovery_queue(
     Ok(items)
 }
 
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CommandRecoveryActionRecord {
+    pub id: i64,
+    pub action: String,
+    pub operator_id: Option<String>,
+    pub operator_role: Option<String>,
+    pub reason: Option<String>,
+    pub confirmed: bool,
+    pub created_at: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CommandRecoveryDetail {
+    pub ledger: CommandLedgerDetail,
+    pub recovery_status: Option<String>,
+    pub risk_level: RecoveryRiskLevel,
+    pub requires_confirmation: bool,
+    pub allowed_actions: Vec<String>,
+    pub actions: Vec<CommandRecoveryActionRecord>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CommandRecoveryStartupScan {
+    pub expired_in_progress: i64,
+    pub failed_retryable: i64,
+}
+
+async fn recovery_actions(
+    pool: &Pool<Sqlite>,
+    command_idempotency_id: i64,
+) -> CommandResult<Vec<CommandRecoveryActionRecord>> {
+    let rows = sqlx::query(
+        "SELECT id, action, operator_id, operator_role, reason, confirmed, created_at
+         FROM command_recovery_actions
+         WHERE command_idempotency_id = ?
+         ORDER BY created_at DESC, id DESC",
+    )
+    .bind(command_idempotency_id)
+    .fetch_all(pool)
+    .await
+    .map_err(system_error)?;
+
+    rows.into_iter()
+        .map(|row| {
+            Ok(CommandRecoveryActionRecord {
+                id: row.try_get("id").map_err(system_error)?,
+                action: row.try_get("action").map_err(system_error)?,
+                operator_id: row.try_get("operator_id").map_err(system_error)?,
+                operator_role: row.try_get("operator_role").map_err(system_error)?,
+                reason: row.try_get("reason").map_err(system_error)?,
+                confirmed: row.try_get::<i64, _>("confirmed").map_err(system_error)? != 0,
+                created_at: row.try_get("created_at").map_err(system_error)?,
+            })
+        })
+        .collect()
+}
+
+pub async fn inspect_command_recovery(
+    pool: &Pool<Sqlite>,
+    id: i64,
+) -> CommandResult<CommandRecoveryDetail> {
+    let now = chrono::Utc::now().to_rfc3339();
+    let detail = get_command_ledger_detail(pool, id).await?;
+    let recovery_status = recovery_status(&detail.status, detail.lease_expires_at.as_deref(), &now);
+    let risk_level = command_recovery_risk_level(&detail.command_name);
+    let actions = recovery_actions(pool, id).await?;
+    Ok(CommandRecoveryDetail {
+        ledger: detail,
+        recovery_status,
+        requires_confirmation: risk_level == RecoveryRiskLevel::High,
+        risk_level,
+        allowed_actions: allowed_actions_for_queue_item(),
+        actions,
+    })
+}
+
+pub async fn scan_command_recovery_startup(
+    pool: &Pool<Sqlite>,
+) -> CommandResult<CommandRecoveryStartupScan> {
+    let now = chrono::Utc::now().to_rfc3339();
+    let expired_in_progress: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*)
+         FROM command_idempotency
+         WHERE status = 'in_progress'
+           AND lease_expires_at IS NOT NULL
+           AND lease_expires_at <= ?
+           AND recovery_dismissed_at IS NULL",
+    )
+    .bind(&now)
+    .fetch_one(pool)
+    .await
+    .map_err(system_error)?;
+
+    let failed_retryable: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*)
+         FROM command_idempotency
+         WHERE status = 'failed_retryable'
+           AND recovery_dismissed_at IS NULL",
+    )
+    .fetch_one(pool)
+    .await
+    .map_err(system_error)?;
+
+    Ok(CommandRecoveryStartupScan {
+        expired_in_progress,
+        failed_retryable,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -221,5 +332,71 @@ mod tests {
             .iter()
             .all(|row| row.allowed_actions.contains(&"inspect".to_string())));
         assert!(rows.iter().all(|row| row.requires_confirmation));
+    }
+
+    #[tokio::test]
+    async fn inspect_recovery_detail_returns_actions_without_writing_an_action() {
+        let pool = test_pool().await;
+        let id = seed_recovery_row(&pool, "check_out", "failed_retryable", None, false).await;
+        sqlx::query(
+            "INSERT INTO command_recovery_actions (
+                command_idempotency_id, action, operator_id, operator_role,
+                reason, confirmed, created_at
+            ) VALUES (?, 'dismissed', 'admin-1', 'admin', 'checked', 0, ?)",
+        )
+        .bind(id)
+        .bind(Utc::now().to_rfc3339())
+        .execute(&pool)
+        .await
+        .expect("seed action");
+
+        let detail = inspect_command_recovery(&pool, id)
+            .await
+            .expect("inspect recovery detail");
+
+        assert_eq!(detail.ledger.id, id);
+        assert_eq!(detail.recovery_status.as_deref(), Some("failed_retryable"));
+        assert_eq!(detail.actions.len(), 1);
+        assert_eq!(detail.actions[0].action, "dismissed");
+
+        let action_count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM command_recovery_actions WHERE command_idempotency_id = ?",
+        )
+        .bind(id)
+        .fetch_one(&pool)
+        .await
+        .expect("action count");
+        assert_eq!(action_count, 1);
+    }
+
+    #[tokio::test]
+    async fn startup_scan_counts_recovery_rows_without_mutating() {
+        let pool = test_pool().await;
+        let expired = (Utc::now() - chrono::Duration::seconds(5)).to_rfc3339();
+        let expired_id =
+            seed_recovery_row(&pool, "check_out", "in_progress", Some(expired), false).await;
+        seed_recovery_row(&pool, "record_payment", "failed_retryable", None, false).await;
+
+        let before_updated_at: String =
+            sqlx::query_scalar("SELECT updated_at FROM command_idempotency WHERE id = ?")
+                .bind(expired_id)
+                .fetch_one(&pool)
+                .await
+                .expect("before updated_at");
+
+        let scan = scan_command_recovery_startup(&pool)
+            .await
+            .expect("startup scan");
+
+        assert_eq!(scan.expired_in_progress, 1);
+        assert_eq!(scan.failed_retryable, 1);
+
+        let after_updated_at: String =
+            sqlx::query_scalar("SELECT updated_at FROM command_idempotency WHERE id = ?")
+                .bind(expired_id)
+                .fetch_one(&pool)
+                .await
+                .expect("after updated_at");
+        assert_eq!(after_updated_at, before_updated_at);
     }
 }
