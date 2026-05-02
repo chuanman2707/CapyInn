@@ -41,6 +41,7 @@ pub mod codes {
     pub const CONFLICT_INVALID_STATE_TRANSITION_DEFAULT_MESSAGE: &str =
         "Dữ liệu đã thay đổi, vui lòng tải lại trước khi thao tác.";
     pub const COMMAND_LEDGER_ROW_NOT_FOUND: &str = "COMMAND_LEDGER_ROW_NOT_FOUND";
+    pub const RECOVERY_REQUIRED: &str = "RECOVERY_REQUIRED";
     pub const SYSTEM_INTERNAL_ERROR: &str = "SYSTEM_INTERNAL_ERROR";
 
     pub const ALL: &[&str] = &[
@@ -75,6 +76,7 @@ pub mod codes {
         CONFLICT_DUPLICATE_IN_FLIGHT,
         CONFLICT_INVALID_STATE_TRANSITION,
         COMMAND_LEDGER_ROW_NOT_FOUND,
+        RECOVERY_REQUIRED,
         SYSTEM_INTERNAL_ERROR,
     ];
 }
@@ -582,6 +584,16 @@ mod tests {
                 codes::CONFLICT_INVALID_STATE_TRANSITION,
                 AppErrorKind::User,
                 codes::CONFLICT_INVALID_STATE_TRANSITION_DEFAULT_MESSAGE,
+            ),
+            (
+                codes::COMMAND_LEDGER_ROW_NOT_FOUND,
+                AppErrorKind::User,
+                "Không tìm thấy dòng lệnh.",
+            ),
+            (
+                codes::RECOVERY_REQUIRED,
+                AppErrorKind::User,
+                "Cần xử lý khôi phục lệnh trước khi tiếp tục.",
             ),
             (
                 codes::SYSTEM_INTERNAL_ERROR,
