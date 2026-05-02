@@ -160,6 +160,17 @@ pub fn run() {
 
             let rt = tokio::runtime::Runtime::new().expect("Failed to create Tokio runtime");
             let pool = rt.block_on(db::init_db()).expect("Failed to init database");
+            match rt.block_on(command_recovery::scan_command_recovery_startup(&pool)) {
+                Ok(scan) if scan.expired_in_progress > 0 || scan.failed_retryable > 0 => info!(
+                    "Command recovery attention required: expired_in_progress={} failed_retryable={}",
+                    scan.expired_in_progress, scan.failed_retryable
+                ),
+                Ok(_) => {}
+                Err(error) => error!(
+                    "Command recovery startup scan failed: {} {}",
+                    error.code, error.message
+                ),
+            }
 
             // Start MCP Gateway server on a dedicated background thread.
             // The runtime must outlive the setup closure, otherwise the spawned
@@ -256,6 +267,11 @@ pub fn run() {
             commands::command_ledger::list_command_ledger,
             commands::command_ledger::list_command_ledger_attention,
             commands::command_ledger::get_command_ledger_detail,
+            commands::command_recovery::list_command_recovery_queue,
+            commands::command_recovery::inspect_command_recovery,
+            commands::command_recovery::request_command_recovery_retry,
+            commands::command_recovery::dismiss_command_recovery,
+            commands::command_recovery::mark_command_recovery_terminal,
             commands::onboarding::get_bootstrap_status,
             commands::onboarding::complete_onboarding,
             // Auth & RBAC
