@@ -3,7 +3,7 @@ use crate::command_ledger::{
     get_command_ledger_detail, CommandLedgerDetail, CommandLedgerListItem,
 };
 use serde::{Deserialize, Serialize};
-use sqlx::{Pool, Row, Sqlite};
+use sqlx::{Pool, Row, Sqlite, Transaction};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -136,6 +136,29 @@ pub struct CommandRecoveryActionRecord {
     pub created_at: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CommandRecoveryActionRequest {
+    pub command_idempotency_id: i64,
+    pub confirmed: bool,
+    pub reason: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RecoveryActionResponse {
+    pub command_idempotency_id: i64,
+    pub action: String,
+    pub status: String,
+    pub code: String,
+    pub message: String,
+    pub next_step: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RecoveryOperator {
+    pub id: String,
+    pub role: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct CommandRecoveryDetail {
     pub ledger: CommandLedgerDetail,
@@ -234,6 +257,340 @@ pub async fn scan_command_recovery_startup(
     })
 }
 
+#[derive(Debug)]
+struct EligibleRecoveryRow {
+    command_name: String,
+}
+
+fn invalid_recovery_state_error() -> CommandError {
+    CommandError::user(
+        codes::CONFLICT_INVALID_STATE_TRANSITION,
+        codes::CONFLICT_INVALID_STATE_TRANSITION_DEFAULT_MESSAGE,
+    )
+}
+
+fn approval_required_error() -> CommandError {
+    CommandError::user(
+        codes::APPROVAL_REQUIRED,
+        "High-risk recovery actions require confirmation and a reason.",
+    )
+}
+
+fn normalized_reason(request: &CommandRecoveryActionRequest) -> Option<String> {
+    request
+        .reason
+        .as_deref()
+        .map(str::trim)
+        .filter(|reason| !reason.is_empty())
+        .map(str::to_string)
+}
+
+fn validate_confirmation(
+    command_name: &str,
+    request: &CommandRecoveryActionRequest,
+    reason: Option<&str>,
+) -> CommandResult<()> {
+    if requires_confirmation(command_name) && (!request.confirmed || reason.is_none()) {
+        return Err(approval_required_error());
+    }
+    Ok(())
+}
+
+async fn eligible_recovery_row_tx(
+    tx: &mut Transaction<'_, Sqlite>,
+    id: i64,
+    now: &str,
+) -> CommandResult<EligibleRecoveryRow> {
+    let row = sqlx::query(
+        "SELECT command_name
+         FROM command_idempotency
+         WHERE id = ?
+           AND recovery_dismissed_at IS NULL
+           AND (
+                status = 'failed_retryable'
+                OR (status = 'in_progress' AND lease_expires_at IS NOT NULL AND lease_expires_at <= ?)
+           )",
+    )
+    .bind(id)
+    .bind(now)
+    .fetch_optional(&mut **tx)
+    .await
+    .map_err(system_error)?;
+
+    let Some(row) = row else {
+        return Err(invalid_recovery_state_error());
+    };
+
+    Ok(EligibleRecoveryRow {
+        command_name: row.try_get("command_name").map_err(system_error)?,
+    })
+}
+
+async fn insert_recovery_action_tx(
+    tx: &mut Transaction<'_, Sqlite>,
+    command_idempotency_id: i64,
+    action: &str,
+    operator: &RecoveryOperator,
+    reason: Option<&str>,
+    confirmed: bool,
+    now: &str,
+) -> CommandResult<()> {
+    sqlx::query(
+        "INSERT INTO command_recovery_actions (
+            command_idempotency_id, action, operator_id, operator_role,
+            reason, confirmed, created_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?)",
+    )
+    .bind(command_idempotency_id)
+    .bind(action)
+    .bind(&operator.id)
+    .bind(&operator.role)
+    .bind(reason)
+    .bind(if confirmed { 1_i64 } else { 0_i64 })
+    .bind(now)
+    .execute(&mut **tx)
+    .await
+    .map_err(system_error)?;
+
+    Ok(())
+}
+
+fn recovery_action_response(
+    command_idempotency_id: i64,
+    action: &str,
+    status: &str,
+    next_step: &str,
+) -> RecoveryActionResponse {
+    RecoveryActionResponse {
+        command_idempotency_id,
+        action: action.to_string(),
+        status: status.to_string(),
+        code: codes::RECOVERY_REQUIRED.to_string(),
+        message: "Cần xử lý khôi phục lệnh trước khi tiếp tục.".to_string(),
+        next_step: next_step.to_string(),
+    }
+}
+
+fn recovery_required_error_json() -> CommandResult<(String, String)> {
+    let error = CommandError::user(
+        codes::RECOVERY_REQUIRED,
+        "Command recovery was marked terminal by an operator.",
+    );
+    let error_json = serde_json::to_string(&error).map_err(system_error)?;
+    let error_summary_json = serde_json::to_string(&serde_json::json!({
+        "code": codes::RECOVERY_REQUIRED,
+        "kind": "user",
+        "retryable": false,
+        "message": error.message,
+        "support_id": null,
+    }))
+    .map_err(system_error)?;
+
+    Ok((error_json, error_summary_json))
+}
+
+pub async fn request_command_recovery_retry(
+    pool: &Pool<Sqlite>,
+    operator: RecoveryOperator,
+    request: CommandRecoveryActionRequest,
+) -> CommandResult<RecoveryActionResponse> {
+    let now = chrono::Utc::now().to_rfc3339();
+    let reason = normalized_reason(&request);
+    let mut tx = pool
+        .begin_with("BEGIN IMMEDIATE")
+        .await
+        .map_err(system_error)?;
+
+    let result = async {
+        let row = eligible_recovery_row_tx(&mut tx, request.command_idempotency_id, &now).await?;
+        validate_confirmation(&row.command_name, &request, reason.as_deref())?;
+        insert_recovery_action_tx(
+            &mut tx,
+            request.command_idempotency_id,
+            "retry_requested",
+            &operator,
+            reason.as_deref(),
+            request.confirmed,
+            &now,
+        )
+        .await?;
+
+        Ok(recovery_action_response(
+            request.command_idempotency_id,
+            "retry_requested",
+            "recovery_required",
+            "Retry request recorded for operator review.",
+        ))
+    }
+    .await;
+
+    match result {
+        Ok(response) => {
+            tx.commit().await.map_err(system_error)?;
+            Ok(response)
+        }
+        Err(error) => {
+            tx.rollback().await.map_err(system_error)?;
+            Err(error)
+        }
+    }
+}
+
+pub async fn dismiss_command_recovery(
+    pool: &Pool<Sqlite>,
+    operator: RecoveryOperator,
+    request: CommandRecoveryActionRequest,
+) -> CommandResult<RecoveryActionResponse> {
+    let now = chrono::Utc::now().to_rfc3339();
+    let reason = normalized_reason(&request);
+    let mut tx = pool
+        .begin_with("BEGIN IMMEDIATE")
+        .await
+        .map_err(system_error)?;
+
+    let result = async {
+        eligible_recovery_row_tx(&mut tx, request.command_idempotency_id, &now).await?;
+        insert_recovery_action_tx(
+            &mut tx,
+            request.command_idempotency_id,
+            "dismissed",
+            &operator,
+            reason.as_deref(),
+            request.confirmed,
+            &now,
+        )
+        .await?;
+
+        let update_result = sqlx::query(
+            "UPDATE command_idempotency
+             SET recovery_dismissed_at = ?,
+                 recovery_dismissed_by = ?,
+                 updated_at = ?
+             WHERE id = ?
+               AND recovery_dismissed_at IS NULL
+               AND (
+                    status = 'failed_retryable'
+                    OR (status = 'in_progress' AND lease_expires_at IS NOT NULL AND lease_expires_at <= ?)
+               )",
+        )
+        .bind(&now)
+        .bind(&operator.id)
+        .bind(&now)
+        .bind(request.command_idempotency_id)
+        .bind(&now)
+        .execute(&mut *tx)
+        .await
+        .map_err(system_error)?;
+
+        if update_result.rows_affected() != 1 {
+            return Err(invalid_recovery_state_error());
+        }
+
+        Ok(recovery_action_response(
+            request.command_idempotency_id,
+            "dismissed",
+            "dismissed",
+            "Recovery item dismissed from the active queue.",
+        ))
+    }
+    .await;
+
+    match result {
+        Ok(response) => {
+            tx.commit().await.map_err(system_error)?;
+            Ok(response)
+        }
+        Err(error) => {
+            tx.rollback().await.map_err(system_error)?;
+            Err(error)
+        }
+    }
+}
+
+pub async fn mark_command_recovery_terminal(
+    pool: &Pool<Sqlite>,
+    operator: RecoveryOperator,
+    request: CommandRecoveryActionRequest,
+) -> CommandResult<RecoveryActionResponse> {
+    let now = chrono::Utc::now().to_rfc3339();
+    let reason = normalized_reason(&request);
+    let mut tx = pool
+        .begin_with("BEGIN IMMEDIATE")
+        .await
+        .map_err(system_error)?;
+
+    let result = async {
+        let row = eligible_recovery_row_tx(&mut tx, request.command_idempotency_id, &now).await?;
+        validate_confirmation(&row.command_name, &request, reason.as_deref())?;
+        insert_recovery_action_tx(
+            &mut tx,
+            request.command_idempotency_id,
+            "marked_terminal",
+            &operator,
+            reason.as_deref(),
+            request.confirmed,
+            &now,
+        )
+        .await?;
+
+        let (error_json, error_summary_json) = recovery_required_error_json()?;
+        let update_result = sqlx::query(
+            "UPDATE command_idempotency
+             SET status = 'failed_terminal',
+                 response_json = NULL,
+                 result_summary_json = NULL,
+                 error_code = ?,
+                 error_json = ?,
+                 error_summary_json = ?,
+                 retryable = 0,
+                 lease_expires_at = NULL,
+                 updated_at = ?,
+                 completed_at = ?,
+                 recovery_dismissed_at = NULL,
+                 recovery_dismissed_by = NULL
+             WHERE id = ?
+               AND recovery_dismissed_at IS NULL
+               AND (
+                    status = 'failed_retryable'
+                    OR (status = 'in_progress' AND lease_expires_at IS NOT NULL AND lease_expires_at <= ?)
+               )",
+        )
+        .bind(codes::RECOVERY_REQUIRED)
+        .bind(&error_json)
+        .bind(&error_summary_json)
+        .bind(&now)
+        .bind(&now)
+        .bind(request.command_idempotency_id)
+        .bind(&now)
+        .execute(&mut *tx)
+        .await
+        .map_err(system_error)?;
+
+        if update_result.rows_affected() != 1 {
+            return Err(invalid_recovery_state_error());
+        }
+
+        Ok(recovery_action_response(
+            request.command_idempotency_id,
+            "marked_terminal",
+            "failed_terminal",
+            "Command marked terminal with recovery-required error details.",
+        ))
+    }
+    .await;
+
+    match result {
+        Ok(response) => {
+            tx.commit().await.map_err(system_error)?;
+            Ok(response)
+        }
+        Err(error) => {
+            tx.rollback().await.map_err(system_error)?;
+            Err(error)
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -303,6 +660,261 @@ mod tests {
         .await
         .expect("seeds recovery row");
         result.last_insert_rowid()
+    }
+
+    fn recovery_operator() -> RecoveryOperator {
+        RecoveryOperator {
+            id: "ops-1".to_string(),
+            role: "admin".to_string(),
+        }
+    }
+
+    fn recovery_request(
+        command_idempotency_id: i64,
+        confirmed: bool,
+        reason: Option<&str>,
+    ) -> CommandRecoveryActionRequest {
+        CommandRecoveryActionRequest {
+            command_idempotency_id,
+            confirmed,
+            reason: reason.map(str::to_string),
+        }
+    }
+
+    async fn action_count(pool: &Pool<Sqlite>, command_idempotency_id: i64) -> i64 {
+        sqlx::query_scalar(
+            "SELECT COUNT(*) FROM command_recovery_actions WHERE command_idempotency_id = ?",
+        )
+        .bind(command_idempotency_id)
+        .fetch_one(pool)
+        .await
+        .expect("counts recovery actions")
+    }
+
+    async fn action_field(pool: &Pool<Sqlite>, command_idempotency_id: i64, field: &str) -> String {
+        let sql = format!(
+            "SELECT {field} FROM command_recovery_actions WHERE command_idempotency_id = ? ORDER BY id DESC LIMIT 1"
+        );
+        sqlx::query_scalar(&sql)
+            .bind(command_idempotency_id)
+            .fetch_one(pool)
+            .await
+            .expect("reads recovery action field")
+    }
+
+    #[tokio::test]
+    async fn retry_request_audits_and_returns_recovery_required_without_status_change() {
+        let pool = test_pool().await;
+        let id = seed_recovery_row(&pool, "check_out", "failed_retryable", None, false).await;
+
+        let response = request_command_recovery_retry(
+            &pool,
+            recovery_operator(),
+            recovery_request(id, true, Some("operator reviewed retry")),
+        )
+        .await
+        .expect("requests retry");
+
+        assert_eq!(response.command_idempotency_id, id);
+        assert_eq!(response.action, "retry_requested");
+        assert_eq!(response.status, "recovery_required");
+        assert_eq!(response.code, codes::RECOVERY_REQUIRED);
+        assert_eq!(
+            sqlx::query_scalar::<_, String>("SELECT status FROM command_idempotency WHERE id = ?")
+                .bind(id)
+                .fetch_one(&pool)
+                .await
+                .expect("reads status"),
+            "failed_retryable"
+        );
+        assert_eq!(action_count(&pool, id).await, 1);
+        assert_eq!(action_field(&pool, id, "action").await, "retry_requested");
+    }
+
+    #[tokio::test]
+    async fn dismiss_audits_sets_marker_and_leaves_status_unchanged() {
+        let pool = test_pool().await;
+        let id = seed_recovery_row(&pool, "check_out", "failed_retryable", None, false).await;
+
+        let response = dismiss_command_recovery(
+            &pool,
+            recovery_operator(),
+            recovery_request(id, false, Some("handled manually")),
+        )
+        .await
+        .expect("dismisses recovery row");
+
+        assert_eq!(response.action, "dismissed");
+        assert_eq!(response.status, "dismissed");
+        let row = sqlx::query(
+            "SELECT status, recovery_dismissed_at, recovery_dismissed_by
+             FROM command_idempotency WHERE id = ?",
+        )
+        .bind(id)
+        .fetch_one(&pool)
+        .await
+        .expect("reads recovery marker");
+        assert_eq!(row.get::<String, _>("status"), "failed_retryable");
+        assert!(row
+            .get::<Option<String>, _>("recovery_dismissed_at")
+            .is_some());
+        assert_eq!(
+            row.get::<Option<String>, _>("recovery_dismissed_by")
+                .as_deref(),
+            Some("ops-1")
+        );
+        assert_eq!(action_count(&pool, id).await, 1);
+        assert_eq!(action_field(&pool, id, "action").await, "dismissed");
+    }
+
+    #[tokio::test]
+    async fn high_risk_mark_terminal_requires_confirmation_and_reason() {
+        let pool = test_pool().await;
+        let id = seed_recovery_row(&pool, "check_out", "failed_retryable", None, false).await;
+
+        let missing_confirmation = mark_command_recovery_terminal(
+            &pool,
+            recovery_operator(),
+            recovery_request(id, false, Some("reviewed")),
+        )
+        .await
+        .expect_err("requires confirmation");
+        assert_eq!(missing_confirmation.code, codes::APPROVAL_REQUIRED);
+
+        let missing_reason = mark_command_recovery_terminal(
+            &pool,
+            recovery_operator(),
+            recovery_request(id, true, Some("   ")),
+        )
+        .await
+        .expect_err("requires reason");
+        assert_eq!(missing_reason.code, codes::APPROVAL_REQUIRED);
+        assert_eq!(action_count(&pool, id).await, 0);
+    }
+
+    #[tokio::test]
+    async fn high_risk_retry_request_requires_confirmation_and_reason() {
+        let pool = test_pool().await;
+        let id = seed_recovery_row(&pool, "record_payment", "failed_retryable", None, false).await;
+
+        let missing_confirmation = request_command_recovery_retry(
+            &pool,
+            recovery_operator(),
+            recovery_request(id, false, Some("reviewed")),
+        )
+        .await
+        .expect_err("requires confirmation");
+        assert_eq!(missing_confirmation.code, codes::APPROVAL_REQUIRED);
+
+        let missing_reason = request_command_recovery_retry(
+            &pool,
+            recovery_operator(),
+            recovery_request(id, true, None),
+        )
+        .await
+        .expect_err("requires reason");
+        assert_eq!(missing_reason.code, codes::APPROVAL_REQUIRED);
+        assert_eq!(action_count(&pool, id).await, 0);
+    }
+
+    #[tokio::test]
+    async fn mark_terminal_closes_row_with_recovery_required_error() {
+        let pool = test_pool().await;
+        let id = seed_recovery_row(&pool, "check_out", "failed_retryable", None, false).await;
+
+        let response = mark_command_recovery_terminal(
+            &pool,
+            recovery_operator(),
+            recovery_request(id, true, Some("cannot safely retry")),
+        )
+        .await
+        .expect("marks terminal");
+
+        assert_eq!(response.action, "marked_terminal");
+        assert_eq!(response.status, "failed_terminal");
+        let row = sqlx::query(
+            "SELECT status, retryable, lease_expires_at, completed_at, error_code, error_json,
+                    error_summary_json, recovery_dismissed_at, recovery_dismissed_by
+             FROM command_idempotency WHERE id = ?",
+        )
+        .bind(id)
+        .fetch_one(&pool)
+        .await
+        .expect("reads terminal row");
+
+        assert_eq!(row.get::<String, _>("status"), "failed_terminal");
+        assert_eq!(row.get::<i64, _>("retryable"), 0);
+        assert!(row.get::<Option<String>, _>("lease_expires_at").is_none());
+        assert!(row.get::<Option<String>, _>("completed_at").is_some());
+        assert_eq!(
+            row.get::<Option<String>, _>("error_code").as_deref(),
+            Some(codes::RECOVERY_REQUIRED)
+        );
+        assert!(row
+            .get::<Option<String>, _>("error_json")
+            .expect("stores error json")
+            .contains(codes::RECOVERY_REQUIRED));
+        assert!(row
+            .get::<Option<String>, _>("error_summary_json")
+            .expect("stores error summary")
+            .contains(codes::RECOVERY_REQUIRED));
+        assert!(row
+            .get::<Option<String>, _>("recovery_dismissed_at")
+            .is_none());
+        assert!(row
+            .get::<Option<String>, _>("recovery_dismissed_by")
+            .is_none());
+        assert_eq!(action_count(&pool, id).await, 1);
+    }
+
+    #[tokio::test]
+    async fn low_risk_mark_terminal_does_not_require_confirmation() {
+        let pool = test_pool().await;
+        let id = seed_recovery_row(&pool, "refresh_cache", "failed_retryable", None, false).await;
+
+        let response = mark_command_recovery_terminal(
+            &pool,
+            recovery_operator(),
+            recovery_request(id, false, None),
+        )
+        .await
+        .expect("marks low risk command terminal without confirmation");
+
+        assert_eq!(response.status, "failed_terminal");
+        assert_eq!(action_field(&pool, id, "action").await, "marked_terminal");
+    }
+
+    #[tokio::test]
+    async fn dismiss_rejects_stale_or_already_dismissed_row() {
+        let pool = test_pool().await;
+        let live = (Utc::now() + chrono::Duration::seconds(60)).to_rfc3339();
+        let already_dismissed =
+            seed_recovery_row(&pool, "check_out", "failed_retryable", None, true).await;
+        let live_in_progress =
+            seed_recovery_row(&pool, "check_out", "in_progress", Some(live), false).await;
+
+        let dismissed_error = dismiss_command_recovery(
+            &pool,
+            recovery_operator(),
+            recovery_request(already_dismissed, false, None),
+        )
+        .await
+        .expect_err("already dismissed is stale");
+        assert_eq!(
+            dismissed_error.code,
+            codes::CONFLICT_INVALID_STATE_TRANSITION
+        );
+
+        let live_error = dismiss_command_recovery(
+            &pool,
+            recovery_operator(),
+            recovery_request(live_in_progress, false, None),
+        )
+        .await
+        .expect_err("live in-progress row is not eligible");
+        assert_eq!(live_error.code, codes::CONFLICT_INVALID_STATE_TRANSITION);
+        assert_eq!(action_count(&pool, already_dismissed).await, 0);
+        assert_eq!(action_count(&pool, live_in_progress).await, 0);
     }
 
     #[tokio::test]
