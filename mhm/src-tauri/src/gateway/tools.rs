@@ -732,6 +732,34 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn mcp_exposes_recovery_read_tools_only() {
+        let pool = test_pool().await;
+        let tools = HotelTools::new(pool, None);
+
+        assert!(tools
+            .tool_router
+            .get("list_command_recovery_queue")
+            .is_some());
+        assert!(tools.tool_router.get("inspect_command_recovery").is_some());
+        assert!(tools
+            .tool_router
+            .get("request_command_recovery_retry")
+            .is_none());
+        assert!(tools.tool_router.get("dismiss_command_recovery").is_none());
+        assert!(tools
+            .tool_router
+            .get("mark_command_recovery_terminal")
+            .is_none());
+
+        let inspect = tools
+            .tool_router
+            .get("inspect_command_recovery")
+            .expect("inspect recovery read tool exists");
+        let schema = serde_json::to_string(&inspect.input_schema).expect("schema serializes");
+        assert!(schema.contains("command_idempotency_id"));
+    }
+
+    #[tokio::test]
     async fn create_reservation_same_mcp_request_id_and_args_replays_stored_command_row() {
         let _env_lock = async_env_lock().lock().await;
         let _env = EnvVarGuard::set("CAPYINN_ENABLE_HIGH_RISK_MCP_WRITES", "1");
@@ -983,7 +1011,7 @@ impl HotelTools {
 
 #[tool_router]
 impl HotelTools {
-    // ─── Read Tools (11) ───
+    // ─── Read Tools (13) ───
 
     #[tool(
         description = "Get the current date/time, timezone, and hotel context. ALWAYS call this first to ground your responses in reality and avoid date hallucinations."
@@ -1146,6 +1174,34 @@ impl HotelTools {
         {
             Ok(result) => serde_json::to_string_pretty(&result).unwrap(),
             Err(e) => format!("Error: {}", e),
+        }
+    }
+
+    #[tool(
+        description = "List command recovery rows needing operator attention. Read-only: this does not retry, dismiss, or mark terminal."
+    )]
+    async fn list_command_recovery_queue(&self) -> String {
+        match crate::command_recovery::list_command_recovery_queue(&self.pool).await {
+            Ok(rows) => serde_json::to_string_pretty(&rows).unwrap(),
+            Err(error) => serde_json::to_string_pretty(&error).unwrap(),
+        }
+    }
+
+    #[tool(
+        description = "Inspect one command recovery row and its safe recovery history. Read-only: this does not retry, dismiss, or mark terminal."
+    )]
+    async fn inspect_command_recovery(
+        &self,
+        Parameters(input): Parameters<InspectCommandRecoveryInput>,
+    ) -> String {
+        match crate::command_recovery::inspect_command_recovery(
+            &self.pool,
+            input.command_idempotency_id,
+        )
+        .await
+        {
+            Ok(detail) => serde_json::to_string_pretty(&detail).unwrap(),
+            Err(error) => serde_json::to_string_pretty(&error).unwrap(),
         }
     }
 

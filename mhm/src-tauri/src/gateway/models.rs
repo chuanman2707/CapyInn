@@ -96,3 +96,9 @@ pub struct GetInvoiceInput {
     /// Booking ID to get invoice for
     pub booking_id: String,
 }
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct InspectCommandRecoveryInput {
+    /// Command ledger row id to inspect.
+    pub command_idempotency_id: i64,
+}

@@ -351,6 +351,8 @@ pub async fn test_pool() -> Pool<Sqlite> {
             error_summary_json TEXT,
             retryable INTEGER NOT NULL DEFAULT 0,
             lease_expires_at TEXT,
+            recovery_dismissed_at TEXT,
+            recovery_dismissed_by TEXT,
             created_at TEXT NOT NULL,
             updated_at TEXT NOT NULL,
             completed_at TEXT,

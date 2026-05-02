@@ -150,6 +150,16 @@
     "defaultMessage": "Dữ liệu đã thay đổi, vui lòng tải lại trước khi thao tác."
   },
   {
+    "code": "COMMAND_LEDGER_ROW_NOT_FOUND",
+    "kind": "user",
+    "defaultMessage": "Không tìm thấy dòng lệnh."
+  },
+  {
+    "code": "RECOVERY_REQUIRED",
+    "kind": "user",
+    "defaultMessage": "Cần xử lý khôi phục lệnh trước khi tiếp tục."
+  },
+  {
     "code": "SYSTEM_INTERNAL_ERROR",
     "kind": "system",
     "defaultMessage": "Có lỗi hệ thống, vui lòng thử lại"

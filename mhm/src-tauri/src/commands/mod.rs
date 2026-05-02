@@ -86,6 +86,7 @@ pub mod auth;
 pub mod billing;
 pub mod bookings;
 pub mod command_ledger;
+pub mod command_recovery;
 pub mod diagnostics;
 pub mod groups;
 pub mod guests;

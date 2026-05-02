@@ -876,6 +876,53 @@ pub(crate) async fn run_migrations(pool: &Pool<Sqlite>) -> Result<(), sqlx::Erro
 
         restore_foreign_keys_after_v14_migration(&mut conn, migration_result).await?;
     }
+
+    // ── V15: Command recovery queue and audit actions ──
+    if current < 15 {
+        let mut tx = pool.begin().await?;
+
+        for alter in [
+            "ALTER TABLE command_idempotency ADD COLUMN recovery_dismissed_at TEXT",
+            "ALTER TABLE command_idempotency ADD COLUMN recovery_dismissed_by TEXT",
+        ] {
+            execute_compat_alter(&mut tx, alter).await?;
+        }
+
+        sqlx::query(
+            "CREATE TABLE IF NOT EXISTS command_recovery_actions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                command_idempotency_id INTEGER NOT NULL,
+                action TEXT NOT NULL,
+                operator_id TEXT,
+                operator_role TEXT,
+                reason TEXT,
+                confirmed INTEGER NOT NULL DEFAULT 0,
+                created_at TEXT NOT NULL,
+                FOREIGN KEY(command_idempotency_id) REFERENCES command_idempotency(id)
+            )",
+        )
+        .execute(&mut *tx)
+        .await?;
+
+        sqlx::query(
+            "CREATE INDEX IF NOT EXISTS command_recovery_actions_command_idx
+             ON command_recovery_actions(command_idempotency_id, created_at)",
+        )
+        .execute(&mut *tx)
+        .await?;
+
+        sqlx::query(
+            "CREATE INDEX IF NOT EXISTS command_idempotency_recovery_queue_idx
+             ON command_idempotency(status, lease_expires_at, updated_at)
+             WHERE status IN ('in_progress', 'failed_retryable')
+               AND recovery_dismissed_at IS NULL",
+        )
+        .execute(&mut *tx)
+        .await?;
+
+        set_schema_version(&mut tx, 15).await?;
+        tx.commit().await?;
+    }
     Ok(())
 }
 
@@ -1148,7 +1195,7 @@ mod tests {
             .expect("reads final schema version")
             .get("version");
 
-        assert_eq!(version, 14);
+        assert_eq!(version, 15);
     }
 
     #[tokio::test]
@@ -1164,7 +1211,7 @@ mod tests {
             .expect("reads version")
             .get("version");
 
-        assert_eq!(version, 14);
+        assert_eq!(version, 15);
         assert_money_columns_are_integer(&pool).await;
     }
 
@@ -1452,7 +1499,7 @@ mod tests {
             .expect("reads final schema version")
             .get("version");
 
-        assert_eq!(version, 14);
+        assert_eq!(version, 15);
     }
 
     #[tokio::test]
@@ -1519,7 +1566,7 @@ mod tests {
             .expect("reads final schema version")
             .get("version");
 
-        assert_eq!(version, 14);
+        assert_eq!(version, 15);
     }
 
     #[tokio::test]
@@ -1560,6 +1607,71 @@ mod tests {
         );
         assert_eq!(
             sqlite_index_count(&pool, "folio_lines_origin_command_uq").await,
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn migration_v15_adds_command_recovery_schema() {
+        let pool = SqlitePool::connect("sqlite::memory:")
+            .await
+            .expect("connects in-memory sqlite");
+        run_migrations(&pool).await.expect("migrations run");
+
+        assert_eq!(
+            command_idempotency_column_count(&pool, "recovery_dismissed_at").await,
+            1
+        );
+        assert_eq!(
+            command_idempotency_column_count(&pool, "recovery_dismissed_by").await,
+            1
+        );
+
+        let table_count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM sqlite_master
+             WHERE type = 'table' AND name = 'command_recovery_actions'",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("reads recovery action table count");
+        assert_eq!(table_count, 1);
+
+        assert_eq!(
+            sqlite_index_count(&pool, "command_recovery_actions_command_idx").await,
+            1
+        );
+        assert_eq!(
+            sqlite_index_count(&pool, "command_idempotency_recovery_queue_idx").await,
+            1
+        );
+
+        let version = get_schema_version(&pool).await.expect("schema version");
+        assert_eq!(version, 15);
+    }
+
+    #[tokio::test]
+    async fn migration_v15_upgrades_existing_v14_database() {
+        let pool = SqlitePool::connect("sqlite::memory:")
+            .await
+            .expect("connects in-memory sqlite");
+        run_migrations(&pool).await.expect("initial migrations run");
+        sqlx::query("UPDATE schema_version SET version = 14")
+            .execute(&pool)
+            .await
+            .expect("rewinds schema version");
+
+        run_migrations(&pool).await.expect("v15 migration reruns");
+
+        assert_eq!(
+            command_idempotency_column_count(&pool, "recovery_dismissed_at").await,
+            1
+        );
+        assert_eq!(
+            command_idempotency_column_count(&pool, "recovery_dismissed_by").await,
+            1
+        );
+        assert_eq!(
+            sqlite_index_count(&pool, "command_idempotency_recovery_queue_idx").await,
             1
         );
     }
