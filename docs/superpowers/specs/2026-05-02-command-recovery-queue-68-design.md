@@ -163,15 +163,18 @@ For now, risk is computed from `command_name` with a small backend function. The
 
 Initial high-risk examples:
 
-- checkout
-- payment posting
-- folio charge posting
-- room move or stay modification
-- reservation cancellation
-- check-in
-- group checkout
-- night audit
-- invoice generation
+- `check_out`
+- `record_payment`
+- `add_folio_line`
+- `modify_reservation`
+- `cancel_reservation`
+- `confirm_reservation`
+- `check_in`
+- `extend_stay`
+- `group_checkin`
+- `group_checkout`
+- `generate_invoice`
+- night-audit commands if or when they enter the command boundary
 
 High-risk `request retry` and `mark terminal` actions require:
 
@@ -203,6 +206,42 @@ MCP/gateway must not expose:
 - dismiss
 - mark terminal
 
+## Action Response Contract
+
+Recovery action commands return `Ok(RecoveryActionResponse)` when the recovery action itself was accepted and recorded. They return `Err(CommandError)` only when the recovery action fails validation, authorization, confirmation, row eligibility, stale-state checks, or persistence.
+
+`request_command_recovery_retry` therefore returns `Ok` with:
+
+- `action = "retry_requested"`
+- `status = "recovery_required"`
+- `code = "RECOVERY_REQUIRED"`
+- `next_step` explaining that the caller must retry the original business command through the command boundary
+
+This is not treated as a failed Tauri command. It is a successful operator decision whose outcome is that CapyInn refuses to auto-mutate hotel truth.
+
+`mark_command_recovery_terminal` returns `Ok` when the terminal mark succeeds, and stores a structured terminal `CommandError` with `code = "RECOVERY_REQUIRED"` in the command row for future exact retries.
+
+Stale recovery actions return `Err(CommandError)` using `CONFLICT_INVALID_STATE_TRANSITION` with an operator-safe message such as "Recovery state changed, refresh the queue." A stale action includes cases where the row was reclaimed, completed, marked terminal, dismissed, or otherwise stopped being eligible between the caller's view and the attempted action.
+
+## Action Atomicity and Stale Guards
+
+Every mutating recovery action must use one short database transaction for validation, audit write, and any command-row update.
+
+Required pattern:
+
+1. Start a short transaction.
+2. Load the command row by `command_idempotency.id`.
+3. Recompute eligibility inside the transaction using the current status, current `lease_expires_at`, current `recovery_dismissed_at`, and the current time.
+4. Reject stale or ineligible rows with a structured `CommandError`.
+5. Insert the `command_recovery_actions` audit row.
+6. For `dismiss` and `mark terminal`, update the command row with a conditional `WHERE` that repeats the expected id, eligible status, expired lease condition where applicable, and dismiss marker condition.
+7. Require `rows_affected == 1`; otherwise roll back and return the stale-state error.
+8. Commit.
+
+This prevents an operator action based on an old queue view from hiding or terminal-marking a newer command attempt.
+
+`request retry` does not update the command row, but it still validates and writes its audit row inside one transaction so the audit action is only recorded for a currently eligible row.
+
 ## Action Behavior
 
 ### Inspect
@@ -216,10 +255,10 @@ MCP/gateway must not expose:
 1. Loads and validates the command row.
 2. Allows only expired `in_progress` or `failed_retryable` rows.
 3. Applies high-risk confirmation rules.
-4. Inserts `command_recovery_actions(action = 'retry_requested')`.
+4. Inserts `command_recovery_actions(action = 'retry_requested')` inside the same validation transaction.
 5. Leaves the command row status unchanged.
 6. Does not run the business command.
-7. Returns a structured outcome with `RECOVERY_REQUIRED`.
+7. Returns `Ok(RecoveryActionResponse)` with `code = 'RECOVERY_REQUIRED'`.
 
 The response must say that the command must be retried through the normal command boundary with the original valid business payload.
 
@@ -229,8 +268,8 @@ The response must say that the command must be retried through the normal comman
 
 1. Loads and validates the command row.
 2. Allows only rows currently eligible for the recovery queue.
-3. Inserts `command_recovery_actions(action = 'dismissed')`.
-4. Sets `recovery_dismissed_at` and `recovery_dismissed_by`.
+3. Inserts `command_recovery_actions(action = 'dismissed')` in the same transaction as the row update.
+4. Sets `recovery_dismissed_at` and `recovery_dismissed_by` through a conditional update guarded by the current eligible row state.
 5. Leaves command status unchanged.
 
 Dismiss does not prevent later inspect or retry. It only hides the current recovery item from the default queue.
@@ -242,8 +281,8 @@ Dismiss does not prevent later inspect or retry. It only hides the current recov
 1. Loads and validates the command row.
 2. Allows only expired `in_progress` or `failed_retryable` rows.
 3. Applies high-risk confirmation rules.
-4. Inserts `command_recovery_actions(action = 'marked_terminal')`.
-5. Updates the command row to `failed_terminal`.
+4. Inserts `command_recovery_actions(action = 'marked_terminal')` in the same transaction as the row update.
+5. Updates the command row to `failed_terminal` through a conditional update guarded by the current eligible row state.
 6. Writes `error_code = 'RECOVERY_REQUIRED'`.
 7. Writes a safe structured `error_json` and `error_summary_json`.
 8. Clears `retryable`, `lease_expires_at`, and dismiss markers.
@@ -287,10 +326,10 @@ Use `attention_reason` and `recovery_status` for queue/list state. Do not use `R
 
 Use `RECOVERY_REQUIRED` when a recovery action needs to explain that safe automatic completion is not possible. Examples:
 
-- `request retry` returns `RECOVERY_REQUIRED` because the operator decision has been recorded but the business command must be sent again through the command boundary.
+- `request retry` returns `Ok(RecoveryActionResponse)` with `code = 'RECOVERY_REQUIRED'` because the operator decision has been recorded but the business command must be sent again through the command boundary.
 - `mark terminal` stores a terminal structured error with `RECOVERY_REQUIRED` so a later exact retry receives a clear terminal outcome.
 
-All recovery errors and outcomes should use the structured command error envelope:
+Failed recovery actions should use the structured command error envelope:
 
 - `code`
 - `message`
@@ -354,14 +393,19 @@ Action tests:
 
 - inspect is read-only and writes no recovery action
 - retry request writes `retry_requested` audit action
+- retry request validates and audits in one transaction
 - retry request does not change command status
 - retry request does not run a business command
-- retry request returns `RECOVERY_REQUIRED`
+- retry request returns `Ok(RecoveryActionResponse)` with `RECOVERY_REQUIRED`
 - dismiss writes `dismissed` audit action
 - dismiss sets dismiss markers
+- dismiss audit and marker update are atomic
+- dismiss uses stale-row guards and rejects stale queue views
 - dismiss does not change command status
 - mark terminal writes `marked_terminal` audit action
 - mark terminal updates status to `failed_terminal`
+- mark terminal audit and row update are atomic
+- mark terminal uses stale-row guards and rejects stale queue views
 - mark terminal stores structured `RECOVERY_REQUIRED` error data
 - mark terminal prevents later reclaim of the same row
 - high-risk retry request and mark terminal require confirmation and non-empty reason
