@@ -139,7 +139,7 @@ pub struct CommandRecoveryActionRecord {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CommandRecoveryActionRequest {
     pub command_idempotency_id: i64,
-    pub confirmed: bool,
+    pub confirmed: Option<bool>,
     pub reason: Option<String>,
 }
 
@@ -148,9 +148,9 @@ pub struct RecoveryActionResponse {
     pub command_idempotency_id: i64,
     pub action: String,
     pub status: String,
-    pub code: String,
+    pub code: Option<String>,
     pub message: String,
-    pub next_step: String,
+    pub next_step: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -290,7 +290,8 @@ fn validate_confirmation(
     request: &CommandRecoveryActionRequest,
     reason: Option<&str>,
 ) -> CommandResult<()> {
-    if requires_confirmation(command_name) && (!request.confirmed || reason.is_none()) {
+    if requires_confirmation(command_name) && (request.confirmed != Some(true) || reason.is_none())
+    {
         return Err(approval_required_error());
     }
     Ok(())
@@ -359,15 +360,17 @@ fn recovery_action_response(
     command_idempotency_id: i64,
     action: &str,
     status: &str,
-    next_step: &str,
+    code: Option<&str>,
+    message: &str,
+    next_step: Option<&str>,
 ) -> RecoveryActionResponse {
     RecoveryActionResponse {
         command_idempotency_id,
         action: action.to_string(),
         status: status.to_string(),
-        code: codes::RECOVERY_REQUIRED.to_string(),
-        message: "Cần xử lý khôi phục lệnh trước khi tiếp tục.".to_string(),
-        next_step: next_step.to_string(),
+        code: code.map(str::to_string),
+        message: message.to_string(),
+        next_step: next_step.map(str::to_string),
     }
 }
 
@@ -410,7 +413,7 @@ pub async fn request_command_recovery_retry(
             "retry_requested",
             &operator,
             reason.as_deref(),
-            request.confirmed,
+            request.confirmed.unwrap_or(false),
             &now,
         )
         .await?;
@@ -419,7 +422,11 @@ pub async fn request_command_recovery_retry(
             request.command_idempotency_id,
             "retry_requested",
             "recovery_required",
-            "Retry request recorded for operator review.",
+            Some(codes::RECOVERY_REQUIRED),
+            "Recovery retry was requested; CapyInn will not replay the business command automatically.",
+            Some(
+                "Retry the original business command through the command boundary with the original valid payload.",
+            ),
         ))
     }
     .await;
@@ -456,7 +463,7 @@ pub async fn dismiss_command_recovery(
             "dismissed",
             &operator,
             reason.as_deref(),
-            request.confirmed,
+            request.confirmed.unwrap_or(false),
             &now,
         )
         .await?;
@@ -490,7 +497,9 @@ pub async fn dismiss_command_recovery(
             request.command_idempotency_id,
             "dismissed",
             "dismissed",
+            None,
             "Recovery item dismissed from the active queue.",
+            None,
         ))
     }
     .await;
@@ -528,7 +537,7 @@ pub async fn mark_command_recovery_terminal(
             "marked_terminal",
             &operator,
             reason.as_deref(),
-            request.confirmed,
+            request.confirmed.unwrap_or(false),
             &now,
         )
         .await?;
@@ -574,7 +583,9 @@ pub async fn mark_command_recovery_terminal(
             request.command_idempotency_id,
             "marked_terminal",
             "failed_terminal",
+            Some(codes::RECOVERY_REQUIRED),
             "Command marked terminal with recovery-required error details.",
+            None,
         ))
     }
     .await;
@@ -671,7 +682,7 @@ mod tests {
 
     fn recovery_request(
         command_idempotency_id: i64,
-        confirmed: bool,
+        confirmed: Option<bool>,
         reason: Option<&str>,
     ) -> CommandRecoveryActionRequest {
         CommandRecoveryActionRequest {
@@ -710,7 +721,7 @@ mod tests {
         let response = request_command_recovery_retry(
             &pool,
             recovery_operator(),
-            recovery_request(id, true, Some("operator reviewed retry")),
+            recovery_request(id, Some(true), Some("operator reviewed retry")),
         )
         .await
         .expect("requests retry");
@@ -718,7 +729,11 @@ mod tests {
         assert_eq!(response.command_idempotency_id, id);
         assert_eq!(response.action, "retry_requested");
         assert_eq!(response.status, "recovery_required");
-        assert_eq!(response.code, codes::RECOVERY_REQUIRED);
+        assert_eq!(response.code.as_deref(), Some(codes::RECOVERY_REQUIRED));
+        assert!(response
+            .next_step
+            .as_deref()
+            .is_some_and(|step| step.contains("command boundary")));
         assert_eq!(
             sqlx::query_scalar::<_, String>("SELECT status FROM command_idempotency WHERE id = ?")
                 .bind(id)
@@ -739,13 +754,15 @@ mod tests {
         let response = dismiss_command_recovery(
             &pool,
             recovery_operator(),
-            recovery_request(id, false, Some("handled manually")),
+            recovery_request(id, None, Some("handled manually")),
         )
         .await
         .expect("dismisses recovery row");
 
         assert_eq!(response.action, "dismissed");
         assert_eq!(response.status, "dismissed");
+        assert!(response.code.is_none());
+        assert!(response.next_step.is_none());
         let row = sqlx::query(
             "SELECT status, recovery_dismissed_at, recovery_dismissed_by
              FROM command_idempotency WHERE id = ?",
@@ -775,7 +792,7 @@ mod tests {
         let missing_confirmation = mark_command_recovery_terminal(
             &pool,
             recovery_operator(),
-            recovery_request(id, false, Some("reviewed")),
+            recovery_request(id, Some(false), Some("reviewed")),
         )
         .await
         .expect_err("requires confirmation");
@@ -784,7 +801,7 @@ mod tests {
         let missing_reason = mark_command_recovery_terminal(
             &pool,
             recovery_operator(),
-            recovery_request(id, true, Some("   ")),
+            recovery_request(id, Some(true), Some("   ")),
         )
         .await
         .expect_err("requires reason");
@@ -800,7 +817,7 @@ mod tests {
         let missing_confirmation = request_command_recovery_retry(
             &pool,
             recovery_operator(),
-            recovery_request(id, false, Some("reviewed")),
+            recovery_request(id, Some(false), Some("reviewed")),
         )
         .await
         .expect_err("requires confirmation");
@@ -809,7 +826,7 @@ mod tests {
         let missing_reason = request_command_recovery_retry(
             &pool,
             recovery_operator(),
-            recovery_request(id, true, None),
+            recovery_request(id, Some(true), None),
         )
         .await
         .expect_err("requires reason");
@@ -825,7 +842,7 @@ mod tests {
         let response = mark_command_recovery_terminal(
             &pool,
             recovery_operator(),
-            recovery_request(id, true, Some("cannot safely retry")),
+            recovery_request(id, Some(true), Some("cannot safely retry")),
         )
         .await
         .expect("marks terminal");
@@ -875,7 +892,7 @@ mod tests {
         let response = mark_command_recovery_terminal(
             &pool,
             recovery_operator(),
-            recovery_request(id, false, None),
+            recovery_request(id, None, None),
         )
         .await
         .expect("marks low risk command terminal without confirmation");
@@ -896,7 +913,7 @@ mod tests {
         let dismissed_error = dismiss_command_recovery(
             &pool,
             recovery_operator(),
-            recovery_request(already_dismissed, false, None),
+            recovery_request(already_dismissed, None, None),
         )
         .await
         .expect_err("already dismissed is stale");
@@ -908,7 +925,7 @@ mod tests {
         let live_error = dismiss_command_recovery(
             &pool,
             recovery_operator(),
-            recovery_request(live_in_progress, false, None),
+            recovery_request(live_in_progress, None, None),
         )
         .await
         .expect_err("live in-progress row is not eligible");
