@@ -2947,9 +2947,27 @@ mod tests {
         .await
         .expect("marks recovery dismissed");
 
+        let command_name = ctx.command_name.clone();
+        let idempotency_key = ctx.idempotency_key.clone();
         let second = WriteCommandExecutor::new(pool.clone())
-            .execute(&ctx, request, |_tx| {
-                Box::pin(async move { Ok(serde_json::json!({ "ok": true })) })
+            .execute(&ctx, request, |tx| {
+                Box::pin(async move {
+                    let row = sqlx::query(
+                        "SELECT recovery_dismissed_at, recovery_dismissed_by
+                         FROM command_idempotency
+                         WHERE command_name = ? AND idempotency_key = ?",
+                    )
+                    .bind(&command_name)
+                    .bind(&idempotency_key)
+                    .fetch_one(&mut **tx)
+                    .await
+                    .map_err(system_error)?;
+
+                    assert_eq!(row.get::<Option<String>, _>("recovery_dismissed_at"), None);
+                    assert_eq!(row.get::<Option<String>, _>("recovery_dismissed_by"), None);
+
+                    Ok(serde_json::json!({ "ok": true }))
+                })
             })
             .await
             .expect("retryable failure is reclaimed and rerun");
