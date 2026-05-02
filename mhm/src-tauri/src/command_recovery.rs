@@ -456,7 +456,8 @@ pub async fn dismiss_command_recovery(
         .map_err(system_error)?;
 
     let result = async {
-        eligible_recovery_row_tx(&mut tx, request.command_idempotency_id, &now).await?;
+        let row = eligible_recovery_row_tx(&mut tx, request.command_idempotency_id, &now).await?;
+        validate_confirmation(&row.command_name, &request, reason.as_deref())?;
         insert_recovery_action_tx(
             &mut tx,
             request.command_idempotency_id,
@@ -749,7 +750,7 @@ mod tests {
     #[tokio::test]
     async fn dismiss_audits_sets_marker_and_leaves_status_unchanged() {
         let pool = test_pool().await;
-        let id = seed_recovery_row(&pool, "check_out", "failed_retryable", None, false).await;
+        let id = seed_recovery_row(&pool, "refresh_cache", "failed_retryable", None, false).await;
 
         let response = dismiss_command_recovery(
             &pool,
@@ -782,6 +783,31 @@ mod tests {
         );
         assert_eq!(action_count(&pool, id).await, 1);
         assert_eq!(action_field(&pool, id, "action").await, "dismissed");
+    }
+
+    #[tokio::test]
+    async fn high_risk_dismiss_requires_confirmation_and_reason() {
+        let pool = test_pool().await;
+        let id = seed_recovery_row(&pool, "check_out", "failed_retryable", None, false).await;
+
+        let missing_confirmation = dismiss_command_recovery(
+            &pool,
+            recovery_operator(),
+            recovery_request(id, Some(false), Some("reviewed")),
+        )
+        .await
+        .expect_err("requires confirmation");
+        assert_eq!(missing_confirmation.code, codes::APPROVAL_REQUIRED);
+
+        let missing_reason = dismiss_command_recovery(
+            &pool,
+            recovery_operator(),
+            recovery_request(id, Some(true), Some("   ")),
+        )
+        .await
+        .expect_err("requires reason");
+        assert_eq!(missing_reason.code, codes::APPROVAL_REQUIRED);
+        assert_eq!(action_count(&pool, id).await, 0);
     }
 
     #[tokio::test]
