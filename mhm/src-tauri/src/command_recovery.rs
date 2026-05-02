@@ -262,6 +262,21 @@ struct EligibleRecoveryRow {
     command_name: String,
 }
 
+#[derive(Debug, Clone, Copy)]
+enum DismissedRecoveryEligibility {
+    ExcludeDismissed,
+    IncludeDismissed,
+}
+
+impl DismissedRecoveryEligibility {
+    fn include_dismissed(self) -> i64 {
+        match self {
+            Self::ExcludeDismissed => 0,
+            Self::IncludeDismissed => 1,
+        }
+    }
+}
+
 fn invalid_recovery_state_error() -> CommandError {
     CommandError::user(
         codes::CONFLICT_INVALID_STATE_TRANSITION,
@@ -301,18 +316,20 @@ async fn eligible_recovery_row_tx(
     tx: &mut Transaction<'_, Sqlite>,
     id: i64,
     now: &str,
+    dismissed_eligibility: DismissedRecoveryEligibility,
 ) -> CommandResult<EligibleRecoveryRow> {
     let row = sqlx::query(
         "SELECT command_name
          FROM command_idempotency
          WHERE id = ?
-           AND recovery_dismissed_at IS NULL
+           AND (? = 1 OR recovery_dismissed_at IS NULL)
            AND (
                 status = 'failed_retryable'
                 OR (status = 'in_progress' AND lease_expires_at IS NOT NULL AND lease_expires_at <= ?)
            )",
     )
     .bind(id)
+    .bind(dismissed_eligibility.include_dismissed())
     .bind(now)
     .fetch_optional(&mut **tx)
     .await
@@ -325,6 +342,31 @@ async fn eligible_recovery_row_tx(
     Ok(EligibleRecoveryRow {
         command_name: row.try_get("command_name").map_err(system_error)?,
     })
+}
+
+async fn clear_recovery_dismiss_marker_tx(
+    tx: &mut Transaction<'_, Sqlite>,
+    command_idempotency_id: i64,
+    now: &str,
+) -> CommandResult<()> {
+    sqlx::query(
+        "UPDATE command_idempotency
+         SET recovery_dismissed_at = NULL,
+             recovery_dismissed_by = NULL,
+             updated_at = ?
+         WHERE id = ?
+           AND (
+                recovery_dismissed_at IS NOT NULL
+                OR recovery_dismissed_by IS NOT NULL
+           )",
+    )
+    .bind(now)
+    .bind(command_idempotency_id)
+    .execute(&mut **tx)
+    .await
+    .map_err(system_error)?;
+
+    Ok(())
 }
 
 async fn insert_recovery_action_tx(
@@ -405,7 +447,13 @@ pub async fn request_command_recovery_retry(
         .map_err(system_error)?;
 
     let result = async {
-        let row = eligible_recovery_row_tx(&mut tx, request.command_idempotency_id, &now).await?;
+        let row = eligible_recovery_row_tx(
+            &mut tx,
+            request.command_idempotency_id,
+            &now,
+            DismissedRecoveryEligibility::IncludeDismissed,
+        )
+        .await?;
         validate_confirmation(&row.command_name, &request, reason.as_deref())?;
         insert_recovery_action_tx(
             &mut tx,
@@ -417,6 +465,7 @@ pub async fn request_command_recovery_retry(
             &now,
         )
         .await?;
+        clear_recovery_dismiss_marker_tx(&mut tx, request.command_idempotency_id, &now).await?;
 
         Ok(recovery_action_response(
             request.command_idempotency_id,
@@ -456,7 +505,13 @@ pub async fn dismiss_command_recovery(
         .map_err(system_error)?;
 
     let result = async {
-        let row = eligible_recovery_row_tx(&mut tx, request.command_idempotency_id, &now).await?;
+        let row = eligible_recovery_row_tx(
+            &mut tx,
+            request.command_idempotency_id,
+            &now,
+            DismissedRecoveryEligibility::ExcludeDismissed,
+        )
+        .await?;
         validate_confirmation(&row.command_name, &request, reason.as_deref())?;
         insert_recovery_action_tx(
             &mut tx,
@@ -530,7 +585,13 @@ pub async fn mark_command_recovery_terminal(
         .map_err(system_error)?;
 
     let result = async {
-        let row = eligible_recovery_row_tx(&mut tx, request.command_idempotency_id, &now).await?;
+        let row = eligible_recovery_row_tx(
+            &mut tx,
+            request.command_idempotency_id,
+            &now,
+            DismissedRecoveryEligibility::IncludeDismissed,
+        )
+        .await?;
         validate_confirmation(&row.command_name, &request, reason.as_deref())?;
         insert_recovery_action_tx(
             &mut tx,
@@ -559,7 +620,6 @@ pub async fn mark_command_recovery_terminal(
                  recovery_dismissed_at = NULL,
                  recovery_dismissed_by = NULL
              WHERE id = ?
-               AND recovery_dismissed_at IS NULL
                AND (
                     status = 'failed_retryable'
                     OR (status = 'in_progress' AND lease_expires_at IS NOT NULL AND lease_expires_at <= ?)
@@ -748,6 +808,40 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn retry_request_reopens_dismissed_recovery_row() {
+        let pool = test_pool().await;
+        let id = seed_recovery_row(&pool, "check_out", "failed_retryable", None, true).await;
+
+        let response = request_command_recovery_retry(
+            &pool,
+            recovery_operator(),
+            recovery_request(id, Some(true), Some("dismissed by mistake")),
+        )
+        .await
+        .expect("requests retry for dismissed row");
+
+        assert_eq!(response.action, "retry_requested");
+        assert_eq!(response.status, "recovery_required");
+        let row = sqlx::query(
+            "SELECT status, recovery_dismissed_at, recovery_dismissed_by
+             FROM command_idempotency WHERE id = ?",
+        )
+        .bind(id)
+        .fetch_one(&pool)
+        .await
+        .expect("reads reopened recovery row");
+        assert_eq!(row.get::<String, _>("status"), "failed_retryable");
+        assert!(row
+            .get::<Option<String>, _>("recovery_dismissed_at")
+            .is_none());
+        assert!(row
+            .get::<Option<String>, _>("recovery_dismissed_by")
+            .is_none());
+        assert_eq!(action_count(&pool, id).await, 1);
+        assert_eq!(action_field(&pool, id, "action").await, "retry_requested");
+    }
+
+    #[tokio::test]
     async fn dismiss_audits_sets_marker_and_leaves_status_unchanged() {
         let pool = test_pool().await;
         let id = seed_recovery_row(&pool, "refresh_cache", "failed_retryable", None, false).await;
@@ -908,6 +1002,40 @@ mod tests {
             .get::<Option<String>, _>("recovery_dismissed_by")
             .is_none());
         assert_eq!(action_count(&pool, id).await, 1);
+    }
+
+    #[tokio::test]
+    async fn mark_terminal_closes_dismissed_recovery_row() {
+        let pool = test_pool().await;
+        let id = seed_recovery_row(&pool, "check_out", "failed_retryable", None, true).await;
+
+        let response = mark_command_recovery_terminal(
+            &pool,
+            recovery_operator(),
+            recovery_request(id, Some(true), Some("terminal after review")),
+        )
+        .await
+        .expect("marks dismissed row terminal");
+
+        assert_eq!(response.action, "marked_terminal");
+        assert_eq!(response.status, "failed_terminal");
+        let row = sqlx::query(
+            "SELECT status, recovery_dismissed_at, recovery_dismissed_by
+             FROM command_idempotency WHERE id = ?",
+        )
+        .bind(id)
+        .fetch_one(&pool)
+        .await
+        .expect("reads terminal recovery row");
+        assert_eq!(row.get::<String, _>("status"), "failed_terminal");
+        assert!(row
+            .get::<Option<String>, _>("recovery_dismissed_at")
+            .is_none());
+        assert!(row
+            .get::<Option<String>, _>("recovery_dismissed_by")
+            .is_none());
+        assert_eq!(action_count(&pool, id).await, 1);
+        assert_eq!(action_field(&pool, id, "action").await, "marked_terminal");
     }
 
     #[tokio::test]
