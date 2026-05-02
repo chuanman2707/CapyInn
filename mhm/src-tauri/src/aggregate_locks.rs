@@ -125,6 +125,45 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn mixed_group_booking_room_and_folio_keys_are_canonicalized() {
+        let left = canonicalize_lock_keys(vec![
+            group_key("G1").unwrap(),
+            booking_key("B2").unwrap(),
+            room_key("R2").unwrap(),
+            folio_key("B2").unwrap(),
+            booking_key("B1").unwrap(),
+            room_key("R1").unwrap(),
+            folio_key("B1").unwrap(),
+            group_key("G1").unwrap(),
+        ])
+        .unwrap();
+        let right = canonicalize_lock_keys(vec![
+            folio_key("B1").unwrap(),
+            room_key("R1").unwrap(),
+            booking_key("B1").unwrap(),
+            folio_key("B2").unwrap(),
+            room_key("R2").unwrap(),
+            booking_key("B2").unwrap(),
+            group_key("G1").unwrap(),
+        ])
+        .unwrap();
+
+        assert_eq!(left, right);
+        assert_eq!(
+            left,
+            vec![
+                "booking:B1".to_string(),
+                "booking:B2".to_string(),
+                "folio:B1".to_string(),
+                "folio:B2".to_string(),
+                "group:G1".to_string(),
+                "room:R1".to_string(),
+                "room:R2".to_string(),
+            ]
+        );
+    }
+
+    #[tokio::test]
     async fn canonicalize_lock_keys_rejects_empty_input() {
         let err = canonicalize_lock_keys(Vec::<String>::new()).expect_err("empty keys reject");
 
@@ -139,7 +178,10 @@ mod tests {
 
         let second_manager = manager.clone();
         let second = tokio::spawn(async move {
-            second_manager.acquire(["room:R1"]).await.expect("second lock")
+            second_manager
+                .acquire(["room:R1"])
+                .await
+                .expect("second lock")
         });
 
         tokio::time::sleep(std::time::Duration::from_millis(25)).await;
@@ -158,7 +200,10 @@ mod tests {
 
         let second_manager = manager.clone();
         let second = tokio::spawn(async move {
-            let second_guard = second_manager.acquire(["room:R2"]).await.expect("second lock");
+            let second_guard = second_manager
+                .acquire(["room:R2"])
+                .await
+                .expect("second lock");
             acquired_tx
                 .send(second_guard.keys().to_vec())
                 .expect("main task waits for acquired signal");

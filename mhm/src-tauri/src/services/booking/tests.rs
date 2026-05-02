@@ -20,7 +20,7 @@ use super::{
     billing_service::{
         add_folio_line, add_folio_line_idempotent, record_cancellation_fee_tx, record_deposit_tx,
         record_deposit_with_origin_tx, record_payment, record_payment_idempotent,
-        record_payment_returning_id_tx, record_payment_tx,
+        record_payment_returning_id_tx, record_payment_tx, record_payment_with_origin_tx,
     },
     group_lifecycle, group_service_management, guest_service, reservation_lifecycle,
     stay_lifecycle,
@@ -1294,6 +1294,13 @@ async fn group_checkout_idempotent_final_payment_locks_group_and_candidate_folio
     .await
     .unwrap();
     let lock_keys: Vec<String> = serde_json::from_str(&lock_keys_json).unwrap();
+    let mut sorted_lock_keys = lock_keys.clone();
+    sorted_lock_keys.sort();
+    sorted_lock_keys.dedup();
+    assert_eq!(
+        lock_keys, sorted_lock_keys,
+        "group checkout lock keys must be sorted and deduplicated: {lock_keys_json}"
+    );
 
     assert!(lock_keys.contains(&format!("group:{}", group.id)));
     let folio_lock_count = lock_keys
@@ -2982,6 +2989,54 @@ async fn record_deposit_with_origin_rejects_blank_key_before_write() {
         .await
         .unwrap();
     assert_eq!(count, 0);
+}
+
+#[tokio::test]
+async fn duplicate_transaction_origin_is_blocked_by_unique_origin_ordinal() {
+    let pool = test_pool().await;
+    seed_room(&pool, "R-TXN-ORIGIN-DUP").await.unwrap();
+    seed_active_booking(&pool, "B-TXN-ORIGIN-DUP", "R-TXN-ORIGIN-DUP")
+        .await
+        .unwrap();
+    let origin = OriginSideEffect::new("origin-duplicate-transaction", 0).unwrap();
+
+    let mut first_tx = crate::services::booking::support::begin_tx(&pool)
+        .await
+        .unwrap();
+    record_payment_with_origin_tx(
+        &mut first_tx,
+        "B-TXN-ORIGIN-DUP",
+        25_000,
+        "Duplicate origin payment",
+        &origin,
+    )
+    .await
+    .unwrap();
+    first_tx.commit().await.unwrap();
+
+    let mut second_tx = crate::services::booking::support::begin_tx(&pool)
+        .await
+        .unwrap();
+    let duplicate = record_payment_with_origin_tx(
+        &mut second_tx,
+        "B-TXN-ORIGIN-DUP",
+        25_000,
+        "Duplicate origin payment",
+        &origin,
+    )
+    .await;
+    assert!(duplicate.is_err(), "duplicate transaction origin must fail");
+    second_tx.rollback().await.unwrap();
+
+    let count: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM transactions
+         WHERE origin_idempotency_key = ? AND origin_transaction_ordinal = 0",
+    )
+    .bind("origin-duplicate-transaction")
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(count, 1);
 }
 
 #[tokio::test]
@@ -5034,6 +5089,72 @@ async fn check_in_idempotent_retry_replays_and_does_not_duplicate_rows() {
 }
 
 #[tokio::test]
+async fn two_check_in_commands_for_same_room_leave_one_booking_and_consistent_calendar() {
+    let pool = test_pool().await;
+    seed_room(&pool, "R-CHECKIN-RACE").await.unwrap();
+    seed_pricing_rule(&pool, "standard", 250_000).await.unwrap();
+    let first_ctx = crate::command_idempotency::WriteCommandContext::for_internal_test(
+        "req-checkin-race-1",
+        "idem-checkin-race-1",
+        "check_in",
+    );
+    let second_ctx = crate::command_idempotency::WriteCommandContext::for_internal_test(
+        "req-checkin-race-2",
+        "idem-checkin-race-2",
+        "check_in",
+    );
+
+    let (first, second) = tokio::join!(
+        stay_lifecycle::check_in_idempotent(
+            &pool,
+            &first_ctx,
+            minimal_checkin_request("R-CHECKIN-RACE"),
+            Some("user-1".to_string())
+        ),
+        stay_lifecycle::check_in_idempotent(
+            &pool,
+            &second_ctx,
+            minimal_checkin_request("R-CHECKIN-RACE"),
+            Some("user-2".to_string())
+        )
+    );
+
+    assert_eq!(
+        usize::from(first.is_ok()) + usize::from(second.is_ok()),
+        1,
+        "exactly one concurrent check-in should succeed"
+    );
+    assert_eq!(
+        usize::from(first.is_err()) + usize::from(second.is_err()),
+        1,
+        "exactly one concurrent check-in should fail"
+    );
+
+    let booking_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM bookings WHERE room_id = ?")
+        .bind("R-CHECKIN-RACE")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(booking_count, 1);
+
+    let room_status: String = sqlx::query_scalar("SELECT status FROM rooms WHERE id = ?")
+        .bind("R-CHECKIN-RACE")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(room_status, "occupied");
+
+    let occupied_calendar_count: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM room_calendar WHERE room_id = ? AND status = 'occupied'",
+    )
+    .bind("R-CHECKIN-RACE")
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(occupied_calendar_count, 2);
+}
+
+#[tokio::test]
 async fn check_in_idempotent_same_key_changed_guest_conflicts() {
     let pool = test_pool().await;
     seed_room(&pool, "R-CHECKIN-HASH").await.unwrap();
@@ -5130,6 +5251,55 @@ async fn check_in_idempotent_duplicate_in_flight_returns_conflict() {
         error.code,
         crate::app_error::codes::CONFLICT_DUPLICATE_IN_FLIGHT
     );
+}
+
+#[tokio::test]
+async fn check_in_fails_when_second_pool_blocks_room_calendar_first() {
+    let (pool_a, pool_b, db_path) = shared_file_test_pools("second-pool-calendar").await;
+    seed_room(&pool_a, "R-2POOL-CALENDAR").await.unwrap();
+    seed_pricing_rule(&pool_a, "standard", 250_000)
+        .await
+        .unwrap();
+
+    let today = Local::now().date_naive().to_string();
+    sqlx::query(
+        "INSERT INTO room_calendar (room_id, date, booking_id, status) VALUES (?, ?, NULL, 'occupied')",
+    )
+    .bind("R-2POOL-CALENDAR")
+    .bind(today)
+    .execute(&pool_b)
+    .await
+    .unwrap();
+
+    let ctx = crate::command_idempotency::WriteCommandContext::for_internal_test(
+        "req-checkin-2pool-calendar",
+        "idem-checkin-2pool-calendar",
+        "check_in",
+    );
+    let error = stay_lifecycle::check_in_idempotent(
+        &pool_a,
+        &ctx,
+        minimal_checkin_request("R-2POOL-CALENDAR"),
+        Some("user-1".to_string()),
+    )
+    .await
+    .expect_err("check-in should reject calendar row inserted by second pool");
+
+    assert_eq!(
+        error.code,
+        crate::app_error::codes::CONFLICT_ROOM_UNAVAILABLE
+    );
+
+    let booking_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM bookings WHERE room_id = ?")
+        .bind("R-2POOL-CALENDAR")
+        .fetch_one(&pool_a)
+        .await
+        .unwrap();
+    assert_eq!(booking_count, 0);
+
+    pool_a.close().await;
+    pool_b.close().await;
+    let _ = std::fs::remove_file(db_path);
 }
 
 #[tokio::test]
@@ -6163,6 +6333,46 @@ async fn extend_stay_idempotent_duplicate_in_flight_returns_conflict() {
         error.code,
         crate::app_error::codes::CONFLICT_DUPLICATE_IN_FLIGHT
     );
+}
+
+#[tokio::test]
+async fn extend_stay_fails_when_second_pool_checked_out_booking_first() {
+    let (pool_a, pool_b, db_path) =
+        shared_file_test_pools("second-pool-extend-after-checkout").await;
+    seed_room(&pool_a, "R-2POOL-EXTEND").await.unwrap();
+    seed_active_booking(&pool_a, "B-2POOL-EXTEND", "R-2POOL-EXTEND")
+        .await
+        .unwrap();
+
+    sqlx::query("UPDATE bookings SET status = 'checked_out' WHERE id = ?")
+        .bind("B-2POOL-EXTEND")
+        .execute(&pool_b)
+        .await
+        .unwrap();
+
+    let ctx = crate::command_idempotency::WriteCommandContext::for_internal_test(
+        "req-extend-2pool-checkout",
+        "idem-extend-2pool-checkout",
+        "extend_stay",
+    );
+    let error = stay_lifecycle::extend_stay_idempotent(&pool_a, &ctx, "B-2POOL-EXTEND")
+        .await
+        .expect_err("extend stay should reject booking checked out by second pool");
+
+    assert_eq!(error.code, crate::app_error::codes::BOOKING_INVALID_STATE);
+
+    let charge_count: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM transactions WHERE booking_id = ? AND note = ?")
+            .bind("B-2POOL-EXTEND")
+            .bind("Extended stay +1 night")
+            .fetch_one(&pool_a)
+            .await
+            .unwrap();
+    assert_eq!(charge_count, 0);
+
+    pool_a.close().await;
+    pool_b.close().await;
+    let _ = std::fs::remove_file(db_path);
 }
 
 #[tokio::test]
@@ -7287,4 +7497,59 @@ async fn insert_folio_line_with_origin_writes_origin_key_and_ordinal() {
         "idem-folio-1"
     );
     assert_eq!(row.get::<i64, _>("origin_line_ordinal"), 0);
+}
+
+#[tokio::test]
+async fn duplicate_folio_origin_is_blocked_by_unique_origin_ordinal() {
+    let pool = test_pool().await;
+    seed_room(&pool, "R-FOLIO-ORIGIN-DUP").await.unwrap();
+    seed_active_booking(&pool, "B-FOLIO-ORIGIN-DUP", "R-FOLIO-ORIGIN-DUP")
+        .await
+        .unwrap();
+    let origin = OriginSideEffect::new("origin-duplicate-folio", 0).unwrap();
+
+    let mut first_tx = crate::services::booking::support::begin_tx(&pool)
+        .await
+        .unwrap();
+    crate::repositories::booking::folio_repository::insert_folio_line_with_origin_tx(
+        &mut first_tx,
+        "B-FOLIO-ORIGIN-DUP",
+        "laundry",
+        "Duplicate origin folio",
+        25_000,
+        Some("staff-1"),
+        "2026-04-27T08:00:00+07:00",
+        &origin,
+    )
+    .await
+    .unwrap();
+    first_tx.commit().await.unwrap();
+
+    let mut second_tx = crate::services::booking::support::begin_tx(&pool)
+        .await
+        .unwrap();
+    let duplicate =
+        crate::repositories::booking::folio_repository::insert_folio_line_with_origin_tx(
+            &mut second_tx,
+            "B-FOLIO-ORIGIN-DUP",
+            "laundry",
+            "Duplicate origin folio",
+            25_000,
+            Some("staff-1"),
+            "2026-04-27T08:00:00+07:00",
+            &origin,
+        )
+        .await;
+    assert!(duplicate.is_err(), "duplicate folio origin must fail");
+    second_tx.rollback().await.unwrap();
+
+    let count: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM folio_lines
+         WHERE origin_idempotency_key = ? AND origin_line_ordinal = 0",
+    )
+    .bind("origin-duplicate-folio")
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(count, 1);
 }

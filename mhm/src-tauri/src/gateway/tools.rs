@@ -537,29 +537,32 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn create_reservation_is_default_denied_without_creating_booking() {
+    async fn create_reservation_is_default_supervised_approval_required_without_creating_booking() {
         let _env_lock = async_env_lock().lock().await;
-        let _env = EnvVarGuard::remove("CAPYINN_ENABLE_HIGH_RISK_MCP_WRITES");
+        let _autonomy = EnvVarGuard::remove("CAPYINN_MCP_AUTONOMY");
+        let _legacy = EnvVarGuard::remove("CAPYINN_ENABLE_HIGH_RISK_MCP_WRITES");
 
         let pool = test_pool().await;
         seed_room(&pool, "R199", "standard").await;
         seed_pricing_rule(&pool, "standard", 600_000).await;
         let tools = HotelTools::new(pool.clone(), None);
+        let request_id = mcp_request_id("req-create-supervised");
 
         let output = tools
-            .create_reservation(
-                Parameters(create_reservation_input("R199")),
-                mcp_request_id("req-create-denied"),
-            )
+            .create_reservation(Parameters(create_reservation_input("R199")), request_id)
             .await;
 
         let envelope: Value = serde_json::from_str(&output).expect("error envelope json");
         assert_eq!(envelope["ok"].as_bool(), Some(false));
         assert_eq!(
             envelope["error"]["code"].as_str(),
-            Some(codes::WRITE_TOOL_DISABLED)
+            Some(codes::APPROVAL_REQUIRED)
         );
         assert_eq!(envelope["error"]["kind"].as_str(), Some("policy"));
+        assert_eq!(
+            envelope["error"]["request_id"].as_str(),
+            Some("string:req-create-supervised")
+        );
 
         let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM bookings WHERE room_id = ?")
             .bind("R199")
@@ -570,8 +573,120 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn create_reservation_read_only_disabled_without_creating_booking() {
+        let _env_lock = async_env_lock().lock().await;
+        let _autonomy = EnvVarGuard::set("CAPYINN_MCP_AUTONOMY", "read_only");
+        let _legacy = EnvVarGuard::remove("CAPYINN_ENABLE_HIGH_RISK_MCP_WRITES");
+
+        let pool = test_pool().await;
+        seed_room(&pool, "R197", "standard").await;
+        seed_pricing_rule(&pool, "standard", 600_000).await;
+        let tools = HotelTools::new(pool.clone(), None);
+
+        let output = tools
+            .create_reservation(
+                Parameters(create_reservation_input("R197")),
+                mcp_request_id("req-create-read-only"),
+            )
+            .await;
+
+        let envelope: Value = serde_json::from_str(&output).expect("error envelope json");
+        assert_eq!(envelope["ok"].as_bool(), Some(false));
+        assert_eq!(
+            envelope["error"]["code"].as_str(),
+            Some(codes::WRITE_TOOL_DISABLED)
+        );
+        assert_eq!(
+            envelope["error"]["request_id"].as_str(),
+            Some("string:req-create-read-only")
+        );
+
+        let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM bookings WHERE room_id = ?")
+            .bind("R197")
+            .fetch_one(&pool)
+            .await
+            .expect("booking count");
+        assert_eq!(count, 0);
+    }
+
+    #[tokio::test]
+    async fn create_reservation_full_disabled_without_creating_booking() {
+        let _env_lock = async_env_lock().lock().await;
+        let _autonomy = EnvVarGuard::set("CAPYINN_MCP_AUTONOMY", "full");
+        let _legacy = EnvVarGuard::remove("CAPYINN_ENABLE_HIGH_RISK_MCP_WRITES");
+
+        let pool = test_pool().await;
+        seed_room(&pool, "R198", "standard").await;
+        seed_pricing_rule(&pool, "standard", 600_000).await;
+        let tools = HotelTools::new(pool.clone(), None);
+
+        let output = tools
+            .create_reservation(
+                Parameters(create_reservation_input("R198")),
+                mcp_request_id("req-create-full"),
+            )
+            .await;
+
+        let envelope: Value = serde_json::from_str(&output).expect("error envelope json");
+        assert_eq!(envelope["ok"].as_bool(), Some(false));
+        assert_eq!(
+            envelope["error"]["code"].as_str(),
+            Some(codes::WRITE_TOOL_DISABLED)
+        );
+        assert_eq!(
+            envelope["error"]["request_id"].as_str(),
+            Some("string:req-create-full")
+        );
+
+        let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM bookings WHERE room_id = ?")
+            .bind("R198")
+            .fetch_one(&pool)
+            .await
+            .expect("booking count");
+        assert_eq!(count, 0);
+    }
+
+    #[tokio::test]
+    async fn create_reservation_legacy_flag_still_requires_approval_without_creating_booking() {
+        let _env_lock = async_env_lock().lock().await;
+        let _autonomy = EnvVarGuard::remove("CAPYINN_MCP_AUTONOMY");
+        let _legacy = EnvVarGuard::set("CAPYINN_ENABLE_HIGH_RISK_MCP_WRITES", "1");
+
+        let pool = test_pool().await;
+        seed_room(&pool, "R196", "standard").await;
+        seed_pricing_rule(&pool, "standard", 600_000).await;
+        let tools = HotelTools::new(pool.clone(), None);
+
+        let output = tools
+            .create_reservation(
+                Parameters(create_reservation_input("R196")),
+                mcp_request_id("req-create-legacy"),
+            )
+            .await;
+
+        let envelope: Value = serde_json::from_str(&output).expect("error envelope json");
+        assert_eq!(envelope["ok"].as_bool(), Some(false));
+        assert_eq!(
+            envelope["error"]["code"].as_str(),
+            Some(codes::APPROVAL_REQUIRED)
+        );
+        assert_eq!(
+            envelope["error"]["request_id"].as_str(),
+            Some("string:req-create-legacy")
+        );
+
+        let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM bookings WHERE room_id = ?")
+            .bind("R196")
+            .fetch_one(&pool)
+            .await
+            .expect("booking count");
+        assert_eq!(count, 0);
+    }
+
+    #[tokio::test]
     async fn get_hotel_context_still_works_when_high_risk_writes_are_disabled() {
         let _env_lock = async_env_lock().lock().await;
+        let _autonomy = EnvVarGuard::remove("CAPYINN_MCP_AUTONOMY");
         let _env = EnvVarGuard::remove("CAPYINN_ENABLE_HIGH_RISK_MCP_WRITES");
 
         let pool = test_pool().await;
@@ -585,9 +700,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn create_reservation_tool_returns_booking_json() {
+    async fn create_reservation_tool_with_legacy_flag_requires_approval() {
         let _env_lock = async_env_lock().lock().await;
-        let _env = EnvVarGuard::set("CAPYINN_ENABLE_HIGH_RISK_MCP_WRITES", "1");
+        let _autonomy = EnvVarGuard::remove("CAPYINN_MCP_AUTONOMY");
+        let _legacy = EnvVarGuard::set("CAPYINN_ENABLE_HIGH_RISK_MCP_WRITES", "1");
 
         let pool = test_pool().await;
         seed_room(&pool, "R200", "standard").await;
@@ -602,17 +718,18 @@ mod tests {
             .await;
 
         let envelope: Value = serde_json::from_str(&output).expect("success envelope json");
-        assert_eq!(envelope["ok"].as_bool(), Some(true));
-        assert_eq!(envelope["data"]["room_id"].as_str(), Some("R200"));
-        assert_eq!(envelope["data"]["status"].as_str(), Some("booked"));
+        assert_eq!(envelope["ok"].as_bool(), Some(false));
+        assert_eq!(
+            envelope["error"]["code"].as_str(),
+            Some(codes::APPROVAL_REQUIRED)
+        );
 
-        let stored: String = sqlx::query("SELECT status FROM bookings WHERE room_id = ?")
+        let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM bookings WHERE room_id = ?")
             .bind("R200")
             .fetch_one(&pool)
             .await
-            .expect("booking row")
-            .get("status");
-        assert_eq!(stored, "booked");
+            .expect("booking count");
+        assert_eq!(count, 0);
     }
 
     #[tokio::test]
@@ -635,9 +752,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn cancel_reservation_tool_returns_success_message_and_updates_status() {
+    async fn cancel_reservation_tool_requires_approval_and_leaves_status_unchanged() {
         let _env_lock = async_env_lock().lock().await;
-        let _env = EnvVarGuard::set("CAPYINN_ENABLE_HIGH_RISK_MCP_WRITES", "1");
+        let _autonomy = EnvVarGuard::set("CAPYINN_MCP_AUTONOMY", "supervised");
+        let _legacy = EnvVarGuard::remove("CAPYINN_ENABLE_HIGH_RISK_MCP_WRITES");
 
         let pool = test_pool().await;
         seed_room(&pool, "R201", "standard").await;
@@ -654,9 +772,15 @@ mod tests {
             .await;
 
         let envelope: Value = serde_json::from_str(&output).expect("success envelope json");
-        assert_eq!(envelope["ok"].as_bool(), Some(true));
-        assert_eq!(envelope["data"]["ok"].as_bool(), Some(true));
-        assert_eq!(envelope["data"]["booking_id"].as_str(), Some("B201"));
+        assert_eq!(envelope["ok"].as_bool(), Some(false));
+        assert_eq!(
+            envelope["error"]["code"].as_str(),
+            Some(codes::APPROVAL_REQUIRED)
+        );
+        assert_eq!(
+            envelope["error"]["request_id"].as_str(),
+            Some("string:req-cancel-success")
+        );
 
         let stored: String = sqlx::query("SELECT status FROM bookings WHERE id = ?")
             .bind("B201")
@@ -664,13 +788,14 @@ mod tests {
             .await
             .expect("booking row")
             .get("status");
-        assert_eq!(stored, "cancelled");
+        assert_eq!(stored, "booked");
     }
 
     #[tokio::test]
-    async fn modify_reservation_tool_returns_updated_booking_json() {
+    async fn modify_reservation_tool_requires_approval_and_leaves_booking_unchanged() {
         let _env_lock = async_env_lock().lock().await;
-        let _env = EnvVarGuard::set("CAPYINN_ENABLE_HIGH_RISK_MCP_WRITES", "1");
+        let _autonomy = EnvVarGuard::set("CAPYINN_MCP_AUTONOMY", "supervised");
+        let _legacy = EnvVarGuard::remove("CAPYINN_ENABLE_HIGH_RISK_MCP_WRITES");
 
         let pool = test_pool().await;
         seed_room(&pool, "R202", "standard").await;
@@ -691,13 +816,25 @@ mod tests {
             .await;
 
         let envelope: Value = serde_json::from_str(&output).expect("success envelope json");
-        assert_eq!(envelope["ok"].as_bool(), Some(true));
-        assert_eq!(envelope["data"]["status"].as_str(), Some("booked"));
-        assert_eq!(envelope["data"]["check_in_at"].as_str(), Some("2026-04-24"));
+        assert_eq!(envelope["ok"].as_bool(), Some(false));
         assert_eq!(
-            envelope["data"]["expected_checkout"].as_str(),
-            Some("2026-04-26")
+            envelope["error"]["code"].as_str(),
+            Some(codes::APPROVAL_REQUIRED)
         );
+        assert_eq!(
+            envelope["error"]["request_id"].as_str(),
+            Some("string:req-modify-success")
+        );
+
+        let row = sqlx::query("SELECT check_in_at, expected_checkout FROM bookings WHERE id = ?")
+            .bind("B202")
+            .fetch_one(&pool)
+            .await
+            .expect("booking row");
+        let check_in: String = row.get("check_in_at");
+        let checkout: String = row.get("expected_checkout");
+        assert_eq!(check_in, "2026-04-20");
+        assert_eq!(checkout, "2026-04-22");
     }
 
     #[tokio::test]
@@ -760,48 +897,21 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn create_reservation_same_mcp_request_id_and_args_replays_stored_command_row() {
-        let _env_lock = async_env_lock().lock().await;
-        let _env = EnvVarGuard::set("CAPYINN_ENABLE_HIGH_RISK_MCP_WRITES", "1");
-
+    async fn write_context_uses_stable_hidden_key_for_same_request_id_and_args() {
         let pool = test_pool().await;
-        seed_room(&pool, "R203", "standard").await;
-        seed_pricing_rule(&pool, "standard", 600_000).await;
-        let tools = HotelTools::new(pool.clone(), None);
+        let tools = HotelTools::new(pool, None);
+        let input = create_reservation_input("R203");
+        let request_id = mcp_request_id("req-create-replay");
 
-        let first_output = tools
-            .create_reservation(
-                Parameters(create_reservation_input("R203")),
-                mcp_request_id("req-create-replay"),
-            )
-            .await;
-        let replay_output = tools
-            .create_reservation(
-                Parameters(create_reservation_input("R203")),
-                mcp_request_id("req-create-replay"),
-            )
-            .await;
+        let first_ctx = tools
+            .write_context("create_reservation", &request_id, &input)
+            .expect("first context");
+        let replay_ctx = tools
+            .write_context("create_reservation", &request_id, &input)
+            .expect("replay context");
 
-        let first: Value = serde_json::from_str(&first_output).expect("success envelope json");
-        let replay: Value = serde_json::from_str(&replay_output).expect("success envelope json");
-        assert_eq!(first["ok"].as_bool(), Some(true));
-        assert_eq!(replay["ok"].as_bool(), Some(true));
-        assert_eq!(first["data"]["id"], replay["data"]["id"]);
-
-        let command_rows: i64 = sqlx::query_scalar(
-            "SELECT COUNT(*) FROM command_idempotency WHERE command_name = 'create_reservation'",
-        )
-        .fetch_one(&pool)
-        .await
-        .expect("command row count");
-        assert_eq!(command_rows, 1);
-
-        let bookings: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM bookings WHERE room_id = ?")
-            .bind("R203")
-            .fetch_one(&pool)
-            .await
-            .expect("booking count");
-        assert_eq!(bookings, 1);
+        assert_eq!(first_ctx.idempotency_key, replay_ctx.idempotency_key);
+        assert_eq!(first_ctx.request_id, "string:req-create-replay");
     }
 
     #[tokio::test]
@@ -827,88 +937,49 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn create_reservation_same_mcp_request_id_and_different_args_use_distinct_hidden_keys() {
-        let _env_lock = async_env_lock().lock().await;
-        let _env = EnvVarGuard::set("CAPYINN_ENABLE_HIGH_RISK_MCP_WRITES", "1");
-
+    async fn write_context_changes_hidden_key_when_same_request_id_has_different_args() {
         let pool = test_pool().await;
-        seed_room(&pool, "R204A", "standard").await;
-        seed_room(&pool, "R204B", "standard").await;
-        seed_pricing_rule(&pool, "standard", 600_000).await;
-        let tools = HotelTools::new(pool.clone(), None);
+        let tools = HotelTools::new(pool, None);
+        let first_input = create_reservation_input("R204A");
+        let second_input = create_reservation_input("R204B");
+        let request_id = mcp_request_id("req-create-same-id-different-args");
 
-        let first_output = tools
-            .create_reservation(
-                Parameters(create_reservation_input("R204A")),
-                mcp_request_id("req-create-same-id-different-args"),
-            )
-            .await;
-        let second_output = tools
-            .create_reservation(
-                Parameters(create_reservation_input("R204B")),
-                mcp_request_id("req-create-same-id-different-args"),
-            )
-            .await;
+        let first_ctx = tools
+            .write_context("create_reservation", &request_id, &first_input)
+            .expect("first context");
+        let second_ctx = tools
+            .write_context("create_reservation", &request_id, &second_input)
+            .expect("second context");
 
-        let first: Value = serde_json::from_str(&first_output).expect("success envelope json");
-        let second: Value = serde_json::from_str(&second_output).expect("success envelope json");
-        assert_eq!(first["ok"].as_bool(), Some(true));
-        assert_eq!(second["ok"].as_bool(), Some(true));
-        assert_ne!(first["data"]["id"], second["data"]["id"]);
-
-        let command_rows: i64 = sqlx::query_scalar(
-            "SELECT COUNT(*) FROM command_idempotency WHERE command_name = 'create_reservation'",
-        )
-        .fetch_one(&pool)
-        .await
-        .expect("command row count");
-        assert_eq!(command_rows, 2);
+        assert_ne!(first_ctx.idempotency_key, second_ctx.idempotency_key);
+        assert!(first_ctx
+            .idempotency_key
+            .starts_with("mcp:create_reservation:string:req-create-same-id-different-args:"));
+        assert!(second_ctx
+            .idempotency_key
+            .starts_with("mcp:create_reservation:string:req-create-same-id-different-args:"));
     }
 
     #[tokio::test]
-    async fn create_reservation_numeric_and_string_mcp_request_ids_use_distinct_hidden_keys() {
-        let _env_lock = async_env_lock().lock().await;
-        let _env = EnvVarGuard::set("CAPYINN_ENABLE_HIGH_RISK_MCP_WRITES", "1");
-
+    async fn write_context_numeric_and_string_mcp_request_ids_use_distinct_hidden_keys() {
         let pool = test_pool().await;
-        seed_room(&pool, "R205", "standard").await;
-        seed_pricing_rule(&pool, "standard", 600_000).await;
-        let tools = HotelTools::new(pool.clone(), None);
+        let tools = HotelTools::new(pool, None);
+        let input = create_reservation_input("R205");
 
-        let first_output = tools
-            .create_reservation(
-                Parameters(create_reservation_input("R205")),
-                numeric_mcp_request_id(1),
-            )
-            .await;
-        let second_output = tools
-            .create_reservation(
-                Parameters(create_reservation_input("R205")),
-                mcp_request_id("1"),
-            )
-            .await;
+        let numeric_ctx = tools
+            .write_context("create_reservation", &numeric_mcp_request_id(1), &input)
+            .expect("numeric context");
+        let string_ctx = tools
+            .write_context("create_reservation", &mcp_request_id("1"), &input)
+            .expect("string context");
 
-        let first: Value = serde_json::from_str(&first_output).expect("success envelope json");
-        let second: Value = serde_json::from_str(&second_output).expect("error envelope json");
-        assert_eq!(first["ok"].as_bool(), Some(true));
-        assert_eq!(second["ok"].as_bool(), Some(false));
-
-        let command_rows: i64 = sqlx::query_scalar(
-            "SELECT COUNT(*) FROM command_idempotency WHERE command_name = 'create_reservation'",
-        )
-        .fetch_one(&pool)
-        .await
-        .expect("command row count");
-        assert_eq!(command_rows, 2);
-
-        let idempotency_keys: Vec<String> = sqlx::query_scalar(
-            "SELECT idempotency_key FROM command_idempotency WHERE command_name = 'create_reservation'",
-        )
-        .fetch_all(&pool)
-        .await
-        .expect("idempotency keys");
-        assert_eq!(idempotency_keys.len(), 2);
-        assert_ne!(idempotency_keys[0], idempotency_keys[1]);
+        assert_ne!(numeric_ctx.idempotency_key, string_ctx.idempotency_key);
+        assert!(numeric_ctx
+            .idempotency_key
+            .starts_with("mcp:create_reservation:number:1:"));
+        assert!(string_ctx
+            .idempotency_key
+            .starts_with("mcp:create_reservation:string:1:"));
     }
 
     #[test]
@@ -1215,11 +1286,13 @@ impl HotelTools {
         Parameters(input): Parameters<CreateReservationInput>,
         request_id: McpRequestId,
     ) -> String {
-        if let Err(envelope) = guard_write_tool(&CREATE_RESERVATION_META) {
+        let request_id_text = mcp_request_id_string(&request_id);
+        if let Err(envelope) =
+            guard_write_tool(&CREATE_RESERVATION_META, Some(request_id_text.clone()))
+        {
             return envelope.to_json_string();
         }
 
-        let request_id_text = mcp_request_id_string(&request_id);
         let ctx = match self.write_context("create_reservation", &request_id, &input) {
             Ok(ctx) => ctx,
             Err(error) => {
@@ -1279,11 +1352,13 @@ impl HotelTools {
         Parameters(input): Parameters<CancelReservationInput>,
         request_id: McpRequestId,
     ) -> String {
-        if let Err(envelope) = guard_write_tool(&CANCEL_RESERVATION_META) {
+        let request_id_text = mcp_request_id_string(&request_id);
+        if let Err(envelope) =
+            guard_write_tool(&CANCEL_RESERVATION_META, Some(request_id_text.clone()))
+        {
             return envelope.to_json_string();
         }
 
-        let request_id_text = mcp_request_id_string(&request_id);
         let ctx = match self.write_context("cancel_reservation", &request_id, &input) {
             Ok(ctx) => ctx,
             Err(error) => {
@@ -1312,11 +1387,13 @@ impl HotelTools {
         Parameters(input): Parameters<ModifyReservationInput>,
         request_id: McpRequestId,
     ) -> String {
-        if let Err(envelope) = guard_write_tool(&MODIFY_RESERVATION_META) {
+        let request_id_text = mcp_request_id_string(&request_id);
+        if let Err(envelope) =
+            guard_write_tool(&MODIFY_RESERVATION_META, Some(request_id_text.clone()))
+        {
             return envelope.to_json_string();
         }
 
-        let request_id_text = mcp_request_id_string(&request_id);
         let ctx = match self.write_context("modify_reservation", &request_id, &input) {
             Ok(ctx) => ctx,
             Err(error) => {
