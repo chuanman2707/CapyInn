@@ -5,7 +5,7 @@ use crate::{
 use chrono::{Duration, Utc};
 use serde_json::{json, Value};
 use sqlx::{sqlite::SqliteRow, Pool, Row, Sqlite, Transaction};
-use std::{future::Future, pin::Pin};
+use std::{future::Future, pin::Pin, sync::Arc};
 
 const OUTBOX_STATUS_PENDING: &str = "pending";
 const OUTBOX_STATUS_PROCESSING: &str = "processing";
@@ -459,6 +459,18 @@ pub async fn run_outbox_dispatch_batch(
     }
 
     Ok(summary)
+}
+
+pub async fn run_outbox_startup_recovery_once(
+    pool: &Pool<Sqlite>,
+    subscribers: &[Arc<dyn OutboxSubscriber>],
+    config: OutboxDispatchConfig,
+) -> CommandResult<OutboxDispatchSummary> {
+    let subscriber_refs = subscribers
+        .iter()
+        .map(|subscriber| subscriber.as_ref())
+        .collect::<Vec<&dyn OutboxSubscriber>>();
+    run_outbox_dispatch_batch(pool, &subscriber_refs, config).await
 }
 
 impl OutboxEventSpec {
@@ -1222,6 +1234,147 @@ mod tests {
                 Some("outbox retry limit reached".to_string())
             );
         }
+    }
+
+    #[tokio::test]
+    async fn batch_with_empty_subscribers_leaves_pending_rows_unchanged() {
+        let pool = test_pool().await;
+        let id = seed_outbox_event(
+            &pool,
+            "booking.checked_out",
+            "booking:B1",
+            "pending",
+            0,
+            None,
+            None,
+        )
+        .await;
+
+        let summary = run_outbox_dispatch_batch(&pool, &[], OutboxDispatchConfig::test())
+            .await
+            .expect("dispatch batch skips without subscribers");
+
+        assert_eq!(summary, OutboxDispatchSummary::default());
+
+        let row = sqlx::query("SELECT status, attempts FROM outbox_events WHERE id = ?")
+            .bind(id)
+            .fetch_one(&pool)
+            .await
+            .expect("pending row exists");
+
+        assert_eq!(row.get::<String, _>("status"), "pending");
+        assert_eq!(row.get::<i64, _>("attempts"), 0);
+    }
+
+    #[tokio::test]
+    async fn batch_dispatches_same_aggregate_in_id_order() {
+        let pool = test_pool().await;
+        let first_id = seed_outbox_event(
+            &pool,
+            "booking.first",
+            "booking:B1",
+            "pending",
+            0,
+            None,
+            None,
+        )
+        .await;
+        let second_id = seed_outbox_event(
+            &pool,
+            "booking.second",
+            "booking:B1",
+            "pending",
+            0,
+            None,
+            None,
+        )
+        .await;
+        let calls = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let subscriber = RecordingSubscriber {
+            calls: calls.clone(),
+            ..RecordingSubscriber::default()
+        };
+        let subscribers: [&dyn OutboxSubscriber; 1] = [&subscriber];
+
+        let summary = run_outbox_dispatch_batch(&pool, &subscribers, OutboxDispatchConfig::test())
+            .await
+            .expect("dispatch batch succeeds");
+
+        assert_eq!(summary.dispatched, 2);
+        assert_eq!(
+            *calls.lock().expect("calls lock"),
+            vec![first_id, second_id]
+        );
+    }
+
+    #[tokio::test]
+    async fn batch_allows_different_aggregates_without_global_order_dependency() {
+        let pool = test_pool().await;
+        let blocked_id = seed_outbox_event(
+            &pool,
+            "booking.blocked",
+            "booking:B1",
+            "pending",
+            0,
+            Some("2999-05-03T09:00:30+00:00"),
+            None,
+        )
+        .await;
+        let due_id =
+            seed_outbox_event(&pool, "booking.due", "booking:B2", "pending", 0, None, None).await;
+        let subscriber = RecordingSubscriber::default();
+        let subscribers: [&dyn OutboxSubscriber; 1] = [&subscriber];
+
+        let summary = run_outbox_dispatch_batch(&pool, &subscribers, OutboxDispatchConfig::test())
+            .await
+            .expect("dispatch batch succeeds");
+
+        assert_eq!(summary.dispatched, 1);
+        assert_eq!(
+            *subscriber.calls.lock().expect("calls lock"),
+            vec![due_id],
+            "due event on a different aggregate dispatches"
+        );
+
+        let blocked_status: String =
+            sqlx::query_scalar("SELECT status FROM outbox_events WHERE id = ?")
+                .bind(blocked_id)
+                .fetch_one(&pool)
+                .await
+                .expect("blocked row exists");
+        assert_eq!(blocked_status, "pending");
+    }
+
+    #[tokio::test]
+    async fn startup_recovery_with_injected_subscriber_processes_expired_processing() {
+        let pool = test_pool().await;
+        let id = seed_outbox_event(
+            &pool,
+            "booking.checked_out",
+            "booking:B1",
+            "processing",
+            2,
+            None,
+            Some("2000-01-01T00:00:00+00:00"),
+        )
+        .await;
+        let subscriber: std::sync::Arc<dyn OutboxSubscriber> =
+            std::sync::Arc::new(RecordingSubscriber::default());
+        let subscribers = vec![subscriber];
+
+        let summary =
+            run_outbox_startup_recovery_once(&pool, &subscribers, OutboxDispatchConfig::test())
+                .await
+                .expect("startup recovery dispatches expired processing row");
+
+        assert_eq!(summary.dispatched, 1);
+
+        let status: String = sqlx::query_scalar("SELECT status FROM outbox_events WHERE id = ?")
+            .bind(id)
+            .fetch_one(&pool)
+            .await
+            .expect("recovered row exists");
+        assert_eq!(status, "dispatched");
     }
 
     #[tokio::test]
