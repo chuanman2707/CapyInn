@@ -1226,7 +1226,7 @@ mod tests {
         let expires_at = row
             .get::<Option<String>, _>("processing_expires_at")
             .expect("processing expiry set");
-        assert!(expires_at > "2000-01-01T00:00:00+00:00".to_string());
+        assert!(expires_at.as_str() > "2000-01-01T00:00:00+00:00");
     }
 
     #[tokio::test]
