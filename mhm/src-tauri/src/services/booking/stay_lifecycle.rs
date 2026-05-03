@@ -998,17 +998,23 @@ async fn extend_stay_tx(
     origin_key: Option<String>,
 ) -> BookingResult<Booking> {
     let booking = sqlx::query(
-        "SELECT room_id, nights, total_price, expected_checkout, pricing_type
-         FROM bookings WHERE id = ? AND status = ?",
+        "SELECT room_id, nights, total_price, expected_checkout, pricing_type, status
+         FROM bookings WHERE id = ?",
     )
     .bind(booking_id)
-    .bind(status::booking::ACTIVE)
     .fetch_optional(&mut **tx)
     .await?;
 
     let booking = booking.ok_or_else(|| {
         BookingError::not_found(format!("Không tìm thấy booking đang active {}", booking_id))
     })?;
+
+    let booking_status: String = booking.get("status");
+    if booking_status != status::booking::ACTIVE {
+        return Err(invalid_state_transition(format!(
+            "booking {booking_id} is not active for extend-stay (status: {booking_status})"
+        )));
+    }
 
     let room_id: String = booking.get("room_id");
     ensure_locked_room_matches_booking(
