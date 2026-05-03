@@ -658,13 +658,16 @@ fn contains_forbidden_payload_term(value: &str) -> bool {
 }
 
 fn sanitize_outbox_error(error: &CommandError) -> String {
-    let message = error.message.trim();
-    let value = if message.is_empty() {
-        error.code.trim()
+    let safe_code = error.code.trim();
+    let safe_code = if validate_safe_outbox_text(safe_code).is_ok() {
+        safe_code
     } else {
-        message
+        codes::SYSTEM_INTERNAL_ERROR
     };
-    value.chars().take(OUTBOX_ERROR_MAX_CHARS).collect()
+    format!("{safe_code}: subscriber delivery failed")
+        .chars()
+        .take(OUTBOX_ERROR_MAX_CHARS)
+        .collect()
 }
 
 fn next_attempt_at_for_attempt(attempts: i64) -> String {
@@ -808,6 +811,7 @@ mod tests {
     struct RecordingSubscriber {
         calls: std::sync::Arc<std::sync::Mutex<Vec<i64>>>,
         fail: bool,
+        error_message: Option<String>,
     }
 
     impl OutboxSubscriber for RecordingSubscriber {
@@ -821,7 +825,7 @@ mod tests {
                 if self.fail {
                     return Err(CommandError::system(
                         codes::SYSTEM_INTERNAL_ERROR,
-                        "subscriber failed",
+                        self.error_message.as_deref().unwrap_or("subscriber failed"),
                     ));
                 }
                 Ok(())
@@ -1338,7 +1342,7 @@ mod tests {
             .is_none());
         assert_eq!(
             row.get::<Option<String>, _>("last_error"),
-            Some("subscriber failed".to_string())
+            Some("SYSTEM_INTERNAL_ERROR: subscriber delivery failed".to_string())
         );
         assert!(row.get::<Option<String>, _>("dispatched_at").is_none());
     }
@@ -1400,9 +1404,55 @@ mod tests {
             .is_none());
         assert_eq!(
             row.get::<Option<String>, _>("last_error"),
-            Some("subscriber failed".to_string())
+            Some("SYSTEM_INTERNAL_ERROR: subscriber delivery failed".to_string())
         );
         assert!(row.get::<Option<String>, _>("dispatched_at").is_none());
+    }
+
+    #[tokio::test]
+    async fn dispatch_failure_does_not_store_unsafe_subscriber_error() {
+        let pool = test_pool().await;
+        let id = seed_outbox_event(
+            &pool,
+            "booking.checked_out",
+            "booking:B1",
+            "pending",
+            0,
+            None,
+            None,
+        )
+        .await;
+        let unsafe_message = format!(
+            "delivery failed for guest@example.com with token=secret-token passport CCCD {}",
+            "x".repeat(700)
+        );
+        let subscriber = RecordingSubscriber {
+            fail: true,
+            error_message: Some(unsafe_message),
+            ..RecordingSubscriber::default()
+        };
+        let subscribers: [&dyn OutboxSubscriber; 1] = [&subscriber];
+
+        run_outbox_dispatch_batch(&pool, &subscribers, OutboxDispatchConfig::test())
+            .await
+            .expect("dispatch batch records sanitized failure");
+
+        let last_error: String =
+            sqlx::query_scalar("SELECT last_error FROM outbox_events WHERE id = ?")
+                .bind(id)
+                .fetch_one(&pool)
+                .await
+                .expect("last_error is stored");
+
+        assert_eq!(
+            last_error,
+            "SYSTEM_INTERNAL_ERROR: subscriber delivery failed"
+        );
+        assert!(last_error.chars().count() <= OUTBOX_ERROR_MAX_CHARS);
+        assert!(!last_error.contains("guest@example.com"));
+        assert!(!last_error.to_ascii_lowercase().contains("token"));
+        assert!(!last_error.to_ascii_lowercase().contains("passport"));
+        assert!(!last_error.to_ascii_lowercase().contains("cccd"));
     }
 
     #[tokio::test]
