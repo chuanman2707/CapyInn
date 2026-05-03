@@ -978,6 +978,22 @@ pub(crate) async fn run_migrations(pool: &Pool<Sqlite>) -> Result<(), sqlx::Erro
         set_schema_version(&mut tx, 16).await?;
         tx.commit().await?;
     }
+
+    // -- V17: Outbox per-aggregate open-row FIFO support --
+    if current < 17 {
+        let mut tx = pool.begin().await?;
+
+        sqlx::query(
+            "CREATE INDEX IF NOT EXISTS outbox_events_aggregate_open_idx
+             ON outbox_events(aggregate_key, id)
+             WHERE status IN ('pending', 'processing')",
+        )
+        .execute(&mut *tx)
+        .await?;
+
+        set_schema_version(&mut tx, 17).await?;
+        tx.commit().await?;
+    }
     Ok(())
 }
 
@@ -1147,7 +1163,7 @@ mod tests {
         .expect("checks outbox_events column")
     }
 
-    async fn assert_outbox_v16_shape(pool: &SqlitePool) {
+    async fn assert_outbox_shape(pool: &SqlitePool) {
         assert_eq!(sqlite_table_count(pool, "outbox_events").await, 1);
 
         for column in [
@@ -1186,6 +1202,10 @@ mod tests {
         );
         assert_eq!(
             sqlite_index_count(pool, "outbox_events_origin_command_uq").await,
+            1
+        );
+        assert_eq!(
+            sqlite_index_count(pool, "outbox_events_aggregate_open_idx").await,
             1
         );
     }
@@ -1317,7 +1337,7 @@ mod tests {
             .expect("reads final schema version")
             .get("version");
 
-        assert_eq!(version, 16);
+        assert_eq!(version, 17);
     }
 
     #[tokio::test]
@@ -1333,7 +1353,7 @@ mod tests {
             .expect("reads version")
             .get("version");
 
-        assert_eq!(version, 16);
+        assert_eq!(version, 17);
         assert_money_columns_are_integer(&pool).await;
     }
 
@@ -1621,7 +1641,7 @@ mod tests {
             .expect("reads final schema version")
             .get("version");
 
-        assert_eq!(version, 16);
+        assert_eq!(version, 17);
     }
 
     #[tokio::test]
@@ -1688,7 +1708,7 @@ mod tests {
             .expect("reads final schema version")
             .get("version");
 
-        assert_eq!(version, 16);
+        assert_eq!(version, 17);
     }
 
     #[tokio::test]
@@ -1768,7 +1788,7 @@ mod tests {
         );
 
         let version = get_schema_version(&pool).await.expect("schema version");
-        assert_eq!(version, 16);
+        assert_eq!(version, 17);
     }
 
     #[tokio::test]
@@ -1806,9 +1826,9 @@ mod tests {
 
         run_migrations(&pool).await.expect("runs migrations");
 
-        assert_outbox_v16_shape(&pool).await;
+        assert_outbox_shape(&pool).await;
         let version = get_schema_version(&pool).await.expect("schema version");
-        assert_eq!(version, 16);
+        assert_eq!(version, 17);
     }
 
     #[tokio::test]
@@ -1824,9 +1844,30 @@ mod tests {
 
         run_migrations(&pool).await.expect("v16 migration reruns");
 
-        assert_outbox_v16_shape(&pool).await;
+        assert_outbox_shape(&pool).await;
         let version = get_schema_version(&pool).await.expect("schema version");
-        assert_eq!(version, 16);
+        assert_eq!(version, 17);
+    }
+
+    #[tokio::test]
+    async fn migration_v17_adds_outbox_fifo_support_index() {
+        let pool = SqlitePool::connect("sqlite::memory:")
+            .await
+            .expect("connects in-memory sqlite");
+        run_migrations(&pool).await.expect("initial migrations run");
+        sqlx::query("UPDATE schema_version SET version = 16")
+            .execute(&pool)
+            .await
+            .expect("rewinds schema version");
+
+        run_migrations(&pool).await.expect("v17 migration reruns");
+
+        assert_eq!(
+            sqlite_index_count(&pool, "outbox_events_aggregate_open_idx").await,
+            1
+        );
+        let version = get_schema_version(&pool).await.expect("schema version");
+        assert_eq!(version, 17);
     }
 
     #[tokio::test]
