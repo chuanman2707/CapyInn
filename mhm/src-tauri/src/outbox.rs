@@ -2,12 +2,58 @@ use crate::{
     app_error::{codes, CommandError, CommandResult},
     command_idempotency::{system_error, WriteCommandContext},
 };
-use chrono::Utc;
+use chrono::{Duration, Utc};
 use serde_json::{json, Value};
-use sqlx::{Sqlite, Transaction};
+use sqlx::{sqlite::SqliteRow, Pool, Row, Sqlite, Transaction};
 
 const OUTBOX_STATUS_PENDING: &str = "pending";
+const OUTBOX_STATUS_PROCESSING: &str = "processing";
+const OUTBOX_STATUS_FAILED: &str = "failed";
 const OUTBOX_SAFE_TEXT_MAX_CHARS: usize = 160;
+const OUTBOX_RETRY_LIMIT_ERROR: &str = "outbox retry limit reached";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct OutboxDispatchConfig {
+    pub max_attempts: i64,
+    pub processing_lease_seconds: i64,
+    pub batch_size: usize,
+}
+
+impl Default for OutboxDispatchConfig {
+    fn default() -> Self {
+        Self {
+            max_attempts: 5,
+            processing_lease_seconds: 30,
+            batch_size: 25,
+        }
+    }
+}
+
+impl OutboxDispatchConfig {
+    #[cfg(test)]
+    fn test() -> Self {
+        Self {
+            max_attempts: 5,
+            processing_lease_seconds: 30,
+            batch_size: 10,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OutboxEvent {
+    pub id: i64,
+    pub event_type: String,
+    pub aggregate_key: String,
+    pub payload_json: String,
+    pub origin_request_id: String,
+    pub origin_idempotency_key: String,
+    pub origin_command_name: String,
+    pub origin_request_hash: String,
+    pub created_at: String,
+    pub attempts: i64,
+    pub worker_token: String,
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OutboxAggregateKeySource {
@@ -85,6 +131,163 @@ pub async fn insert_outbox_event_tx(
     .map_err(system_error)?;
 
     Ok(())
+}
+
+pub async fn fail_retry_limit_rows(
+    pool: &Pool<Sqlite>,
+    config: OutboxDispatchConfig,
+) -> CommandResult<u64> {
+    let now = Utc::now().to_rfc3339();
+    let mut tx = pool
+        .begin_with("BEGIN IMMEDIATE")
+        .await
+        .map_err(system_error)?;
+
+    let result = sqlx::query(
+        "UPDATE outbox_events
+         SET status = ?,
+             worker_token = NULL,
+             next_attempt_at = NULL,
+             processing_started_at = NULL,
+             processing_expires_at = NULL,
+             last_error = ?
+         WHERE attempts >= ?
+           AND (
+                (
+                    status = ?
+                    AND (next_attempt_at IS NULL OR next_attempt_at <= ?)
+                )
+                OR (
+                    status = ?
+                    AND processing_expires_at <= ?
+                )
+           )",
+    )
+    .bind(OUTBOX_STATUS_FAILED)
+    .bind(OUTBOX_RETRY_LIMIT_ERROR)
+    .bind(config.max_attempts)
+    .bind(OUTBOX_STATUS_PENDING)
+    .bind(&now)
+    .bind(OUTBOX_STATUS_PROCESSING)
+    .bind(&now)
+    .execute(&mut *tx)
+    .await
+    .map_err(system_error)?;
+
+    tx.commit().await.map_err(system_error)?;
+
+    Ok(result.rows_affected())
+}
+
+pub async fn claim_next_outbox_event(
+    pool: &Pool<Sqlite>,
+    config: OutboxDispatchConfig,
+) -> CommandResult<Option<OutboxEvent>> {
+    let now = Utc::now();
+    let now_string = now.to_rfc3339();
+    let processing_expires_at =
+        (now + Duration::seconds(config.processing_lease_seconds)).to_rfc3339();
+    let worker_token = uuid::Uuid::new_v4().to_string();
+    let mut tx = pool
+        .begin_with("BEGIN IMMEDIATE")
+        .await
+        .map_err(system_error)?;
+
+    let result = async {
+        let claimable_id = sqlx::query_scalar::<_, i64>(
+            "SELECT candidate.id
+             FROM outbox_events candidate
+             WHERE candidate.attempts < ?
+               AND (
+                    (
+                        candidate.status = ?
+                        AND (
+                            candidate.next_attempt_at IS NULL
+                            OR candidate.next_attempt_at <= ?
+                        )
+                    )
+                    OR (
+                        candidate.status = ?
+                        AND candidate.processing_expires_at <= ?
+                    )
+               )
+               AND NOT EXISTS (
+                    SELECT 1
+                    FROM outbox_events older
+                    WHERE older.aggregate_key = candidate.aggregate_key
+                      AND older.id < candidate.id
+                      AND older.status IN ('pending', 'processing')
+               )
+             ORDER BY candidate.id
+             LIMIT 1",
+        )
+        .bind(config.max_attempts)
+        .bind(OUTBOX_STATUS_PENDING)
+        .bind(&now_string)
+        .bind(OUTBOX_STATUS_PROCESSING)
+        .bind(&now_string)
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(system_error)?;
+
+        let Some(claimable_id) = claimable_id else {
+            return Ok(None);
+        };
+
+        sqlx::query(
+            "UPDATE outbox_events
+             SET status = ?,
+                 worker_token = ?,
+                 attempts = attempts + 1,
+                 processing_started_at = ?,
+                 processing_expires_at = ?,
+                 last_error = NULL
+             WHERE id = ?",
+        )
+        .bind(OUTBOX_STATUS_PROCESSING)
+        .bind(&worker_token)
+        .bind(&now_string)
+        .bind(&processing_expires_at)
+        .bind(claimable_id)
+        .execute(&mut *tx)
+        .await
+        .map_err(system_error)?;
+
+        let row = sqlx::query(
+            "SELECT
+                id,
+                event_type,
+                aggregate_key,
+                payload_json,
+                origin_request_id,
+                origin_idempotency_key,
+                origin_command_name,
+                origin_request_hash,
+                created_at,
+                attempts,
+                worker_token
+             FROM outbox_events
+             WHERE id = ?",
+        )
+        .bind(claimable_id)
+        .fetch_one(&mut *tx)
+        .await
+        .map_err(system_error)?;
+
+        Ok(Some(outbox_event_from_row(row)?))
+    }
+    .await;
+
+    match result {
+        Ok(event) => {
+            tx.commit().await.map_err(system_error)?;
+            Ok(event)
+        }
+        Err(error) => {
+            tx.rollback().await.map_err(system_error)?;
+            Err(error)
+        }
+    }
 }
 
 impl OutboxEventSpec {
@@ -272,13 +475,91 @@ fn canonical_json_string(value: &Value) -> CommandResult<String> {
     serde_json::to_string(&canonicalize_json_value(value.clone())).map_err(system_error)
 }
 
+fn outbox_event_from_row(row: SqliteRow) -> CommandResult<OutboxEvent> {
+    let worker_token = row
+        .try_get::<Option<String>, _>("worker_token")
+        .map_err(system_error)?
+        .ok_or_else(|| system_error("claimed outbox event missing worker token"))?;
+
+    Ok(OutboxEvent {
+        id: row.try_get("id").map_err(system_error)?,
+        event_type: row.try_get("event_type").map_err(system_error)?,
+        aggregate_key: row.try_get("aggregate_key").map_err(system_error)?,
+        payload_json: row.try_get("payload_json").map_err(system_error)?,
+        origin_request_id: row.try_get("origin_request_id").map_err(system_error)?,
+        origin_idempotency_key: row
+            .try_get("origin_idempotency_key")
+            .map_err(system_error)?,
+        origin_command_name: row.try_get("origin_command_name").map_err(system_error)?,
+        origin_request_hash: row.try_get("origin_request_hash").map_err(system_error)?,
+        created_at: row.try_get("created_at").map_err(system_error)?,
+        attempts: row.try_get("attempts").map_err(system_error)?,
+        worker_token,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::command_idempotency::WriteCommandContext;
     use chrono::DateTime;
     use serde_json::json;
-    use sqlx::{sqlite::SqlitePoolOptions, Row};
+    use sqlx::{sqlite::SqlitePoolOptions, Row, Sqlite};
+
+    async fn test_pool() -> sqlx::Pool<Sqlite> {
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .expect("in-memory sqlite connects");
+        crate::db::run_migrations(&pool)
+            .await
+            .expect("migrations run");
+        pool
+    }
+
+    async fn seed_outbox_event(
+        pool: &sqlx::Pool<Sqlite>,
+        event_type: &str,
+        aggregate_key: &str,
+        status: &str,
+        attempts: i64,
+        next_attempt_at: Option<&str>,
+        processing_expires_at: Option<&str>,
+    ) -> i64 {
+        let result = sqlx::query(
+            "INSERT INTO outbox_events (
+                event_type, aggregate_key, payload_json,
+                origin_request_id, origin_idempotency_key,
+                origin_command_name, origin_request_hash,
+                status, attempts, next_attempt_at,
+                processing_started_at, processing_expires_at,
+                created_at
+             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        )
+        .bind(event_type)
+        .bind(aggregate_key)
+        .bind(r#"{"schema_version":1}"#)
+        .bind(format!("req-{event_type}-{aggregate_key}"))
+        .bind(format!("idem-{event_type}-{aggregate_key}"))
+        .bind("test.command")
+        .bind("hash-test")
+        .bind(status)
+        .bind(attempts)
+        .bind(next_attempt_at)
+        .bind(if status == "processing" {
+            Some("2026-05-03T08:59:00+00:00")
+        } else {
+            None
+        })
+        .bind(processing_expires_at)
+        .bind("2026-05-03T09:00:00+00:00")
+        .execute(pool)
+        .await
+        .expect("seeds outbox event");
+
+        result.last_insert_rowid()
+    }
 
     fn test_ctx(command_name: &str) -> WriteCommandContext {
         let issued_at = DateTime::parse_from_rfc3339("2026-05-03T09:00:00+07:00")
@@ -350,14 +631,7 @@ mod tests {
 
     #[tokio::test]
     async fn insert_outbox_event_tx_persists_pending_event_contract() {
-        let pool = SqlitePoolOptions::new()
-            .max_connections(1)
-            .connect("sqlite::memory:")
-            .await
-            .expect("in-memory sqlite connects");
-        crate::db::run_migrations(&pool)
-            .await
-            .expect("migrations run");
+        let pool = test_pool().await;
 
         let spec = OutboxEventSpec::new(
             "booking.checked_out",
@@ -429,5 +703,268 @@ mod tests {
             .is_none());
         assert!(row.get::<Option<String>, _>("last_error").is_none());
         assert!(row.get::<Option<String>, _>("dispatched_at").is_none());
+    }
+
+    #[tokio::test]
+    async fn claim_pending_event_sets_processing_and_increments_attempts() {
+        let pool = test_pool().await;
+        let id = seed_outbox_event(
+            &pool,
+            "booking.checked_out",
+            "booking:B1",
+            "pending",
+            0,
+            None,
+            None,
+        )
+        .await;
+
+        let claimed = claim_next_outbox_event(&pool, OutboxDispatchConfig::test())
+            .await
+            .expect("claim succeeds")
+            .expect("event is claimed");
+
+        assert_eq!(claimed.id, id);
+        assert_eq!(claimed.event_type, "booking.checked_out");
+        assert_eq!(claimed.aggregate_key, "booking:B1");
+        assert_eq!(claimed.payload_json, r#"{"schema_version":1}"#);
+        assert_eq!(
+            claimed.origin_request_id,
+            "req-booking.checked_out-booking:B1"
+        );
+        assert_eq!(
+            claimed.origin_idempotency_key,
+            "idem-booking.checked_out-booking:B1"
+        );
+        assert_eq!(claimed.origin_command_name, "test.command");
+        assert_eq!(claimed.origin_request_hash, "hash-test");
+        assert_eq!(claimed.attempts, 1);
+        assert!(!claimed.worker_token.is_empty());
+
+        let row = sqlx::query(
+            "SELECT status, attempts, worker_token, next_attempt_at,
+                    processing_started_at, processing_expires_at, last_error
+             FROM outbox_events WHERE id = ?",
+        )
+        .bind(id)
+        .fetch_one(&pool)
+        .await
+        .expect("claimed row exists");
+
+        assert_eq!(row.get::<String, _>("status"), "processing");
+        assert_eq!(row.get::<i64, _>("attempts"), 1);
+        assert_eq!(
+            row.get::<Option<String>, _>("worker_token"),
+            Some(claimed.worker_token)
+        );
+        assert!(row.get::<Option<String>, _>("next_attempt_at").is_none());
+        assert!(row
+            .get::<Option<String>, _>("processing_started_at")
+            .is_some());
+        assert!(row
+            .get::<Option<String>, _>("processing_expires_at")
+            .is_some());
+        assert!(row.get::<Option<String>, _>("last_error").is_none());
+    }
+
+    #[tokio::test]
+    async fn claim_preserves_fifo_for_same_aggregate() {
+        let pool = test_pool().await;
+        let first_id = seed_outbox_event(
+            &pool,
+            "booking.first",
+            "booking:B1",
+            "pending",
+            0,
+            None,
+            None,
+        )
+        .await;
+        let second_id = seed_outbox_event(
+            &pool,
+            "booking.second",
+            "booking:B1",
+            "pending",
+            0,
+            None,
+            None,
+        )
+        .await;
+
+        let first_claim = claim_next_outbox_event(&pool, OutboxDispatchConfig::test())
+            .await
+            .expect("claim succeeds")
+            .expect("first event is claimed");
+        let second_claim = claim_next_outbox_event(&pool, OutboxDispatchConfig::test())
+            .await
+            .expect("second claim succeeds");
+
+        assert_eq!(first_claim.id, first_id);
+        assert_eq!(second_claim, None);
+
+        let second_status: String =
+            sqlx::query_scalar("SELECT status FROM outbox_events WHERE id = ?")
+                .bind(second_id)
+                .fetch_one(&pool)
+                .await
+                .expect("second row exists");
+        assert_eq!(second_status, "pending");
+    }
+
+    #[tokio::test]
+    async fn claim_reclaims_expired_processing_event() {
+        let pool = test_pool().await;
+        let id = seed_outbox_event(
+            &pool,
+            "booking.checked_out",
+            "booking:B1",
+            "processing",
+            2,
+            None,
+            Some("2000-01-01T00:00:00+00:00"),
+        )
+        .await;
+
+        let claimed = claim_next_outbox_event(&pool, OutboxDispatchConfig::test())
+            .await
+            .expect("claim succeeds")
+            .expect("expired processing event is reclaimed");
+
+        assert_eq!(claimed.id, id);
+        assert_eq!(claimed.attempts, 3);
+        assert!(!claimed.worker_token.is_empty());
+
+        let row = sqlx::query(
+            "SELECT status, attempts, worker_token, processing_expires_at
+             FROM outbox_events WHERE id = ?",
+        )
+        .bind(id)
+        .fetch_one(&pool)
+        .await
+        .expect("claimed row exists");
+
+        assert_eq!(row.get::<String, _>("status"), "processing");
+        assert_eq!(row.get::<i64, _>("attempts"), 3);
+        assert_eq!(
+            row.get::<Option<String>, _>("worker_token"),
+            Some(claimed.worker_token)
+        );
+        let expires_at = row
+            .get::<Option<String>, _>("processing_expires_at")
+            .expect("processing expiry set");
+        assert!(expires_at > "2000-01-01T00:00:00+00:00".to_string());
+    }
+
+    #[tokio::test]
+    async fn claim_does_not_reclaim_active_processing_event() {
+        let pool = test_pool().await;
+        let id = seed_outbox_event(
+            &pool,
+            "booking.checked_out",
+            "booking:B1",
+            "processing",
+            2,
+            None,
+            Some("2999-05-03T09:00:30+00:00"),
+        )
+        .await;
+
+        let claimed = claim_next_outbox_event(&pool, OutboxDispatchConfig::test())
+            .await
+            .expect("claim succeeds");
+
+        assert_eq!(claimed, None);
+
+        let row = sqlx::query(
+            "SELECT status, attempts, worker_token, processing_expires_at
+             FROM outbox_events WHERE id = ?",
+        )
+        .bind(id)
+        .fetch_one(&pool)
+        .await
+        .expect("processing row exists");
+
+        assert_eq!(row.get::<String, _>("status"), "processing");
+        assert_eq!(row.get::<i64, _>("attempts"), 2);
+        assert!(row.get::<Option<String>, _>("worker_token").is_none());
+        assert_eq!(
+            row.get::<Option<String>, _>("processing_expires_at"),
+            Some("2999-05-03T09:00:30+00:00".to_string())
+        );
+    }
+
+    #[tokio::test]
+    async fn retry_limit_rows_fail_before_subscriber_claim() {
+        let pool = test_pool().await;
+        let pending_retry_limited_id = seed_outbox_event(
+            &pool,
+            "booking.pending_limited",
+            "booking:B1",
+            "pending",
+            5,
+            None,
+            None,
+        )
+        .await;
+        let expired_processing_retry_limited_id = seed_outbox_event(
+            &pool,
+            "booking.processing_limited",
+            "booking:B2",
+            "processing",
+            5,
+            None,
+            Some("2000-01-01T00:00:00+00:00"),
+        )
+        .await;
+        let claimable_id = seed_outbox_event(
+            &pool,
+            "booking.claimable",
+            "booking:B3",
+            "pending",
+            4,
+            None,
+            None,
+        )
+        .await;
+
+        let failed = fail_retry_limit_rows(&pool, OutboxDispatchConfig::test())
+            .await
+            .expect("retry-limit rows fail");
+        let claimed = claim_next_outbox_event(&pool, OutboxDispatchConfig::test())
+            .await
+            .expect("claim succeeds")
+            .expect("remaining event is claimable");
+
+        assert_eq!(failed, 2);
+        assert_eq!(claimed.id, claimable_id);
+
+        for id in [
+            pending_retry_limited_id,
+            expired_processing_retry_limited_id,
+        ] {
+            let row = sqlx::query(
+                "SELECT status, worker_token, next_attempt_at,
+                        processing_started_at, processing_expires_at, last_error
+                 FROM outbox_events WHERE id = ?",
+            )
+            .bind(id)
+            .fetch_one(&pool)
+            .await
+            .expect("retry-limited row exists");
+
+            assert_eq!(row.get::<String, _>("status"), "failed");
+            assert!(row.get::<Option<String>, _>("worker_token").is_none());
+            assert!(row.get::<Option<String>, _>("next_attempt_at").is_none());
+            assert!(row
+                .get::<Option<String>, _>("processing_started_at")
+                .is_none());
+            assert!(row
+                .get::<Option<String>, _>("processing_expires_at")
+                .is_none());
+            assert_eq!(
+                row.get::<Option<String>, _>("last_error"),
+                Some("outbox retry limit reached".to_string())
+            );
+        }
     }
 }
