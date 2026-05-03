@@ -11,6 +11,83 @@ const OUTBOX_STATUS_PROCESSING: &str = "processing";
 const OUTBOX_STATUS_FAILED: &str = "failed";
 const OUTBOX_SAFE_TEXT_MAX_CHARS: usize = 160;
 const OUTBOX_RETRY_LIMIT_ERROR: &str = "outbox retry limit reached";
+const CLAIM_NEXT_OUTBOX_EVENT_CANDIDATE_SQL: &str = "
+SELECT id
+FROM (
+    SELECT candidate.id AS id
+    FROM outbox_events candidate INDEXED BY outbox_events_pending_idx
+    WHERE candidate.status = 'pending'
+      AND candidate.attempts < ?
+      AND candidate.next_attempt_at IS NULL
+      AND NOT EXISTS (
+          SELECT 1
+          FROM outbox_events older
+          WHERE older.aggregate_key = candidate.aggregate_key
+            AND older.id < candidate.id
+            AND older.status IN ('pending', 'processing')
+      )
+    UNION ALL
+    SELECT candidate.id AS id
+    FROM outbox_events candidate INDEXED BY outbox_events_pending_idx
+    WHERE candidate.status = 'pending'
+      AND candidate.attempts < ?
+      AND candidate.next_attempt_at <= ?
+      AND NOT EXISTS (
+          SELECT 1
+          FROM outbox_events older
+          WHERE older.aggregate_key = candidate.aggregate_key
+            AND older.id < candidate.id
+            AND older.status IN ('pending', 'processing')
+      )
+    UNION ALL
+    SELECT candidate.id AS id
+    FROM outbox_events candidate INDEXED BY outbox_events_processing_idx
+    WHERE candidate.status = 'processing'
+      AND candidate.attempts < ?
+      AND candidate.processing_expires_at <= ?
+      AND NOT EXISTS (
+          SELECT 1
+          FROM outbox_events older
+          WHERE older.aggregate_key = candidate.aggregate_key
+            AND older.id < candidate.id
+            AND older.status IN ('pending', 'processing')
+      )
+)
+ORDER BY id
+LIMIT 1";
+const FAIL_RETRY_LIMIT_PENDING_NULL_SQL: &str = "
+UPDATE outbox_events INDEXED BY outbox_events_pending_idx
+SET status = ?,
+    worker_token = NULL,
+    next_attempt_at = NULL,
+    processing_started_at = NULL,
+    processing_expires_at = NULL,
+    last_error = ?
+WHERE status = 'pending'
+  AND attempts >= ?
+  AND next_attempt_at IS NULL";
+const FAIL_RETRY_LIMIT_PENDING_DUE_SQL: &str = "
+UPDATE outbox_events INDEXED BY outbox_events_pending_idx
+SET status = ?,
+    worker_token = NULL,
+    next_attempt_at = NULL,
+    processing_started_at = NULL,
+    processing_expires_at = NULL,
+    last_error = ?
+WHERE status = 'pending'
+  AND attempts >= ?
+  AND next_attempt_at <= ?";
+const FAIL_RETRY_LIMIT_PROCESSING_SQL: &str = "
+UPDATE outbox_events INDEXED BY outbox_events_processing_idx
+SET status = ?,
+    worker_token = NULL,
+    next_attempt_at = NULL,
+    processing_started_at = NULL,
+    processing_expires_at = NULL,
+    last_error = ?
+WHERE status = 'processing'
+  AND attempts >= ?
+  AND processing_expires_at <= ?";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct OutboxDispatchConfig {
@@ -143,40 +220,35 @@ pub async fn fail_retry_limit_rows(
         .await
         .map_err(system_error)?;
 
-    let result = sqlx::query(
-        "UPDATE outbox_events
-         SET status = ?,
-             worker_token = NULL,
-             next_attempt_at = NULL,
-             processing_started_at = NULL,
-             processing_expires_at = NULL,
-             last_error = ?
-         WHERE attempts >= ?
-           AND (
-                (
-                    status = ?
-                    AND (next_attempt_at IS NULL OR next_attempt_at <= ?)
-                )
-                OR (
-                    status = ?
-                    AND processing_expires_at <= ?
-                )
-           )",
-    )
-    .bind(OUTBOX_STATUS_FAILED)
-    .bind(OUTBOX_RETRY_LIMIT_ERROR)
-    .bind(config.max_attempts)
-    .bind(OUTBOX_STATUS_PENDING)
-    .bind(&now)
-    .bind(OUTBOX_STATUS_PROCESSING)
-    .bind(&now)
-    .execute(&mut *tx)
-    .await
-    .map_err(system_error)?;
+    let pending_null_result = sqlx::query(FAIL_RETRY_LIMIT_PENDING_NULL_SQL)
+        .bind(OUTBOX_STATUS_FAILED)
+        .bind(OUTBOX_RETRY_LIMIT_ERROR)
+        .bind(config.max_attempts)
+        .execute(&mut *tx)
+        .await
+        .map_err(system_error)?;
+    let pending_due_result = sqlx::query(FAIL_RETRY_LIMIT_PENDING_DUE_SQL)
+        .bind(OUTBOX_STATUS_FAILED)
+        .bind(OUTBOX_RETRY_LIMIT_ERROR)
+        .bind(config.max_attempts)
+        .bind(&now)
+        .execute(&mut *tx)
+        .await
+        .map_err(system_error)?;
+    let processing_result = sqlx::query(FAIL_RETRY_LIMIT_PROCESSING_SQL)
+        .bind(OUTBOX_STATUS_FAILED)
+        .bind(OUTBOX_RETRY_LIMIT_ERROR)
+        .bind(config.max_attempts)
+        .bind(&now)
+        .execute(&mut *tx)
+        .await
+        .map_err(system_error)?;
 
     tx.commit().await.map_err(system_error)?;
 
-    Ok(result.rows_affected())
+    Ok(pending_null_result.rows_affected()
+        + pending_due_result.rows_affected()
+        + processing_result.rows_affected())
 }
 
 pub async fn claim_next_outbox_event(
@@ -194,41 +266,15 @@ pub async fn claim_next_outbox_event(
         .map_err(system_error)?;
 
     let result = async {
-        let claimable_id = sqlx::query_scalar::<_, i64>(
-            "SELECT candidate.id
-             FROM outbox_events candidate
-             WHERE candidate.attempts < ?
-               AND (
-                    (
-                        candidate.status = ?
-                        AND (
-                            candidate.next_attempt_at IS NULL
-                            OR candidate.next_attempt_at <= ?
-                        )
-                    )
-                    OR (
-                        candidate.status = ?
-                        AND candidate.processing_expires_at <= ?
-                    )
-               )
-               AND NOT EXISTS (
-                    SELECT 1
-                    FROM outbox_events older
-                    WHERE older.aggregate_key = candidate.aggregate_key
-                      AND older.id < candidate.id
-                      AND older.status IN ('pending', 'processing')
-               )
-             ORDER BY candidate.id
-             LIMIT 1",
-        )
-        .bind(config.max_attempts)
-        .bind(OUTBOX_STATUS_PENDING)
-        .bind(&now_string)
-        .bind(OUTBOX_STATUS_PROCESSING)
-        .bind(&now_string)
-        .fetch_optional(&mut *tx)
-        .await
-        .map_err(system_error)?;
+        let claimable_id = sqlx::query_scalar::<_, i64>(CLAIM_NEXT_OUTBOX_EVENT_CANDIDATE_SQL)
+            .bind(config.max_attempts)
+            .bind(config.max_attempts)
+            .bind(&now_string)
+            .bind(config.max_attempts)
+            .bind(&now_string)
+            .fetch_optional(&mut *tx)
+            .await
+            .map_err(system_error)?;
 
         let Some(claimable_id) = claimable_id else {
             return Ok(None);
@@ -966,5 +1012,103 @@ mod tests {
                 Some("outbox retry limit reached".to_string())
             );
         }
+    }
+
+    async fn explain_query_plan(
+        pool: &sqlx::Pool<Sqlite>,
+        sql: &str,
+        binds: &[&str],
+    ) -> Vec<String> {
+        let explain_sql = format!("EXPLAIN QUERY PLAN {sql}");
+        let mut query = sqlx::query(&explain_sql);
+        for bind in binds {
+            query = query.bind(*bind);
+        }
+        query
+            .fetch_all(pool)
+            .await
+            .expect("query plan explains")
+            .into_iter()
+            .map(|row| row.get::<String, _>("detail"))
+            .collect()
+    }
+
+    fn assert_uses_index(plan: &[String], index_name: &str) {
+        assert!(
+            plan.iter().any(|detail| detail.contains(index_name)),
+            "expected plan to use {index_name}; plan: {plan:?}"
+        );
+    }
+
+    fn assert_no_plain_scan(plan: &[String], table_or_alias: &str) {
+        let plain_scan = format!("SCAN {table_or_alias}");
+        assert!(
+            plan.iter()
+                .all(|detail| { !detail.contains(&plain_scan) || detail.contains("USING INDEX") }),
+            "expected plan not to scan {table_or_alias} without an index; plan: {plan:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn claim_candidate_query_uses_outbox_partial_indexes() {
+        let pool = test_pool().await;
+        let plan = explain_query_plan(
+            &pool,
+            CLAIM_NEXT_OUTBOX_EVENT_CANDIDATE_SQL,
+            &[
+                "5",
+                "5",
+                "2026-05-03T09:00:00+00:00",
+                "5",
+                "2026-05-03T09:00:00+00:00",
+            ],
+        )
+        .await;
+
+        assert_uses_index(&plan, "outbox_events_pending_idx");
+        assert_uses_index(&plan, "outbox_events_processing_idx");
+        assert_uses_index(&plan, "outbox_events_aggregate_open_idx");
+        assert_no_plain_scan(&plan, "candidate");
+    }
+
+    #[tokio::test]
+    async fn retry_limit_failover_queries_use_outbox_partial_indexes() {
+        let pool = test_pool().await;
+
+        let pending_null_plan = explain_query_plan(
+            &pool,
+            FAIL_RETRY_LIMIT_PENDING_NULL_SQL,
+            &[OUTBOX_STATUS_FAILED, OUTBOX_RETRY_LIMIT_ERROR, "5"],
+        )
+        .await;
+        let pending_due_plan = explain_query_plan(
+            &pool,
+            FAIL_RETRY_LIMIT_PENDING_DUE_SQL,
+            &[
+                OUTBOX_STATUS_FAILED,
+                OUTBOX_RETRY_LIMIT_ERROR,
+                "5",
+                "2026-05-03T09:00:00+00:00",
+            ],
+        )
+        .await;
+        let processing_plan = explain_query_plan(
+            &pool,
+            FAIL_RETRY_LIMIT_PROCESSING_SQL,
+            &[
+                OUTBOX_STATUS_FAILED,
+                OUTBOX_RETRY_LIMIT_ERROR,
+                "5",
+                "2026-05-03T09:00:00+00:00",
+            ],
+        )
+        .await;
+
+        assert_uses_index(&pending_null_plan, "outbox_events_pending_idx");
+        assert_uses_index(&pending_due_plan, "outbox_events_pending_idx");
+        assert_uses_index(&processing_plan, "outbox_events_processing_idx");
+        assert_no_plain_scan(&pending_null_plan, "outbox_events");
+        assert_no_plain_scan(&pending_due_plan, "outbox_events");
+        assert_no_plain_scan(&processing_plan, "outbox_events");
     }
 }
