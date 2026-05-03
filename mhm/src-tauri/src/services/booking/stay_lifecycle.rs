@@ -18,6 +18,7 @@ use crate::{
         CheckoutSettlementPreview, CheckoutSettlementPreviewRequest,
     },
     money::MoneyVnd,
+    outbox::{OutboxAggregateKeySource, OutboxEventSpec},
 };
 
 use super::{
@@ -484,7 +485,12 @@ pub async fn check_in_idempotent(
     let request = WriteCommandRequest::new_sanitized(hash_payload.clone(), ledger_intent, summary)?
         .with_primary_aggregate_key(format!("room:{}", req.room_id))
         .with_lock_key_deriver(check_in_lock_keys_from_payload)
-        .with_success_summary(CommandLedgerResultSummary::success("Checked in")?);
+        .with_success_summary(CommandLedgerResultSummary::success("Checked in")?)
+        .with_outbox_event(OutboxEventSpec::new(
+            "booking.checked_in",
+            OutboxAggregateKeySource::response_field("booking", "id"),
+            &["bookings", "rooms", "folio"],
+        )?);
 
     let runtime_lock_keys = check_in_lock_keys_from_payload(&hash_payload)?;
     let origin_key = format!("{}:{}", ctx.command_name, ctx.idempotency_key);
@@ -952,7 +958,12 @@ pub async fn check_out_idempotent(
     let request = WriteCommandRequest::new_sanitized(hash_payload.clone(), ledger_intent, summary)?
         .with_primary_aggregate_key(format!("booking:{}", req.booking_id))
         .with_lock_key_deriver(check_out_initial_lock_keys_from_payload)
-        .with_success_summary(CommandLedgerResultSummary::success("Checked out")?);
+        .with_success_summary(CommandLedgerResultSummary::success("Checked out")?)
+        .with_outbox_event(OutboxEventSpec::new(
+            "booking.checked_out",
+            OutboxAggregateKeySource::response_field("booking", "booking_id"),
+            &["bookings", "rooms", "folio"],
+        )?);
 
     let pool_for_lookup = pool.clone();
     let booking_id_for_lookup = req.booking_id.clone();
@@ -1149,7 +1160,12 @@ pub async fn extend_stay_idempotent(
     let request = WriteCommandRequest::new_sanitized(hash_payload, ledger_intent, summary)?
         .with_primary_aggregate_key(format!("booking:{booking_id}"))
         .with_lock_key_deriver(extend_stay_initial_lock_keys_from_payload)
-        .with_success_summary(CommandLedgerResultSummary::success("Stay extended")?);
+        .with_success_summary(CommandLedgerResultSummary::success("Stay extended")?)
+        .with_outbox_event(OutboxEventSpec::new(
+            "booking.stay_extended",
+            OutboxAggregateKeySource::response_field("booking", "id"),
+            &["bookings", "rooms", "folio"],
+        )?);
 
     let pool_for_lookup = pool.clone();
     let booking_id_for_lookup = booking_id.to_string();

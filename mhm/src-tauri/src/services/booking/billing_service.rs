@@ -11,6 +11,7 @@ use crate::{
     db_error_monitoring::classify_db_error_code,
     domain::booking::{BookingError, BookingResult, OriginSideEffect},
     money::{validate_transport_money_vnd, MoneyVnd},
+    outbox::{OutboxAggregateKeySource, OutboxEventSpec},
 };
 use serde_json::json;
 
@@ -141,7 +142,12 @@ pub async fn add_folio_line_idempotent(
     let request = WriteCommandRequest::new_sanitized(hash_payload, ledger_intent, summary)?
         .with_primary_aggregate_key(format!("booking:{booking_id}"))
         .with_lock_key_deriver(add_folio_line_lock_keys_from_payload)
-        .with_success_summary(CommandLedgerResultSummary::success("Folio line added")?);
+        .with_success_summary(CommandLedgerResultSummary::success("Folio line added")?)
+        .with_outbox_event(OutboxEventSpec::new(
+            "folio.line_added",
+            OutboxAggregateKeySource::response_field("folio", "booking_id"),
+            &["folio", "bookings"],
+        )?);
 
     let booking_id = booking_id.to_string();
     let category = category.to_string();
@@ -245,7 +251,12 @@ pub async fn record_payment_idempotent(
                 crate::aggregate_locks::folio_key(booking_id)?,
             ])
         })
-        .with_success_summary(CommandLedgerResultSummary::success("Credit recorded")?);
+        .with_success_summary(CommandLedgerResultSummary::success("Credit recorded")?)
+        .with_outbox_event(OutboxEventSpec::new(
+            "folio.payment_recorded",
+            OutboxAggregateKeySource::response_field("folio", "booking_id"),
+            &["folio", "bookings"],
+        )?);
 
     let booking_id_for_guard = booking_id.to_string();
     let booking_id_for_service = booking_id.to_string();

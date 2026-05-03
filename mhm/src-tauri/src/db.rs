@@ -923,6 +923,61 @@ pub(crate) async fn run_migrations(pool: &Pool<Sqlite>) -> Result<(), sqlx::Erro
         set_schema_version(&mut tx, 15).await?;
         tx.commit().await?;
     }
+
+    // ── V16: Durable outbox events ──
+    if current < 16 {
+        let mut tx = pool.begin().await?;
+
+        sqlx::query(
+            "CREATE TABLE IF NOT EXISTS outbox_events (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                event_type TEXT NOT NULL,
+                aggregate_key TEXT NOT NULL,
+                payload_json TEXT NOT NULL,
+                origin_request_id TEXT NOT NULL,
+                origin_idempotency_key TEXT NOT NULL,
+                origin_command_name TEXT NOT NULL,
+                origin_request_hash TEXT NOT NULL,
+                status TEXT NOT NULL,
+                worker_token TEXT,
+                attempts INTEGER NOT NULL DEFAULT 0,
+                next_attempt_at TEXT,
+                processing_started_at TEXT,
+                processing_expires_at TEXT,
+                last_error TEXT,
+                created_at TEXT NOT NULL,
+                dispatched_at TEXT
+            )",
+        )
+        .execute(&mut *tx)
+        .await?;
+
+        sqlx::query(
+            "CREATE INDEX IF NOT EXISTS outbox_events_pending_idx
+             ON outbox_events(next_attempt_at, aggregate_key, id)
+             WHERE status = 'pending'",
+        )
+        .execute(&mut *tx)
+        .await?;
+
+        sqlx::query(
+            "CREATE INDEX IF NOT EXISTS outbox_events_processing_idx
+             ON outbox_events(processing_expires_at)
+             WHERE status = 'processing'",
+        )
+        .execute(&mut *tx)
+        .await?;
+
+        sqlx::query(
+            "CREATE UNIQUE INDEX IF NOT EXISTS outbox_events_origin_command_uq
+             ON outbox_events(origin_command_name, origin_idempotency_key)",
+        )
+        .execute(&mut *tx)
+        .await?;
+
+        set_schema_version(&mut tx, 16).await?;
+        tx.commit().await?;
+    }
     Ok(())
 }
 
@@ -1068,6 +1123,73 @@ mod tests {
         .expect("checks sqlite index")
     }
 
+    async fn sqlite_table_count(pool: &SqlitePool, name: &str) -> i64 {
+        sqlx::query_scalar(
+            "SELECT COUNT(*)
+             FROM sqlite_master
+             WHERE type = 'table' AND name = ?",
+        )
+        .bind(name)
+        .fetch_one(pool)
+        .await
+        .expect("checks sqlite table")
+    }
+
+    async fn outbox_column_count(pool: &SqlitePool, name: &str) -> i64 {
+        sqlx::query_scalar(
+            "SELECT COUNT(*)
+             FROM pragma_table_info('outbox_events')
+             WHERE name = ?",
+        )
+        .bind(name)
+        .fetch_one(pool)
+        .await
+        .expect("checks outbox_events column")
+    }
+
+    async fn assert_outbox_v16_shape(pool: &SqlitePool) {
+        assert_eq!(sqlite_table_count(pool, "outbox_events").await, 1);
+
+        for column in [
+            "id",
+            "event_type",
+            "aggregate_key",
+            "payload_json",
+            "origin_request_id",
+            "origin_idempotency_key",
+            "origin_command_name",
+            "origin_request_hash",
+            "status",
+            "worker_token",
+            "attempts",
+            "next_attempt_at",
+            "processing_started_at",
+            "processing_expires_at",
+            "last_error",
+            "created_at",
+            "dispatched_at",
+        ] {
+            assert_eq!(
+                outbox_column_count(pool, column).await,
+                1,
+                "missing outbox_events column {column}"
+            );
+        }
+
+        assert_eq!(
+            sqlite_index_count(pool, "outbox_events_pending_idx").await,
+            1
+        );
+        assert_eq!(
+            sqlite_index_count(pool, "outbox_events_processing_idx").await,
+            1
+        );
+        assert_eq!(
+            sqlite_index_count(pool, "outbox_events_origin_command_uq").await,
+            1
+        );
+    }
+
     async fn column_type(pool: &SqlitePool, table: &str, column: &str) -> String {
         let sql = format!(
             "SELECT type FROM pragma_table_info('{}') WHERE name = ?",
@@ -1195,7 +1317,7 @@ mod tests {
             .expect("reads final schema version")
             .get("version");
 
-        assert_eq!(version, 15);
+        assert_eq!(version, 16);
     }
 
     #[tokio::test]
@@ -1211,7 +1333,7 @@ mod tests {
             .expect("reads version")
             .get("version");
 
-        assert_eq!(version, 15);
+        assert_eq!(version, 16);
         assert_money_columns_are_integer(&pool).await;
     }
 
@@ -1499,7 +1621,7 @@ mod tests {
             .expect("reads final schema version")
             .get("version");
 
-        assert_eq!(version, 15);
+        assert_eq!(version, 16);
     }
 
     #[tokio::test]
@@ -1566,7 +1688,7 @@ mod tests {
             .expect("reads final schema version")
             .get("version");
 
-        assert_eq!(version, 15);
+        assert_eq!(version, 16);
     }
 
     #[tokio::test]
@@ -1646,7 +1768,7 @@ mod tests {
         );
 
         let version = get_schema_version(&pool).await.expect("schema version");
-        assert_eq!(version, 15);
+        assert_eq!(version, 16);
     }
 
     #[tokio::test]
@@ -1674,6 +1796,85 @@ mod tests {
             sqlite_index_count(&pool, "command_idempotency_recovery_queue_idx").await,
             1
         );
+    }
+
+    #[tokio::test]
+    async fn migration_v16_adds_outbox_events_schema() {
+        let pool = SqlitePool::connect("sqlite::memory:")
+            .await
+            .expect("connects in-memory sqlite");
+
+        run_migrations(&pool).await.expect("runs migrations");
+
+        assert_outbox_v16_shape(&pool).await;
+        let version = get_schema_version(&pool).await.expect("schema version");
+        assert_eq!(version, 16);
+    }
+
+    #[tokio::test]
+    async fn migration_v16_upgrades_existing_v15_database() {
+        let pool = SqlitePool::connect("sqlite::memory:")
+            .await
+            .expect("connects in-memory sqlite");
+        run_migrations(&pool).await.expect("initial migrations run");
+        sqlx::query("UPDATE schema_version SET version = 15")
+            .execute(&pool)
+            .await
+            .expect("rewinds schema version");
+
+        run_migrations(&pool).await.expect("v16 migration reruns");
+
+        assert_outbox_v16_shape(&pool).await;
+        let version = get_schema_version(&pool).await.expect("schema version");
+        assert_eq!(version, 16);
+    }
+
+    #[tokio::test]
+    async fn migration_v16_pending_outbox_defaults_are_insertable() {
+        let pool = SqlitePool::connect("sqlite::memory:")
+            .await
+            .expect("connects in-memory sqlite");
+        run_migrations(&pool).await.expect("runs migrations");
+
+        sqlx::query(
+            "INSERT INTO outbox_events (
+                event_type, aggregate_key, payload_json,
+                origin_request_id, origin_idempotency_key,
+                origin_command_name, origin_request_hash,
+                status, created_at
+             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        )
+        .bind("booking.checked_out")
+        .bind("booking:B1")
+        .bind(r#"{"schema_version":1}"#)
+        .bind("req-1")
+        .bind("idem-1")
+        .bind("check_out")
+        .bind("hash-1")
+        .bind("pending")
+        .bind("2026-05-03T09:00:00+07:00")
+        .execute(&pool)
+        .await
+        .expect("inserts pending outbox row");
+
+        let row = sqlx::query(
+            "SELECT status, attempts, worker_token, next_attempt_at,
+                    processing_started_at, processing_expires_at,
+                    last_error, dispatched_at
+             FROM outbox_events WHERE origin_command_name = 'check_out'",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("reads outbox row");
+
+        assert_eq!(row.get::<String, _>("status"), "pending");
+        assert_eq!(row.get::<i64, _>("attempts"), 0);
+        assert_eq!(row.get::<Option<String>, _>("worker_token"), None);
+        assert_eq!(row.get::<Option<String>, _>("next_attempt_at"), None);
+        assert_eq!(row.get::<Option<String>, _>("processing_started_at"), None);
+        assert_eq!(row.get::<Option<String>, _>("processing_expires_at"), None);
+        assert_eq!(row.get::<Option<String>, _>("last_error"), None);
+        assert_eq!(row.get::<Option<String>, _>("dispatched_at"), None);
     }
 
     #[tokio::test]

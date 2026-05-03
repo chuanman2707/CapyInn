@@ -20,6 +20,7 @@ mod models;
 pub mod money;
 mod money_migration;
 mod ocr;
+pub mod outbox;
 mod pricing;
 mod queries;
 mod repositories;

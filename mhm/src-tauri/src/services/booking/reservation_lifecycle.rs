@@ -17,6 +17,7 @@ use crate::{
     },
     models::{status, Booking, CreateReservationRequest, ModifyReservationRequest},
     money::{validate_non_negative_money_vnd, MoneyVnd},
+    outbox::{OutboxAggregateKeySource, OutboxEventSpec},
 };
 
 use super::{
@@ -431,7 +432,12 @@ pub async fn create_reservation_idempotent(
     let request = WriteCommandRequest::new_sanitized(hash_payload, ledger_intent, summary)?
         .with_primary_aggregate_key(format!("room:{room_id}"))
         .with_lock_key_deriver(create_room_lock_keys)
-        .with_success_summary(CommandLedgerResultSummary::success("Reservation created")?);
+        .with_success_summary(CommandLedgerResultSummary::success("Reservation created")?)
+        .with_outbox_event(OutboxEventSpec::new(
+            "booking.reservation_created",
+            OutboxAggregateKeySource::response_field("booking", "id"),
+            &["bookings", "rooms"],
+        )?);
 
     let request_for_service = req;
     let origin_idempotency_key = command_origin_key(ctx);
@@ -838,6 +844,11 @@ pub async fn cancel_reservation_idempotent(
         .with_lock_key_deriver(reservation_booking_lock_keys)
         .with_success_summary(CommandLedgerResultSummary::success(
             "Reservation cancelled",
+        )?)
+        .with_outbox_event(OutboxEventSpec::new(
+            "booking.reservation_cancelled",
+            OutboxAggregateKeySource::response_field("booking", "booking_id"),
+            &["bookings", "rooms", "folio"],
         )?);
 
     let pool_for_guard = pool.clone();
@@ -892,6 +903,11 @@ pub async fn confirm_reservation_idempotent(
         .with_lock_key_deriver(reservation_booking_lock_keys)
         .with_success_summary(CommandLedgerResultSummary::success(
             "Reservation confirmed",
+        )?)
+        .with_outbox_event(OutboxEventSpec::new(
+            "booking.reservation_confirmed",
+            OutboxAggregateKeySource::response_field("booking", "id"),
+            &["bookings", "rooms", "folio"],
         )?);
 
     let pool_for_guard = pool.clone();
@@ -946,7 +962,12 @@ pub async fn modify_reservation_idempotent(
     let request = WriteCommandRequest::new_sanitized(hash_payload, ledger_intent, summary)?
         .with_primary_aggregate_key(format!("booking:{}", req.booking_id))
         .with_lock_key_deriver(reservation_booking_lock_keys)
-        .with_success_summary(CommandLedgerResultSummary::success("Reservation modified")?);
+        .with_success_summary(CommandLedgerResultSummary::success("Reservation modified")?)
+        .with_outbox_event(OutboxEventSpec::new(
+            "booking.reservation_modified",
+            OutboxAggregateKeySource::response_field("booking", "id"),
+            &["bookings", "rooms"],
+        )?);
 
     let pool_for_guard = pool.clone();
     let booking_id_for_guard = req.booking_id.clone();

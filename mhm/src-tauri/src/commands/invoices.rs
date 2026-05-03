@@ -138,6 +138,23 @@ mod tests {
         pool
     }
 
+    async fn invoice_outbox_event_count(
+        pool: &Pool<Sqlite>,
+        command_name: &str,
+        idempotency_key: &str,
+    ) -> i64 {
+        sqlx::query_scalar(
+            "SELECT COUNT(*)
+             FROM outbox_events
+             WHERE origin_command_name = ? AND origin_idempotency_key = ?",
+        )
+        .bind(command_name)
+        .bind(idempotency_key)
+        .fetch_one(pool)
+        .await
+        .expect("counts invoice outbox events")
+    }
+
     async fn seed_invoice_booking(pool: &Pool<Sqlite>, booking_id: &str) {
         let room_id = format!("room-{booking_id}");
         let guest_id = format!("guest-{booking_id}");
@@ -245,6 +262,10 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(count, 1);
+        assert_eq!(
+            invoice_outbox_event_count(&pool, &ctx.command_name, &ctx.idempotency_key).await,
+            1
+        );
     }
 
     #[tokio::test]
