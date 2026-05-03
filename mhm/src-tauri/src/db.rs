@@ -1859,6 +1859,15 @@ mod tests {
             .execute(&pool)
             .await
             .expect("rewinds schema version");
+        sqlx::query("DROP INDEX outbox_events_aggregate_open_idx")
+            .execute(&pool)
+            .await
+            .expect("removes v17 index");
+
+        assert_eq!(
+            sqlite_index_count(&pool, "outbox_events_aggregate_open_idx").await,
+            0
+        );
 
         run_migrations(&pool).await.expect("v17 migration reruns");
 
