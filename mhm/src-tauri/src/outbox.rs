@@ -5,11 +5,14 @@ use crate::{
 use chrono::{Duration, Utc};
 use serde_json::{json, Value};
 use sqlx::{sqlite::SqliteRow, Pool, Row, Sqlite, Transaction};
+use std::{future::Future, pin::Pin};
 
 const OUTBOX_STATUS_PENDING: &str = "pending";
 const OUTBOX_STATUS_PROCESSING: &str = "processing";
+const OUTBOX_STATUS_DISPATCHED: &str = "dispatched";
 const OUTBOX_STATUS_FAILED: &str = "failed";
 const OUTBOX_SAFE_TEXT_MAX_CHARS: usize = 160;
+const OUTBOX_ERROR_MAX_CHARS: usize = 512;
 const OUTBOX_RETRY_LIMIT_ERROR: &str = "outbox retry limit reached";
 const CLAIM_NEXT_OUTBOX_EVENT_CANDIDATE_SQL: &str = "
 SELECT id
@@ -130,6 +133,22 @@ pub struct OutboxEvent {
     pub created_at: String,
     pub attempts: i64,
     pub worker_token: String,
+}
+
+pub type OutboxSubscriberFuture<'a> = Pin<Box<dyn Future<Output = CommandResult<()>> + Send + 'a>>;
+
+pub trait OutboxSubscriber: Send + Sync {
+    fn name(&self) -> &'static str;
+    fn handle<'a>(&'a self, event: &'a OutboxEvent) -> OutboxSubscriberFuture<'a>;
+}
+
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct OutboxDispatchSummary {
+    pub claimed: u64,
+    pub dispatched: u64,
+    pub retried: u64,
+    pub failed: u64,
+    pub retry_limit_failed: u64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -336,6 +355,112 @@ pub async fn claim_next_outbox_event(
     }
 }
 
+pub async fn mark_outbox_dispatched(
+    pool: &Pool<Sqlite>,
+    id: i64,
+    worker_token: &str,
+) -> CommandResult<bool> {
+    let now = Utc::now().to_rfc3339();
+    let result = sqlx::query(
+        "UPDATE outbox_events
+         SET status = ?,
+             worker_token = NULL,
+             next_attempt_at = NULL,
+             processing_started_at = NULL,
+             processing_expires_at = NULL,
+             last_error = NULL,
+             dispatched_at = ?
+         WHERE id = ?
+           AND status = ?
+           AND worker_token = ?",
+    )
+    .bind(OUTBOX_STATUS_DISPATCHED)
+    .bind(&now)
+    .bind(id)
+    .bind(OUTBOX_STATUS_PROCESSING)
+    .bind(worker_token)
+    .execute(pool)
+    .await
+    .map_err(system_error)?;
+
+    Ok(result.rows_affected() == 1)
+}
+
+pub async fn record_outbox_failure(
+    pool: &Pool<Sqlite>,
+    event: &OutboxEvent,
+    error: &CommandError,
+    config: OutboxDispatchConfig,
+) -> CommandResult<bool> {
+    let terminal_failure = event.attempts >= config.max_attempts;
+    let status = if terminal_failure {
+        OUTBOX_STATUS_FAILED
+    } else {
+        OUTBOX_STATUS_PENDING
+    };
+    let next_attempt_at = if terminal_failure {
+        None
+    } else {
+        Some(next_attempt_at_for_attempt(event.attempts))
+    };
+    let last_error = sanitize_outbox_error(error);
+
+    let result = sqlx::query(
+        "UPDATE outbox_events
+         SET status = ?,
+             worker_token = NULL,
+             next_attempt_at = ?,
+             processing_started_at = NULL,
+             processing_expires_at = NULL,
+             last_error = ?
+         WHERE id = ?
+           AND status = ?
+           AND worker_token = ?",
+    )
+    .bind(status)
+    .bind(next_attempt_at)
+    .bind(last_error)
+    .bind(event.id)
+    .bind(OUTBOX_STATUS_PROCESSING)
+    .bind(&event.worker_token)
+    .execute(pool)
+    .await
+    .map_err(system_error)?;
+
+    Ok(result.rows_affected() == 1)
+}
+
+pub async fn run_outbox_dispatch_batch(
+    pool: &Pool<Sqlite>,
+    subscribers: &[&dyn OutboxSubscriber],
+    config: OutboxDispatchConfig,
+) -> CommandResult<OutboxDispatchSummary> {
+    if subscribers.is_empty() {
+        return Ok(OutboxDispatchSummary::default());
+    }
+
+    let mut summary = OutboxDispatchSummary {
+        retry_limit_failed: fail_retry_limit_rows(pool, config).await?,
+        ..OutboxDispatchSummary::default()
+    };
+
+    for _ in 0..config.batch_size {
+        let Some(event) = claim_next_outbox_event(pool, config).await? else {
+            break;
+        };
+
+        summary.claimed += 1;
+        match dispatch_claimed_event(pool, event, subscribers, config).await? {
+            ClaimedDispatchOutcome::Dispatched => summary.dispatched += 1,
+            ClaimedDispatchOutcome::Retried => summary.retried += 1,
+            ClaimedDispatchOutcome::Failed => summary.failed += 1,
+            ClaimedDispatchOutcome::Stale => {}
+        }
+    }
+
+    Ok(summary)
+}
+
 impl OutboxEventSpec {
     pub fn new(
         event_type: &'static str,
@@ -437,6 +562,42 @@ fn resolve_aggregate(
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ClaimedDispatchOutcome {
+    Dispatched,
+    Retried,
+    Failed,
+    Stale,
+}
+
+async fn dispatch_claimed_event(
+    pool: &Pool<Sqlite>,
+    event: OutboxEvent,
+    subscribers: &[&dyn OutboxSubscriber],
+    config: OutboxDispatchConfig,
+) -> CommandResult<ClaimedDispatchOutcome> {
+    for subscriber in subscribers {
+        if let Err(error) = subscriber.handle(&event).await {
+            let terminal_failure = event.attempts >= config.max_attempts;
+            let finalized = record_outbox_failure(pool, &event, &error, config).await?;
+            if !finalized {
+                return Ok(ClaimedDispatchOutcome::Stale);
+            }
+            return Ok(if terminal_failure {
+                ClaimedDispatchOutcome::Failed
+            } else {
+                ClaimedDispatchOutcome::Retried
+            });
+        }
+    }
+
+    if mark_outbox_dispatched(pool, event.id, &event.worker_token).await? {
+        Ok(ClaimedDispatchOutcome::Dispatched)
+    } else {
+        Ok(ClaimedDispatchOutcome::Stale)
+    }
+}
+
 fn validate_aggregate_key_source(source: &OutboxAggregateKeySource) -> CommandResult<()> {
     match source {
         OutboxAggregateKeySource::PrimaryAggregateKey => Ok(()),
@@ -494,6 +655,26 @@ fn contains_forbidden_payload_term(value: &str) -> bool {
     ]
     .iter()
     .any(|term| lower.contains(term))
+}
+
+fn sanitize_outbox_error(error: &CommandError) -> String {
+    let message = error.message.trim();
+    let value = if message.is_empty() {
+        error.code.trim()
+    } else {
+        message
+    };
+    value.chars().take(OUTBOX_ERROR_MAX_CHARS).collect()
+}
+
+fn next_attempt_at_for_attempt(attempts: i64) -> String {
+    let delay_seconds = match attempts {
+        i64::MIN..=1 => 1,
+        2 => 5,
+        3 => 15,
+        _ => 30,
+    };
+    (Utc::now() + Duration::seconds(delay_seconds)).to_rfc3339()
 }
 
 fn canonicalize_json_value(value: Value) -> Value {
@@ -620,6 +801,31 @@ mod tests {
             session_id: None,
             channel_id: None,
             issued_at,
+        }
+    }
+
+    #[derive(Default)]
+    struct RecordingSubscriber {
+        calls: std::sync::Arc<std::sync::Mutex<Vec<i64>>>,
+        fail: bool,
+    }
+
+    impl OutboxSubscriber for RecordingSubscriber {
+        fn name(&self) -> &'static str {
+            "recording"
+        }
+
+        fn handle<'a>(&'a self, event: &'a OutboxEvent) -> OutboxSubscriberFuture<'a> {
+            Box::pin(async move {
+                self.calls.lock().expect("calls lock").push(event.id);
+                if self.fail {
+                    return Err(CommandError::system(
+                        codes::SYSTEM_INTERNAL_ERROR,
+                        "subscriber failed",
+                    ));
+                }
+                Ok(())
+            })
         }
     }
 
@@ -1012,6 +1218,231 @@ mod tests {
                 Some("outbox retry limit reached".to_string())
             );
         }
+    }
+
+    #[tokio::test]
+    async fn dispatch_success_marks_event_dispatched() {
+        let pool = test_pool().await;
+        let id = seed_outbox_event(
+            &pool,
+            "booking.checked_out",
+            "booking:B1",
+            "pending",
+            0,
+            None,
+            None,
+        )
+        .await;
+        let subscriber = RecordingSubscriber::default();
+        let subscribers: [&dyn OutboxSubscriber; 1] = [&subscriber];
+
+        let summary = run_outbox_dispatch_batch(&pool, &subscribers, OutboxDispatchConfig::test())
+            .await
+            .expect("dispatch succeeds");
+
+        assert_eq!(
+            summary,
+            OutboxDispatchSummary {
+                claimed: 1,
+                dispatched: 1,
+                retried: 0,
+                failed: 0,
+                retry_limit_failed: 0,
+            }
+        );
+        assert_eq!(
+            *subscriber.calls.lock().expect("calls lock"),
+            vec![id],
+            "subscriber receives claimed event"
+        );
+
+        let row = sqlx::query(
+            "SELECT status, attempts, worker_token, next_attempt_at,
+                    processing_started_at, processing_expires_at,
+                    last_error, dispatched_at
+             FROM outbox_events WHERE id = ?",
+        )
+        .bind(id)
+        .fetch_one(&pool)
+        .await
+        .expect("dispatched row exists");
+
+        assert_eq!(row.get::<String, _>("status"), "dispatched");
+        assert_eq!(row.get::<i64, _>("attempts"), 1);
+        assert!(row.get::<Option<String>, _>("worker_token").is_none());
+        assert!(row.get::<Option<String>, _>("next_attempt_at").is_none());
+        assert!(row
+            .get::<Option<String>, _>("processing_started_at")
+            .is_none());
+        assert!(row
+            .get::<Option<String>, _>("processing_expires_at")
+            .is_none());
+        assert!(row.get::<Option<String>, _>("last_error").is_none());
+        assert!(row.get::<Option<String>, _>("dispatched_at").is_some());
+    }
+
+    #[tokio::test]
+    async fn dispatch_failure_retries_pending_with_backoff() {
+        let pool = test_pool().await;
+        let id = seed_outbox_event(
+            &pool,
+            "booking.checked_out",
+            "booking:B1",
+            "pending",
+            0,
+            None,
+            None,
+        )
+        .await;
+        let subscriber = RecordingSubscriber {
+            fail: true,
+            ..RecordingSubscriber::default()
+        };
+        let subscribers: [&dyn OutboxSubscriber; 1] = [&subscriber];
+
+        let summary = run_outbox_dispatch_batch(&pool, &subscribers, OutboxDispatchConfig::test())
+            .await
+            .expect("dispatch batch records failure");
+
+        assert_eq!(
+            summary,
+            OutboxDispatchSummary {
+                claimed: 1,
+                dispatched: 0,
+                retried: 1,
+                failed: 0,
+                retry_limit_failed: 0,
+            }
+        );
+
+        let row = sqlx::query(
+            "SELECT status, attempts, worker_token, next_attempt_at,
+                    processing_started_at, processing_expires_at,
+                    last_error, dispatched_at
+             FROM outbox_events WHERE id = ?",
+        )
+        .bind(id)
+        .fetch_one(&pool)
+        .await
+        .expect("retried row exists");
+
+        assert_eq!(row.get::<String, _>("status"), "pending");
+        assert_eq!(row.get::<i64, _>("attempts"), 1);
+        assert!(row.get::<Option<String>, _>("worker_token").is_none());
+        assert!(row.get::<Option<String>, _>("next_attempt_at").is_some());
+        assert!(row
+            .get::<Option<String>, _>("processing_started_at")
+            .is_none());
+        assert!(row
+            .get::<Option<String>, _>("processing_expires_at")
+            .is_none());
+        assert_eq!(
+            row.get::<Option<String>, _>("last_error"),
+            Some("subscriber failed".to_string())
+        );
+        assert!(row.get::<Option<String>, _>("dispatched_at").is_none());
+    }
+
+    #[tokio::test]
+    async fn dispatch_failure_at_limit_marks_failed() {
+        let pool = test_pool().await;
+        let id = seed_outbox_event(
+            &pool,
+            "booking.checked_out",
+            "booking:B1",
+            "pending",
+            4,
+            None,
+            None,
+        )
+        .await;
+        let subscriber = RecordingSubscriber {
+            fail: true,
+            ..RecordingSubscriber::default()
+        };
+        let subscribers: [&dyn OutboxSubscriber; 1] = [&subscriber];
+
+        let summary = run_outbox_dispatch_batch(&pool, &subscribers, OutboxDispatchConfig::test())
+            .await
+            .expect("dispatch batch records terminal failure");
+
+        assert_eq!(
+            summary,
+            OutboxDispatchSummary {
+                claimed: 1,
+                dispatched: 0,
+                retried: 0,
+                failed: 1,
+                retry_limit_failed: 0,
+            }
+        );
+
+        let row = sqlx::query(
+            "SELECT status, attempts, worker_token, next_attempt_at,
+                    processing_started_at, processing_expires_at,
+                    last_error, dispatched_at
+             FROM outbox_events WHERE id = ?",
+        )
+        .bind(id)
+        .fetch_one(&pool)
+        .await
+        .expect("failed row exists");
+
+        assert_eq!(row.get::<String, _>("status"), "failed");
+        assert_eq!(row.get::<i64, _>("attempts"), 5);
+        assert!(row.get::<Option<String>, _>("worker_token").is_none());
+        assert!(row.get::<Option<String>, _>("next_attempt_at").is_none());
+        assert!(row
+            .get::<Option<String>, _>("processing_started_at")
+            .is_none());
+        assert!(row
+            .get::<Option<String>, _>("processing_expires_at")
+            .is_none());
+        assert_eq!(
+            row.get::<Option<String>, _>("last_error"),
+            Some("subscriber failed".to_string())
+        );
+        assert!(row.get::<Option<String>, _>("dispatched_at").is_none());
+    }
+
+    #[tokio::test]
+    async fn stale_worker_token_cannot_mark_dispatched() {
+        let pool = test_pool().await;
+        let id = seed_outbox_event(
+            &pool,
+            "booking.checked_out",
+            "booking:B1",
+            "pending",
+            0,
+            None,
+            None,
+        )
+        .await;
+        let claimed = claim_next_outbox_event(&pool, OutboxDispatchConfig::test())
+            .await
+            .expect("claim succeeds")
+            .expect("event is claimed");
+
+        let updated = mark_outbox_dispatched(&pool, id, "stale-worker-token")
+            .await
+            .expect("stale finalization is ignored");
+
+        assert!(!updated);
+
+        let row = sqlx::query(
+            "SELECT status, worker_token, dispatched_at FROM outbox_events WHERE id = ?",
+        )
+        .bind(id)
+        .fetch_one(&pool)
+        .await
+        .expect("claimed row exists");
+
+        assert_eq!(row.get::<String, _>("status"), "processing");
+        assert_eq!(
+            row.get::<Option<String>, _>("worker_token"),
+            Some(claimed.worker_token)
+        );
+        assert!(row.get::<Option<String>, _>("dispatched_at").is_none());
     }
 
     async fn explain_query_plan(
