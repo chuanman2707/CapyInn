@@ -3,9 +3,16 @@ use crate::{
     command_idempotency::{system_error, WriteCommandContext},
 };
 use chrono::{Duration, Utc};
+use log::{error, info};
 use serde_json::{json, Value};
 use sqlx::{sqlite::SqliteRow, Pool, Row, Sqlite, Transaction};
-use std::{future::Future, pin::Pin, sync::Arc};
+use std::{
+    future::Future,
+    pin::Pin,
+    sync::{Arc, Mutex},
+    time::Duration as StdDuration,
+};
+use tokio::sync::oneshot;
 
 const OUTBOX_STATUS_PENDING: &str = "pending";
 const OUTBOX_STATUS_PROCESSING: &str = "processing";
@@ -140,6 +147,48 @@ pub type OutboxSubscriberFuture<'a> = Pin<Box<dyn Future<Output = CommandResult<
 pub trait OutboxSubscriber: Send + Sync {
     fn name(&self) -> &'static str;
     fn handle<'a>(&'a self, event: &'a OutboxEvent) -> OutboxSubscriberFuture<'a>;
+}
+
+pub struct OutboxDispatcherHandle {
+    task: Mutex<Option<tauri::async_runtime::JoinHandle<()>>>,
+    shutdown_tx: Mutex<Option<oneshot::Sender<()>>>,
+}
+
+impl OutboxDispatcherHandle {
+    pub fn inactive() -> Self {
+        Self {
+            task: Mutex::new(None),
+            shutdown_tx: Mutex::new(None),
+        }
+    }
+
+    fn new(task: tauri::async_runtime::JoinHandle<()>, shutdown_tx: oneshot::Sender<()>) -> Self {
+        Self {
+            task: Mutex::new(Some(task)),
+            shutdown_tx: Mutex::new(Some(shutdown_tx)),
+        }
+    }
+
+    pub fn is_active(&self) -> bool {
+        self.task
+            .lock()
+            .map(|guard| guard.is_some())
+            .unwrap_or(false)
+    }
+
+    pub fn shutdown(&self) {
+        let shutdown_tx = self
+            .shutdown_tx
+            .lock()
+            .ok()
+            .and_then(|mut guard| guard.take());
+
+        if let Some(shutdown_tx) = shutdown_tx {
+            let _ = shutdown_tx.send(());
+        }
+
+        let _task = self.task.lock().ok().and_then(|mut guard| guard.take());
+    }
 }
 
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
@@ -461,6 +510,23 @@ pub async fn run_outbox_dispatch_batch(
     Ok(summary)
 }
 
+pub fn start_outbox_dispatcher(
+    pool: Pool<Sqlite>,
+    subscribers: Vec<Arc<dyn OutboxSubscriber>>,
+) -> OutboxDispatcherHandle {
+    if subscribers.is_empty() {
+        info!("Outbox dispatcher inactive: no subscribers registered");
+        return OutboxDispatcherHandle::inactive();
+    }
+
+    let (shutdown_tx, shutdown_rx) = oneshot::channel();
+    let task = tauri::async_runtime::spawn(async move {
+        run_outbox_dispatcher_loop(pool, subscribers, shutdown_rx).await;
+    });
+
+    OutboxDispatcherHandle::new(task, shutdown_tx)
+}
+
 pub async fn run_outbox_startup_recovery_once(
     pool: &Pool<Sqlite>,
     subscribers: &[Arc<dyn OutboxSubscriber>],
@@ -471,6 +537,40 @@ pub async fn run_outbox_startup_recovery_once(
         .map(|subscriber| subscriber.as_ref())
         .collect::<Vec<&dyn OutboxSubscriber>>();
     run_outbox_dispatch_batch(pool, &subscriber_refs, config).await
+}
+
+async fn run_outbox_dispatcher_loop(
+    pool: Pool<Sqlite>,
+    subscribers: Vec<Arc<dyn OutboxSubscriber>>,
+    mut shutdown_rx: oneshot::Receiver<()>,
+) {
+    loop {
+        tokio::select! {
+            biased;
+            _ = &mut shutdown_rx => {
+                break;
+            }
+            _ = tokio::time::sleep(StdDuration::from_secs(5)) => {
+                let subscriber_refs = subscribers
+                    .iter()
+                    .map(|subscriber| subscriber.as_ref())
+                    .collect::<Vec<&dyn OutboxSubscriber>>();
+
+                if let Err(error) = run_outbox_dispatch_batch(
+                    &pool,
+                    &subscriber_refs,
+                    OutboxDispatchConfig::default(),
+                )
+                .await
+                {
+                    error!(
+                        "Outbox dispatcher batch failed: code={} message={}",
+                        error.code, error.message
+                    );
+                }
+            }
+        }
+    }
 }
 
 impl OutboxEventSpec {
@@ -843,6 +943,12 @@ mod tests {
                 Ok(())
             })
         }
+    }
+
+    #[test]
+    fn dispatcher_handle_is_inactive_without_subscribers() {
+        let handle = OutboxDispatcherHandle::inactive();
+        assert!(!handle.is_active());
     }
 
     #[test]

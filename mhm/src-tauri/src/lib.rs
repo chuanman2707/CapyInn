@@ -1,18 +1,18 @@
 use log::{error, info};
 use tauri::Manager;
 
+pub mod aggregate_locks;
 pub mod app_error;
 pub mod app_identity;
-pub mod aggregate_locks;
 mod backup;
 mod command_failure_log;
 pub mod command_idempotency;
 pub mod command_ledger;
 pub mod command_recovery;
-mod crash_index;
 mod commands;
-pub mod db_error_monitoring;
+mod crash_index;
 mod db;
+pub mod db_error_monitoring;
 mod diagnostics;
 mod domain;
 pub mod gateway;
@@ -197,11 +197,12 @@ pub fn run() {
             };
 
             app.manage(AppState {
-                db: pool,
+                db: pool.clone(),
                 current_user: Arc::new(Mutex::new(None)),
             });
             app.manage(backup::BackupCoordinator::new());
             app.manage(backup::start_backup_scheduler(app.handle().clone()));
+            app.manage(outbox::start_outbox_dispatcher(pool.clone(), Vec::new()));
             app.manage(GatewayRuntimeState::new(rt, gateway_runtime));
 
             let _ = std::fs::create_dir_all(app_identity::models_dir());
