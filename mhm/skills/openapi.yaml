@@ -6,11 +6,16 @@ info:
     CapyInn MCP Gateway API.
     Exposes room management, booking, pricing, and reservation tools via MCP protocol.
     All dates use YYYY-MM-DD format. Timezone: Asia/Ho_Chi_Minh.
+    Loopback-only by default. The documented server URL uses 127.0.0.1 and is not a LAN or remote deployment instruction.
+    SQLite-backed PMS tools are the source of truth for booking, payment, room availability, folio, invoice, ledger, housekeeping, and audit state.
+    Observer events are committed PMS facts that tell clients what to refresh; they are not a replacement for detail reads.
+    Agent memory is non-authoritative and may only store preferences, summaries, service context, city recommendations, chat IDs, channel IDs, and notes.
+    LAN or remote exposure requires explicit configuration, auth or pairing, and policy gates. High-risk write tools remain policy-gated even for paired clients.
   contact:
     name: CapyInn
 servers:
   - url: http://127.0.0.1:{port}
-    description: Local MCP Gateway (runtime port)
+    description: Local loopback MCP Gateway (runtime port; not LAN or remote)
     variables:
       port:
         default: '61234'
