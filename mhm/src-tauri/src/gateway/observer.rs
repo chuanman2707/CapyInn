@@ -1,6 +1,17 @@
-use axum::http::HeaderMap;
+use async_stream::stream;
+use axum::{
+    extract::{Query, State},
+    http::{HeaderMap, StatusCode},
+    response::{
+        sse::{Event, KeepAlive, Sse},
+        IntoResponse,
+    },
+    Json,
+};
+use futures_util::Stream;
 use serde::{Deserialize, Serialize};
 use sqlx::{Pool, Row, Sqlite};
+use std::{convert::Infallible, time::Duration};
 
 const OBSERVER_BATCH_LIMIT: i64 = 100;
 
@@ -15,6 +26,23 @@ pub enum ObserverErrorCode {
 pub struct ObserverError {
     pub code: ObserverErrorCode,
     pub message: String,
+}
+
+#[derive(Debug, Serialize)]
+struct ObserverErrorResponse<'a> {
+    ok: bool,
+    error: ObserverErrorBody<'a>,
+}
+
+#[derive(Debug, Serialize)]
+struct ObserverErrorBody<'a> {
+    code: &'a str,
+    message: &'a str,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ObserverQuery {
+    pub last_event_id: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -45,6 +73,39 @@ struct StoredOutboxAggregate {
     #[serde(rename = "type")]
     ref_type: String,
     id: String,
+}
+
+impl ObserverErrorCode {
+    fn as_str(&self) -> &'static str {
+        match self {
+            ObserverErrorCode::InvalidCursor => "invalid_cursor",
+            ObserverErrorCode::CursorExpired => "cursor_expired",
+            ObserverErrorCode::ObserverUnavailable => "observer_unavailable",
+        }
+    }
+
+    fn status_code(&self) -> StatusCode {
+        match self {
+            ObserverErrorCode::InvalidCursor => StatusCode::BAD_REQUEST,
+            ObserverErrorCode::CursorExpired => StatusCode::CONFLICT,
+            ObserverErrorCode::ObserverUnavailable => StatusCode::INTERNAL_SERVER_ERROR,
+        }
+    }
+}
+
+impl IntoResponse for ObserverError {
+    fn into_response(self) -> axum::response::Response {
+        let status = self.code.status_code();
+        let body = ObserverErrorResponse {
+            ok: false,
+            error: ObserverErrorBody {
+                code: self.code.as_str(),
+                message: &self.message,
+            },
+        };
+
+        (status, Json(body)).into_response()
+    }
 }
 
 pub fn parse_cursor(
@@ -196,6 +257,74 @@ pub async fn load_observer_events_after(
             })
         })
         .collect()
+}
+
+pub async fn observe_events(
+    State(pool): State<Pool<Sqlite>>,
+    Query(query): Query<ObserverQuery>,
+    headers: HeaderMap,
+) -> Result<Sse<impl Stream<Item = Result<Event, Infallible>>>, ObserverError> {
+    let cursor = parse_cursor(query.last_event_id.as_deref(), &headers)?;
+    let start_after = resolve_start_after_event_id(&pool, cursor).await?;
+
+    Ok(Sse::new(build_observer_sse_stream(
+        pool,
+        start_after,
+        Duration::from_secs(1),
+    ))
+    .keep_alive(KeepAlive::default()))
+}
+
+pub fn build_observer_sse_stream(
+    pool: Pool<Sqlite>,
+    start_after: i64,
+    poll_interval: Duration,
+) -> impl Stream<Item = Result<Event, Infallible>> {
+    stream! {
+        let mut last_sent_id = start_after;
+
+        loop {
+            match load_observer_events_after(&pool, last_sent_id, OBSERVER_BATCH_LIMIT).await {
+                Ok(events) => {
+                    for observer_event in events {
+                        last_sent_id = observer_event.event_id;
+                        let event_id = observer_event.event_id.to_string();
+                        let event = Event::default()
+                            .event("pms.changed")
+                            .id(event_id)
+                            .json_data(observer_event)
+                            .unwrap_or_else(|_| observer_error_event(observer_unavailable()));
+
+                        yield Ok(event);
+                    }
+                }
+                Err(error) => {
+                    yield Ok(observer_error_event(error));
+                }
+            }
+
+            tokio::time::sleep(poll_interval).await;
+        }
+    }
+}
+
+fn observer_error_event(error: ObserverError) -> Event {
+    let payload = ObserverErrorResponse {
+        ok: false,
+        error: ObserverErrorBody {
+            code: error.code.as_str(),
+            message: &error.message,
+        },
+    };
+
+    Event::default()
+        .event("observer.error")
+        .json_data(payload)
+        .unwrap_or_else(|_| {
+            Event::default().event("observer.error").data(
+                r#"{"ok":false,"error":{"code":"observer_unavailable","message":"observer stream is unavailable"}}"#,
+            )
+        })
 }
 
 #[cfg(test)]
