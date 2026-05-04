@@ -41,6 +41,24 @@ describe("GatewaySection", () => {
         expect(copied).not.toContain("--mcp-stdio");
     });
 
+    it("shows loopback-only gateway guidance for operators", async () => {
+        render(<GatewaySection />);
+
+        await waitFor(() => {
+            expect(screen.getByText(/Gateway đang chạy/i)).toBeInTheDocument();
+        });
+
+        expect(
+            screen.getByText(/Mặc định chỉ kết nối local qua 127\.0\.0\.1/i),
+        ).toBeInTheDocument();
+        expect(
+            screen.getByText(/LAN\/remote không được mở mặc định/i),
+        ).toBeInTheDocument();
+        expect(
+            screen.getByText(/high-risk write tools vẫn cần policy gate/i),
+        ).toBeInTheDocument();
+    });
+
     it("shows the full HTTP MCP tool list including get_invoice", async () => {
         render(<GatewaySection />);
 
