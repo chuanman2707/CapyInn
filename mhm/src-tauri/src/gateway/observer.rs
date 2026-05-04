@@ -1,12 +1,12 @@
 use async_stream::stream;
 use axum::{
+    Json,
     extract::{Query, State},
     http::{HeaderMap, StatusCode},
     response::{
-        sse::{Event, KeepAlive, Sse},
         IntoResponse,
+        sse::{Event, KeepAlive, Sse},
     },
-    Json,
 };
 use futures_util::Stream;
 use serde::{Deserialize, Serialize};
@@ -52,6 +52,12 @@ pub struct ObserverEvent {
     pub aggregate: ObserverAggregate,
     pub created_at: String,
     pub refresh: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ObserverEventBatch {
+    pub events: Vec<ObserverEvent>,
+    pub high_watermark_event_id: i64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -222,7 +228,7 @@ pub async fn load_observer_events_after(
     pool: &Pool<Sqlite>,
     after_event_id: i64,
     limit: i64,
-) -> Result<Vec<ObserverEvent>, ObserverError> {
+) -> Result<ObserverEventBatch, ObserverError> {
     let limit = limit.clamp(1, OBSERVER_BATCH_LIMIT);
     let rows = sqlx::query(
         "SELECT id, event_type, payload_json, created_at
@@ -237,26 +243,36 @@ pub async fn load_observer_events_after(
     .await
     .map_err(|_| observer_unavailable())?;
 
-    rows.into_iter()
-        .map(|row| {
-            let payload_json: String = row
-                .try_get("payload_json")
-                .map_err(|_| observer_unavailable())?;
-            let (aggregate, refresh) = parse_safe_payload(&payload_json)?;
+    let mut events = Vec::new();
+    let mut high_watermark_event_id = after_event_id;
+    for row in rows {
+        let event_id = row.try_get("id").map_err(|_| observer_unavailable())?;
+        high_watermark_event_id = event_id;
 
-            Ok(ObserverEvent {
-                event_id: row.try_get("id").map_err(|_| observer_unavailable())?,
-                event_type: row
-                    .try_get("event_type")
-                    .map_err(|_| observer_unavailable())?,
-                aggregate,
-                created_at: row
-                    .try_get("created_at")
-                    .map_err(|_| observer_unavailable())?,
-                refresh,
-            })
-        })
-        .collect()
+        let payload_json: String = row
+            .try_get("payload_json")
+            .map_err(|_| observer_unavailable())?;
+        let Ok((aggregate, refresh)) = parse_safe_payload(&payload_json) else {
+            continue;
+        };
+
+        events.push(ObserverEvent {
+            event_id,
+            event_type: row
+                .try_get("event_type")
+                .map_err(|_| observer_unavailable())?,
+            aggregate,
+            created_at: row
+                .try_get("created_at")
+                .map_err(|_| observer_unavailable())?,
+            refresh,
+        });
+    }
+
+    Ok(ObserverEventBatch {
+        events,
+        high_watermark_event_id,
+    })
 }
 
 pub async fn observe_events(
@@ -285,9 +301,8 @@ pub fn build_observer_sse_stream(
 
         loop {
             match load_observer_events_after(&pool, last_sent_id, OBSERVER_BATCH_LIMIT).await {
-                Ok(events) => {
-                    for observer_event in events {
-                        last_sent_id = observer_event.event_id;
+                Ok(batch) => {
+                    for observer_event in batch.events {
                         let event_id = observer_event.event_id.to_string();
                         let event = Event::default()
                             .event("pms.changed")
@@ -297,6 +312,7 @@ pub fn build_observer_sse_stream(
 
                         yield Ok(event);
                     }
+                    last_sent_id = batch.high_watermark_event_id;
                 }
                 Err(error) => {
                     yield Ok(observer_error_event(error));
@@ -329,7 +345,7 @@ fn observer_error_event(error: ObserverError) -> Event {
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_cursor, ObserverErrorCode};
+    use super::{ObserverErrorCode, parse_cursor};
     use axum::http::{HeaderMap, HeaderValue};
 
     #[test]
@@ -411,9 +427,9 @@ mod tests {
 
 #[cfg(test)]
 mod db_tests {
-    use super::{load_observer_events_after, resolve_start_after_event_id, ObserverErrorCode};
+    use super::{ObserverErrorCode, load_observer_events_after, resolve_start_after_event_id};
     use serde_json::json;
-    use sqlx::{sqlite::SqlitePoolOptions, Pool, Sqlite};
+    use sqlx::{Pool, Sqlite, sqlite::SqlitePoolOptions};
 
     async fn test_pool() -> Pool<Sqlite> {
         let pool = SqlitePoolOptions::new()
@@ -464,6 +480,32 @@ mod db_tests {
         result.last_insert_rowid()
     }
 
+    async fn seed_malformed_outbox_event(pool: &Pool<Sqlite>, created_at: &str) -> i64 {
+        let result = sqlx::query(
+            "INSERT INTO outbox_events (
+                event_type, aggregate_key, payload_json,
+                origin_request_id, origin_idempotency_key,
+                origin_command_name, origin_request_hash,
+                status, attempts, created_at
+             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        )
+        .bind("pms.command.completed")
+        .bind("booking:malformed")
+        .bind(r#"{"schema_version":2,"aggregate":{"type":"booking","id":"malformed"},"refresh":["bookings"]}"#)
+        .bind("req-malformed")
+        .bind("idem-malformed")
+        .bind("check_out")
+        .bind("hash-malformed")
+        .bind("pending")
+        .bind(3_i64)
+        .bind(created_at)
+        .execute(pool)
+        .await
+        .expect("seeds malformed outbox event");
+
+        result.last_insert_rowid()
+    }
+
     #[tokio::test]
     async fn no_cursor_starts_after_current_max_id() {
         let pool = test_pool().await;
@@ -473,13 +515,14 @@ mod db_tests {
         let start_after = resolve_start_after_event_id(&pool, None)
             .await
             .expect("resolves no cursor");
-        let events = load_observer_events_after(&pool, start_after, 100)
+        let batch = load_observer_events_after(&pool, start_after, 100)
             .await
             .expect("loads observer events");
 
         assert!(second_id > first_id);
         assert_eq!(start_after, second_id);
-        assert!(events.is_empty());
+        assert!(batch.events.is_empty());
+        assert_eq!(batch.high_watermark_event_id, second_id);
     }
 
     #[tokio::test]
@@ -491,12 +534,13 @@ mod db_tests {
         let start_after = resolve_start_after_event_id(&pool, Some(first_id))
             .await
             .expect("resolves cursor");
-        let events = load_observer_events_after(&pool, start_after, 100)
+        let batch = load_observer_events_after(&pool, start_after, 100)
             .await
             .expect("loads observer events");
 
-        assert_eq!(events.len(), 1);
-        let event = &events[0];
+        assert_eq!(batch.events.len(), 1);
+        assert_eq!(batch.high_watermark_event_id, second_id);
+        let event = &batch.events[0];
         assert_eq!(event.event_id, second_id);
         assert_eq!(event.event_type, "pms.command.completed");
         assert_eq!(event.aggregate.ref_type, "booking");
@@ -525,6 +569,38 @@ mod db_tests {
                 "serialized observer event exposed {forbidden}: {serialized}"
             );
         }
+    }
+
+    #[tokio::test]
+    async fn malformed_payload_rows_do_not_block_later_events() {
+        let pool = test_pool().await;
+        let first_id = seed_outbox_event(&pool, "booking-1", "2026-05-03T09:00:00+00:00").await;
+        let malformed_id = seed_malformed_outbox_event(&pool, "2026-05-03T09:01:00+00:00").await;
+        let second_id = seed_outbox_event(&pool, "booking-2", "2026-05-03T09:02:00+00:00").await;
+
+        let batch = load_observer_events_after(&pool, first_id, 100)
+            .await
+            .expect("loads observer events");
+
+        assert!(first_id < malformed_id);
+        assert!(malformed_id < second_id);
+        assert_eq!(batch.events.len(), 1);
+        assert_eq!(batch.events[0].event_id, second_id);
+        assert_eq!(batch.high_watermark_event_id, second_id);
+    }
+
+    #[tokio::test]
+    async fn malformed_only_batches_advance_high_watermark() {
+        let pool = test_pool().await;
+        let first_id = seed_outbox_event(&pool, "booking-1", "2026-05-03T09:00:00+00:00").await;
+        let malformed_id = seed_malformed_outbox_event(&pool, "2026-05-03T09:01:00+00:00").await;
+
+        let batch = load_observer_events_after(&pool, first_id, 100)
+            .await
+            .expect("loads observer events");
+
+        assert_eq!(batch.events, Vec::new());
+        assert_eq!(batch.high_watermark_event_id, malformed_id);
     }
 
     #[tokio::test]
