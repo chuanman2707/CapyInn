@@ -85,18 +85,16 @@ fn map_audit_error(
     context: Value,
 ) -> (CommandError, Option<DbErrorGroup>) {
     match error {
-        BookingError::Validation(message) if message == "Ngày audit không hợp lệ" => {
-            (
-                map_audit_user_error(
-                    codes::AUDIT_INVALID_DATE,
-                    command_name,
-                    effective_correlation_id,
-                    message,
-                    &context,
-                ),
-                None,
-            )
-        }
+        BookingError::Validation(message) if message == "Ngày audit không hợp lệ" => (
+            map_audit_user_error(
+                codes::AUDIT_INVALID_DATE,
+                command_name,
+                effective_correlation_id,
+                message,
+                &context,
+            ),
+            None,
+        ),
         BookingError::Validation(message) | BookingError::Conflict(message)
             if message.starts_with("Đã audit ngày ") =>
         {
@@ -111,18 +109,16 @@ fn map_audit_error(
                 None,
             )
         }
-        BookingError::Validation(message) | BookingError::Conflict(message) => {
-            (
-                map_audit_user_error(
-                    codes::AUDIT_INVALID_DATE,
-                    command_name,
-                    effective_correlation_id,
-                    message,
-                    &context,
-                ),
-                None,
-            )
-        }
+        BookingError::Validation(message) | BookingError::Conflict(message) => (
+            map_audit_user_error(
+                codes::AUDIT_INVALID_DATE,
+                command_name,
+                effective_correlation_id,
+                message,
+                &context,
+            ),
+            None,
+        ),
         BookingError::DatabaseWrite(message) => {
             let db_error_group = classify_db_failure(MonitoredDbFailure::DatabaseWrite(&message));
             (
