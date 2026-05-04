@@ -544,6 +544,8 @@ async fn run_outbox_dispatcher_loop(
     subscribers: Vec<Arc<dyn OutboxSubscriber>>,
     mut shutdown_rx: oneshot::Receiver<()>,
 ) {
+    run_default_outbox_dispatch_batch(&pool, &subscribers).await;
+
     loop {
         tokio::select! {
             biased;
@@ -551,25 +553,28 @@ async fn run_outbox_dispatcher_loop(
                 break;
             }
             _ = tokio::time::sleep(StdDuration::from_secs(5)) => {
-                let subscriber_refs = subscribers
-                    .iter()
-                    .map(|subscriber| subscriber.as_ref())
-                    .collect::<Vec<&dyn OutboxSubscriber>>();
-
-                if let Err(error) = run_outbox_dispatch_batch(
-                    &pool,
-                    &subscriber_refs,
-                    OutboxDispatchConfig::default(),
-                )
-                .await
-                {
-                    error!(
-                        "Outbox dispatcher batch failed: code={} message={}",
-                        error.code, error.message
-                    );
-                }
+                run_default_outbox_dispatch_batch(&pool, &subscribers).await;
             }
         }
+    }
+}
+
+async fn run_default_outbox_dispatch_batch(
+    pool: &Pool<Sqlite>,
+    subscribers: &[Arc<dyn OutboxSubscriber>],
+) {
+    let subscriber_refs = subscribers
+        .iter()
+        .map(|subscriber| subscriber.as_ref())
+        .collect::<Vec<&dyn OutboxSubscriber>>();
+
+    if let Err(error) =
+        run_outbox_dispatch_batch(pool, &subscriber_refs, OutboxDispatchConfig::default()).await
+    {
+        error!(
+            "Outbox dispatcher batch failed: code={} message={}",
+            error.code, error.message
+        );
     }
 }
 
@@ -1514,6 +1519,55 @@ mod tests {
             .fetch_one(&pool)
             .await
             .expect("recovered row exists");
+        assert_eq!(status, "dispatched");
+    }
+
+    #[tokio::test]
+    async fn dispatcher_loop_runs_batch_before_first_poll_sleep() {
+        let pool = test_pool().await;
+        let id = seed_outbox_event(
+            &pool,
+            "booking.checked_out",
+            "booking:B1",
+            "pending",
+            0,
+            None,
+            None,
+        )
+        .await;
+        let calls = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let subscriber: std::sync::Arc<dyn OutboxSubscriber> =
+            std::sync::Arc::new(RecordingSubscriber {
+                calls: calls.clone(),
+                ..RecordingSubscriber::default()
+            });
+        let (shutdown_tx, shutdown_rx) = oneshot::channel();
+
+        let task = tokio::spawn(run_outbox_dispatcher_loop(
+            pool.clone(),
+            vec![subscriber],
+            shutdown_rx,
+        ));
+
+        tokio::time::timeout(StdDuration::from_millis(500), async {
+            loop {
+                if calls.lock().expect("calls lock").contains(&id) {
+                    break;
+                }
+                tokio::time::sleep(StdDuration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("dispatcher runs the first batch immediately");
+
+        let _ = shutdown_tx.send(());
+        task.await.expect("dispatcher task joins");
+
+        let status: String = sqlx::query_scalar("SELECT status FROM outbox_events WHERE id = ?")
+            .bind(id)
+            .fetch_one(&pool)
+            .await
+            .expect("dispatched row exists");
         assert_eq!(status, "dispatched");
     }
 
