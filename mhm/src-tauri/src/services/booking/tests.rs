@@ -364,7 +364,98 @@ pub async fn test_pool() -> Pool<Sqlite> {
     .await
     .expect("failed to create command_idempotency table");
 
+    sqlx::query(
+        "CREATE TABLE outbox_events (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            event_type TEXT NOT NULL,
+            aggregate_key TEXT NOT NULL,
+            payload_json TEXT NOT NULL,
+            origin_request_id TEXT NOT NULL,
+            origin_idempotency_key TEXT NOT NULL,
+            origin_command_name TEXT NOT NULL,
+            origin_request_hash TEXT NOT NULL,
+            status TEXT NOT NULL,
+            worker_token TEXT,
+            attempts INTEGER NOT NULL DEFAULT 0,
+            next_attempt_at TEXT,
+            processing_started_at TEXT,
+            processing_expires_at TEXT,
+            last_error TEXT,
+            created_at TEXT NOT NULL,
+            dispatched_at TEXT
+        )",
+    )
+    .execute(&pool)
+    .await
+    .expect("failed to create outbox_events table");
+
+    sqlx::query(
+        "CREATE UNIQUE INDEX outbox_events_origin_command_uq
+         ON outbox_events (origin_command_name, origin_idempotency_key)",
+    )
+    .execute(&pool)
+    .await
+    .expect("failed to create outbox origin command index");
+
     pool
+}
+
+async fn outbox_event_count(pool: &Pool<Sqlite>, command_name: &str, idempotency_key: &str) -> i64 {
+    sqlx::query_scalar(
+        "SELECT COUNT(*)
+         FROM outbox_events
+         WHERE origin_command_name = ? AND origin_idempotency_key = ?",
+    )
+    .bind(command_name)
+    .bind(idempotency_key)
+    .fetch_one(pool)
+    .await
+    .expect("counts outbox events")
+}
+
+async fn assert_single_outbox_event(
+    pool: &Pool<Sqlite>,
+    ctx: &crate::command_idempotency::WriteCommandContext,
+    event_type: &str,
+) -> serde_json::Value {
+    assert_eq!(
+        outbox_event_count(pool, &ctx.command_name, &ctx.idempotency_key).await,
+        1
+    );
+
+    let row = sqlx::query(
+        "SELECT event_type, status, attempts, origin_request_id,
+                origin_request_hash, payload_json
+         FROM outbox_events
+         WHERE origin_command_name = ? AND origin_idempotency_key = ?",
+    )
+    .bind(&ctx.command_name)
+    .bind(&ctx.idempotency_key)
+    .fetch_one(pool)
+    .await
+    .expect("reads outbox event");
+
+    assert_eq!(row.get::<String, _>("event_type"), event_type);
+    assert_eq!(row.get::<String, _>("status"), "pending");
+    assert_eq!(row.get::<i64, _>("attempts"), 0);
+    assert_eq!(
+        row.get::<String, _>("origin_request_id"),
+        ctx.request_id.as_str()
+    );
+    assert!(!row.get::<String, _>("origin_request_hash").is_empty());
+
+    let payload: serde_json::Value =
+        serde_json::from_str(&row.get::<String, _>("payload_json")).expect("payload is JSON");
+    assert_eq!(payload["schema_version"], serde_json::json!(1));
+    assert_eq!(
+        payload["command_name"],
+        serde_json::json!(ctx.command_name.as_str())
+    );
+    assert!(payload
+        .get("refresh")
+        .and_then(|value| value.as_array())
+        .is_some());
+    payload
 }
 
 async fn shared_file_test_pools(label: &str) -> (Pool<Sqlite>, Pool<Sqlite>, std::path::PathBuf) {
@@ -1954,6 +2045,7 @@ async fn group_checkin_idempotent_retry_does_not_duplicate_groups_bookings_or_pa
     assert!(!first.replayed);
     assert!(replay.replayed);
     assert_eq!(first.response["id"], replay.response["id"]);
+    assert_single_outbox_event(&pool, &ctx, "group.checked_in").await;
 
     let group_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM booking_groups")
         .fetch_one(&pool)
@@ -2309,6 +2401,7 @@ async fn add_group_service_idempotent_retry_replays_without_duplicate_row() {
         second.response["total_price"]
     );
     assert_eq!(first.response["total_price"], 50_000);
+    assert_single_outbox_event(&pool, &ctx, "group.service_added").await;
 
     let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM group_services WHERE group_id = ?")
         .bind("G-SVC-IDEM")
@@ -2383,10 +2476,9 @@ async fn add_group_service_idempotent_rejects_negative_unit_price_without_writin
         note: None,
     };
 
-    let error =
-        group_service_management::add_group_service_idempotent(&pool, &ctx, req, "staff-1")
-            .await
-            .expect_err("negative unit price is rejected");
+    let error = group_service_management::add_group_service_idempotent(&pool, &ctx, req, "staff-1")
+        .await
+        .expect_err("negative unit price is rejected");
 
     assert_eq!(error.code, crate::app_error::codes::BOOKING_INVALID_STATE);
 
@@ -2774,6 +2866,11 @@ async fn record_payment_idempotent_retry_replays_and_does_not_double_post() {
         .await
         .unwrap();
     assert_eq!(paid_amount, 125_000);
+
+    let payload = assert_single_outbox_event(&pool, &ctx, "folio.payment_recorded").await;
+    assert_eq!(payload["aggregate"]["type"], "folio");
+    assert_eq!(payload["aggregate"]["id"], "B-PAY-IDEM");
+    assert_eq!(payload["refresh"], serde_json::json!(["folio", "bookings"]));
 }
 
 #[tokio::test]
@@ -3417,6 +3514,7 @@ async fn create_reservation_idempotent_retry_does_not_duplicate_deposit() {
     assert_eq!(first.response["id"], second.response["id"]);
     assert!(!first.replayed);
     assert!(second.replayed);
+    assert_single_outbox_event(&pool, &ctx, "booking.reservation_created").await;
 
     let count: i64 =
         sqlx::query_scalar("SELECT COUNT(*) FROM transactions WHERE origin_idempotency_key = ?")
@@ -5086,6 +5184,7 @@ async fn check_in_idempotent_retry_replays_and_does_not_duplicate_rows() {
             .await
             .unwrap();
     assert_eq!(calendar_count, 2);
+    assert_single_outbox_event(&pool, &ctx, "booking.checked_in").await;
 }
 
 #[tokio::test]
@@ -5357,6 +5456,7 @@ async fn check_out_idempotent_retry_replays_without_duplicate_money_or_housekeep
     .await
     .unwrap();
     assert_eq!(checkout_money_count, 2);
+    assert_single_outbox_event(&pool, &ctx, "booking.checked_out").await;
 }
 
 #[tokio::test]
@@ -6256,6 +6356,7 @@ async fn extend_stay_idempotent_retry_replays_without_extra_night_or_charge() {
             .await
             .unwrap();
     assert_eq!(charge_count, 1);
+    assert_single_outbox_event(&pool, &ctx, "booking.stay_extended").await;
 }
 
 #[tokio::test]
@@ -6987,6 +7088,7 @@ async fn add_folio_line_idempotent_retry_replays_and_does_not_duplicate_row() {
             .await
             .unwrap();
     assert_eq!(count, 1);
+    assert_single_outbox_event(&pool, &ctx, "folio.line_added").await;
 }
 
 #[tokio::test]

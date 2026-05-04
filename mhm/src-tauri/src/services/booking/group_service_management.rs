@@ -10,6 +10,7 @@ use crate::{
     domain::booking::BookingError,
     models::{AddGroupServiceRequest, GroupService, RemoveGroupServiceResponse},
     money::{validate_non_negative_money_vnd, MoneyVnd},
+    outbox::{OutboxAggregateKeySource, OutboxEventSpec},
 };
 use serde_json::json;
 
@@ -171,7 +172,12 @@ pub async fn add_group_service_idempotent(
     let request = WriteCommandRequest::new_sanitized(hash_payload.clone(), ledger_intent, summary)?
         .with_primary_aggregate_key(format!("group:{}", req.group_id))
         .with_lock_key_deriver(add_group_service_lock_keys_from_payload)
-        .with_success_summary(CommandLedgerResultSummary::success("Group service added")?);
+        .with_success_summary(CommandLedgerResultSummary::success("Group service added")?)
+        .with_outbox_event(OutboxEventSpec::new(
+            "group.service_added",
+            OutboxAggregateKeySource::response_field("group", "group_id"),
+            &["groups", "folio"],
+        )?);
     let runtime_lock_keys = add_group_service_lock_keys_from_payload(&hash_payload)?;
     let actor_id = actor_id.to_string();
 
@@ -320,6 +326,11 @@ pub async fn remove_group_service_idempotent(
         })
         .with_success_summary(CommandLedgerResultSummary::success(
             "Group service removed",
+        )?)
+        .with_outbox_event(OutboxEventSpec::new(
+            "group.service_removed",
+            OutboxAggregateKeySource::response_field("group", "group_id"),
+            &["groups", "folio"],
         )?);
     let pool_for_locks = pool.clone();
     let service_id = service_id.to_string();

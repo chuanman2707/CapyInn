@@ -17,6 +17,7 @@ use crate::{
         status, BookingGroup, GroupCheckinRequest, GroupCheckoutRequest, GroupCheckoutResponse,
     },
     money::MoneyVnd,
+    outbox::{OutboxAggregateKeySource, OutboxEventSpec},
 };
 
 use super::{
@@ -297,7 +298,12 @@ pub async fn group_checkin_idempotent(
     let runtime_lock_keys = group_checkin_lock_keys_from_payload(&hash_payload)?;
     let request = WriteCommandRequest::new_sanitized(hash_payload, ledger_intent, summary)?
         .with_lock_key_deriver(group_checkin_lock_keys_from_payload)
-        .with_success_summary(CommandLedgerResultSummary::success("Group checked in")?);
+        .with_success_summary(CommandLedgerResultSummary::success("Group checked in")?)
+        .with_outbox_event(OutboxEventSpec::new(
+            "group.checked_in",
+            OutboxAggregateKeySource::response_field("group", "id"),
+            &["groups", "bookings", "rooms", "folio"],
+        )?);
 
     let req_for_service = req;
     let user_id_for_service = user_id;
@@ -811,7 +817,12 @@ pub async fn group_checkout_idempotent(
     let request = WriteCommandRequest::new_sanitized(hash_payload, ledger_intent, summary)?
         .with_primary_aggregate_key(format!("group:{}", req.group_id))
         .with_lock_key_deriver(group_checkout_initial_lock_keys_from_payload)
-        .with_success_summary(CommandLedgerResultSummary::success("Group checked out")?);
+        .with_success_summary(CommandLedgerResultSummary::success("Group checked out")?)
+        .with_outbox_event(OutboxEventSpec::new(
+            "group.checked_out",
+            OutboxAggregateKeySource::response_field("group", "group_id"),
+            &["groups", "bookings", "rooms", "folio"],
+        )?);
 
     let pool_for_locks = pool.clone();
     let req_for_locks = GroupCheckoutRequest {

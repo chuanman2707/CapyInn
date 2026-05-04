@@ -6,6 +6,7 @@ use crate::{
     },
     commands::{get_money_vnd, get_optional_money_vnd},
     models::InvoiceData,
+    outbox::{OutboxAggregateKeySource, OutboxEventSpec},
 };
 use serde_json::json;
 use sqlx::{Pool, Row, Sqlite, Transaction};
@@ -306,7 +307,12 @@ pub async fn generate_invoice_idempotent(
     let request = WriteCommandRequest::new_sanitized(hash_payload, ledger_intent, summary)?
         .with_primary_aggregate_key(format!("booking:{booking_id}"))
         .with_lock_key_deriver(generate_invoice_lock_keys_from_payload)
-        .with_success_summary(CommandLedgerResultSummary::success("Invoice generated")?);
+        .with_success_summary(CommandLedgerResultSummary::success("Invoice generated")?)
+        .with_outbox_event(OutboxEventSpec::new(
+            "invoice.generated",
+            OutboxAggregateKeySource::response_field("invoice", "id"),
+            &["invoice", "bookings", "folio"],
+        )?);
     let booking_id = booking_id.to_string();
 
     WriteCommandExecutor::new(pool.clone())

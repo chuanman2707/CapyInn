@@ -1,5 +1,6 @@
 use crate::{
     app_error::{codes, CommandError, CommandResult},
+    outbox::{insert_outbox_event_tx, OutboxEventSpec},
     services::settings_store,
 };
 use chrono::{DateTime, FixedOffset, Utc};
@@ -372,6 +373,7 @@ pub struct WriteCommandRequest {
     success_summary: CommandLedgerResultSummary,
     primary_aggregate_key: Option<String>,
     lock_key_deriver: LockKeyDeriver,
+    outbox_event: Option<OutboxEventSpec>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -424,6 +426,7 @@ impl WriteCommandRequest {
             success_summary: CommandLedgerResultSummary::success("Command completed")?,
             primary_aggregate_key: None,
             lock_key_deriver: default_lock_key_deriver,
+            outbox_event: None,
         })
     }
 
@@ -448,6 +451,11 @@ impl WriteCommandRequest {
 
     pub fn with_success_summary(mut self, success_summary: CommandLedgerResultSummary) -> Self {
         self.success_summary = success_summary;
+        self
+    }
+
+    pub fn with_outbox_event(mut self, outbox_event: OutboxEventSpec) -> Self {
+        self.outbox_event = Some(outbox_event);
         self
     }
 }
@@ -488,6 +496,7 @@ struct PreparedWriteCommandRequest {
     result_summary_json: String,
     lock_keys_json: String,
     primary_aggregate_key: Option<String>,
+    outbox_event: Option<OutboxEventSpec>,
 }
 
 impl WriteCommandExecutor {
@@ -842,6 +851,26 @@ impl WriteCommandExecutor {
         };
 
         let response_json = stable_json_string(&response)?;
+
+        if let Some(outbox_event) = &prepared.outbox_event {
+            let prepared_event = match outbox_event.prepare(
+                ctx,
+                prepared.primary_aggregate_key.as_deref(),
+                &prepared.request_hash,
+                &response,
+            ) {
+                Ok(event) => event,
+                Err(error) => {
+                    let _ = tx.rollback().await;
+                    return Err(error.with_request_id(ctx.request_id.clone()));
+                }
+            };
+            if let Err(error) = insert_outbox_event_tx(&mut tx, &prepared_event).await {
+                let _ = tx.rollback().await;
+                return Err(error.with_request_id(ctx.request_id.clone()));
+            }
+        }
+
         let completed_at = chrono::Utc::now().to_rfc3339();
         let completion_result = sqlx::query(
             "UPDATE command_idempotency
@@ -1030,6 +1059,30 @@ impl WriteCommandExecutor {
         };
 
         let response_json = stable_json_string(&response)?;
+
+        if let Some(outbox_event) = &prepared.outbox_event {
+            let prepared_event = match outbox_event.prepare(
+                ctx,
+                prepared.primary_aggregate_key.as_deref(),
+                &prepared.request_hash,
+                &response,
+            ) {
+                Ok(event) => event,
+                Err(mut error) => {
+                    let _ = tx.rollback().await;
+                    error.request_id = Some(ctx.request_id.clone());
+                    self.finalize_failure(ctx, claim_token, &error).await?;
+                    return Err(error);
+                }
+            };
+            if let Err(mut error) = insert_outbox_event_tx(&mut tx, &prepared_event).await {
+                let _ = tx.rollback().await;
+                error.request_id = Some(ctx.request_id.clone());
+                self.finalize_failure(ctx, claim_token, &error).await?;
+                return Err(error);
+            }
+        }
+
         let completed_at = chrono::Utc::now().to_rfc3339();
         let completion_result = sqlx::query(
             "UPDATE command_idempotency
@@ -1309,6 +1362,7 @@ fn prepare_write_command_request(
         result_summary_json,
         lock_keys_json,
         primary_aggregate_key: request.primary_aggregate_key,
+        outbox_event: request.outbox_event,
     })
 }
 
@@ -1515,6 +1569,192 @@ mod tests {
 
     async fn test_pool() -> Pool<Sqlite> {
         test_pool_with_max_connections(5).await
+    }
+
+    async fn outbox_count(pool: &Pool<Sqlite>, command_name: &str, idempotency_key: &str) -> i64 {
+        sqlx::query_scalar(
+            "SELECT COUNT(*)
+             FROM outbox_events
+             WHERE origin_command_name = ? AND origin_idempotency_key = ?",
+        )
+        .bind(command_name)
+        .bind(idempotency_key)
+        .fetch_one(pool)
+        .await
+        .expect("counts outbox rows")
+    }
+
+    fn test_outbox_spec() -> crate::outbox::OutboxEventSpec {
+        crate::outbox::OutboxEventSpec::new(
+            "booking.checked_out",
+            crate::outbox::OutboxAggregateKeySource::response_field("booking", "booking_id"),
+            &["bookings", "rooms", "folio"],
+        )
+        .expect("outbox spec builds")
+    }
+
+    #[tokio::test]
+    async fn outbox_execute_atomic_success_persists_one_pending_event() {
+        let pool = test_pool().await;
+        let ctx = WriteCommandContext::for_internal_test(
+            "req-outbox-atomic-success",
+            "idem-outbox-atomic-success",
+            "test.outbox_atomic_success",
+        );
+        let request = WriteCommandRequest::new_low_risk(
+            serde_json::json!({ "case": "outbox-atomic-success" }),
+            "Outbox atomic success",
+        )
+        .expect("request builds")
+        .with_outbox_event(test_outbox_spec());
+
+        let result = WriteCommandExecutor::new(pool.clone())
+            .execute_atomic(&ctx, request, |_tx| {
+                Box::pin(async move { Ok(serde_json::json!({ "booking_id": "B1", "ok": true })) })
+            })
+            .await
+            .expect("command succeeds");
+
+        assert!(!result.replayed);
+        assert_eq!(
+            outbox_count(&pool, &ctx.command_name, &ctx.idempotency_key).await,
+            1
+        );
+
+        let status: String = sqlx::query_scalar(
+            "SELECT status
+             FROM outbox_events
+             WHERE origin_command_name = ? AND origin_idempotency_key = ?",
+        )
+        .bind(&ctx.command_name)
+        .bind(&ctx.idempotency_key)
+        .fetch_one(&pool)
+        .await
+        .expect("reads outbox status");
+        assert_eq!(status, "pending");
+    }
+
+    #[tokio::test]
+    async fn outbox_execute_atomic_replay_does_not_duplicate_or_rerun_service() {
+        let pool = test_pool().await;
+        let ctx = WriteCommandContext::for_internal_test(
+            "req-outbox-atomic-replay",
+            "idem-outbox-atomic-replay",
+            "test.outbox_atomic_replay",
+        );
+        let request = WriteCommandRequest::new_low_risk(
+            serde_json::json!({ "case": "outbox-atomic-replay" }),
+            "Outbox atomic replay",
+        )
+        .expect("request builds")
+        .with_outbox_event(test_outbox_spec());
+        let attempts = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+
+        let first_attempts = attempts.clone();
+        let first = WriteCommandExecutor::new(pool.clone())
+            .execute_atomic(&ctx, request.clone(), move |_tx| {
+                let attempts = first_attempts.clone();
+                Box::pin(async move {
+                    attempts.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    Ok(serde_json::json!({ "booking_id": "B2", "ok": true }))
+                })
+            })
+            .await
+            .expect("first command succeeds");
+
+        let second_attempts = attempts.clone();
+        let second = WriteCommandExecutor::new(pool.clone())
+            .execute_atomic(&ctx, request, move |_tx| {
+                let attempts = second_attempts.clone();
+                Box::pin(async move {
+                    attempts.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    Ok(serde_json::json!({ "unexpected": true }))
+                })
+            })
+            .await
+            .expect("second command replays");
+
+        assert!(!first.replayed);
+        assert!(second.replayed);
+        assert_eq!(attempts.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert_eq!(
+            outbox_count(&pool, &ctx.command_name, &ctx.idempotency_key).await,
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn outbox_execute_success_persists_one_pending_event() {
+        let pool = test_pool().await;
+        let ctx = WriteCommandContext::for_internal_test(
+            "req-outbox-execute-success",
+            "idem-outbox-execute-success",
+            "test.outbox_execute_success",
+        );
+        let request = WriteCommandRequest::new_low_risk(
+            serde_json::json!({ "case": "outbox-execute-success" }),
+            "Outbox execute success",
+        )
+        .expect("request builds")
+        .with_outbox_event(test_outbox_spec());
+
+        let result = WriteCommandExecutor::new(pool.clone())
+            .execute(&ctx, request, |_tx| {
+                Box::pin(async move { Ok(serde_json::json!({ "booking_id": "B3", "ok": true })) })
+            })
+            .await
+            .expect("command succeeds");
+
+        assert!(!result.replayed);
+        assert_eq!(
+            outbox_count(&pool, &ctx.command_name, &ctx.idempotency_key).await,
+            1
+        );
+
+        let status: String = sqlx::query_scalar(
+            "SELECT status
+             FROM outbox_events
+             WHERE origin_command_name = ? AND origin_idempotency_key = ?",
+        )
+        .bind(&ctx.command_name)
+        .bind(&ctx.idempotency_key)
+        .fetch_one(&pool)
+        .await
+        .expect("reads outbox status");
+        assert_eq!(status, "pending");
+    }
+
+    #[tokio::test]
+    async fn outbox_service_failure_writes_no_event() {
+        let pool = test_pool().await;
+        let ctx = WriteCommandContext::for_internal_test(
+            "req-outbox-service-fail",
+            "idem-outbox-service-fail",
+            "test.outbox_service_fail",
+        );
+        let request = WriteCommandRequest::new_low_risk(
+            serde_json::json!({ "case": "outbox-service-fail" }),
+            "Outbox service fail",
+        )
+        .expect("request builds")
+        .with_outbox_event(test_outbox_spec());
+
+        WriteCommandExecutor::new(pool.clone())
+            .execute(&ctx, request, |_tx| {
+                Box::pin(async move {
+                    Err(CommandError::system(
+                        codes::SYSTEM_INTERNAL_ERROR,
+                        "forced service failure",
+                    ))
+                })
+            })
+            .await
+            .expect_err("service failure returns error");
+
+        assert_eq!(
+            outbox_count(&pool, &ctx.command_name, &ctx.idempotency_key).await,
+            0
+        );
     }
 
     #[test]
@@ -3002,7 +3242,8 @@ mod tests {
             serde_json::json!({ "case": "stale" }),
             "Stale claim",
         )
-        .expect("request builds");
+        .expect("request builds")
+        .with_outbox_event(test_outbox_spec());
         let command_name = ctx.command_name.clone();
         let idempotency_key = ctx.idempotency_key.clone();
 
@@ -3024,7 +3265,7 @@ mod tests {
                     .await
                     .map_err(system_error)?;
 
-                    Ok(serde_json::json!({ "ok": true }))
+                    Ok(serde_json::json!({ "booking_id": "B-stale", "ok": true }))
                 })
             })
             .await
@@ -3053,5 +3294,9 @@ mod tests {
 
         assert_eq!(row.get::<String, _>("status"), "in_progress");
         assert_eq!(row.get::<Option<String>, _>("response_json"), None);
+        assert_eq!(
+            outbox_count(&pool, &ctx.command_name, &ctx.idempotency_key).await,
+            0
+        );
     }
 }
