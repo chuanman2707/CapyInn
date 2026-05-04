@@ -47,7 +47,46 @@ paths:
                 type: string
                 example: OK
 
+  /observer/events:
+    get:
+      summary: PMS Observer Event Stream
+      description: |
+        Read-only Server-Sent Events stream for committed PMS outbox facts.
+        No cursor starts after the current latest event.
+        last_event_id replays events after the cursor, then streams new events.
+        Payloads are observer-safe facts, not commands.
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: last_event_id
+          in: query
+          required: false
+          schema:
+            type: integer
+            minimum: 0
+          description: Replay events after this observer cursor before streaming new events.
+      responses:
+        '200':
+          description: Observer event stream
+          content:
+            text/event-stream:
+              schema:
+                type: string
+        '400':
+          description: Invalid cursor
+        '401':
+          description: Missing or invalid API key
+        '409':
+          description: Cursor expired; rebuild snapshot
+        '500':
+          description: Observer unavailable
+
 components:
+  securitySchemes:
+    BearerAuth:
+      type: http
+      scheme: bearer
+
   schemas:
     JsonRpcRequest:
       type: object

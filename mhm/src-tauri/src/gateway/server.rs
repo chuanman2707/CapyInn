@@ -3,6 +3,7 @@ use axum::{
     http::StatusCode,
     middleware::{self, Next},
     response::Response,
+    routing::get,
     Router,
 };
 use log::error;
@@ -87,11 +88,16 @@ pub async fn start_server(
     let protected = Router::new()
         .route_service("/mcp", mcp_service.clone())
         .route_service("/mcp/{*path}", mcp_service)
-        .route_layer(middleware::from_fn_with_state(pool.clone(), require_api_key));
+        .route("/observer/events", get(super::observer::observe_events))
+        .route_layer(middleware::from_fn_with_state(
+            pool.clone(),
+            require_api_key,
+        ))
+        .with_state(pool.clone());
 
     // Build axum router: health at /health (public), MCP at /mcp (protected)
     let app = Router::new()
-        .route("/health", axum::routing::get(|| async { "OK" }))
+        .route("/health", get(|| async { "OK" }))
         .merge(protected);
 
     // Try ports in range
@@ -140,7 +146,7 @@ mod tests {
     use super::require_api_key;
     use axum::{
         body::Body,
-        http::{Request, StatusCode},
+        http::{header, Request, StatusCode},
         middleware,
         routing::get,
         Router,
@@ -165,7 +171,15 @@ mod tests {
     fn test_router(pool: Pool<Sqlite>) -> Router {
         Router::new()
             .route("/mcp", get(|| async { StatusCode::OK }))
-            .route_layer(middleware::from_fn_with_state(pool, require_api_key))
+            .route(
+                "/observer/events",
+                get(crate::gateway::observer::observe_events),
+            )
+            .route_layer(middleware::from_fn_with_state(
+                pool.clone(),
+                require_api_key,
+            ))
+            .with_state(pool)
     }
 
     #[tokio::test]
@@ -173,12 +187,7 @@ mod tests {
         let pool = test_pool().await;
 
         let response = test_router(pool)
-            .oneshot(
-                Request::builder()
-                    .uri("/mcp")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
+            .oneshot(Request::builder().uri("/mcp").body(Body::empty()).unwrap())
             .await
             .unwrap();
 
@@ -194,9 +203,25 @@ mod tests {
             .unwrap();
 
         let response = test_router(pool)
+            .oneshot(Request::builder().uri("/mcp").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn observer_events_requires_auth_after_setup() {
+        let pool = test_pool().await;
+        sqlx::query("UPDATE settings SET value = 'true' WHERE key = 'setup_completed'")
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        let response = test_router(pool)
             .oneshot(
                 Request::builder()
-                    .uri("/mcp")
+                    .uri("/observer/events")
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -204,5 +229,38 @@ mod tests {
             .unwrap();
 
         assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn observer_events_accepts_valid_api_key_with_sse_content_type() {
+        let pool = test_pool().await;
+        sqlx::query("UPDATE settings SET value = 'true' WHERE key = 'setup_completed'")
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        let (key, hash) = crate::gateway::auth::generate_api_key();
+        crate::gateway::auth::store_api_key(&pool, &hash, "observer-test")
+            .await
+            .unwrap();
+
+        let response = test_router(pool)
+            .oneshot(
+                Request::builder()
+                    .uri("/observer/events")
+                    .header(header::AUTHORIZATION, format!("Bearer {}", key))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let content_type = response
+            .headers()
+            .get(header::CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok())
+            .unwrap_or("");
+        assert!(content_type.starts_with("text/event-stream"));
     }
 }

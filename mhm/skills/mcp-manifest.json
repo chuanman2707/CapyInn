@@ -11,6 +11,18 @@
             }
         }
     },
+    "observer": {
+        "sse": {
+            "url": "http://127.0.0.1:<gateway-port>/observer/events",
+            "headers": {
+                "Authorization": "Bearer <your-api-key>"
+            },
+            "cursor": {
+                "query": "last_event_id",
+                "header": "Last-Event-ID"
+            }
+        }
+    },
     "tools": [
         {
             "name": "get_hotel_context",

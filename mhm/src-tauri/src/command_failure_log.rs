@@ -189,9 +189,9 @@ mod tests {
         assert!(parsed
             .iter()
             .any(|line| line["command"] == "check_in" && line.get("db_error_group").is_none()));
-        assert!(parsed.iter().any(
-            |line| line["command"] == "check_out" && line["db_error_group"] == "locked"
-        ));
+        assert!(parsed
+            .iter()
+            .any(|line| line["command"] == "check_out" && line["db_error_group"] == "locked"));
         assert!(parsed
             .iter()
             .all(|line| line["context"].get("correlation_id").is_none()));
@@ -201,9 +201,7 @@ mod tests {
         assert!(parsed
             .iter()
             .any(|line| line["context"]["guest_count"] == 0));
-        assert!(parsed
-            .iter()
-            .any(|line| line["context"]["nights"] == 0));
+        assert!(parsed.iter().any(|line| line["context"]["nights"] == 0));
         assert!(parsed
             .iter()
             .any(|line| line["context"]["booking_id"] == "B202"));
