@@ -605,7 +605,7 @@ impl OutboxEventSpec {
             resolve_aggregate(&self.aggregate_key_source, primary_aggregate_key, response)?;
 
         validate_safe_outbox_text(&ctx.command_name)?;
-        validate_safe_outbox_text(origin_request_hash)?;
+        validate_safe_outbox_identifier(origin_request_hash)?;
 
         let payload = json!({
             "schema_version": 1,
@@ -647,8 +647,8 @@ fn resolve_aggregate(
                 .split_once(':')
                 .ok_or_else(|| system_error("outbox primary aggregate key must be type:id"))?;
             validate_safe_outbox_text(aggregate_type)?;
-            validate_safe_outbox_text(aggregate_id)?;
-            validate_safe_outbox_text(aggregate_key)?;
+            validate_safe_outbox_identifier(aggregate_id)?;
+            validate_safe_outbox_identifier(aggregate_key)?;
             Ok((
                 aggregate_type.to_string(),
                 aggregate_id.to_string(),
@@ -664,7 +664,7 @@ fn resolve_aggregate(
                 .and_then(Value::as_str)
                 .ok_or_else(|| system_error(format!("outbox response missing field {field}")))?;
             validate_safe_outbox_text(aggregate_type)?;
-            validate_safe_outbox_text(aggregate_id)?;
+            validate_safe_outbox_identifier(aggregate_id)?;
             Ok((
                 aggregate_type.to_string(),
                 aggregate_id.to_string(),
@@ -725,14 +725,14 @@ fn validate_aggregate_key_source(source: &OutboxAggregateKeySource) -> CommandRe
 
 fn validate_prepared_event(event: &PreparedOutboxEvent) -> CommandResult<()> {
     validate_safe_outbox_text(&event.event_type)?;
-    validate_safe_outbox_text(&event.aggregate_key)?;
+    validate_safe_outbox_identifier(&event.aggregate_key)?;
     validate_non_empty(event.origin_request_id.clone(), "origin_request_id")?;
     validate_non_empty(
         event.origin_idempotency_key.clone(),
         "origin_idempotency_key",
     )?;
     validate_safe_outbox_text(&event.origin_command_name)?;
-    validate_safe_outbox_text(&event.origin_request_hash)?;
+    validate_safe_outbox_identifier(&event.origin_request_hash)?;
     validate_non_empty(event.created_at.clone(), "created_at")?;
     serde_json::from_str::<Value>(&event.payload_json)
         .map_err(|error| CommandError::system(codes::SYSTEM_INTERNAL_ERROR, error.to_string()))?;
@@ -753,6 +753,17 @@ fn validate_safe_outbox_text(value: &str) -> CommandResult<()> {
         || trimmed.chars().count() > OUTBOX_SAFE_TEXT_MAX_CHARS
         || trimmed.contains('@')
         || contains_forbidden_payload_term(trimmed)
+    {
+        return Err(system_error("unsafe outbox text"));
+    }
+    Ok(())
+}
+
+fn validate_safe_outbox_identifier(value: &str) -> CommandResult<()> {
+    let trimmed = value.trim();
+    if trimmed.is_empty()
+        || trimmed.chars().count() > OUTBOX_SAFE_TEXT_MAX_CHARS
+        || trimmed.contains('@')
     {
         return Err(system_error("unsafe outbox text"));
     }
@@ -1001,6 +1012,29 @@ mod tests {
             &["folio", "bookings"],
         )
         .expect("payment event name is business-safe");
+    }
+
+    #[test]
+    fn outbox_spec_allows_forbidden_substrings_in_machine_identifiers() {
+        let spec = OutboxEventSpec::new(
+            "booking.checked_out",
+            OutboxAggregateKeySource::response_field("booking", "booking_id"),
+            &["bookings", "rooms"],
+        )
+        .expect("spec builds");
+        let ctx = test_ctx("check_out");
+        let prepared = spec
+            .prepare(
+                &ctx,
+                Some("booking:B-cccd-001"),
+                "sha256-cccd001122334455",
+                &json!({ "booking_id": "B-cccd-001" }),
+            )
+            .expect("machine identifiers with forbidden substrings prepare");
+
+        assert_eq!(prepared.aggregate_key, "booking:B-cccd-001");
+        assert_eq!(prepared.origin_request_hash, "sha256-cccd001122334455");
+        validate_prepared_event(&prepared).expect("prepared event remains storable");
     }
 
     #[tokio::test]
