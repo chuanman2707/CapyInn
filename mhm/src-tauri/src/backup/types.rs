@@ -77,9 +77,9 @@ impl BackupRequestError {
     pub fn kind(&self) -> BackupRequestErrorKind {
         match self {
             Self::ShutdownInProgress => BackupRequestErrorKind::ShutdownSkip,
-            Self::MissingHomeDirectory
-            | Self::BackupFailed(_)
-            | Self::ShutdownTimedOut => BackupRequestErrorKind::Failure,
+            Self::MissingHomeDirectory | Self::BackupFailed(_) | Self::ShutdownTimedOut => {
+                BackupRequestErrorKind::Failure
+            }
         }
     }
 }
