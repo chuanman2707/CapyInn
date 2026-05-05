@@ -120,6 +120,7 @@ fn is_sensitive_metadata_key(key: &str) -> bool {
         "token",
         "secret",
         "password",
+        "authorization",
     ]
     .iter()
     .any(|marker| normalized.contains(marker))
@@ -141,32 +142,32 @@ fn contains_obvious_secret_marker(value: &str) -> bool {
 }
 
 fn contains_forbidden_memory_truth(value: &str) -> bool {
-    let normalized = value.to_ascii_lowercase();
+    let normalized = normalized_category(value);
     [
         "canonical_booking",
-        "canonical booking",
         "canonical_booking_state",
         "booking_truth",
-        "booking truth",
         "room_availability_truth",
-        "room availability truth",
         "payment_truth",
-        "payment truth",
         "folio_truth",
-        "folio truth",
         "invoice_truth",
-        "invoice truth",
         "ledger_truth",
-        "ledger truth",
         "housekeeping_truth",
-        "housekeeping truth",
         "night_audit_truth",
-        "night audit truth",
         "audit_truth",
-        "audit truth",
+        "auto_mutating_recovery_commands",
     ]
     .iter()
-    .any(|forbidden| normalized.contains(forbidden))
+    .map(|forbidden| normalized_category(forbidden))
+    .any(|forbidden| normalized.contains(&forbidden))
+}
+
+fn normalized_category(value: &str) -> String {
+    value
+        .chars()
+        .flat_map(char::to_lowercase)
+        .filter(|character| character.is_ascii_alphanumeric())
+        .collect()
 }
 
 fn validate_memory_item(input: &NewAgentMemoryItem) -> CommandResult<()> {
@@ -202,7 +203,7 @@ pub async fn create_agent_session(
     .bind(&input.channel_actor_id)
     .bind(if input.uses_memory { 1_i64 } else { 0_i64 })
     .bind(&input.retention_policy)
-    .bind(stable_json(&input.metadata)?)
+    .bind(stable_json(&sanitize_metadata(&input.metadata))?)
     .bind(&now)
     .bind(&now)
     .execute(pool)
@@ -364,6 +365,55 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn create_session_stores_sanitized_metadata() {
+        let pool = test_pool().await;
+
+        create_agent_session(
+            &pool,
+            NewAgentSession {
+                id: "session-sanitized".to_string(),
+                role: AgentRole::CeoSecretary,
+                channel: AgentChannel::Telegram,
+                channel_actor_id: Some("12345".to_string()),
+                uses_memory: false,
+                retention_policy: SESSION_RETENTION_METADATA_ONLY.to_string(),
+                metadata: serde_json::json!({
+                    "source": "test",
+                    "raw_prompt": "show private details",
+                    "provider_key": "capyinn_sk_secret",
+                    "authorization": "Bearer abc",
+                    "nested": {
+                        "OPENAI_API_KEY": "sk-secret",
+                        "telegram_bot_token": "telegram-token"
+                    }
+                }),
+            },
+        )
+        .await
+        .expect("session stored");
+
+        let metadata: String =
+            sqlx::query_scalar("SELECT metadata_json FROM agent_sessions WHERE id = ?")
+                .bind("session-sanitized")
+                .fetch_one(&pool)
+                .await
+                .expect("reads metadata");
+
+        assert!(metadata.contains("\"source\":\"test\""));
+        assert!(metadata.contains("\"raw_prompt\":\"[redacted]\""));
+        assert!(metadata.contains("\"provider_key\":\"[redacted]\""));
+        assert!(metadata.contains("\"authorization\":\"[redacted]\""));
+        assert!(metadata.contains("\"OPENAI_API_KEY\":\"[redacted]\""));
+        assert!(metadata.contains("\"telegram_bot_token\":\"[redacted]\""));
+        assert!(!metadata.contains(' '));
+        assert!(!metadata.contains("show private details"));
+        assert!(!metadata.contains("capyinn_sk_secret"));
+        assert!(!metadata.contains("Bearer abc"));
+        assert!(!metadata.contains("sk-secret"));
+        assert!(!metadata.contains("telegram-token"));
+    }
+
+    #[tokio::test]
     async fn audit_event_stores_sanitized_metadata() {
         let pool = test_pool().await;
 
@@ -430,5 +480,67 @@ mod tests {
             error.code,
             crate::app_error::codes::AGENT_MEMORY_FORBIDDEN_TRUTH
         );
+    }
+
+    #[tokio::test]
+    async fn memory_rejects_normalized_pms_truth_categories() {
+        let pool = test_pool().await;
+
+        for (id, scope, key, value) in [
+            (
+                "memory-auto-scope",
+                "auto_mutating_recovery_commands",
+                "preference",
+                serde_json::json!({ "summary": "ok" }),
+            ),
+            (
+                "memory-auto-key",
+                "preference",
+                "auto_mutating_recovery_commands",
+                serde_json::json!({ "summary": "ok" }),
+            ),
+            (
+                "memory-auto-value",
+                "preference",
+                "summary",
+                serde_json::json!({ "category": "auto_mutating_recovery_commands" }),
+            ),
+            (
+                "memory-camel",
+                "canonicalBookingState",
+                "booking-1",
+                serde_json::json!({ "summary": "ok" }),
+            ),
+            (
+                "memory-hyphen",
+                "room-availability truth",
+                "room-1",
+                serde_json::json!({ "summary": "ok" }),
+            ),
+            (
+                "memory-space",
+                "preference",
+                "payment truth",
+                serde_json::json!({ "summary": "ok" }),
+            ),
+        ] {
+            let error = upsert_agent_memory_item(
+                &pool,
+                NewAgentMemoryItem {
+                    id: id.to_string(),
+                    role: AgentRole::CeoSecretary,
+                    scope: scope.to_string(),
+                    key: key.to_string(),
+                    value,
+                },
+            )
+            .await
+            .expect_err("normalized PMS truth must not be stored in memory");
+
+            assert_eq!(
+                error.code,
+                crate::app_error::codes::AGENT_MEMORY_FORBIDDEN_TRUTH
+            );
+        }
     }
 }
