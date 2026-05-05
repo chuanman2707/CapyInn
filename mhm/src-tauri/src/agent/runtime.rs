@@ -16,7 +16,7 @@ fn ensure_paired_actor(input: &AgentRuntimePolicyInput) -> CommandResult<()> {
         .channel_actor
         .stable_actor_id
         .as_deref()
-        .is_none_or(str::is_empty)
+        .is_none_or(|actor_id| actor_id.trim().is_empty())
     {
         return Err(CommandError::user(
             codes::AGENT_CHANNEL_UNPAIRED,
@@ -74,6 +74,25 @@ mod tests {
         })
         .await
         .expect_err("unpaired actor must be denied");
+
+        assert_eq!(result.code, crate::app_error::codes::AGENT_CHANNEL_UNPAIRED);
+    }
+
+    #[tokio::test]
+    async fn whitespace_only_actor_id_is_denied_before_prompt_construction() {
+        let result = handle_agent_message_disabled(AgentRuntimePolicyInput {
+            role: AgentRole::CeoSecretary,
+            channel_actor: ChannelActor {
+                channel: AgentChannel::Telegram,
+                stable_actor_id: Some("   ".to_string()),
+                display_name: Some("Unknown".to_string()),
+                username: Some("unknown".to_string()),
+            },
+            ceo_cloud_data_opt_in: true,
+            contains_ceo_sensitive_data: true,
+        })
+        .await
+        .expect_err("whitespace-only actor id must be denied");
 
         assert_eq!(result.code, crate::app_error::codes::AGENT_CHANNEL_UNPAIRED);
     }
