@@ -27,10 +27,7 @@ fn ensure_paired_actor(input: &AgentRuntimePolicyInput) -> CommandResult<()> {
 }
 
 fn ensure_cloud_opt_in(input: &AgentRuntimePolicyInput) -> CommandResult<()> {
-    if input.role == AgentRole::CeoSecretary
-        && input.contains_ceo_sensitive_data
-        && !input.ceo_cloud_data_opt_in
-    {
+    if input.contains_ceo_sensitive_data && !input.ceo_cloud_data_opt_in {
         return Err(CommandError::user(
             codes::AGENT_CLOUD_DATA_OPT_IN_REQUIRED,
             "CEO cloud-data opt-in is required",
@@ -96,6 +93,28 @@ mod tests {
         })
         .await
         .expect_err("missing opt-in must block provider construction");
+
+        assert_eq!(
+            result.code,
+            crate::app_error::codes::AGENT_CLOUD_DATA_OPT_IN_REQUIRED
+        );
+    }
+
+    #[tokio::test]
+    async fn ceo_sensitive_guest_request_requires_opt_in() {
+        let result = build_provider_request_disabled(AgentRuntimePolicyInput {
+            role: AgentRole::GuestReceptionist,
+            channel_actor: ChannelActor {
+                channel: AgentChannel::Telegram,
+                stable_actor_id: Some("12345".to_string()),
+                display_name: None,
+                username: None,
+            },
+            ceo_cloud_data_opt_in: false,
+            contains_ceo_sensitive_data: true,
+        })
+        .await
+        .expect_err("CEO-sensitive data must require opt-in for every role");
 
         assert_eq!(
             result.code,
