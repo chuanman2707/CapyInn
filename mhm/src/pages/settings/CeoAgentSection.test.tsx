@@ -54,7 +54,7 @@ describe("CeoAgentSection", () => {
         /raw prompts, raw responses, raw tool outputs, and raw provider errors are not stored/i,
       ),
     ).toBeInTheDocument();
-    expect(screen.getByText(/runtime remains disabled in this foundation slice/i)).toBeInTheDocument();
+    expect(screen.getByText(/runtime remains disabled in this build/i)).toBeInTheDocument();
 
     const checkbox = await screen.findByRole("checkbox", {
       name: "Allow CEO cloud-data processing",
@@ -140,6 +140,57 @@ describe("CeoAgentSection", () => {
     await waitFor(() => expect(toastError).toHaveBeenCalledWith("Unable to update CEO cloud-data opt-in"));
     expect(checkbox).not.toBeChecked();
   });
+
+  it("keeps the toggle disabled when loading opt-in state fails", async () => {
+    setMockResponses({
+      get_ceo_cloud_data_opt_in: () => {
+        throw new Error("unavailable");
+      },
+      set_ceo_cloud_data_opt_in: () => undefined,
+    });
+
+    render(<CeoAgentSection />);
+
+    const checkbox = await screen.findByRole("checkbox", {
+      name: "Allow CEO cloud-data processing",
+    });
+
+    await waitFor(() => {
+      expect(screen.getByText("Unable to load CEO cloud-data opt-in")).toBeInTheDocument();
+    });
+    expect(checkbox).toBeDisabled();
+  });
+
+  it("disables the toggle while saving to prevent duplicate writes", async () => {
+    const user = userEvent.setup();
+    let resolveWrite: (() => void) | undefined;
+    const setHandler = vi.fn(
+      () =>
+        new Promise<void>((resolve) => {
+          resolveWrite = resolve;
+        }),
+    );
+
+    setMockResponses({
+      get_ceo_cloud_data_opt_in: () => false,
+      set_ceo_cloud_data_opt_in: setHandler,
+    });
+
+    render(<CeoAgentSection />);
+
+    const checkbox = await screen.findByRole("checkbox", {
+      name: "Allow CEO cloud-data processing",
+    });
+
+    await user.click(checkbox);
+    expect(checkbox).toBeDisabled();
+
+    await user.click(checkbox);
+    expect(setHandler).toHaveBeenCalledTimes(1);
+
+    resolveWrite?.();
+    await waitFor(() => expect(checkbox).not.toBeDisabled());
+  });
 });
 
 describe("SettingsPage CEO Agent nav", () => {
@@ -183,4 +234,3 @@ describe("SettingsPage CEO Agent nav", () => {
     expect(screen.queryByRole("button", { name: "CEO Agent" })).not.toBeInTheDocument();
   });
 });
-

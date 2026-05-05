@@ -6,15 +6,25 @@ import { invokeCommand, invokeWriteCommand } from "@/lib/invokeCommand";
 export default function CeoAgentSection() {
   const [enabled, setEnabled] = useState(false);
   const [loading, setLoading] = useState(true);
+  const [saving, setSaving] = useState(false);
+  const [loadError, setLoadError] = useState<string | null>(null);
   const [statusMessage, setStatusMessage] = useState<string | null>(null);
 
   useEffect(() => {
     invokeCommand<boolean>("get_ceo_cloud_data_opt_in")
-      .then(setEnabled)
+      .then((value) => {
+        setEnabled(value);
+        setLoadError(null);
+      })
+      .catch(() => {
+        setLoadError("Unable to load CEO cloud-data opt-in");
+      })
       .finally(() => setLoading(false));
   }, []);
 
   const handleToggle = async (nextValue: boolean) => {
+    const previous = enabled;
+    setSaving(true);
     setEnabled(nextValue);
     setStatusMessage(null);
 
@@ -26,9 +36,11 @@ export default function CeoAgentSection() {
       setStatusMessage(message);
       toast.success(message);
     } catch {
-      setEnabled(!nextValue);
+      setEnabled(previous);
       setStatusMessage("Unable to update CEO cloud-data opt-in");
       toast.error("Unable to update CEO cloud-data opt-in");
+    } finally {
+      setSaving(false);
     }
   };
 
@@ -50,18 +62,19 @@ export default function CeoAgentSection() {
             <p>
               Raw prompts, raw responses, raw tool outputs, and raw provider errors are not stored.
             </p>
-            <p>Runtime remains disabled in this foundation slice.</p>
+            <p>Runtime remains disabled in this build.</p>
           </div>
         </div>
         <input
           type="checkbox"
           aria-label="Allow CEO cloud-data processing"
           checked={enabled}
-          disabled={loading}
+          disabled={loading || saving || Boolean(loadError)}
           onChange={(event) => void handleToggle(event.target.checked)}
         />
       </label>
 
+      {loadError && <p className="text-sm text-red-500">{loadError}</p>}
       {statusMessage && <p className="text-sm text-brand-text">{statusMessage}</p>}
     </div>
   );
