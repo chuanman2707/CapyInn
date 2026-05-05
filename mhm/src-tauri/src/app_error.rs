@@ -42,6 +42,12 @@ pub mod codes {
         "Dữ liệu đã thay đổi, vui lòng tải lại trước khi thao tác.";
     pub const COMMAND_LEDGER_ROW_NOT_FOUND: &str = "COMMAND_LEDGER_ROW_NOT_FOUND";
     pub const RECOVERY_REQUIRED: &str = "RECOVERY_REQUIRED";
+    pub const AGENT_RUNTIME_DISABLED: &str = "AGENT_RUNTIME_DISABLED";
+    pub const AGENT_CHANNEL_UNPAIRED: &str = "AGENT_CHANNEL_UNPAIRED";
+    pub const AGENT_PROVIDER_DISABLED: &str = "AGENT_PROVIDER_DISABLED";
+    pub const AGENT_CLOUD_DATA_OPT_IN_REQUIRED: &str = "AGENT_CLOUD_DATA_OPT_IN_REQUIRED";
+    pub const AGENT_TOOL_NOT_ALLOWED: &str = "AGENT_TOOL_NOT_ALLOWED";
+    pub const AGENT_MEMORY_FORBIDDEN_TRUTH: &str = "AGENT_MEMORY_FORBIDDEN_TRUTH";
     pub const SYSTEM_INTERNAL_ERROR: &str = "SYSTEM_INTERNAL_ERROR";
 
     pub const ALL: &[&str] = &[
@@ -77,6 +83,12 @@ pub mod codes {
         CONFLICT_INVALID_STATE_TRANSITION,
         COMMAND_LEDGER_ROW_NOT_FOUND,
         RECOVERY_REQUIRED,
+        AGENT_RUNTIME_DISABLED,
+        AGENT_CHANNEL_UNPAIRED,
+        AGENT_PROVIDER_DISABLED,
+        AGENT_CLOUD_DATA_OPT_IN_REQUIRED,
+        AGENT_TOOL_NOT_ALLOWED,
+        AGENT_MEMORY_FORBIDDEN_TRUTH,
         SYSTEM_INTERNAL_ERROR,
     ];
 }
@@ -389,6 +401,22 @@ mod tests {
     #[should_panic(expected = "unregistered command error code")]
     fn rejects_unregistered_command_error_code() {
         let _ = CommandError::user("NOT_REGISTERED", "boom");
+    }
+
+    #[test]
+    fn agent_error_codes_are_registered() {
+        for code in [
+            codes::AGENT_RUNTIME_DISABLED,
+            codes::AGENT_CHANNEL_UNPAIRED,
+            codes::AGENT_PROVIDER_DISABLED,
+            codes::AGENT_CLOUD_DATA_OPT_IN_REQUIRED,
+            codes::AGENT_TOOL_NOT_ALLOWED,
+            codes::AGENT_MEMORY_FORBIDDEN_TRUTH,
+        ] {
+            let error = CommandError::user(code, "agent policy denied");
+            assert_eq!(error.code, code);
+            assert_eq!(error.kind, AppErrorKind::User);
+        }
     }
 
     #[test]

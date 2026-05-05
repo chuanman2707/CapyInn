@@ -2,6 +2,7 @@ use log::{error, info};
 use tauri::Manager;
 
 pub mod aggregate_locks;
+pub mod agent;
 pub mod app_error;
 pub mod app_identity;
 mod backup;
