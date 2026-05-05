@@ -53,12 +53,14 @@ fn role_as_str(role: AgentRole) -> &'static str {
 
 fn channel_as_str(channel: AgentChannel) -> &'static str {
     match channel {
+        AgentChannel::Desktop => "desktop",
         AgentChannel::Telegram => "telegram",
     }
 }
 
 fn provider_as_str(provider: AgentProvider) -> &'static str {
     match provider {
+        AgentProvider::None => "none",
         AgentProvider::OpenAi => "open_ai",
     }
 }
@@ -112,6 +114,10 @@ fn is_sensitive_metadata_key(key: &str) -> bool {
     [
         "raw_prompt",
         "prompt",
+        "raw_response",
+        "response",
+        "raw_tool_output",
+        "tool_output",
         "provider_key",
         "api_key",
         "openai_api_key",

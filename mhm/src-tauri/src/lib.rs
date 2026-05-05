@@ -1,8 +1,8 @@
 use log::{error, info};
 use tauri::Manager;
 
-pub mod aggregate_locks;
 pub mod agent;
+pub mod aggregate_locks;
 pub mod app_error;
 pub mod app_identity;
 mod backup;
@@ -261,6 +261,8 @@ pub fn run() {
             commands::settings::get_settings,
             commands::settings::get_crash_reporting_preference,
             commands::settings::set_crash_reporting_preference,
+            commands::agent_settings::get_ceo_cloud_data_opt_in,
+            commands::agent_settings::set_ceo_cloud_data_opt_in,
             commands::diagnostics::record_js_crash,
             commands::diagnostics::get_pending_crash_report,
             commands::diagnostics::mark_crash_report_submitted,
