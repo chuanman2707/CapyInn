@@ -16,7 +16,7 @@ fn ensure_paired_actor(input: &AgentRuntimePolicyInput) -> CommandResult<()> {
         .channel_actor
         .stable_actor_id
         .as_deref()
-        .map_or(true, str::is_empty)
+        .is_none_or(str::is_empty)
     {
         return Err(CommandError::user(
             codes::AGENT_CHANNEL_UNPAIRED,
