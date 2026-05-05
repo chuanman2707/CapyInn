@@ -108,7 +108,7 @@ fn sanitize_metadata(value: &Value) -> Value {
 }
 
 fn is_sensitive_metadata_key(key: &str) -> bool {
-    let normalized = key.to_ascii_lowercase();
+    let normalized = normalized_category(key);
     [
         "raw_prompt",
         "prompt",
@@ -123,7 +123,8 @@ fn is_sensitive_metadata_key(key: &str) -> bool {
         "authorization",
     ]
     .iter()
-    .any(|marker| normalized.contains(marker))
+    .map(|marker| normalized_category(marker))
+    .any(|marker| normalized.contains(&marker))
 }
 
 fn contains_obvious_secret_marker(value: &str) -> bool {
@@ -380,10 +381,13 @@ mod tests {
                 metadata: serde_json::json!({
                     "source": "test",
                     "raw_prompt": "show private details",
+                    "apiKey": "abc123",
                     "provider_key": "capyinn_sk_secret",
+                    "providerKey": "plain-provider-key",
                     "authorization": "Bearer abc",
                     "nested": {
                         "OPENAI_API_KEY": "sk-secret",
+                        "openaiApiKey": "plain-openai-key",
                         "telegram_bot_token": "telegram-token"
                     }
                 }),
@@ -401,15 +405,21 @@ mod tests {
 
         assert!(metadata.contains("\"source\":\"test\""));
         assert!(metadata.contains("\"raw_prompt\":\"[redacted]\""));
+        assert!(metadata.contains("\"apiKey\":\"[redacted]\""));
         assert!(metadata.contains("\"provider_key\":\"[redacted]\""));
+        assert!(metadata.contains("\"providerKey\":\"[redacted]\""));
         assert!(metadata.contains("\"authorization\":\"[redacted]\""));
         assert!(metadata.contains("\"OPENAI_API_KEY\":\"[redacted]\""));
+        assert!(metadata.contains("\"openaiApiKey\":\"[redacted]\""));
         assert!(metadata.contains("\"telegram_bot_token\":\"[redacted]\""));
         assert!(!metadata.contains(' '));
         assert!(!metadata.contains("show private details"));
+        assert!(!metadata.contains("abc123"));
         assert!(!metadata.contains("capyinn_sk_secret"));
+        assert!(!metadata.contains("plain-provider-key"));
         assert!(!metadata.contains("Bearer abc"));
         assert!(!metadata.contains("sk-secret"));
+        assert!(!metadata.contains("plain-openai-key"));
         assert!(!metadata.contains("telegram-token"));
     }
 
