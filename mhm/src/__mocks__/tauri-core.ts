@@ -45,6 +45,8 @@ export const invoke = vi.fn(async (command: string, args?: Record<string, unknow
         },
         get_crash_reporting_preference: false,
         set_crash_reporting_preference: undefined,
+        get_ceo_cloud_data_opt_in: false,
+        set_ceo_cloud_data_opt_in: undefined,
         complete_onboarding: {
             setup_completed: true,
             app_lock_enabled: false,
