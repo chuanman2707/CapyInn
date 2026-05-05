@@ -160,6 +160,36 @@
     "defaultMessage": "Cần xử lý khôi phục lệnh trước khi tiếp tục."
   },
   {
+    "code": "AGENT_RUNTIME_DISABLED",
+    "kind": "user",
+    "defaultMessage": "Trợ lý AI hiện đang bị tắt."
+  },
+  {
+    "code": "AGENT_CHANNEL_UNPAIRED",
+    "kind": "user",
+    "defaultMessage": "Kênh trợ lý AI chưa được liên kết."
+  },
+  {
+    "code": "AGENT_PROVIDER_DISABLED",
+    "kind": "user",
+    "defaultMessage": "Nhà cung cấp AI hiện đang bị tắt."
+  },
+  {
+    "code": "AGENT_CLOUD_DATA_OPT_IN_REQUIRED",
+    "kind": "user",
+    "defaultMessage": "Cần bật cho phép xử lý dữ liệu trên đám mây trước khi dùng trợ lý AI."
+  },
+  {
+    "code": "AGENT_TOOL_NOT_ALLOWED",
+    "kind": "user",
+    "defaultMessage": "Trợ lý AI không được phép dùng công cụ này."
+  },
+  {
+    "code": "AGENT_MEMORY_FORBIDDEN_TRUTH",
+    "kind": "user",
+    "defaultMessage": "Bộ nhớ trợ lý AI không được dùng làm dữ liệu PMS chính thức."
+  },
+  {
     "code": "SYSTEM_INTERNAL_ERROR",
     "kind": "system",
     "defaultMessage": "Có lỗi hệ thống, vui lòng thử lại"

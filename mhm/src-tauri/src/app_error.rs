@@ -624,12 +624,44 @@ mod tests {
                 "Cần xử lý khôi phục lệnh trước khi tiếp tục.",
             ),
             (
+                codes::AGENT_RUNTIME_DISABLED,
+                AppErrorKind::User,
+                "Trợ lý AI hiện đang bị tắt.",
+            ),
+            (
+                codes::AGENT_CHANNEL_UNPAIRED,
+                AppErrorKind::User,
+                "Kênh trợ lý AI chưa được liên kết.",
+            ),
+            (
+                codes::AGENT_PROVIDER_DISABLED,
+                AppErrorKind::User,
+                "Nhà cung cấp AI hiện đang bị tắt.",
+            ),
+            (
+                codes::AGENT_CLOUD_DATA_OPT_IN_REQUIRED,
+                AppErrorKind::User,
+                "Cần bật cho phép xử lý dữ liệu trên đám mây trước khi dùng trợ lý AI.",
+            ),
+            (
+                codes::AGENT_TOOL_NOT_ALLOWED,
+                AppErrorKind::User,
+                "Trợ lý AI không được phép dùng công cụ này.",
+            ),
+            (
+                codes::AGENT_MEMORY_FORBIDDEN_TRUTH,
+                AppErrorKind::User,
+                "Bộ nhớ trợ lý AI không được dùng làm dữ liệu PMS chính thức.",
+            ),
+            (
                 codes::SYSTEM_INTERNAL_ERROR,
                 AppErrorKind::System,
                 GENERIC_SYSTEM_ERROR_MESSAGE,
             ),
         ];
 
+        let expected_codes: Vec<&str> = expected.iter().map(|(code, _, _)| *code).collect();
+        assert_eq!(expected_codes, codes::ALL);
         assert_eq!(registry.len(), expected.len());
         for (entry, (code, kind, default_message)) in registry.iter().zip(expected.iter()) {
             assert_eq!(entry.code, *code);
