@@ -70,4 +70,48 @@ describe("agentic integration guardrails", () => {
             "LAN or remote exposure requires explicit configuration, auth or pairing, and policy gates",
         );
     });
+
+    it("documents CEO agent data sensitivity and cloud opt-in boundaries", () => {
+        const skill = readWorkspaceFile("skills/hotel-manager.skill.md");
+        const openapi = readWorkspaceFile("skills/openapi.yaml");
+        const manifest = JSON.parse(readWorkspaceFile("skills/mcp-manifest.json"));
+
+        expect(skill).toContain("ReadOnly does not mean guest-safe");
+        expect(skill).toContain("CEO cloud-data opt-in is required");
+        expect(skill).toContain(
+            "raw prompts, raw responses, raw tool outputs, and raw provider errors are not stored",
+        );
+
+        expect(openapi).toContain("PublicHotelInfo");
+        expect(openapi).toContain("GuestScoped");
+        expect(openapi).toContain("StaffOperational");
+        expect(openapi).toContain("CeoSensitive");
+        expect(openapi).toContain(
+            "CEO cloud-data opt-in is persisted and revocable",
+        );
+
+        expect(manifest.agent_safety.data_sensitivity_classes).toEqual([
+            "PublicHotelInfo",
+            "GuestScoped",
+            "StaffOperational",
+            "CeoSensitive",
+        ]);
+        expect(manifest.agent_safety.read_only_not_guest_safe).toBe(true);
+        expect(manifest.agent_safety.cloud_data_opt_in.setting_key).toBe(
+            "ceo_cloud_data_opt_in",
+        );
+        expect(manifest.agent_safety.cloud_data_opt_in.default).toBe(false);
+        expect(manifest.agent_safety.retention.raw_prompt_retention).toBe(
+            "not_stored",
+        );
+        expect(manifest.agent_safety.retention.raw_response_retention).toBe(
+            "not_stored",
+        );
+        expect(manifest.agent_safety.retention.raw_tool_output_retention).toBe(
+            "not_stored",
+        );
+        expect(
+            manifest.agent_safety.retention.raw_provider_error_retention,
+        ).toBe("not_stored");
+    });
 });

@@ -12,6 +12,21 @@ Observer events are committed PMS facts that tell you what area to refresh. Afte
 
 The gateway is loopback-only by default at `127.0.0.1`. LAN or remote exposure requires a separate explicit configuration, auth or pairing, and policy gates. A paired or authenticated client still cannot bypass high-risk write policy.
 
+## CEO Agent Safety Boundary
+
+ReadOnly does not mean guest-safe. A read-only tool can still expose guest, revenue, balance, audit, or operational data and must carry a data sensitivity class.
+
+Data sensitivity classes:
+
+- `PublicHotelInfo`: public hotel policy or descriptive information
+- `GuestScoped`: only after verifying the guest and scope
+- `StaffOperational`: authenticated staff operations
+- `CeoSensitive`: CEO or explicitly authorized owner/admin only
+
+CEO cloud-data opt-in is required before any cloud LLM request may include CEO-sensitive PMS data. The opt-in is persisted, revocable, and audited.
+
+Retention: raw prompts, raw responses, raw tool outputs, and raw provider errors are not stored by the CEO agent safety foundation. Session and audit records store sanitized local metadata only.
+
 ## ⚠️ CRITICAL: Call `get_hotel_context` FIRST
 
 **Before ANY other tool call**, always call `get_hotel_context` to get the current date, time, timezone, and hotel info. This prevents date hallucinations.
