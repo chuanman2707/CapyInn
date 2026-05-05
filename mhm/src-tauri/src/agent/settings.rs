@@ -34,14 +34,19 @@ pub async fn get_ceo_cloud_data_opt_in(pool: &Pool<Sqlite>) -> CommandResult<boo
                 )
             })?;
 
-    Ok(matches!(value.as_deref(), Some("true" | "TRUE" | "True")))
+    Ok(value
+        .as_deref()
+        .map(|value| {
+            let normalized = value.trim().to_ascii_lowercase();
+            normalized == "true" || normalized == "1"
+        })
+        .unwrap_or(false))
 }
 
 pub async fn set_ceo_cloud_data_opt_in_idempotent(
     pool: &Pool<Sqlite>,
     ctx: &WriteCommandContext,
     enabled: bool,
-    _request_context: Value,
 ) -> CommandResult<IdempotentCommandResult<Value>> {
     let request = WriteCommandRequest::new_low_risk(
         serde_json::json!({ "enabled": enabled }),
@@ -147,6 +152,15 @@ mod tests {
             .expect("query settings")
     }
 
+    async fn save_setting_value(pool: &Pool<Sqlite>, value: &str) {
+        sqlx::query("INSERT INTO settings (key, value) VALUES (?, ?)")
+            .bind(CEO_CLOUD_DATA_OPT_IN_SETTING)
+            .bind(value)
+            .execute(pool)
+            .await
+            .expect("seed setting");
+    }
+
     async fn audit_rows(pool: &Pool<Sqlite>) -> Vec<(String, String)> {
         // (event_type, summary_json)
         sqlx::query_as::<_, (String, String)>(
@@ -178,22 +192,21 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn enabling_persists_setting_and_writes_one_sanitized_audit_event() {
+    async fn stored_numeric_true_setting_returns_true() {
+        let pool = test_pool().await;
+        save_setting_value(&pool, "1").await;
+        let value = get_ceo_cloud_data_opt_in(&pool)
+            .await
+            .expect("read helper succeeds");
+        assert!(value);
+    }
+
+    #[tokio::test]
+    async fn enabling_persists_setting_and_writes_one_metadata_only_audit_event() {
         let pool = test_pool().await;
         let ctx = write_ctx("req-1", "idem-1");
-        let request_context = serde_json::json!({
-            "surface": "settings",
-            "openai_api_key": "sk-test-leak",
-            "telegram_bot_token": "123:abc",
-            "prompt": "raw prompt leak",
-            "response": "raw response leak",
-            "tool_output": "raw tool output leak",
-            "providerKey": "provider-key-leak",
-            "secret": "super-secret",
-            "token": "bearer token leak",
-        });
 
-        set_ceo_cloud_data_opt_in_idempotent(&pool, &ctx, true, request_context)
+        set_ceo_cloud_data_opt_in_idempotent(&pool, &ctx, true)
             .await
             .expect("set should succeed");
 
@@ -205,6 +218,13 @@ mod tests {
 
         let summary: serde_json::Value =
             serde_json::from_str(&rows[0].1).expect("summary json parses");
+        let top_level_keys = summary
+            .as_object()
+            .expect("summary must be an object")
+            .keys()
+            .cloned()
+            .collect::<Vec<_>>();
+        assert_eq!(top_level_keys, vec!["enabled", "retention", "setting"]);
         assert_eq!(summary["enabled"], serde_json::json!(true));
         assert_eq!(
             summary["retention"]["raw_items"],
@@ -221,26 +241,13 @@ mod tests {
         );
         assert_eq!(summary["retention"]["audit_meta"], AUDIT_METADATA_RETENTION);
         assert_eq!(summary["retention"]["memory"], MEMORY_RETENTION);
-
-        // Ensure raw values are not present.
-        assert!(!rows[0].1.contains("sk-test-leak"));
-        assert!(!rows[0].1.contains("123:abc"));
-        assert!(!rows[0].1.contains("super-secret"));
-        assert!(!rows[0].1.contains("openai_api_key"));
-        assert!(!rows[0].1.contains("telegram_bot_token"));
-        assert!(!rows[0].1.contains("providerKey"));
-        assert!(!rows[0].1.contains("\"prompt\""));
-        assert!(!rows[0].1.contains("\"response\""));
-        assert!(!rows[0].1.contains("tool_output leak"));
-        assert!(!rows[0].1.contains("\"secret\""));
-        assert!(!rows[0].1.contains("\"token\""));
     }
 
     #[tokio::test]
     async fn revoking_persists_setting_and_writes_revoked_audit_event() {
         let pool = test_pool().await;
         let ctx = write_ctx("req-2", "idem-2");
-        set_ceo_cloud_data_opt_in_idempotent(&pool, &ctx, false, serde_json::json!({}))
+        set_ceo_cloud_data_opt_in_idempotent(&pool, &ctx, false)
             .await
             .expect("revoke should succeed");
 
@@ -254,12 +261,12 @@ mod tests {
     async fn retry_same_idempotency_key_same_payload_replays_without_duplicate_audit_event() {
         let pool = test_pool().await;
         let ctx = write_ctx("req-3", "idem-3");
-        let first = set_ceo_cloud_data_opt_in_idempotent(&pool, &ctx, true, serde_json::json!({}))
+        let first = set_ceo_cloud_data_opt_in_idempotent(&pool, &ctx, true)
             .await
             .expect("first succeeds");
         assert!(!first.replayed);
 
-        let second = set_ceo_cloud_data_opt_in_idempotent(&pool, &ctx, true, serde_json::json!({}))
+        let second = set_ceo_cloud_data_opt_in_idempotent(&pool, &ctx, true)
             .await
             .expect("second replays");
         assert!(second.replayed);
@@ -273,11 +280,11 @@ mod tests {
         let pool = test_pool().await;
         let ctx = write_ctx("req-4", "idem-4");
 
-        set_ceo_cloud_data_opt_in_idempotent(&pool, &ctx, true, serde_json::json!({}))
+        set_ceo_cloud_data_opt_in_idempotent(&pool, &ctx, true)
             .await
             .expect("first succeeds");
 
-        let error = set_ceo_cloud_data_opt_in_idempotent(&pool, &ctx, false, serde_json::json!({}))
+        let error = set_ceo_cloud_data_opt_in_idempotent(&pool, &ctx, false)
             .await
             .expect_err("hash mismatch must be rejected");
 

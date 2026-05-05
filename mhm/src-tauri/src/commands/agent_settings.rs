@@ -34,14 +34,9 @@ pub async fn set_ceo_cloud_data_opt_in(
     )?;
     ctx.actor_id = Some(user.id.clone());
 
-    set_ceo_cloud_data_opt_in_idempotent(
-        &state.db,
-        &ctx,
-        enabled,
-        serde_json::json!({ "surface": "tauri" }),
-    )
-    .await
-    .map(|_| ())
+    set_ceo_cloud_data_opt_in_idempotent(&state.db, &ctx, enabled)
+        .await
+        .map(|_| ())
 }
 
 #[cfg(test)]
