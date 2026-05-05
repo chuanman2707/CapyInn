@@ -146,6 +146,33 @@ Sessions store conversation or run metadata. Audit events store sanitized facts 
 
 None of these tables should store raw prompts, raw responses, raw PMS extracts, canonical booking state, room availability truth, payment truth, folio truth, invoice truth, ledger truth, housekeeping truth, or audit truth by default.
 
+## Retention Policy
+
+This slice must make retention explicit even though it does not run the real agent runtime.
+
+Required retention constants:
+
+- `raw_prompt_retention`: `not_stored`
+- `raw_response_retention`: `not_stored`
+- `raw_tool_output_retention`: `not_stored`
+- `raw_provider_error_retention`: `not_stored`
+- `session_metadata_retention`: `local_metadata_until_operator_cleanup_v1`
+- `audit_metadata_retention`: `local_metadata_until_operator_cleanup_v1`
+- `memory_retention`: `local_non_authoritative_until_operator_cleanup_v1`
+
+Required behavior:
+
+- raw prompts are not persisted in this slice
+- raw responses are not persisted in this slice
+- raw tool outputs are not persisted in this slice
+- raw provider errors are not persisted in this slice
+- session rows store metadata only
+- audit rows store sanitized summaries only
+- memory rows store non-authoritative preferences, summaries, and notes only
+- future raw prompt, response, tool-output, or provider-error persistence requires a separate design, UI consent, and verification gate
+
+The `agent_sessions.retention_policy` value must use `metadata_only_v1` for this slice. Any other retention policy value should be rejected until a future issue defines it.
+
 ## Database Schema
 
 Add migration v18.
@@ -238,6 +265,8 @@ Backend commands:
 - `get_ceo_cloud_data_opt_in() -> bool`
 - `set_ceo_cloud_data_opt_in(enabled: bool)`
 
+The setter must enforce backend authorization before it starts the command transaction. Allowed actors are authenticated admins or explicitly modeled owner/CEO actors. A receptionist, unauthenticated actor, agent runtime, or integration key must not be able to enable or revoke CEO cloud-data opt-in.
+
 The setter must use an explicit low-risk command boundary, following the existing crash-reporting preference pattern. It should record actor, command name, idempotency, canonical payload hash, timestamp, and command ledger metadata through the existing command executor.
 
 The setter must also write a sanitized `agent_audit_events` row:
@@ -260,9 +289,10 @@ The UI should:
 - show current enabled/disabled state
 - let an admin enable or revoke opt-in
 - call the new Tauri commands
+- rely on backend authorization, not UI-only hiding, for privacy enforcement
 - show concise text that cloud LLM processing may receive CEO-sensitive PMS data only when enabled
 - state that revoking opt-in blocks cloud calls containing CEO-sensitive PMS data
-- mention retention posture at a high level: sanitized audit/session metadata by default, no raw PMS extracts by default
+- state retention explicitly: raw prompts, raw responses, raw tool outputs, and raw provider errors are not stored in this slice; sanitized session/audit metadata is stored locally under `metadata_only_v1`
 
 The UI should not:
 
@@ -352,9 +382,13 @@ Backend tests:
 - migration v18 creates agent tables, columns, indexes, and latest schema version
 - opt-in defaults to false
 - opt-in setter persists enabled and revoked states through command boundary
+- opt-in setter rejects unauthenticated, receptionist, agent runtime, and integration-key actors
+- unauthorized opt-in attempts do not change the setting and do not write opt-in audit events
 - exact opt-in command retry replays idempotently
 - same idempotency key with different opt-in payload conflicts
 - opt-in setter writes sanitized agent audit event
+- retention constants are exposed and match `not_stored` for raw prompt, response, tool output, and provider error data
+- session creation rejects unknown retention policies and accepts `metadata_only_v1`
 - runtime skeleton is disabled by default
 - unpaired Telegram actor denial happens before prompt construction
 - CEO-sensitive provider request construction requires opt-in
@@ -409,9 +443,10 @@ Exact command names may change during implementation, but coverage must preserve
 
 - CEO-sensitive cloud provider request construction requires persisted opt-in.
 - Revoking opt-in blocks future cloud requests containing CEO-sensitive PMS data.
-- Retention posture is documented.
+- Retention posture is explicit: raw prompts, responses, tool outputs, and provider errors are `not_stored`; sanitized session/audit metadata uses `metadata_only_v1`.
 - Provider data-use and retention posture is documented at a high level.
 - Audit/session records avoid full raw PMS extracts by default.
+- Backend authorization prevents non-admin, non-owner, agent runtime, or integration actors from changing CEO cloud-data opt-in.
 
 #125 partial:
 
