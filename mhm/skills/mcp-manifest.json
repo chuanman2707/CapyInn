@@ -23,6 +23,57 @@
             }
         }
     },
+    "security": {
+        "gateway_exposure": {
+            "default_bind": "127.0.0.1",
+            "remote_enabled_by_default": false,
+            "remote_requires": [
+                "explicit_configuration",
+                "auth_or_pairing",
+                "policy_gate"
+            ],
+            "high_risk_tools_policy_gated_even_when_authenticated": true
+        }
+    },
+    "data_sources": {
+        "pms_truth": {
+            "authoritative": true,
+            "source": "SQLite-backed CapyInn read tools and command results",
+            "covers": [
+                "booking_state",
+                "payment_truth",
+                "room_availability_truth",
+                "folio_truth",
+                "invoice_truth",
+                "ledger_truth",
+                "housekeeping_truth",
+                "audit_truth"
+            ]
+        },
+        "observer_facts": {
+            "authoritative": false,
+            "source": "Committed outbox notifications",
+            "use": "Refresh the relevant PMS read tools after receiving an event"
+        },
+        "agent_memory": {
+            "authoritative": false,
+            "allowed": [
+                "preferences",
+                "summaries",
+                "service_context",
+                "city_recommendations",
+                "chat_ids",
+                "channel_ids",
+                "non_authoritative_notes"
+            ],
+            "forbidden": [
+                "canonical_booking_state",
+                "payment_truth",
+                "room_availability_truth",
+                "auto_mutating_recovery_commands"
+            ]
+        }
+    },
     "tools": [
         {
             "name": "get_hotel_context",

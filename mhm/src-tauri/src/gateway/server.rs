@@ -10,7 +10,7 @@ use log::error;
 use rmcp::transport::streamable_http_server::session::local::LocalSessionManager;
 use rmcp::transport::streamable_http_server::{StreamableHttpServerConfig, StreamableHttpService};
 use sqlx::{Pool, Sqlite};
-use std::net::SocketAddr;
+use std::net::{Ipv4Addr, SocketAddr};
 use std::sync::Arc;
 use tauri::AppHandle;
 use tokio::sync::oneshot;
@@ -20,6 +20,11 @@ use super::tools::HotelTools;
 
 const DEFAULT_PORT: u16 = 61234;
 const PORT_RANGE: std::ops::Range<u16> = 61234..61244;
+const DEFAULT_BIND_IP: Ipv4Addr = Ipv4Addr::LOCALHOST;
+
+fn gateway_bind_addr(port: u16) -> SocketAddr {
+    SocketAddr::from((DEFAULT_BIND_IP, port))
+}
 
 /// API key middleware for MCP routes.
 /// Before setup completes, requests may pass through for bootstrap flows.
@@ -103,7 +108,7 @@ pub async fn start_server(
     // Try ports in range
     let mut port = DEFAULT_PORT;
     let listener = loop {
-        let addr = SocketAddr::from(([127, 0, 0, 1], port));
+        let addr = gateway_bind_addr(port);
         match tokio::net::TcpListener::bind(addr).await {
             Ok(listener) => break listener,
             Err(_) if port < PORT_RANGE.end => {
@@ -180,6 +185,18 @@ mod tests {
                 require_api_key,
             ))
             .with_state(pool)
+    }
+
+    #[test]
+    fn default_gateway_bind_address_is_loopback_only() {
+        let addr = super::gateway_bind_addr(super::DEFAULT_PORT);
+
+        assert_eq!(
+            addr.ip(),
+            std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST)
+        );
+        assert!(addr.ip().is_loopback());
+        assert_eq!(addr.port(), super::DEFAULT_PORT);
     }
 
     #[tokio::test]

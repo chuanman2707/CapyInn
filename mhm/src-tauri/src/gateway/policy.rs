@@ -262,6 +262,21 @@ mod tests {
     }
 
     #[test]
+    fn paired_future_client_context_still_requires_policy_approval() {
+        let _lock = env_lock().lock().expect("env lock poisoned");
+        let _autonomy = EnvVarGuard::set("CAPYINN_MCP_AUTONOMY", "supervised");
+        let request_id = Some("paired:telegram-accounting-agent:req-1".to_string());
+
+        let err = guard_write_tool(&CREATE_RESERVATION_META, request_id.clone())
+            .expect_err("paired future clients must not bypass high-risk write policy");
+
+        assert_eq!(err.error.code, codes::APPROVAL_REQUIRED);
+        assert_eq!(err.error.kind, "policy");
+        assert_eq!(err.error.request_id, request_id);
+        assert!(!err.error.retryable);
+    }
+
+    #[test]
     fn full_autonomy_is_represented_but_high_risk_writes_remain_disabled() {
         let _lock = env_lock().lock().expect("env lock poisoned");
         let _autonomy = EnvVarGuard::set("CAPYINN_MCP_AUTONOMY", "full");

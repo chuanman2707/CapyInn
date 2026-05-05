@@ -109,6 +109,9 @@ export default function GatewaySection() {
           MCP Gateway
         </h3>
         <p className="text-sm text-brand-muted">Cho phép AI agents (OpenClaw, n8n, Claude Code...) kết nối qua HTTP và quản lý {APP_NAME}</p>
+        <p className="text-xs text-brand-muted mt-2">
+          Mặc định chỉ kết nối local qua 127.0.0.1. LAN/remote không được mở mặc định; high-risk write tools vẫn cần policy gate.
+        </p>
       </div>
 
       <div className="flex items-center justify-between p-4 bg-slate-50 rounded-xl">
