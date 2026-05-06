@@ -64,7 +64,8 @@ pub async fn list_today_checkouts(
 pub async fn list_unpaid_balances(
     pool: &Pool<Sqlite>,
 ) -> Result<Vec<CeoBookingSummary>, sqlx::Error> {
-    let rows = sqlx::query(
+    let expected_checkout_date = local_date("b.expected_checkout");
+    let sql = format!(
         "SELECT b.id AS booking_id,
                 b.room_id,
                 COALESCE(g.full_name, '') AS guest_name,
@@ -79,10 +80,9 @@ pub async fn list_unpaid_balances(
          LEFT JOIN guests g ON g.id = b.primary_guest_id
          WHERE b.status IN ('booked', 'active', 'checked_out')
            AND b.total_price - COALESCE(b.paid_amount, 0) > 0
-         ORDER BY balance_due DESC, DATE(b.expected_checkout) ASC, b.room_id ASC",
-    )
-    .fetch_all(pool)
-    .await?;
+         ORDER BY balance_due DESC, {expected_checkout_date} ASC, b.room_id ASC",
+    );
+    let rows = sqlx::query(&sql).fetch_all(pool).await?;
 
     Ok(rows.iter().map(row_to_booking_summary).collect())
 }
@@ -229,14 +229,39 @@ mod tests {
         total_price: MoneyVnd,
         paid_amount: MoneyVnd,
     ) {
+        seed_booking_for_room(
+            pool,
+            booking_id,
+            "101",
+            status,
+            check_in_at,
+            expected_checkout,
+            total_price,
+            paid_amount,
+        )
+        .await;
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn seed_booking_for_room(
+        pool: &Pool<Sqlite>,
+        booking_id: &str,
+        room_id: &str,
+        status: &str,
+        check_in_at: &str,
+        expected_checkout: &str,
+        total_price: MoneyVnd,
+        paid_amount: MoneyVnd,
+    ) {
         sqlx::query(
             "INSERT INTO bookings (
                 id, room_id, primary_guest_id, check_in_at, expected_checkout,
                 actual_checkout, nights, total_price, paid_amount, status,
                 source, notes, scheduled_checkin, scheduled_checkout, created_at
-            ) VALUES (?, '101', 'guest-1', ?, ?, NULL, 1, ?, ?, ?, 'walk-in', 'private note', ?, ?, '2026-05-06T08:00:00+07:00')",
+            ) VALUES (?, ?, 'guest-1', ?, ?, NULL, 1, ?, ?, ?, 'walk-in', 'private note', ?, ?, '2026-05-06T08:00:00+07:00')",
         )
         .bind(booking_id)
+        .bind(room_id)
         .bind(check_in_at)
         .bind(expected_checkout)
         .bind(total_price)
@@ -373,6 +398,48 @@ mod tests {
         assert_eq!(balances.len(), 1);
         assert_eq!(balances[0].booking_id, "booking-unpaid");
         assert_eq!(balances[0].balance_due, 800_000);
+    }
+
+    #[tokio::test]
+    async fn list_unpaid_balances_orders_equal_balances_by_local_expected_checkout_date() {
+        let pool = test_pool().await;
+        seed_room_and_guest(&pool).await;
+        sqlx::query(
+            "INSERT INTO rooms (
+                id, name, type, floor, has_balcony, base_price, max_guests, extra_person_fee, status
+            ) VALUES ('102', 'Room 102', 'standard', 1, 0, 900000, 2, 0, 'vacant')",
+        )
+        .execute(&pool)
+        .await
+        .expect("seed second room");
+        seed_booking_for_room(
+            &pool,
+            "booking-local-may6",
+            "101",
+            "active",
+            "2026-05-05",
+            "2026-05-06T00:30:00+07:00",
+            900_000,
+            100_000,
+        )
+        .await;
+        seed_booking_for_room(
+            &pool,
+            "booking-local-may5",
+            "102",
+            "active",
+            "2026-05-05",
+            "2026-05-05T23:30:00+07:00",
+            900_000,
+            100_000,
+        )
+        .await;
+
+        let balances = list_unpaid_balances(&pool).await.expect("unpaid balances");
+
+        assert_eq!(balances.len(), 2);
+        assert_eq!(balances[0].booking_id, "booking-local-may5");
+        assert_eq!(balances[1].booking_id, "booking-local-may6");
     }
 
     #[tokio::test]

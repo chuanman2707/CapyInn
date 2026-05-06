@@ -6602,6 +6602,103 @@ async fn revenue_queries_include_cancellation_fees_in_recognized_revenue() {
 }
 
 #[tokio::test]
+async fn revenue_queries_use_local_rfc3339_booking_dates_for_business_day() {
+    let pool = test_pool().await;
+    seed_room(&pool, "R430").await.unwrap();
+    seed_active_booking_with_terms(
+        &pool,
+        "B430",
+        "R430",
+        "2026-05-06T00:30:00+07:00",
+        "2026-05-07T00:30:00+07:00",
+        1,
+        250_000,
+        Some(0),
+    )
+    .await
+    .unwrap();
+
+    let stats = revenue_queries::load_revenue_stats(&pool, "2026-05-06", "2026-05-06")
+        .await
+        .unwrap();
+    let total_revenue = revenue_queries::load_total_revenue(&pool, "2026-05-06", "2026-05-06")
+        .await
+        .unwrap();
+
+    assert_eq!(stats.total_revenue, 250_000);
+    assert_eq!(stats.rooms_sold, 1);
+    assert_eq!(total_revenue, 250_000);
+}
+
+#[tokio::test]
+async fn night_audit_snapshot_uses_local_rfc3339_booking_dates_for_occupancy() {
+    let pool = test_pool().await;
+    seed_room(&pool, "R431").await.unwrap();
+    seed_active_booking_with_terms(
+        &pool,
+        "B431",
+        "R431",
+        "2026-05-06T00:30:00+07:00",
+        "2026-05-07T00:30:00+07:00",
+        1,
+        250_000,
+        Some(0),
+    )
+    .await
+    .unwrap();
+
+    let audit = audit_queries::load_night_audit_snapshot(&pool, "2026-05-06")
+        .await
+        .unwrap();
+
+    assert_eq!(audit.room_revenue, 250_000);
+    assert_eq!(audit.rooms_sold, 1);
+    assert_eq!(audit.occupancy_pct, 100.0);
+}
+
+#[tokio::test]
+async fn folio_and_cancellation_revenue_use_local_rfc3339_created_dates() {
+    let pool = test_pool().await;
+    seed_room(&pool, "R432").await.unwrap();
+    seed_active_booking_with_terms(
+        &pool,
+        "B432",
+        "R432",
+        "2026-05-06",
+        "2026-05-07",
+        1,
+        250_000,
+        Some(0),
+    )
+    .await
+    .unwrap();
+    seed_folio_line(&pool, "B432", 40_000, "2026-05-06T00:30:00+07:00")
+        .await
+        .unwrap();
+    seed_transaction(
+        &pool,
+        "B432",
+        50_000,
+        "cancellation_fee",
+        "Retained deposit",
+        "2026-05-06T00:30:00+07:00",
+    )
+    .await
+    .unwrap();
+
+    let folio_revenue = revenue_queries::load_folio_revenue(&pool, "2026-05-06", "2026-05-06")
+        .await
+        .unwrap();
+    let cancellation_fee_revenue =
+        revenue_queries::load_cancellation_fee_revenue(&pool, "2026-05-06", "2026-05-06")
+            .await
+            .unwrap();
+
+    assert_eq!(folio_revenue, 40_000);
+    assert_eq!(cancellation_fee_revenue, 50_000);
+}
+
+#[tokio::test]
 async fn same_day_checkout_settlement_counts_one_room_sold_and_full_revenue() {
     let pool = test_pool().await;
     seed_room(&pool, "R420").await.unwrap();

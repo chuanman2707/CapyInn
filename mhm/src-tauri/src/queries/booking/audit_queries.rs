@@ -30,12 +30,16 @@ pub async fn load_night_audit_snapshot(
         .await?;
 
     let occupancy_checkout = revenue_queries::occupancy_checkout_date_sql("");
+    let check_in_date = format!("DATE({})", revenue_queries::local_date_sql("check_in_at"));
+    let audit_date_start = format!("DATE({})", revenue_queries::local_date_sql("?2"));
+    let audit_date_end_exclusive =
+        format!("DATE({}, '+1 day')", revenue_queries::local_date_sql("?1"));
     let rooms_sold_query = format!(
         "SELECT COUNT(DISTINCT room_id)
          FROM bookings
          WHERE status IN ('active', 'checked_out')
-           AND DATE(check_in_at) < DATE(?1, '+1 day')
-           AND DATE({occupancy_checkout}) > DATE(?2)"
+           AND {check_in_date} < {audit_date_end_exclusive}
+           AND DATE({occupancy_checkout}) > {audit_date_start}"
     );
     let rooms_sold: (i32,) = sqlx::query_as(&rooms_sold_query)
         .bind(audit_date)
