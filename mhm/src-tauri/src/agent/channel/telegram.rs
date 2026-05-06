@@ -17,6 +17,7 @@ const TELEGRAM_MAX_RESPONSE_BYTES: u64 = 1024 * 1024;
 const OWNER_DENIAL_PREFIX: &str = "Telegram ID ";
 const OWNER_DENIAL_SUFFIX: &str =
     " is not paired with CapyInn CEO Chat. Ask an admin to bind this numeric ID.";
+const MISSING_SENDER_DENIAL: &str = "Telegram sender is not paired with CapyInn CEO Chat. Ask an admin to bind this numeric ID once Telegram provides it.";
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct TelegramUpdate {
@@ -236,9 +237,9 @@ where
     let mut highest_update_id: Option<i64> = None;
 
     for update in updates {
-        highest_update_id = Some(highest_update_id.map_or(update.update_id, |highest| {
-            highest.max(update.update_id)
-        }));
+        highest_update_id = Some(
+            highest_update_id.map_or(update.update_id, |highest| highest.max(update.update_id)),
+        );
 
         let Some(message) = update.message else {
             continue;
@@ -247,6 +248,9 @@ where
             continue;
         };
         let Some(sender) = message.from else {
+            transport
+                .send_message(message.chat.id, MISSING_SENDER_DENIAL.to_string())
+                .await?;
             continue;
         };
 
@@ -285,7 +289,10 @@ async fn limited_response_bytes(
 ) -> CommandResult<Vec<u8>> {
     if let Some(length) = response.content_length() {
         if length > TELEGRAM_MAX_RESPONSE_BYTES {
-            return Err(scrub_telegram_error("telegram response was too large", token));
+            return Err(scrub_telegram_error(
+                "telegram response was too large",
+                token,
+            ));
         }
     }
 
@@ -456,10 +463,7 @@ impl TelegramMessageRuntime for FakeTelegramMessageRuntime {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::agent::{
-        config::CeoTelegramConfig,
-        secrets::FakeSecretStore,
-    };
+    use crate::agent::{config::CeoTelegramConfig, secrets::FakeSecretStore};
 
     fn ready_config(owner_id: &str, last_update_id: Option<i64>) -> CeoTelegramConfig {
         CeoTelegramConfig {
@@ -511,10 +515,27 @@ mod tests {
         }
     }
 
+    fn telegram_text_update_without_sender(
+        update_id: i64,
+        chat_id: i64,
+        text: &str,
+    ) -> TelegramUpdate {
+        TelegramUpdate {
+            update_id,
+            message: Some(TelegramMessage {
+                message_id: update_id * 10,
+                from: None,
+                chat: TelegramChat { id: chat_id },
+                text: Some(text.to_string()),
+            }),
+        }
+    }
+
     #[tokio::test]
     async fn unknown_sender_gets_denial_without_runtime_call() {
-        let transport =
-            FakeTelegramTransport::with_updates(vec![telegram_text_update(10, 777, 55, "xin chao")]);
+        let transport = FakeTelegramTransport::with_updates(vec![telegram_text_update(
+            10, 777, 55, "xin chao",
+        )]);
         let runtime = FakeTelegramMessageRuntime::default();
         let config = ready_config("123", None);
 
@@ -531,6 +552,29 @@ mod tests {
             sent_messages[0].text,
             "Telegram ID 777 is not paired with CapyInn CEO Chat. Ask an admin to bind this numeric ID."
         );
+    }
+
+    #[tokio::test]
+    async fn missing_sender_gets_denial_without_runtime_call() {
+        let transport =
+            FakeTelegramTransport::with_updates(vec![telegram_text_update_without_sender(
+                13, 55, "xin chao",
+            )]);
+        let runtime = FakeTelegramMessageRuntime::default();
+        let config = ready_config("123", None);
+
+        let result = poll_once(&transport, &runtime, &config)
+            .await
+            .expect("poll succeeds");
+
+        assert_eq!(result, Some(13));
+        assert_eq!(runtime.call_count(), 0);
+        let sent_messages = transport.sent_messages();
+        assert_eq!(sent_messages.len(), 1);
+        assert_eq!(sent_messages[0].chat_id, 55);
+        assert!(!sent_messages[0].text.contains("Telegram ID "));
+        assert!(sent_messages[0].text.contains("not paired"));
+        assert!(sent_messages[0].text.contains("bind this numeric ID"));
     }
 
     #[tokio::test]
