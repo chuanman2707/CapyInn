@@ -13,6 +13,7 @@ use crate::{
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use sqlx::{Pool, Sqlite, Transaction};
+use std::future::Future;
 
 pub const CEO_TELEGRAM_USER_ID_SETTING: &str = "ceo_telegram_user_id";
 pub const CEO_TELEGRAM_RUNTIME_ENABLED_SETTING: &str = "ceo_telegram_runtime_enabled";
@@ -225,11 +226,36 @@ pub async fn update_ceo_telegram_secret_presence_idempotent(
     telegram_bot_token_present: Option<bool>,
     openai_api_key_present: Option<bool>,
 ) -> CommandResult<IdempotentCommandResult<serde_json::Value>> {
+    let payload = serde_json::json!({
+        "telegram_credential": presence_intent_value(telegram_bot_token_present),
+        "ai_provider_credential": presence_intent_value(openai_api_key_present),
+    });
+
+    update_ceo_telegram_secret_presence_with_guard_idempotent(
+        pool,
+        ctx,
+        telegram_bot_token_present,
+        openai_api_key_present,
+        payload,
+        || async { Ok(()) },
+    )
+    .await
+}
+
+pub async fn update_ceo_telegram_secret_presence_with_guard_idempotent<Before, Fut>(
+    pool: &Pool<Sqlite>,
+    ctx: &WriteCommandContext,
+    telegram_bot_token_present: Option<bool>,
+    openai_api_key_present: Option<bool>,
+    idempotency_payload: serde_json::Value,
+    before_transaction: Before,
+) -> CommandResult<IdempotentCommandResult<serde_json::Value>>
+where
+    Before: FnOnce() -> Fut,
+    Fut: Future<Output = CommandResult<()>> + Send,
+{
     let request = WriteCommandRequest::new_low_risk(
-        serde_json::json!({
-            "telegram_credential": presence_intent_value(telegram_bot_token_present),
-            "ai_provider_credential": presence_intent_value(openai_api_key_present),
-        }),
+        idempotency_payload,
         "Set CEO Telegram credential status",
     )?
     .with_primary_aggregate_key(CEO_TELEGRAM_SETTINGS_AGGREGATE)
@@ -237,7 +263,7 @@ pub async fn update_ceo_telegram_secret_presence_idempotent(
 
     let actor_id = ctx.actor_id.clone();
     WriteCommandExecutor::new(pool.clone())
-        .execute_atomic(ctx, request, move |tx| {
+        .execute_with_pre_transaction_guard(ctx, request, before_transaction, move |tx| {
             Box::pin(async move {
                 let current_telegram =
                     read_bool_setting_tx(tx, CEO_TELEGRAM_TOKEN_PRESENT_SETTING).await?;

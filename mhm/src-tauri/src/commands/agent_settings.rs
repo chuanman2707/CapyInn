@@ -7,17 +7,24 @@ use crate::{
     agent::{
         config::{
             get_ceo_telegram_config as read_ceo_telegram_config,
-            set_ceo_telegram_config_idempotent, update_ceo_telegram_secret_presence_idempotent,
-            CeoTelegramConfig, CeoTelegramGateStatus, SET_CEO_TELEGRAM_CONFIG_COMMAND,
+            set_ceo_telegram_config_idempotent,
+            update_ceo_telegram_secret_presence_with_guard_idempotent, CeoTelegramConfig,
+            CeoTelegramGateStatus, SET_CEO_TELEGRAM_CONFIG_COMMAND,
             SET_CEO_TELEGRAM_SECRET_STATUS_COMMAND,
         },
-        secrets::{AgentSecretKind, AgentSecretStore, KeychainSecretStore},
+        secrets::{
+            agent_secret_fingerprint, AgentSecretKind, AgentSecretStore, KeychainSecretStore,
+        },
     },
     app_error::{codes, CommandError, CommandResult},
     command_idempotency::WriteCommandContext,
     models::User,
 };
 use sqlx::{Pool, Sqlite};
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Arc,
+};
 use tauri::State;
 
 pub(crate) fn require_ceo_cloud_opt_in_admin(user: Option<User>) -> CommandResult<User> {
@@ -241,10 +248,21 @@ async fn set_agent_secret_with_store(
     value: &str,
 ) -> CommandResult<()> {
     validate_non_blank_secret(value)?;
-    store.set_secret(kind, value)?;
+    let keychain_mutated = Arc::new(AtomicBool::new(false));
+    let keychain_mutated_for_guard = Arc::clone(&keychain_mutated);
+    let payload = set_secret_idempotency_payload(kind, value);
 
-    if let Err(error) = persist_secret_presence(pool, ctx, kind, true).await {
-        store.clear_secret(kind)?;
+    if let Err(error) =
+        persist_secret_presence_with_guard(pool, ctx, kind, true, payload, || async move {
+            store.set_secret(kind, value)?;
+            keychain_mutated_for_guard.store(true, Ordering::SeqCst);
+            Ok(())
+        })
+        .await
+    {
+        if keychain_mutated.load(Ordering::SeqCst) {
+            store.clear_secret(kind)?;
+        }
         return Err(error);
     }
 
@@ -258,25 +276,56 @@ async fn clear_agent_secret_with_store(
     ctx: &WriteCommandContext,
     kind: AgentSecretKind,
 ) -> CommandResult<()> {
-    store.clear_secret(kind)?;
-    persist_secret_presence(pool, ctx, kind, false).await
+    let payload = clear_secret_idempotency_payload(kind);
+    persist_secret_presence_with_guard(pool, ctx, kind, false, payload, || async move {
+        store.clear_secret(kind)
+    })
+    .await
 }
 
 #[allow(dead_code)]
-async fn persist_secret_presence(
+async fn persist_secret_presence_with_guard<Before, Fut>(
     pool: &Pool<Sqlite>,
     ctx: &WriteCommandContext,
     kind: AgentSecretKind,
     present: bool,
-) -> CommandResult<()> {
+    idempotency_payload: serde_json::Value,
+    before_transaction: Before,
+) -> CommandResult<()>
+where
+    Before: FnOnce() -> Fut,
+    Fut: std::future::Future<Output = CommandResult<()>> + Send,
+{
     let (telegram_present, openai_present) = match kind {
         AgentSecretKind::TelegramBotToken => (Some(present), None),
         AgentSecretKind::OpenAiApiKey => (None, Some(present)),
     };
 
-    update_ceo_telegram_secret_presence_idempotent(pool, ctx, telegram_present, openai_present)
-        .await
-        .map(|_| ())
+    update_ceo_telegram_secret_presence_with_guard_idempotent(
+        pool,
+        ctx,
+        telegram_present,
+        openai_present,
+        idempotency_payload,
+        before_transaction,
+    )
+    .await
+    .map(|_| ())
+}
+
+fn set_secret_idempotency_payload(kind: AgentSecretKind, value: &str) -> serde_json::Value {
+    serde_json::json!({
+        "credential": kind.idempotency_label(),
+        "operation": "set",
+        "fingerprint": agent_secret_fingerprint(kind, value),
+    })
+}
+
+fn clear_secret_idempotency_payload(kind: AgentSecretKind) -> serde_json::Value {
+    serde_json::json!({
+        "credential": kind.idempotency_label(),
+        "operation": "clear",
+    })
 }
 
 #[allow(dead_code)]
@@ -295,10 +344,52 @@ mod tests {
     use super::*;
     use crate::app_error::{codes, AppErrorKind};
     use crate::{
-        agent::secrets::{AgentSecretKind, AgentSecretStore, FakeSecretStore},
+        agent::secrets::{AgentSecretKind, AgentSecretStore},
         command_idempotency::{ActorType, WriteCommandContext},
     };
     use sqlx::{sqlite::SqlitePoolOptions, Pool, Sqlite};
+    use std::{
+        collections::HashMap,
+        sync::{Arc, Mutex},
+    };
+
+    #[derive(Default)]
+    struct CountingSecretStore {
+        values: Arc<Mutex<HashMap<AgentSecretKind, String>>>,
+        set_count: Arc<Mutex<usize>>,
+        clear_count: Arc<Mutex<usize>>,
+    }
+
+    impl CountingSecretStore {
+        fn set_count(&self) -> usize {
+            *self.set_count.lock().expect("set count lock")
+        }
+
+        fn clear_count(&self) -> usize {
+            *self.clear_count.lock().expect("clear count lock")
+        }
+    }
+
+    impl AgentSecretStore for CountingSecretStore {
+        fn get_secret(&self, kind: AgentSecretKind) -> CommandResult<Option<String>> {
+            Ok(self.values.lock().expect("values lock").get(&kind).cloned())
+        }
+
+        fn set_secret(&self, kind: AgentSecretKind, value: &str) -> CommandResult<()> {
+            *self.set_count.lock().expect("set count lock") += 1;
+            self.values
+                .lock()
+                .expect("values lock")
+                .insert(kind, value.to_string());
+            Ok(())
+        }
+
+        fn clear_secret(&self, kind: AgentSecretKind) -> CommandResult<()> {
+            *self.clear_count.lock().expect("clear count lock") += 1;
+            self.values.lock().expect("values lock").remove(&kind);
+            Ok(())
+        }
+    }
 
     fn mock_user(role: &str) -> User {
         User {
@@ -369,9 +460,13 @@ mod tests {
     }
 
     fn write_ctx() -> WriteCommandContext {
+        write_ctx_with_key("idem-secret-command-1")
+    }
+
+    fn write_ctx_with_key(idempotency_key: &str) -> WriteCommandContext {
         let mut ctx = WriteCommandContext::for_internal_test(
             "req-secret-command-1",
-            "idem-secret-command-1",
+            idempotency_key,
             crate::agent::config::SET_CEO_TELEGRAM_SECRET_STATUS_COMMAND,
         );
         ctx.actor_type = ActorType::Human;
@@ -382,8 +477,11 @@ mod tests {
     #[tokio::test]
     async fn telegram_secret_write_clears_store_when_metadata_persistence_fails() {
         let pool = test_pool().await;
-        pool.close().await;
-        let store = FakeSecretStore::default();
+        sqlx::query("DROP TABLE settings")
+            .execute(&pool)
+            .await
+            .expect("drop settings table");
+        let store = CountingSecretStore::default();
         let ctx = write_ctx();
 
         let error = set_ceo_telegram_bot_token_with_store(&pool, &store, &ctx, "telegram-token")
@@ -391,11 +489,91 @@ mod tests {
             .expect_err("closed pool must fail metadata persistence");
 
         assert_eq!(error.code, codes::SYSTEM_INTERNAL_ERROR);
+        assert_eq!(store.set_count(), 1, "secret must be written after claim");
+        assert_eq!(
+            store.clear_count(),
+            1,
+            "failed metadata write must roll back secret"
+        );
         assert_eq!(
             store
                 .get_secret(AgentSecretKind::TelegramBotToken)
                 .expect("store remains readable"),
             None
+        );
+    }
+
+    async fn audit_row_count(pool: &Pool<Sqlite>) -> i64 {
+        sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM agent_audit_events")
+            .fetch_one(pool)
+            .await
+            .expect("count audit rows")
+    }
+
+    #[tokio::test]
+    async fn same_idempotency_key_same_secret_replays_without_rewriting_or_duplicate_audit() {
+        let pool = test_pool().await;
+        let store = CountingSecretStore::default();
+        let ctx = write_ctx_with_key("idem-same-secret");
+
+        set_ceo_telegram_bot_token_with_store(&pool, &store, &ctx, "telegram-token")
+            .await
+            .expect("first write succeeds");
+        set_ceo_telegram_bot_token_with_store(&pool, &store, &ctx, "telegram-token")
+            .await
+            .expect("same secret replays");
+
+        assert_eq!(store.set_count(), 1, "replay must not rewrite keychain");
+        assert_eq!(audit_row_count(&pool).await, 1);
+    }
+
+    #[tokio::test]
+    async fn same_idempotency_key_different_secret_rejects_before_keychain_mutation() {
+        let pool = test_pool().await;
+        let store = CountingSecretStore::default();
+        let ctx = write_ctx_with_key("idem-different-secret");
+
+        set_ceo_telegram_bot_token_with_store(&pool, &store, &ctx, "telegram-token-a")
+            .await
+            .expect("first write succeeds");
+
+        let error = set_ceo_telegram_bot_token_with_store(&pool, &store, &ctx, "telegram-token-b")
+            .await
+            .expect_err("different secret must conflict");
+
+        assert_eq!(error.code, codes::CONFLICT_IDEMPOTENCY_HASH_MISMATCH);
+        assert_eq!(store.set_count(), 1, "conflict must not rewrite keychain");
+        assert_eq!(
+            store
+                .get_secret(AgentSecretKind::TelegramBotToken)
+                .expect("secret remains readable")
+                .as_deref(),
+            Some("telegram-token-a")
+        );
+    }
+
+    #[tokio::test]
+    async fn same_idempotency_key_set_then_clear_rejects_before_keychain_mutation() {
+        let pool = test_pool().await;
+        let store = CountingSecretStore::default();
+        let ctx = write_ctx_with_key("idem-set-clear");
+
+        set_ceo_telegram_bot_token_with_store(&pool, &store, &ctx, "telegram-token")
+            .await
+            .expect("first write succeeds");
+
+        let error = clear_ceo_telegram_bot_token_with_store(&pool, &store, &ctx)
+            .await
+            .expect_err("clear with set key must conflict");
+
+        assert_eq!(error.code, codes::CONFLICT_IDEMPOTENCY_HASH_MISMATCH);
+        assert_eq!(store.clear_count(), 0, "conflict must not clear keychain");
+        assert_eq!(
+            store
+                .get_secret(AgentSecretKind::TelegramBotToken)
+                .expect("secret remains readable")
+                .as_deref(),
+            Some("telegram-token")
         );
     }
 }

@@ -1,5 +1,6 @@
 use crate::app_error::{codes, CommandError, CommandResult};
 use regex::Regex;
+use sha2::{Digest, Sha256};
 use std::{
     collections::HashMap,
     sync::{Arc, Mutex, PoisonError},
@@ -14,10 +15,17 @@ pub enum AgentSecretKind {
 }
 
 impl AgentSecretKind {
-    fn keychain_account(self) -> &'static str {
+    pub fn label(self) -> &'static str {
         match self {
             Self::TelegramBotToken => "ceo_telegram_bot_token",
             Self::OpenAiApiKey => "ceo_openai_api_key",
+        }
+    }
+
+    pub fn idempotency_label(self) -> &'static str {
+        match self {
+            Self::TelegramBotToken => "telegram",
+            Self::OpenAiApiKey => "openai",
         }
     }
 }
@@ -61,7 +69,7 @@ pub struct KeychainSecretStore;
 
 impl KeychainSecretStore {
     fn entry(kind: AgentSecretKind) -> CommandResult<keyring::Entry> {
-        keyring::Entry::new(KEYCHAIN_SERVICE, kind.keychain_account()).map_err(map_keyring_error)
+        keyring::Entry::new(KEYCHAIN_SERVICE, kind.label()).map_err(map_keyring_error)
     }
 }
 
@@ -120,6 +128,21 @@ pub fn redact_agent_secret_markers(value: &str) -> String {
         .to_string()
 }
 
+pub fn agent_secret_fingerprint(kind: AgentSecretKind, value: &str) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(kind.label().as_bytes());
+    hasher.update(b":");
+    hasher.update(value.as_bytes());
+    let digest = hasher.finalize();
+
+    let mut fingerprint = String::with_capacity(digest.len() * 2);
+    for byte in digest {
+        fingerprint.push(char::from(b'a' + (byte >> 4)));
+        fingerprint.push(char::from(b'a' + (byte & 0x0f)));
+    }
+    fingerprint
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -157,5 +180,17 @@ mod tests {
         assert!(!redacted.contains("sk-test"));
         assert!(!redacted.contains("abc"));
         assert!(redacted.contains("[redacted]"));
+    }
+
+    #[test]
+    fn secret_fingerprint_is_kind_scoped_and_one_way() {
+        let token_fingerprint =
+            agent_secret_fingerprint(AgentSecretKind::TelegramBotToken, "same-secret");
+        let key_fingerprint =
+            agent_secret_fingerprint(AgentSecretKind::OpenAiApiKey, "same-secret");
+
+        assert_ne!(token_fingerprint, key_fingerprint);
+        assert_eq!(token_fingerprint.len(), 64);
+        assert!(!token_fingerprint.contains("same-secret"));
     }
 }
