@@ -29,10 +29,14 @@ pub async fn list_today_arrivals(
     pool: &Pool<Sqlite>,
     business_date: &str,
 ) -> Result<Vec<CeoBookingSummary>, sqlx::Error> {
+    let arrival_date = local_date("COALESCE(NULLIF(b.scheduled_checkin, ''), b.check_in_at)");
+    let where_clause = format!(
+        "b.status = 'booked'
+         AND {arrival_date} = ?"
+    );
     load_booking_summaries(
         pool,
-        "b.status = 'booked'
-         AND DATE(COALESCE(NULLIF(b.scheduled_checkin, ''), b.check_in_at)) = DATE(?)",
+        &where_clause,
         business_date,
         "COALESCE(NULLIF(b.scheduled_checkin, ''), b.check_in_at) ASC, b.room_id ASC",
     )
@@ -43,10 +47,14 @@ pub async fn list_today_checkouts(
     pool: &Pool<Sqlite>,
     business_date: &str,
 ) -> Result<Vec<CeoBookingSummary>, sqlx::Error> {
+    let checkout_date = local_date("b.expected_checkout");
+    let where_clause = format!(
+        "b.status = 'active'
+         AND {checkout_date} = ?"
+    );
     load_booking_summaries(
         pool,
-        "b.status = 'active'
-         AND DATE(b.expected_checkout) = DATE(?)",
+        &where_clause,
         business_date,
         "b.expected_checkout ASC, b.room_id ASC",
     )
@@ -92,12 +100,13 @@ pub async fn summarize_operational_risks(
     .fetch_one(pool)
     .await?;
 
-    let checkout_count: i64 = sqlx::query_scalar(
+    let checkout_date = local_date("expected_checkout");
+    let checkout_count: i64 = sqlx::query_scalar(&format!(
         "SELECT COUNT(*)
          FROM bookings
          WHERE status = 'active'
-           AND DATE(expected_checkout) = DATE(?)",
-    )
+           AND {checkout_date} = ?",
+    ))
     .bind(business_date)
     .fetch_one(pool)
     .await?;
@@ -167,6 +176,10 @@ fn row_to_booking_summary(row: &sqlx::sqlite::SqliteRow) -> CeoBookingSummary {
         balance_due: get_money_vnd(row, "balance_due"),
         status: row.get("status"),
     }
+}
+
+fn local_date(expression: &str) -> String {
+    format!("substr(NULLIF({expression}, ''), 1, 10)")
 }
 
 #[cfg(test)]
@@ -261,6 +274,29 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn list_today_arrivals_keeps_local_rfc3339_business_date() {
+        let pool = test_pool().await;
+        seed_room_and_guest(&pool).await;
+        seed_booking(
+            &pool,
+            "booking-arrival-rfc3339",
+            "booked",
+            "2026-05-06T00:30:00+07:00",
+            "2026-05-07",
+            900_000,
+            100_000,
+        )
+        .await;
+
+        let arrivals = list_today_arrivals(&pool, "2026-05-06")
+            .await
+            .expect("arrivals");
+
+        assert_eq!(arrivals.len(), 1);
+        assert_eq!(arrivals[0].booking_id, "booking-arrival-rfc3339");
+    }
+
+    #[tokio::test]
     async fn list_today_checkouts_reads_active_bookings_due_for_departure() {
         let pool = test_pool().await;
         seed_room_and_guest(&pool).await;
@@ -282,6 +318,29 @@ mod tests {
         assert_eq!(checkouts.len(), 1);
         assert_eq!(checkouts[0].booking_id, "booking-checkout");
         assert_eq!(checkouts[0].expected_checkout, "2026-05-06");
+    }
+
+    #[tokio::test]
+    async fn list_today_checkouts_keeps_local_rfc3339_business_date() {
+        let pool = test_pool().await;
+        seed_room_and_guest(&pool).await;
+        seed_booking(
+            &pool,
+            "booking-checkout-rfc3339",
+            "active",
+            "2026-05-05",
+            "2026-05-06T00:30:00+07:00",
+            900_000,
+            900_000,
+        )
+        .await;
+
+        let checkouts = list_today_checkouts(&pool, "2026-05-06")
+            .await
+            .expect("checkouts");
+
+        assert_eq!(checkouts.len(), 1);
+        assert_eq!(checkouts[0].booking_id, "booking-checkout-rfc3339");
     }
 
     #[tokio::test]
@@ -338,6 +397,30 @@ mod tests {
         assert!(risks
             .iter()
             .any(|risk| risk.code == "unpaid_balances" && risk.count == 1));
+        assert!(risks
+            .iter()
+            .any(|risk| risk.code == "checkouts_due_today" && risk.count == 1));
+    }
+
+    #[tokio::test]
+    async fn summarize_operational_risks_counts_local_rfc3339_checkout_date() {
+        let pool = test_pool().await;
+        seed_room_and_guest(&pool).await;
+        seed_booking(
+            &pool,
+            "booking-risk-rfc3339",
+            "active",
+            "2026-05-05",
+            "2026-05-06T00:30:00+07:00",
+            900_000,
+            900_000,
+        )
+        .await;
+
+        let risks = summarize_operational_risks(&pool, "2026-05-06")
+            .await
+            .expect("risks");
+
         assert!(risks
             .iter()
             .any(|risk| risk.code == "checkouts_due_today" && risk.count == 1));
