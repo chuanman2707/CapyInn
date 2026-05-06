@@ -248,6 +248,7 @@ async fn set_agent_secret_with_store(
     value: &str,
 ) -> CommandResult<()> {
     validate_non_blank_secret(value)?;
+    let prior_secret = store.get_secret(kind)?;
     let keychain_mutated = Arc::new(AtomicBool::new(false));
     let keychain_mutated_for_guard = Arc::clone(&keychain_mutated);
     let payload = set_secret_idempotency_payload(kind, value);
@@ -261,7 +262,7 @@ async fn set_agent_secret_with_store(
         .await
     {
         if keychain_mutated.load(Ordering::SeqCst) {
-            store.clear_secret(kind)?;
+            restore_agent_secret(store, kind, prior_secret)?;
         }
         return Err(error);
     }
@@ -276,11 +277,25 @@ async fn clear_agent_secret_with_store(
     ctx: &WriteCommandContext,
     kind: AgentSecretKind,
 ) -> CommandResult<()> {
+    let prior_secret = store.get_secret(kind)?;
+    let keychain_mutated = Arc::new(AtomicBool::new(false));
+    let keychain_mutated_for_guard = Arc::clone(&keychain_mutated);
     let payload = clear_secret_idempotency_payload(kind);
-    persist_secret_presence_with_guard(pool, ctx, kind, false, payload, || async move {
-        store.clear_secret(kind)
-    })
-    .await
+    if let Err(error) =
+        persist_secret_presence_with_guard(pool, ctx, kind, false, payload, || async move {
+            store.clear_secret(kind)?;
+            keychain_mutated_for_guard.store(true, Ordering::SeqCst);
+            Ok(())
+        })
+        .await
+    {
+        if keychain_mutated.load(Ordering::SeqCst) {
+            restore_agent_secret(store, kind, prior_secret)?;
+        }
+        return Err(error);
+    }
+
+    Ok(())
 }
 
 #[allow(dead_code)]
@@ -326,6 +341,17 @@ fn clear_secret_idempotency_payload(kind: AgentSecretKind) -> serde_json::Value 
         "credential": kind.idempotency_label(),
         "operation": "clear",
     })
+}
+
+fn restore_agent_secret(
+    store: &dyn AgentSecretStore,
+    kind: AgentSecretKind,
+    prior_secret: Option<String>,
+) -> CommandResult<()> {
+    match prior_secret {
+        Some(value) => store.set_secret(kind, &value),
+        None => store.clear_secret(kind),
+    }
 }
 
 #[allow(dead_code)]
@@ -495,6 +521,83 @@ mod tests {
             1,
             "failed metadata write must roll back secret"
         );
+        assert_eq!(
+            store
+                .get_secret(AgentSecretKind::TelegramBotToken)
+                .expect("store remains readable"),
+            None
+        );
+    }
+
+    #[tokio::test]
+    async fn replacing_existing_secret_restores_old_secret_when_metadata_persistence_fails() {
+        let pool = test_pool().await;
+        sqlx::query("DROP TABLE settings")
+            .execute(&pool)
+            .await
+            .expect("drop settings table");
+        let store = CountingSecretStore::default();
+        store
+            .set_secret(AgentSecretKind::TelegramBotToken, "old-token")
+            .expect("seed old secret");
+        let ctx = write_ctx_with_key("idem-replace-fails");
+
+        let error = set_ceo_telegram_bot_token_with_store(&pool, &store, &ctx, "new-token")
+            .await
+            .expect_err("metadata write must fail");
+
+        assert_eq!(error.code, codes::SYSTEM_INTERNAL_ERROR);
+        assert_eq!(
+            store
+                .get_secret(AgentSecretKind::TelegramBotToken)
+                .expect("secret remains readable")
+                .as_deref(),
+            Some("old-token")
+        );
+    }
+
+    #[tokio::test]
+    async fn clearing_existing_secret_restores_old_secret_when_metadata_persistence_fails() {
+        let pool = test_pool().await;
+        sqlx::query("DROP TABLE settings")
+            .execute(&pool)
+            .await
+            .expect("drop settings table");
+        let store = CountingSecretStore::default();
+        store
+            .set_secret(AgentSecretKind::TelegramBotToken, "old-token")
+            .expect("seed old secret");
+        let ctx = write_ctx_with_key("idem-clear-fails");
+
+        let error = clear_ceo_telegram_bot_token_with_store(&pool, &store, &ctx)
+            .await
+            .expect_err("metadata write must fail");
+
+        assert_eq!(error.code, codes::SYSTEM_INTERNAL_ERROR);
+        assert_eq!(
+            store
+                .get_secret(AgentSecretKind::TelegramBotToken)
+                .expect("secret remains readable")
+                .as_deref(),
+            Some("old-token")
+        );
+    }
+
+    #[tokio::test]
+    async fn setting_new_secret_leaves_no_secret_when_metadata_persistence_fails() {
+        let pool = test_pool().await;
+        sqlx::query("DROP TABLE settings")
+            .execute(&pool)
+            .await
+            .expect("drop settings table");
+        let store = CountingSecretStore::default();
+        let ctx = write_ctx_with_key("idem-new-fails");
+
+        let error = set_ceo_telegram_bot_token_with_store(&pool, &store, &ctx, "new-token")
+            .await
+            .expect_err("metadata write must fail");
+
+        assert_eq!(error.code, codes::SYSTEM_INTERNAL_ERROR);
         assert_eq!(
             store
                 .get_secret(AgentSecretKind::TelegramBotToken)
