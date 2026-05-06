@@ -7029,6 +7029,72 @@ async fn cancellation_fee_export_uses_transaction_period_when_checkin_is_future(
 }
 
 #[tokio::test]
+async fn booking_export_includes_local_rfc3339_non_checkout_checkin_date() {
+    let pool = test_pool().await;
+    seed_room(&pool, "R426").await.unwrap();
+    seed_active_booking_with_terms(
+        &pool,
+        "B426",
+        "R426",
+        "2026-05-06T00:30:00+07:00",
+        "2026-05-07T00:30:00+07:00",
+        1,
+        250_000,
+        Some(0),
+    )
+    .await
+    .unwrap();
+
+    let export_rows = audit_queries::load_booking_export_rows(&pool, "2026-05-06", "2026-05-06")
+        .await
+        .unwrap();
+
+    let row = export_rows.iter().find(|row| row.id == "B426").unwrap();
+    assert_eq!(row.check_in_at, "2026-05-06T00:30:00+07:00");
+}
+
+#[tokio::test]
+async fn booking_export_includes_local_rfc3339_cancellation_fee_date() {
+    let pool = test_pool().await;
+    seed_room(&pool, "R427").await.unwrap();
+    seed_booked_reservation(&pool, "B427", "R427")
+        .await
+        .unwrap();
+
+    sqlx::query(
+        "UPDATE bookings
+         SET check_in_at = '2026-05-20',
+             expected_checkout = '2026-05-22',
+             scheduled_checkin = '2026-05-20',
+             scheduled_checkout = '2026-05-22',
+             status = 'cancelled'
+         WHERE id = ?",
+    )
+    .bind("B427")
+    .execute(&pool)
+    .await
+    .unwrap();
+    seed_transaction(
+        &pool,
+        "B427",
+        50_000,
+        "cancellation_fee",
+        "Retained deposit",
+        "2026-05-06T00:30:00+07:00",
+    )
+    .await
+    .unwrap();
+
+    let export_rows = audit_queries::load_booking_export_rows(&pool, "2026-05-06", "2026-05-06")
+        .await
+        .unwrap();
+
+    let row = export_rows.iter().find(|row| row.id == "B427").unwrap();
+    assert_eq!(row.cancellation_fee_total, 50_000);
+    assert_eq!(row.recognized_revenue, 50_000);
+}
+
+#[tokio::test]
 async fn run_night_audit_uses_canonical_room_and_folio_revenue() {
     let pool = test_pool().await;
     seed_room(&pool, "R303").await.unwrap();
