@@ -44,6 +44,16 @@ pub struct CeoChatRuntime<P> {
     provider: P,
 }
 
+struct CeoChatAuditEvent {
+    session_id: Option<String>,
+    event_type: &'static str,
+    actor_id: Option<String>,
+    provider: Option<AgentProvider>,
+    policy_outcome: &'static str,
+    tool_name: Option<String>,
+    summary: Value,
+}
+
 impl<P> CeoChatRuntime<P>
 where
     P: AiProvider,
@@ -72,35 +82,35 @@ where
         )
         .await?;
 
-        self.audit(
-            Some(&session_id),
-            "ceo_chat.message_received",
-            message.actor.stable_actor_id.clone(),
-            None,
-            "received",
-            None,
-            json!({
+        self.audit(CeoChatAuditEvent {
+            session_id: Some(session_id.clone()),
+            event_type: "ceo_chat.message_received",
+            actor_id: message.actor.stable_actor_id.clone(),
+            provider: None,
+            policy_outcome: "received",
+            tool_name: None,
+            summary: json!({
                 "chat_id": message.chat_id,
                 "source": "telegram_read_only_chat",
                 "message_chars": message.text.chars().count(),
             }),
-        )
+        })
         .await?;
 
         if let Err(error) = gate_result {
-            self.audit(
-                Some(&session_id),
-                "ceo_chat.denied",
-                message.actor.stable_actor_id.clone(),
-                None,
-                "denied",
-                None,
-                json!({
+            self.audit(CeoChatAuditEvent {
+                session_id: Some(session_id.clone()),
+                event_type: "ceo_chat.denied",
+                actor_id: message.actor.stable_actor_id.clone(),
+                provider: None,
+                policy_outcome: "denied",
+                tool_name: None,
+                summary: json!({
                     "chat_id": message.chat_id,
                     "source": "telegram_read_only_chat",
                     "reason_code": error.code,
                 }),
-            )
+            })
             .await?;
             return Err(error);
         }
@@ -108,19 +118,19 @@ where
         match self.run_provider_loop(&session_id, &message).await {
             Ok(reply) => Ok(reply),
             Err(error) => {
-                self.audit(
-                    Some(&session_id),
-                    "ceo_chat.error",
-                    message.actor.stable_actor_id.clone(),
-                    Some(AgentProvider::OpenAi),
-                    "error",
-                    None,
-                    json!({
+                self.audit(CeoChatAuditEvent {
+                    session_id: Some(session_id.clone()),
+                    event_type: "ceo_chat.error",
+                    actor_id: message.actor.stable_actor_id.clone(),
+                    provider: Some(AgentProvider::OpenAi),
+                    policy_outcome: "error",
+                    tool_name: None,
+                    summary: json!({
                         "chat_id": message.chat_id,
                         "source": "telegram_read_only_chat",
                         "reason_code": error.code,
                     }),
-                )
+                })
                 .await?;
                 Err(error)
             }
@@ -172,14 +182,14 @@ where
                         tools_called,
                         termination_reason: "final_text".to_string(),
                     };
-                    self.audit(
-                        Some(session_id),
-                        "ceo_chat.final_reply",
-                        message.actor.stable_actor_id.clone(),
-                        Some(AgentProvider::OpenAi),
-                        "allowed",
-                        None,
-                        json!({
+                    self.audit(CeoChatAuditEvent {
+                        session_id: Some(session_id.to_string()),
+                        event_type: "ceo_chat.final_reply",
+                        actor_id: message.actor.stable_actor_id.clone(),
+                        provider: Some(AgentProvider::OpenAi),
+                        policy_outcome: "allowed",
+                        tool_name: None,
+                        summary: json!({
                             "chat_id": message.chat_id,
                             "source": "telegram_read_only_chat",
                             "termination_reason": reply.termination_reason,
@@ -187,7 +197,7 @@ where
                             "reply_chars": reply.text.chars().count(),
                             "data_unavailable": reply.text.trim() == DATA_UNAVAILABLE_MESSAGE,
                         }),
-                    )
+                    })
                     .await?;
                     return Ok(reply);
                 }
@@ -206,21 +216,21 @@ where
 
                         let envelope =
                             dispatch_ceo_read_tool(&self.pool, &call.name, call.arguments).await?;
-                        self.audit(
-                            Some(session_id),
-                            "ceo_chat.tool_called",
-                            message.actor.stable_actor_id.clone(),
-                            Some(AgentProvider::OpenAi),
-                            "allowed",
-                            Some(call.name.clone()),
-                            json!({
+                        self.audit(CeoChatAuditEvent {
+                            session_id: Some(session_id.to_string()),
+                            event_type: "ceo_chat.tool_called",
+                            actor_id: message.actor.stable_actor_id.clone(),
+                            provider: Some(AgentProvider::OpenAi),
+                            policy_outcome: "allowed",
+                            tool_name: Some(call.name.clone()),
+                            summary: json!({
                                 "chat_id": message.chat_id,
                                 "source": "telegram_read_only_chat",
                                 "tool_name": call.name,
                                 "args_hash": stable_hash(&canonical_args),
                                 "tool_metadata": envelope.metadata,
                             }),
-                        )
+                        })
                         .await?;
                         tools_called.push(envelope.tool.clone());
                         tool_outputs.push(ProviderToolOutput {
@@ -240,30 +250,21 @@ where
         Err(tool_loop_limit_error())
     }
 
-    async fn audit(
-        &self,
-        session_id: Option<&str>,
-        event_type: &str,
-        actor_id: Option<String>,
-        provider: Option<AgentProvider>,
-        policy_outcome: &str,
-        tool_name: Option<String>,
-        summary: Value,
-    ) -> CommandResult<()> {
+    async fn audit(&self, event: CeoChatAuditEvent) -> CommandResult<()> {
         insert_agent_audit_event(
             &self.pool,
             NewAgentAuditEvent {
-                session_id: session_id.map(str::to_string),
-                event_type: event_type.to_string(),
-                actor_id,
+                session_id: event.session_id,
+                event_type: event.event_type.to_string(),
+                actor_id: event.actor_id,
                 role: Some(AgentRole::CeoSecretary),
                 channel: Some(AgentChannel::Telegram),
-                tool_name,
-                provider,
-                policy_outcome: policy_outcome.to_string(),
+                tool_name: event.tool_name,
+                provider: event.provider,
+                policy_outcome: event.policy_outcome.to_string(),
                 mutation_risk: Some(MutationRisk::ReadOnly),
                 data_sensitivity: Some(DataSensitivity::CeoSensitive),
-                summary,
+                summary: event.summary,
             },
         )
         .await
