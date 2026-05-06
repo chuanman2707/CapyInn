@@ -296,25 +296,36 @@ async fn limited_response_bytes(
         }
     }
 
-    let bytes = response
-        .bytes()
+    let mut response = response;
+    let mut bytes = Vec::with_capacity(
+        response
+            .content_length()
+            .unwrap_or_default()
+            .min(TELEGRAM_MAX_RESPONSE_BYTES) as usize,
+    );
+    while let Some(chunk) = response
+        .chunk()
         .await
-        .map(|bytes| bytes.to_vec())
-        .map_err(|error| scrub_telegram_error(&error.to_string(), token))?;
-    enforce_telegram_response_size_limit(bytes, token)
+        .map_err(|error| scrub_telegram_error(&error.to_string(), token))?
+    {
+        append_limited_response_chunk(&mut bytes, &chunk, token)?;
+    }
+    Ok(bytes)
 }
 
-fn enforce_telegram_response_size_limit(
-    bytes: Vec<u8>,
+fn append_limited_response_chunk(
+    bytes: &mut Vec<u8>,
+    chunk: &[u8],
     token: Option<&str>,
-) -> CommandResult<Vec<u8>> {
-    if bytes.len() > TELEGRAM_MAX_RESPONSE_BYTES as usize {
+) -> CommandResult<()> {
+    if bytes.len().saturating_add(chunk.len()) > TELEGRAM_MAX_RESPONSE_BYTES as usize {
         return Err(scrub_telegram_error(
             "telegram response was too large",
             token,
         ));
     }
-    Ok(bytes)
+    bytes.extend_from_slice(chunk);
+    Ok(())
 }
 
 fn scrub_telegram_error(message: &str, token: Option<&str>) -> CommandError {
@@ -689,14 +700,15 @@ mod tests {
     }
 
     #[test]
-    fn oversized_response_body_without_content_length_is_rejected_after_read() {
-        let oversized = vec![b'x'; TELEGRAM_MAX_RESPONSE_BYTES as usize + 1];
+    fn oversized_response_chunk_is_rejected_before_accumulation() {
+        let mut bytes = vec![b'x'; TELEGRAM_MAX_RESPONSE_BYTES as usize - 1];
 
-        let error = enforce_telegram_response_size_limit(oversized, None)
+        let error = append_limited_response_chunk(&mut bytes, b"xx", None)
             .expect_err("oversized response must fail closed");
 
         assert_eq!(error.code, crate::app_error::codes::SYSTEM_INTERNAL_ERROR);
         assert!(error.message.contains("too large"));
+        assert_eq!(bytes.len(), TELEGRAM_MAX_RESPONSE_BYTES as usize - 1);
     }
 
     #[test]
