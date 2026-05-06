@@ -48,6 +48,13 @@ pub mod codes {
     pub const AGENT_CLOUD_DATA_OPT_IN_REQUIRED: &str = "AGENT_CLOUD_DATA_OPT_IN_REQUIRED";
     pub const AGENT_TOOL_NOT_ALLOWED: &str = "AGENT_TOOL_NOT_ALLOWED";
     pub const AGENT_MEMORY_FORBIDDEN_TRUTH: &str = "AGENT_MEMORY_FORBIDDEN_TRUTH";
+    pub const AGENT_RUNTIME_NOT_CONFIGURED: &str = "AGENT_RUNTIME_NOT_CONFIGURED";
+    pub const AGENT_TELEGRAM_OWNER_NOT_BOUND: &str = "AGENT_TELEGRAM_OWNER_NOT_BOUND";
+    pub const AGENT_TELEGRAM_USER_DENIED: &str = "AGENT_TELEGRAM_USER_DENIED";
+    pub const AGENT_SECRET_MISSING: &str = "AGENT_SECRET_MISSING";
+    pub const AGENT_PROVIDER_REQUEST_FAILED: &str = "AGENT_PROVIDER_REQUEST_FAILED";
+    pub const AGENT_TOOL_LOOP_LIMIT: &str = "AGENT_TOOL_LOOP_LIMIT";
+    pub const AGENT_UNSUPPORTED_PMS_QUESTION: &str = "AGENT_UNSUPPORTED_PMS_QUESTION";
     pub const SYSTEM_INTERNAL_ERROR: &str = "SYSTEM_INTERNAL_ERROR";
 
     pub const ALL: &[&str] = &[
@@ -89,6 +96,13 @@ pub mod codes {
         AGENT_CLOUD_DATA_OPT_IN_REQUIRED,
         AGENT_TOOL_NOT_ALLOWED,
         AGENT_MEMORY_FORBIDDEN_TRUTH,
+        AGENT_RUNTIME_NOT_CONFIGURED,
+        AGENT_TELEGRAM_OWNER_NOT_BOUND,
+        AGENT_TELEGRAM_USER_DENIED,
+        AGENT_SECRET_MISSING,
+        AGENT_PROVIDER_REQUEST_FAILED,
+        AGENT_TOOL_LOOP_LIMIT,
+        AGENT_UNSUPPORTED_PMS_QUESTION,
         SYSTEM_INTERNAL_ERROR,
     ];
 }
@@ -412,6 +426,13 @@ mod tests {
             codes::AGENT_CLOUD_DATA_OPT_IN_REQUIRED,
             codes::AGENT_TOOL_NOT_ALLOWED,
             codes::AGENT_MEMORY_FORBIDDEN_TRUTH,
+            codes::AGENT_RUNTIME_NOT_CONFIGURED,
+            codes::AGENT_TELEGRAM_OWNER_NOT_BOUND,
+            codes::AGENT_TELEGRAM_USER_DENIED,
+            codes::AGENT_SECRET_MISSING,
+            codes::AGENT_PROVIDER_REQUEST_FAILED,
+            codes::AGENT_TOOL_LOOP_LIMIT,
+            codes::AGENT_UNSUPPORTED_PMS_QUESTION,
         ] {
             let error = CommandError::user(code, "agent policy denied");
             assert_eq!(error.code, code);
@@ -652,6 +673,41 @@ mod tests {
                 codes::AGENT_MEMORY_FORBIDDEN_TRUTH,
                 AppErrorKind::User,
                 "Bộ nhớ trợ lý AI không được dùng làm dữ liệu PMS chính thức.",
+            ),
+            (
+                codes::AGENT_RUNTIME_NOT_CONFIGURED,
+                AppErrorKind::User,
+                "Cấu hình CEO Telegram Chat chưa đầy đủ.",
+            ),
+            (
+                codes::AGENT_TELEGRAM_OWNER_NOT_BOUND,
+                AppErrorKind::User,
+                "Chưa liên kết Telegram CEO.",
+            ),
+            (
+                codes::AGENT_TELEGRAM_USER_DENIED,
+                AppErrorKind::User,
+                "Tài khoản Telegram này chưa được phép dùng trợ lý CEO.",
+            ),
+            (
+                codes::AGENT_SECRET_MISSING,
+                AppErrorKind::User,
+                "Thiếu khóa bí mật cho CEO Telegram Chat.",
+            ),
+            (
+                codes::AGENT_PROVIDER_REQUEST_FAILED,
+                AppErrorKind::User,
+                "Không thể gọi nhà cung cấp AI.",
+            ),
+            (
+                codes::AGENT_TOOL_LOOP_LIMIT,
+                AppErrorKind::User,
+                "Trợ lý AI đã dừng vì vượt giới hạn gọi công cụ.",
+            ),
+            (
+                codes::AGENT_UNSUPPORTED_PMS_QUESTION,
+                AppErrorKind::User,
+                "Trợ lý AI không có đủ dữ liệu PMS để trả lời câu hỏi này.",
             ),
             (
                 codes::SYSTEM_INTERNAL_ERROR,

@@ -1,7 +1,7 @@
 {
   "name": "capyinn",
   "private": true,
-  "version": "0.1.4",
+  "version": "0.1.5",
   "type": "module",
   "scripts": {
     "dev": "vite",
@@ -12,6 +12,7 @@
     "test:watch": "vitest",
     "test:coverage": "vitest run --coverage",
     "verify:money": "node ./scripts/verify/no-float-money.mjs",
+    "verify:agent": "node ./scripts/verify/agent.mjs",
     "verify:quick": "node ./scripts/verify/quick.mjs",
     "verify:full": "node ./scripts/verify/full.mjs",
     "verify:repeat": "node ./scripts/verify/repeat.mjs"

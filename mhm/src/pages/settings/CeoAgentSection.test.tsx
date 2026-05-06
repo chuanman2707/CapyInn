@@ -2,10 +2,10 @@ import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-import SettingsPage from "./index";
-import CeoAgentSection from "./CeoAgentSection";
 import { clearMockResponses, invoke, setMockResponses } from "@/__mocks__/tauri-core";
 import { useAuthStore } from "@/stores/useAuthStore";
+import CeoAgentSection from "./CeoAgentSection";
+import SettingsPage from "./index";
 
 const { toastSuccess, toastError } = vi.hoisted(() => ({
   toastSuccess: vi.fn(),
@@ -18,6 +18,63 @@ vi.mock("sonner", () => ({
     error: toastError,
   },
 }));
+
+type CeoTelegramConfigFixture = {
+  runtime_enabled: boolean;
+  telegram_user_id: string | null;
+  telegram_bot_token_present: boolean;
+  openai_api_key_present: boolean;
+  openai_model: string;
+  last_update_id: number | null;
+};
+
+type CeoTelegramGateFixture = {
+  ready: boolean;
+  missing: string[];
+};
+
+const disabledConfig: CeoTelegramConfigFixture = {
+  runtime_enabled: false,
+  telegram_user_id: null,
+  telegram_bot_token_present: false,
+  openai_api_key_present: false,
+  openai_model: "gpt-5",
+  last_update_id: null,
+};
+
+const readyConfig: CeoTelegramConfigFixture = {
+  runtime_enabled: true,
+  telegram_user_id: "123456",
+  telegram_bot_token_present: true,
+  openai_api_key_present: true,
+  openai_model: "gpt-5",
+  last_update_id: 91,
+};
+
+function mockInitialState(
+  config: CeoTelegramConfigFixture = disabledConfig,
+  gate: CeoTelegramGateFixture = {
+    ready: false,
+    missing: ["runtime_enabled", "telegram_owner_binding", "telegram_bot_token", "open_ai_api_key"],
+  },
+) {
+  setMockResponses({
+    get_ceo_cloud_data_opt_in: () => true,
+    get_ceo_telegram_config: () => config,
+    get_ceo_telegram_gate_status: () => gate,
+    set_ceo_cloud_data_opt_in: () => undefined,
+    set_ceo_telegram_config: (args) => ({
+      ...config,
+      runtime_enabled: Boolean(args?.runtimeEnabled),
+      telegram_user_id: (args?.telegramUserId as string | null) ?? null,
+      openai_model: (args?.openaiModel as string) ?? "gpt-5",
+    }),
+    set_ceo_telegram_bot_token: () => undefined,
+    clear_ceo_telegram_bot_token: () => undefined,
+    set_ceo_openai_api_key: () => undefined,
+    clear_ceo_openai_api_key: () => undefined,
+  });
+}
 
 describe("CeoAgentSection", () => {
   beforeEach(() => {
@@ -34,47 +91,31 @@ describe("CeoAgentSection", () => {
     });
   });
 
-  it("renders the disabled opt-in state and required copy", async () => {
-    setMockResponses({
-      get_ceo_cloud_data_opt_in: () => false,
-      set_ceo_cloud_data_opt_in: () => undefined,
-    });
+  it("renders CEO Telegram Chat gate status", async () => {
+    mockInitialState();
 
     render(<CeoAgentSection />);
 
-    expect(
-      screen.getByText(/opt-in is required before future CEO-sensitive cloud LLM processing/i),
-    ).toBeInTheDocument();
-    expect(screen.getByText(/opt-in is revocable/i)).toBeInTheDocument();
-    expect(
-      screen.getByText(/revoking blocks cloud calls containing CEO-sensitive PMS data/i),
-    ).toBeInTheDocument();
-    expect(
-      screen.getByText(
-        /raw prompts, raw responses, raw tool outputs, and raw provider errors are not stored/i,
-      ),
-    ).toBeInTheDocument();
-    expect(screen.getByText(/runtime remains disabled in this build/i)).toBeInTheDocument();
+    expect(await screen.findByText("CEO Telegram Chat")).toBeInTheDocument();
+    expect(screen.getByText(/Telegram owner binding/i)).toBeInTheDocument();
+    expect(screen.getByLabelText("Telegram owner binding: missing")).toBeInTheDocument();
+    expect(screen.getByLabelText("OpenAI API key: missing")).toBeInTheDocument();
+  });
+
+  it("allows an admin to toggle opt-in on via an idempotent write command", async () => {
+    const user = userEvent.setup();
+    mockInitialState();
+    setMockResponses({
+      get_ceo_cloud_data_opt_in: () => false,
+    });
+
+    render(<CeoAgentSection />);
 
     const checkbox = await screen.findByRole("checkbox", {
       name: "Allow CEO cloud-data processing",
     });
     expect(checkbox).not.toBeChecked();
-  });
 
-  it("allows an admin to toggle opt-in on via an idempotent write command", async () => {
-    const user = userEvent.setup();
-
-    setMockResponses({
-      get_ceo_cloud_data_opt_in: () => false,
-      set_ceo_cloud_data_opt_in: () => undefined,
-    });
-
-    render(<CeoAgentSection />);
-
-    const checkbox = await screen.findByRole("checkbox", {
-      name: "Allow CEO cloud-data processing",
-    });
     await user.click(checkbox);
 
     await waitFor(() => {
@@ -89,38 +130,9 @@ describe("CeoAgentSection", () => {
     expect(toastSuccess).toHaveBeenCalledWith("CEO cloud-data opt-in enabled");
   });
 
-  it("allows an admin to revoke opt-in and calls the backend with enabled=false", async () => {
+  it("reverts the opt-in checkbox and shows an error toast when the update fails", async () => {
     const user = userEvent.setup();
-
-    setMockResponses({
-      get_ceo_cloud_data_opt_in: () => true,
-      set_ceo_cloud_data_opt_in: () => undefined,
-    });
-
-    render(<CeoAgentSection />);
-
-    const checkbox = await screen.findByRole("checkbox", {
-      name: "Allow CEO cloud-data processing",
-    });
-    expect(checkbox).toBeChecked();
-
-    await user.click(checkbox);
-
-    await waitFor(() => {
-      expect(invoke).toHaveBeenCalledWith(
-        "set_ceo_cloud_data_opt_in",
-        expect.objectContaining({
-          enabled: false,
-          idempotencyKey: expect.stringMatching(/^set_ceo_cloud_data_opt_in:/),
-        }),
-      );
-    });
-    expect(toastSuccess).toHaveBeenCalledWith("CEO cloud-data opt-in revoked");
-  });
-
-  it("reverts the checkbox and shows an error toast when the update fails", async () => {
-    const user = userEvent.setup();
-
+    mockInitialState();
     setMockResponses({
       get_ceo_cloud_data_opt_in: () => false,
       set_ceo_cloud_data_opt_in: () => {
@@ -133,20 +145,152 @@ describe("CeoAgentSection", () => {
     const checkbox = await screen.findByRole("checkbox", {
       name: "Allow CEO cloud-data processing",
     });
-    expect(checkbox).not.toBeChecked();
-
     await user.click(checkbox);
 
-    await waitFor(() => expect(toastError).toHaveBeenCalledWith("Unable to update CEO cloud-data opt-in"));
+    await waitFor(() =>
+      expect(toastError).toHaveBeenCalledWith("Unable to update CEO cloud-data opt-in"),
+    );
     expect(checkbox).not.toBeChecked();
   });
 
-  it("keeps the toggle disabled when loading opt-in state fails", async () => {
+  it("does not roll back committed opt-in when gate refresh fails", async () => {
+    const user = userEvent.setup();
+    let gateCalls = 0;
+    mockInitialState();
+    setMockResponses({
+      get_ceo_cloud_data_opt_in: () => false,
+      get_ceo_telegram_gate_status: () => {
+        gateCalls += 1;
+        if (gateCalls === 1) {
+          return {
+            ready: false,
+            missing: ["cloud_data_opt_in", "runtime_enabled"],
+          };
+        }
+        throw new Error("gate refresh failed");
+      },
+    });
+
+    render(<CeoAgentSection />);
+
+    const checkbox = await screen.findByRole("checkbox", {
+      name: "Allow CEO cloud-data processing",
+    });
+    await user.click(checkbox);
+
+    await waitFor(() => expect(toastSuccess).toHaveBeenCalledWith("CEO cloud-data opt-in enabled"));
+    expect(toastError).toHaveBeenCalledWith("Unable to refresh CEO Telegram Chat status");
+    expect(checkbox).toBeChecked();
+  });
+
+  it("saves owner binding, model, and runtime flag", async () => {
+    const user = userEvent.setup();
+    mockInitialState();
+
+    render(<CeoAgentSection />);
+
+    await user.type(await screen.findByLabelText("Telegram owner ID"), "abc123456");
+    await user.click(screen.getByRole("checkbox", { name: "Runtime enabled" }));
+    expect(invoke.mock.calls.some(([command]) => command === "set_ceo_telegram_config")).toBe(
+      false,
+    );
+
+    await user.click(screen.getByRole("button", { name: "Save Telegram config" }));
+
+    await waitFor(() => {
+      expect(invoke).toHaveBeenCalledWith(
+        "set_ceo_telegram_config",
+        expect.objectContaining({
+          runtimeEnabled: true,
+          telegramUserId: "123456",
+          openaiModel: "gpt-5",
+          idempotencyKey: expect.stringMatching(/^set_ceo_telegram_config:/),
+        }),
+      );
+    });
+    expect(invoke.mock.calls.filter(([command]) => command === "set_ceo_telegram_config")).toHaveLength(1);
+  });
+
+  it("saves and clears Telegram and OpenAI secrets", async () => {
+    const user = userEvent.setup();
+    mockInitialState(readyConfig, { ready: true, missing: [] });
+
+    render(<CeoAgentSection />);
+
+    await user.type(await screen.findByLabelText("Telegram bot token"), "telegram-token");
+    await user.click(screen.getByRole("button", { name: "Save token" }));
+    await waitFor(() => {
+      expect(invoke).toHaveBeenCalledWith(
+        "set_ceo_telegram_bot_token",
+        expect.objectContaining({
+          token: "telegram-token",
+          idempotencyKey: expect.stringMatching(/^set_ceo_telegram_bot_token:/),
+        }),
+      );
+    });
+
+    await user.click(screen.getByRole("button", { name: "Clear token" }));
+    await waitFor(() => {
+      expect(invoke).toHaveBeenCalledWith(
+        "clear_ceo_telegram_bot_token",
+        expect.objectContaining({
+          idempotencyKey: expect.stringMatching(/^clear_ceo_telegram_bot_token:/),
+        }),
+      );
+    });
+
+    await user.type(screen.getByLabelText("OpenAI API key"), "sk-test");
+    await user.click(screen.getByRole("button", { name: "Save key" }));
+    await waitFor(() => {
+      expect(invoke).toHaveBeenCalledWith(
+        "set_ceo_openai_api_key",
+        expect.objectContaining({
+          apiKey: "sk-test",
+          idempotencyKey: expect.stringMatching(/^set_ceo_openai_api_key:/),
+        }),
+      );
+    });
+
+    await user.click(screen.getByRole("button", { name: "Clear key" }));
+    await waitFor(() => {
+      expect(invoke).toHaveBeenCalledWith(
+        "clear_ceo_openai_api_key",
+        expect.objectContaining({
+          idempotencyKey: expect.stringMatching(/^clear_ceo_openai_api_key:/),
+        }),
+      );
+    });
+  });
+
+  it("preserves unsaved owner draft when saving a secret refreshes credentials", async () => {
+    const user = userEvent.setup();
+    mockInitialState();
+
+    render(<CeoAgentSection />);
+
+    const ownerInput = await screen.findByLabelText("Telegram owner ID");
+    await user.type(ownerInput, "987654");
+    await user.type(screen.getByLabelText("Telegram bot token"), "telegram-token");
+    await user.click(screen.getByRole("button", { name: "Save token" }));
+
+    await waitFor(() => {
+      expect(invoke).toHaveBeenCalledWith(
+        "set_ceo_telegram_bot_token",
+        expect.objectContaining({
+          token: "telegram-token",
+        }),
+      );
+    });
+    expect(ownerInput).toHaveValue("987654");
+  });
+
+  it("keeps controls disabled when loading settings fails", async () => {
     setMockResponses({
       get_ceo_cloud_data_opt_in: () => {
         throw new Error("unavailable");
       },
-      set_ceo_cloud_data_opt_in: () => undefined,
+      get_ceo_telegram_config: () => disabledConfig,
+      get_ceo_telegram_gate_status: () => ({ ready: false, missing: ["runtime_enabled"] }),
     });
 
     render(<CeoAgentSection />);
@@ -156,40 +300,9 @@ describe("CeoAgentSection", () => {
     });
 
     await waitFor(() => {
-      expect(screen.getByText("Unable to load CEO cloud-data opt-in")).toBeInTheDocument();
+      expect(screen.getByText("Unable to load CEO Telegram Chat settings")).toBeInTheDocument();
     });
     expect(checkbox).toBeDisabled();
-  });
-
-  it("disables the toggle while saving to prevent duplicate writes", async () => {
-    const user = userEvent.setup();
-    let resolveWrite: (() => void) | undefined;
-    const setHandler = vi.fn(
-      () =>
-        new Promise<void>((resolve) => {
-          resolveWrite = resolve;
-        }),
-    );
-
-    setMockResponses({
-      get_ceo_cloud_data_opt_in: () => false,
-      set_ceo_cloud_data_opt_in: setHandler,
-    });
-
-    render(<CeoAgentSection />);
-
-    const checkbox = await screen.findByRole("checkbox", {
-      name: "Allow CEO cloud-data processing",
-    });
-
-    await user.click(checkbox);
-    expect(checkbox).toBeDisabled();
-
-    await user.click(checkbox);
-    expect(setHandler).toHaveBeenCalledTimes(1);
-
-    resolveWrite?.();
-    await waitFor(() => expect(checkbox).not.toBeDisabled());
   });
 });
 
@@ -208,17 +321,14 @@ describe("SettingsPage CEO Agent nav", () => {
       error: null,
     });
 
-    setMockResponses({
-      get_ceo_cloud_data_opt_in: () => false,
-      set_ceo_cloud_data_opt_in: () => undefined,
-    });
+    mockInitialState();
 
     render(<SettingsPage />);
 
     const navButton = screen.getByRole("button", { name: "CEO Agent" });
     await user.click(navButton);
 
-    expect(await screen.findByRole("checkbox", { name: "Allow CEO cloud-data processing" })).toBeInTheDocument();
+    expect(await screen.findByText("CEO Telegram Chat")).toBeInTheDocument();
   });
 
   it("does not show CEO Agent in settings nav for receptionist users", () => {

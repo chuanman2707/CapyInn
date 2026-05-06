@@ -190,6 +190,41 @@
     "defaultMessage": "Bộ nhớ trợ lý AI không được dùng làm dữ liệu PMS chính thức."
   },
   {
+    "code": "AGENT_RUNTIME_NOT_CONFIGURED",
+    "kind": "user",
+    "defaultMessage": "Cấu hình CEO Telegram Chat chưa đầy đủ."
+  },
+  {
+    "code": "AGENT_TELEGRAM_OWNER_NOT_BOUND",
+    "kind": "user",
+    "defaultMessage": "Chưa liên kết Telegram CEO."
+  },
+  {
+    "code": "AGENT_TELEGRAM_USER_DENIED",
+    "kind": "user",
+    "defaultMessage": "Tài khoản Telegram này chưa được phép dùng trợ lý CEO."
+  },
+  {
+    "code": "AGENT_SECRET_MISSING",
+    "kind": "user",
+    "defaultMessage": "Thiếu khóa bí mật cho CEO Telegram Chat."
+  },
+  {
+    "code": "AGENT_PROVIDER_REQUEST_FAILED",
+    "kind": "user",
+    "defaultMessage": "Không thể gọi nhà cung cấp AI."
+  },
+  {
+    "code": "AGENT_TOOL_LOOP_LIMIT",
+    "kind": "user",
+    "defaultMessage": "Trợ lý AI đã dừng vì vượt giới hạn gọi công cụ."
+  },
+  {
+    "code": "AGENT_UNSUPPORTED_PMS_QUESTION",
+    "kind": "user",
+    "defaultMessage": "Trợ lý AI không có đủ dữ liệu PMS để trả lời câu hỏi này."
+  },
+  {
     "code": "SYSTEM_INTERNAL_ERROR",
     "kind": "system",
     "defaultMessage": "Có lỗi hệ thống, vui lòng thử lại"
