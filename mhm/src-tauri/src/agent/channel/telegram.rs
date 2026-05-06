@@ -296,11 +296,25 @@ async fn limited_response_bytes(
         }
     }
 
-    response
+    let bytes = response
         .bytes()
         .await
         .map(|bytes| bytes.to_vec())
-        .map_err(|error| scrub_telegram_error(&error.to_string(), token))
+        .map_err(|error| scrub_telegram_error(&error.to_string(), token))?;
+    enforce_telegram_response_size_limit(bytes, token)
+}
+
+fn enforce_telegram_response_size_limit(
+    bytes: Vec<u8>,
+    token: Option<&str>,
+) -> CommandResult<Vec<u8>> {
+    if bytes.len() > TELEGRAM_MAX_RESPONSE_BYTES as usize {
+        return Err(scrub_telegram_error(
+            "telegram response was too large",
+            token,
+        ));
+    }
+    Ok(bytes)
 }
 
 fn scrub_telegram_error(message: &str, token: Option<&str>) -> CommandError {
@@ -420,7 +434,7 @@ impl TelegramTransport for FakeTelegramTransport {
 #[cfg(test)]
 #[derive(Default)]
 pub struct FakeTelegramMessageRuntime {
-    replies: std::sync::Mutex<Vec<String>>,
+    replies: std::sync::Mutex<std::collections::VecDeque<String>>,
     calls: std::sync::Mutex<Vec<TelegramRuntimeMessage>>,
 }
 
@@ -428,7 +442,7 @@ pub struct FakeTelegramMessageRuntime {
 impl FakeTelegramMessageRuntime {
     pub fn with_replies(replies: Vec<String>) -> Self {
         Self {
-            replies: std::sync::Mutex::new(replies),
+            replies: std::sync::Mutex::new(replies.into()),
             calls: std::sync::Mutex::new(Vec::new()),
         }
     }
@@ -454,7 +468,7 @@ impl TelegramMessageRuntime for FakeTelegramMessageRuntime {
                 .replies
                 .lock()
                 .expect("runtime reply lock")
-                .pop()
+                .pop_front()
                 .unwrap_or_default())
         })
     }
@@ -601,6 +615,34 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn paired_sender_receives_fake_runtime_replies_in_fifo_order() {
+        let transport = FakeTelegramTransport::with_updates(vec![
+            telegram_text_update(14, 123, 55, "first?"),
+            telegram_text_update(15, 123, 55, "second?"),
+        ]);
+        let runtime = FakeTelegramMessageRuntime::with_replies(vec![
+            "first".to_string(),
+            "second".to_string(),
+        ]);
+        let config = ready_config("123", None);
+
+        let result = poll_once(&transport, &runtime, &config)
+            .await
+            .expect("poll succeeds");
+
+        assert_eq!(result, Some(15));
+        assert_eq!(runtime.call_count(), 2);
+        let sent_messages = transport.sent_messages();
+        assert_eq!(
+            sent_messages
+                .iter()
+                .map(|message| message.text.as_str())
+                .collect::<Vec<_>>(),
+            vec!["first", "second"]
+        );
+    }
+
+    #[tokio::test]
     async fn ignores_non_text_updates_without_runtime_call_or_reply() {
         let transport =
             FakeTelegramTransport::with_updates(vec![telegram_non_text_update(12, 123, 55)]);
@@ -644,6 +686,17 @@ mod tests {
             .expect_err("missing bot token must fail closed");
 
         assert_eq!(error.code, crate::app_error::codes::AGENT_SECRET_MISSING);
+    }
+
+    #[test]
+    fn oversized_response_body_without_content_length_is_rejected_after_read() {
+        let oversized = vec![b'x'; TELEGRAM_MAX_RESPONSE_BYTES as usize + 1];
+
+        let error = enforce_telegram_response_size_limit(oversized, None)
+            .expect_err("oversized response must fail closed");
+
+        assert_eq!(error.code, crate::app_error::codes::SYSTEM_INTERNAL_ERROR);
+        assert!(error.message.contains("too large"));
     }
 
     #[test]
