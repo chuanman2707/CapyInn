@@ -15,6 +15,7 @@ use crate::{
         secrets::{
             agent_secret_fingerprint, AgentSecretKind, AgentSecretStore, KeychainSecretStore,
         },
+        supervisor::{reconcile_managed_supervisor, AgentSupervisor},
     },
     app_error::{codes, CommandError, CommandResult},
     command_idempotency::WriteCommandContext,
@@ -40,6 +41,7 @@ pub async fn get_ceo_cloud_data_opt_in(state: State<'_, AppState>) -> CommandRes
 #[tauri::command]
 pub async fn set_ceo_cloud_data_opt_in(
     state: State<'_, AppState>,
+    supervisor: State<'_, AgentSupervisor>,
     enabled: bool,
     idempotency_key: String,
 ) -> CommandResult<()> {
@@ -51,9 +53,8 @@ pub async fn set_ceo_cloud_data_opt_in(
     )?;
     ctx.actor_id = Some(user.id.clone());
 
-    set_ceo_cloud_data_opt_in_idempotent(&state.db, &ctx, enabled)
-        .await
-        .map(|_| ())
+    set_ceo_cloud_data_opt_in_idempotent(&state.db, &ctx, enabled).await?;
+    reconcile_managed_supervisor(&state.db, Some(&*supervisor)).await
 }
 
 #[tauri::command]
@@ -69,6 +70,7 @@ pub async fn get_ceo_telegram_config(
 #[allow(dead_code)]
 pub async fn set_ceo_telegram_config(
     state: State<'_, AppState>,
+    supervisor: State<'_, AgentSupervisor>,
     runtime_enabled: bool,
     telegram_user_id: Option<String>,
     openai_model: String,
@@ -87,6 +89,8 @@ pub async fn set_ceo_telegram_config(
     )
     .await?;
 
+    reconcile_managed_supervisor(&state.db, Some(&*supervisor)).await?;
+
     read_ceo_telegram_config(&state.db).await
 }
 
@@ -94,6 +98,7 @@ pub async fn set_ceo_telegram_config(
 #[allow(dead_code)]
 pub async fn set_ceo_telegram_bot_token(
     state: State<'_, AppState>,
+    supervisor: State<'_, AgentSupervisor>,
     token: String,
     idempotency_key: String,
 ) -> CommandResult<()> {
@@ -104,13 +109,15 @@ pub async fn set_ceo_telegram_bot_token(
         SET_CEO_TELEGRAM_SECRET_STATUS_COMMAND,
     )?;
     let store = KeychainSecretStore;
-    set_ceo_telegram_bot_token_with_store(&state.db, &store, &ctx, &token).await
+    set_ceo_telegram_bot_token_with_store(&state.db, &store, &ctx, &token).await?;
+    reconcile_managed_supervisor(&state.db, Some(&*supervisor)).await
 }
 
 #[tauri::command]
 #[allow(dead_code)]
 pub async fn clear_ceo_telegram_bot_token(
     state: State<'_, AppState>,
+    supervisor: State<'_, AgentSupervisor>,
     idempotency_key: String,
 ) -> CommandResult<()> {
     let user = require_ceo_cloud_opt_in_admin(get_user(&state))?;
@@ -120,13 +127,15 @@ pub async fn clear_ceo_telegram_bot_token(
         SET_CEO_TELEGRAM_SECRET_STATUS_COMMAND,
     )?;
     let store = KeychainSecretStore;
-    clear_ceo_telegram_bot_token_with_store(&state.db, &store, &ctx).await
+    clear_ceo_telegram_bot_token_with_store(&state.db, &store, &ctx).await?;
+    reconcile_managed_supervisor(&state.db, Some(&*supervisor)).await
 }
 
 #[tauri::command]
 #[allow(dead_code)]
 pub async fn set_ceo_openai_api_key(
     state: State<'_, AppState>,
+    supervisor: State<'_, AgentSupervisor>,
     api_key: String,
     idempotency_key: String,
 ) -> CommandResult<()> {
@@ -137,13 +146,15 @@ pub async fn set_ceo_openai_api_key(
         SET_CEO_TELEGRAM_SECRET_STATUS_COMMAND,
     )?;
     let store = KeychainSecretStore;
-    set_ceo_openai_api_key_with_store(&state.db, &store, &ctx, &api_key).await
+    set_ceo_openai_api_key_with_store(&state.db, &store, &ctx, &api_key).await?;
+    reconcile_managed_supervisor(&state.db, Some(&*supervisor)).await
 }
 
 #[tauri::command]
 #[allow(dead_code)]
 pub async fn clear_ceo_openai_api_key(
     state: State<'_, AppState>,
+    supervisor: State<'_, AgentSupervisor>,
     idempotency_key: String,
 ) -> CommandResult<()> {
     let user = require_ceo_cloud_opt_in_admin(get_user(&state))?;
@@ -153,7 +164,8 @@ pub async fn clear_ceo_openai_api_key(
         SET_CEO_TELEGRAM_SECRET_STATUS_COMMAND,
     )?;
     let store = KeychainSecretStore;
-    clear_ceo_openai_api_key_with_store(&state.db, &store, &ctx).await
+    clear_ceo_openai_api_key_with_store(&state.db, &store, &ctx).await?;
+    reconcile_managed_supervisor(&state.db, Some(&*supervisor)).await
 }
 
 #[tauri::command]

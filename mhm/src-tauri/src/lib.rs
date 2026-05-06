@@ -58,7 +58,7 @@ impl GatewayRuntimeState {
         }
     }
 
-    fn shutdown(&self) {
+    fn shutdown(&self, agent_supervisor: Option<&agent::supervisor::AgentSupervisor>) {
         let shutdown_tx = self
             .shutdown_tx
             .lock()
@@ -78,6 +78,9 @@ impl GatewayRuntimeState {
 
         if let Ok(mut runtime_guard) = self.runtime.lock() {
             if let Some(runtime) = runtime_guard.take() {
+                if let Some(agent_supervisor) = agent_supervisor {
+                    runtime.block_on(agent_supervisor.shutdown());
+                }
                 if let Some(server_task) = server_task {
                     let _ = runtime.block_on(async move {
                         tokio::time::timeout(Duration::from_secs(2), server_task).await
@@ -197,6 +200,19 @@ pub fn run() {
                 })
             };
 
+            let agent_supervisor = agent::supervisor::AgentSupervisor::new(pool.clone());
+            if runtime_config::env_flag("CAPYINN_DISABLE_CEO_TELEGRAM") {
+                info!("CEO Telegram runtime disabled by CAPYINN_DISABLE_CEO_TELEGRAM");
+            } else if let Err(error) = rt.block_on(agent::supervisor::reconcile_managed_supervisor(
+                &pool,
+                Some(&agent_supervisor),
+            )) {
+                error!(
+                    "Failed to reconcile CEO Telegram runtime at startup: {} {}",
+                    error.code, error.message
+                );
+            }
+
             app.manage(AppState {
                 db: pool.clone(),
                 current_user: Arc::new(Mutex::new(None)),
@@ -204,6 +220,7 @@ pub fn run() {
             app.manage(backup::BackupCoordinator::new());
             app.manage(backup::start_backup_scheduler(app.handle().clone()));
             app.manage(outbox::start_outbox_dispatcher(pool.clone(), Vec::new()));
+            app.manage(agent_supervisor);
             app.manage(GatewayRuntimeState::new(rt, gateway_runtime));
 
             let _ = std::fs::create_dir_all(app_identity::models_dir());
@@ -350,6 +367,10 @@ pub fn run() {
                 .shutdown();
             let handle = app_handle.clone();
             tauri::async_runtime::spawn(async move {
+                handle
+                    .state::<agent::supervisor::AgentSupervisor>()
+                    .shutdown()
+                    .await;
                 if let Err(error) = backup::drain_and_backup_on_exit(&handle).await {
                     error!("exit backup failed: {}", error);
                 }
@@ -357,7 +378,10 @@ pub fn run() {
             });
         }
         tauri::RunEvent::Exit => {
-            app_handle.state::<GatewayRuntimeState>().shutdown();
+            let agent_supervisor = app_handle.state::<agent::supervisor::AgentSupervisor>();
+            app_handle
+                .state::<GatewayRuntimeState>()
+                .shutdown(Some(&*agent_supervisor));
         }
         _ => {}
     });
