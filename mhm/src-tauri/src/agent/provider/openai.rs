@@ -289,6 +289,8 @@ async fn limited_response_bytes(response: reqwest::Response) -> CommandResult<Ve
 fn parse_provider_turn(bytes: &[u8]) -> CommandResult<ProviderTurn> {
     let response: OpenAiResponsesResponse = serde_json::from_slice(bytes)
         .map_err(|error| scrub_provider_error(&format!("invalid provider response: {error}")))?;
+    validate_completed_response(&response)?;
+
     let mut tool_calls = Vec::new();
     let mut final_text = None;
 
@@ -315,6 +317,38 @@ fn parse_provider_turn(bytes: &[u8]) -> CommandResult<ProviderTurn> {
         .filter(|text| !text.trim().is_empty())
         .map(ProviderTurn::FinalText)
         .ok_or_else(|| scrub_provider_error("provider response did not contain usable output"))
+}
+
+fn validate_completed_response(response: &OpenAiResponsesResponse) -> CommandResult<()> {
+    if response.status.as_deref() == Some("completed") {
+        return Ok(());
+    }
+
+    Err(scrub_provider_error(&response_status_error_message(
+        response,
+    )))
+}
+
+fn response_status_error_message(response: &OpenAiResponsesResponse) -> String {
+    let status = response.status.as_deref().unwrap_or("missing");
+    let mut parts = vec![format!("provider response status was {status}")];
+
+    if let Some(error) = &response.error {
+        if let Some(code) = string_field(error, "code") {
+            parts.push(format!("error code {code}"));
+        }
+        if let Some(message) = string_field(error, "message") {
+            parts.push(format!("error message {message}"));
+        }
+    }
+
+    if let Some(details) = &response.incomplete_details {
+        if let Some(reason) = string_field(details, "reason") {
+            parts.push(format!("incomplete reason {reason}"));
+        }
+    }
+
+    parts.join("; ")
 }
 
 fn parse_tool_call(raw: Value) -> CommandResult<ProviderToolCall> {
@@ -372,6 +406,9 @@ fn provider_lock_error<T>(error: PoisonError<T>) -> CommandError {
 
 #[derive(Debug, Deserialize)]
 struct OpenAiResponsesResponse {
+    status: Option<String>,
+    error: Option<Value>,
+    incomplete_details: Option<Value>,
     output: Vec<Value>,
 }
 
@@ -422,6 +459,7 @@ mod tests {
             "arguments": "{}",
         });
         let response = serde_json::json!({
+            "status": "completed",
             "output": [reasoning_item.clone(), function_call_item.clone()],
         });
 
@@ -438,6 +476,93 @@ mod tests {
             }
             ProviderTurn::FinalText(_) => panic!("expected tool call turn"),
         }
+    }
+
+    #[test]
+    fn parse_completed_message_returns_final_text() {
+        let response = serde_json::json!({
+            "status": "completed",
+            "output": [{
+                "type": "message",
+                "content": [{
+                    "type": "output_text",
+                    "text": "Khách sạn đang hoạt động bình thường.",
+                }],
+            }],
+        });
+
+        let turn = parse_provider_turn(response.to_string().as_bytes()).expect("parse turn");
+
+        assert_eq!(
+            turn,
+            ProviderTurn::FinalText("Khách sạn đang hoạt động bình thường.".to_string())
+        );
+    }
+
+    #[test]
+    fn incomplete_response_with_partial_message_fails_closed() {
+        let response = serde_json::json!({
+            "status": "incomplete",
+            "incomplete_details": {"reason": "max_output_tokens"},
+            "output": [{
+                "type": "message",
+                "content": [{
+                    "type": "output_text",
+                    "text": "partial text",
+                }],
+            }],
+        });
+
+        let error = parse_provider_turn(response.to_string().as_bytes())
+            .expect_err("incomplete responses must fail closed");
+
+        assert_eq!(error.code, codes::AGENT_PROVIDER_REQUEST_FAILED);
+    }
+
+    #[test]
+    fn incomplete_response_with_partial_function_call_fails_closed() {
+        let response = serde_json::json!({
+            "status": "incomplete",
+            "incomplete_details": {"reason": "max_output_tokens"},
+            "output": [{
+                "type": "function_call",
+                "id": "fc_123",
+                "call_id": "call_123",
+                "name": "get_hotel_status",
+                "arguments": "{}",
+            }],
+        });
+
+        let error = parse_provider_turn(response.to_string().as_bytes())
+            .expect_err("incomplete function calls must fail closed");
+
+        assert_eq!(error.code, codes::AGENT_PROVIDER_REQUEST_FAILED);
+    }
+
+    #[test]
+    fn failed_response_with_error_object_fails_closed_and_scrubs_message() {
+        let response = serde_json::json!({
+            "status": "failed",
+            "error": {
+                "code": "server_error",
+                "message": "request failed with sk-secret and telegram_bot_token=abc",
+            },
+            "output": [{
+                "type": "message",
+                "content": [{
+                    "type": "output_text",
+                    "text": "partial text",
+                }],
+            }],
+        });
+
+        let error = parse_provider_turn(response.to_string().as_bytes())
+            .expect_err("failed responses must fail closed");
+
+        assert_eq!(error.code, codes::AGENT_PROVIDER_REQUEST_FAILED);
+        assert!(error.message.contains("failed"));
+        assert!(!error.message.contains("sk-secret"));
+        assert!(!error.message.contains("abc"));
     }
 
     #[test]
