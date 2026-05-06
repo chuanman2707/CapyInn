@@ -234,46 +234,64 @@ where
 {
     let offset = config.last_update_id.map(|id| id + 1);
     let updates = transport.get_updates(offset).await?;
-    let mut highest_update_id: Option<i64> = None;
+    let mut last_completed_update_id: Option<i64> = None;
 
     for update in updates {
-        highest_update_id = Some(
-            highest_update_id.map_or(update.update_id, |highest| highest.max(update.update_id)),
-        );
-
-        let Some(message) = update.message else {
-            continue;
-        };
-        let Some(text) = message.text else {
-            continue;
-        };
-        let Some(sender) = message.from else {
-            transport
-                .send_message(message.chat.id, MISSING_SENDER_DENIAL.to_string())
-                .await?;
-            continue;
-        };
-
-        let sender_id = sender.id.to_string();
-        if config.telegram_user_id.as_deref().map(str::trim) != Some(sender_id.as_str()) {
-            transport
-                .send_message(message.chat.id, owner_denial_message(sender.id))
-                .await?;
-            continue;
+        let update_id = update.update_id;
+        if let Err(error) = handle_update(transport, runtime, config, update).await {
+            return match last_completed_update_id {
+                Some(update_id) => Ok(Some(update_id)),
+                None => Err(error),
+            };
         }
 
-        let reply = runtime
-            .handle_message(TelegramRuntimeMessage {
-                actor: actor_from_sender(&sender),
-                chat_id: message.chat.id,
-                message_id: message.message_id,
-                text,
-            })
-            .await?;
-        transport.send_message(message.chat.id, reply).await?;
+        last_completed_update_id =
+            Some(last_completed_update_id.map_or(update_id, |highest| highest.max(update_id)));
     }
 
-    Ok(highest_update_id)
+    Ok(last_completed_update_id)
+}
+
+async fn handle_update<T, R>(
+    transport: &T,
+    runtime: &R,
+    config: &CeoTelegramConfig,
+    update: TelegramUpdate,
+) -> CommandResult<()>
+where
+    T: TelegramTransport,
+    R: TelegramMessageRuntime,
+{
+    let Some(message) = update.message else {
+        return Ok(());
+    };
+    let Some(text) = message.text else {
+        return Ok(());
+    };
+    let Some(sender) = message.from else {
+        transport
+            .send_message(message.chat.id, MISSING_SENDER_DENIAL.to_string())
+            .await?;
+        return Ok(());
+    };
+
+    let sender_id = sender.id.to_string();
+    if config.telegram_user_id.as_deref().map(str::trim) != Some(sender_id.as_str()) {
+        transport
+            .send_message(message.chat.id, owner_denial_message(sender.id))
+            .await?;
+        return Ok(());
+    }
+
+    let reply = runtime
+        .handle_message(TelegramRuntimeMessage {
+            actor: actor_from_sender(&sender),
+            chat_id: message.chat.id,
+            message_id: message.message_id,
+            text,
+        })
+        .await?;
+    transport.send_message(message.chat.id, reply).await
 }
 
 #[derive(Debug, Deserialize)]
@@ -651,6 +669,49 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec!["first", "second"]
         );
+    }
+
+    #[tokio::test]
+    async fn returns_last_completed_update_id_when_later_update_fails() {
+        struct FailingSecondMessageRuntime {
+            calls: std::sync::Mutex<Vec<TelegramRuntimeMessage>>,
+        }
+
+        impl TelegramMessageRuntime for FailingSecondMessageRuntime {
+            fn handle_message<'a>(
+                &'a self,
+                message: TelegramRuntimeMessage,
+            ) -> Pin<Box<dyn Future<Output = CommandResult<String>> + Send + 'a>> {
+                Box::pin(async move {
+                    let mut calls = self.calls.lock().expect("runtime call lock");
+                    calls.push(message);
+                    if calls.len() == 2 {
+                        return Err(CommandError::system(
+                            codes::SYSTEM_INTERNAL_ERROR,
+                            "second update failed",
+                        ));
+                    }
+                    Ok("first".to_string())
+                })
+            }
+        }
+
+        let transport = FakeTelegramTransport::with_updates(vec![
+            telegram_text_update(14, 123, 55, "first?"),
+            telegram_text_update(15, 123, 55, "second?"),
+        ]);
+        let runtime = FailingSecondMessageRuntime {
+            calls: std::sync::Mutex::new(Vec::new()),
+        };
+        let config = ready_config("123", Some(13));
+
+        let result = poll_once(&transport, &runtime, &config)
+            .await
+            .expect("completed offset is returned");
+
+        assert_eq!(result, Some(14));
+        assert_eq!(transport.sent_messages()[0].text, "first");
+        assert_eq!(runtime.calls.lock().expect("runtime call lock").len(), 2);
     }
 
     #[tokio::test]
