@@ -248,6 +248,7 @@ async fn set_agent_secret_with_store(
     value: &str,
 ) -> CommandResult<()> {
     validate_non_blank_secret(value)?;
+    let _secret_lock = acquire_agent_secret_lock(kind).await?;
     let prior_secret = store.get_secret(kind)?;
     let keychain_mutated = Arc::new(AtomicBool::new(false));
     let keychain_mutated_for_guard = Arc::clone(&keychain_mutated);
@@ -277,6 +278,7 @@ async fn clear_agent_secret_with_store(
     ctx: &WriteCommandContext,
     kind: AgentSecretKind,
 ) -> CommandResult<()> {
+    let _secret_lock = acquire_agent_secret_lock(kind).await?;
     let prior_secret = store.get_secret(kind)?;
     let keychain_mutated = Arc::new(AtomicBool::new(false));
     let keychain_mutated_for_guard = Arc::clone(&keychain_mutated);
@@ -343,6 +345,14 @@ fn clear_secret_idempotency_payload(kind: AgentSecretKind) -> serde_json::Value 
     })
 }
 
+async fn acquire_agent_secret_lock(
+    kind: AgentSecretKind,
+) -> CommandResult<crate::aggregate_locks::AggregateLockGuard> {
+    crate::aggregate_locks::global_manager()
+        .acquire([format!("agent_secret:{}", kind.idempotency_label())])
+        .await
+}
+
 fn restore_agent_secret(
     store: &dyn AgentSecretStore,
     kind: AgentSecretKind,
@@ -376,7 +386,9 @@ mod tests {
     use sqlx::{sqlite::SqlitePoolOptions, Pool, Sqlite};
     use std::{
         collections::HashMap,
+        sync::mpsc,
         sync::{Arc, Mutex},
+        time::Duration,
     };
 
     #[derive(Default)]
@@ -412,6 +424,64 @@ mod tests {
 
         fn clear_secret(&self, kind: AgentSecretKind) -> CommandResult<()> {
             *self.clear_count.lock().expect("clear count lock") += 1;
+            self.values.lock().expect("values lock").remove(&kind);
+            Ok(())
+        }
+    }
+
+    struct InterleavingSecretStore {
+        values: Arc<Mutex<HashMap<AgentSecretKind, String>>>,
+        a_mutated_tx: Mutex<Option<mpsc::Sender<()>>>,
+        a_release_rx: Mutex<Option<mpsc::Receiver<()>>>,
+        b_mutated_tx: Mutex<Option<mpsc::Sender<()>>>,
+    }
+
+    impl InterleavingSecretStore {
+        fn new(
+            a_mutated_tx: mpsc::Sender<()>,
+            a_release_rx: mpsc::Receiver<()>,
+            b_mutated_tx: mpsc::Sender<()>,
+        ) -> Self {
+            Self {
+                values: Arc::new(Mutex::new(HashMap::new())),
+                a_mutated_tx: Mutex::new(Some(a_mutated_tx)),
+                a_release_rx: Mutex::new(Some(a_release_rx)),
+                b_mutated_tx: Mutex::new(Some(b_mutated_tx)),
+            }
+        }
+    }
+
+    impl AgentSecretStore for InterleavingSecretStore {
+        fn get_secret(&self, kind: AgentSecretKind) -> CommandResult<Option<String>> {
+            Ok(self.values.lock().expect("values lock").get(&kind).cloned())
+        }
+
+        fn set_secret(&self, kind: AgentSecretKind, value: &str) -> CommandResult<()> {
+            self.values
+                .lock()
+                .expect("values lock")
+                .insert(kind, value.to_string());
+
+            if value == "new-a" {
+                if let Some(tx) = self.a_mutated_tx.lock().expect("a signal lock").take() {
+                    let _ = tx.send(());
+                }
+                if let Some(rx) = self.a_release_rx.lock().expect("a release lock").take() {
+                    rx.recv_timeout(Duration::from_secs(2))
+                        .expect("test releases command A");
+                }
+            }
+
+            if value == "new-b" {
+                if let Some(tx) = self.b_mutated_tx.lock().expect("b signal lock").take() {
+                    let _ = tx.send(());
+                }
+            }
+
+            Ok(())
+        }
+
+        fn clear_secret(&self, kind: AgentSecretKind) -> CommandResult<()> {
             self.values.lock().expect("values lock").remove(&kind);
             Ok(())
         }
@@ -490,13 +560,17 @@ mod tests {
     }
 
     fn write_ctx_with_key(idempotency_key: &str) -> WriteCommandContext {
+        write_ctx_with_key_and_actor(idempotency_key, "admin-1")
+    }
+
+    fn write_ctx_with_key_and_actor(idempotency_key: &str, actor_id: &str) -> WriteCommandContext {
         let mut ctx = WriteCommandContext::for_internal_test(
             "req-secret-command-1",
             idempotency_key,
             crate::agent::config::SET_CEO_TELEGRAM_SECRET_STATUS_COMMAND,
         );
         ctx.actor_type = ActorType::Human;
-        ctx.actor_id = Some("admin-1".to_string());
+        ctx.actor_id = Some(actor_id.to_string());
         ctx
     }
 
@@ -603,6 +677,73 @@ mod tests {
                 .get_secret(AgentSecretKind::TelegramBotToken)
                 .expect("store remains readable"),
             None
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn failed_secret_replacement_does_not_clobber_later_successful_secret_write() {
+        let pool = test_pool().await;
+        sqlx::query(
+            "CREATE TRIGGER fail_agent_audit_for_actor_a
+             BEFORE INSERT ON agent_audit_events
+             WHEN NEW.actor_id = 'admin-a'
+             BEGIN
+                 SELECT RAISE(ABORT, 'fail actor a audit');
+             END",
+        )
+        .execute(&pool)
+        .await
+        .expect("create failure trigger");
+
+        let (a_mutated_tx, a_mutated_rx) = mpsc::channel();
+        let (a_release_tx, a_release_rx) = mpsc::channel();
+        let (b_mutated_tx, b_mutated_rx) = mpsc::channel();
+        let store = Arc::new(InterleavingSecretStore::new(
+            a_mutated_tx,
+            a_release_rx,
+            b_mutated_tx,
+        ));
+        store
+            .set_secret(AgentSecretKind::TelegramBotToken, "old-token")
+            .expect("seed old secret");
+
+        let pool_a = pool.clone();
+        let store_a = Arc::clone(&store);
+        let command_a = tokio::spawn(async move {
+            let ctx = write_ctx_with_key_and_actor("idem-a", "admin-a");
+            set_ceo_telegram_bot_token_with_store(&pool_a, store_a.as_ref(), &ctx, "new-a").await
+        });
+
+        a_mutated_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("command A mutates keychain");
+
+        let pool_b = pool.clone();
+        let store_b = Arc::clone(&store);
+        let command_b = tokio::spawn(async move {
+            let ctx = write_ctx_with_key_and_actor("idem-b", "admin-b");
+            set_ceo_telegram_bot_token_with_store(&pool_b, store_b.as_ref(), &ctx, "new-b").await
+        });
+
+        let _ = b_mutated_rx.recv_timeout(Duration::from_millis(100));
+        a_release_tx.send(()).expect("release command A");
+
+        let error_a = command_a
+            .await
+            .expect("command A task joins")
+            .expect_err("command A metadata write fails");
+        assert_eq!(error_a.code, codes::SYSTEM_INTERNAL_ERROR);
+        command_b
+            .await
+            .expect("command B task joins")
+            .expect("command B succeeds");
+
+        assert_eq!(
+            store
+                .get_secret(AgentSecretKind::TelegramBotToken)
+                .expect("secret remains readable")
+                .as_deref(),
+            Some("new-b")
         );
     }
 
