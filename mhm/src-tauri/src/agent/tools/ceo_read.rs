@@ -40,6 +40,9 @@ pub async fn dispatch_ceo_read_tool(
     name: &str,
     args: Value,
 ) -> CommandResult<CeoToolEnvelope> {
+    if !is_allowed_ceo_read_tool(name) {
+        return Err(tool_not_allowed());
+    }
     validate_no_args(&args)?;
 
     let today = Local::now().format("%Y-%m-%d").to_string();
@@ -92,12 +95,7 @@ pub async fn dispatch_ceo_read_tool(
                 .await
                 .map_err(query_error)?,
         ),
-        _ => {
-            return Err(CommandError::user(
-                codes::AGENT_TOOL_NOT_ALLOWED,
-                "CEO read tool is not allowed.",
-            ));
-        }
+        _ => return Err(tool_not_allowed()),
     }
     .map_err(|_| {
         CommandError::system(codes::SYSTEM_INTERNAL_ERROR, "Cannot serialize tool data")
@@ -112,6 +110,17 @@ pub async fn dispatch_ceo_read_tool(
         }),
         data,
     })
+}
+
+fn is_allowed_ceo_read_tool(name: &str) -> bool {
+    CEO_PHASE_A_TOOLS.iter().any(|tool| tool.name == name)
+}
+
+fn tool_not_allowed() -> CommandError {
+    CommandError::user(
+        codes::AGENT_TOOL_NOT_ALLOWED,
+        "CEO read tool is not allowed.",
+    )
 }
 
 fn query_error(_: sqlx::Error) -> CommandError {
@@ -211,5 +220,31 @@ mod tests {
             .await
             .expect_err("write tool must not be dispatched");
         assert_eq!(error.code, crate::app_error::codes::AGENT_TOOL_NOT_ALLOWED);
+    }
+
+    #[tokio::test]
+    async fn unknown_tool_with_arguments_is_rejected_before_arg_validation() {
+        let pool = test_pool().await;
+        let error = dispatch_ceo_read_tool(
+            &pool,
+            "create_reservation",
+            serde_json::json!({"room_id": "101"}),
+        )
+        .await
+        .expect_err("unknown tool must not validate args first");
+        assert_eq!(error.code, crate::app_error::codes::AGENT_TOOL_NOT_ALLOWED);
+    }
+
+    #[tokio::test]
+    async fn allowed_tool_with_arguments_is_rejected_as_invalid_input() {
+        let pool = test_pool().await;
+        let error = dispatch_ceo_read_tool(
+            &pool,
+            "list_today_arrivals",
+            serde_json::json!({"room_id": "101"}),
+        )
+        .await
+        .expect_err("allowed no-arg tool must reject args");
+        assert_eq!(error.code, crate::app_error::codes::VALIDATION_INVALID_INPUT);
     }
 }
