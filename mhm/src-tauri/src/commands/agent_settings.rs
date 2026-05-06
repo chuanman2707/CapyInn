@@ -4,10 +4,20 @@ use crate::{
         get_ceo_cloud_data_opt_in as read_ceo_cloud_data_opt_in,
         set_ceo_cloud_data_opt_in_idempotent, SET_CEO_CLOUD_DATA_OPT_IN_COMMAND,
     },
-    app_error::CommandResult,
+    agent::{
+        config::{
+            get_ceo_telegram_config as read_ceo_telegram_config,
+            set_ceo_telegram_config_idempotent, update_ceo_telegram_secret_presence_idempotent,
+            CeoTelegramConfig, CeoTelegramGateStatus, SET_CEO_TELEGRAM_CONFIG_COMMAND,
+            SET_CEO_TELEGRAM_SECRET_STATUS_COMMAND,
+        },
+        secrets::{AgentSecretKind, AgentSecretStore, KeychainSecretStore},
+    },
+    app_error::{codes, CommandError, CommandResult},
     command_idempotency::WriteCommandContext,
     models::User,
 };
+use sqlx::{Pool, Sqlite};
 use tauri::State;
 
 pub(crate) fn require_ceo_cloud_opt_in_admin(user: Option<User>) -> CommandResult<User> {
@@ -39,10 +49,256 @@ pub async fn set_ceo_cloud_data_opt_in(
         .map(|_| ())
 }
 
+#[tauri::command]
+#[allow(dead_code)]
+pub async fn get_ceo_telegram_config(
+    state: State<'_, AppState>,
+) -> CommandResult<CeoTelegramConfig> {
+    let _user = require_ceo_cloud_opt_in_admin(get_user(&state))?;
+    read_ceo_telegram_config(&state.db).await
+}
+
+#[tauri::command]
+#[allow(dead_code)]
+pub async fn set_ceo_telegram_config(
+    state: State<'_, AppState>,
+    runtime_enabled: bool,
+    telegram_user_id: Option<String>,
+    openai_model: String,
+    idempotency_key: String,
+) -> CommandResult<CeoTelegramConfig> {
+    let user = require_ceo_cloud_opt_in_admin(get_user(&state))?;
+    let telegram_user_id = validate_optional_telegram_user_id(telegram_user_id)?;
+    let ctx = scoped_admin_ctx(&user, idempotency_key, SET_CEO_TELEGRAM_CONFIG_COMMAND)?;
+
+    set_ceo_telegram_config_idempotent(
+        &state.db,
+        &ctx,
+        runtime_enabled,
+        telegram_user_id,
+        openai_model,
+    )
+    .await?;
+
+    read_ceo_telegram_config(&state.db).await
+}
+
+#[tauri::command]
+#[allow(dead_code)]
+pub async fn set_ceo_telegram_bot_token(
+    state: State<'_, AppState>,
+    token: String,
+    idempotency_key: String,
+) -> CommandResult<()> {
+    let user = require_ceo_cloud_opt_in_admin(get_user(&state))?;
+    let ctx = scoped_admin_ctx(
+        &user,
+        idempotency_key,
+        SET_CEO_TELEGRAM_SECRET_STATUS_COMMAND,
+    )?;
+    let store = KeychainSecretStore;
+    set_ceo_telegram_bot_token_with_store(&state.db, &store, &ctx, &token).await
+}
+
+#[tauri::command]
+#[allow(dead_code)]
+pub async fn clear_ceo_telegram_bot_token(
+    state: State<'_, AppState>,
+    idempotency_key: String,
+) -> CommandResult<()> {
+    let user = require_ceo_cloud_opt_in_admin(get_user(&state))?;
+    let ctx = scoped_admin_ctx(
+        &user,
+        idempotency_key,
+        SET_CEO_TELEGRAM_SECRET_STATUS_COMMAND,
+    )?;
+    let store = KeychainSecretStore;
+    clear_ceo_telegram_bot_token_with_store(&state.db, &store, &ctx).await
+}
+
+#[tauri::command]
+#[allow(dead_code)]
+pub async fn set_ceo_openai_api_key(
+    state: State<'_, AppState>,
+    api_key: String,
+    idempotency_key: String,
+) -> CommandResult<()> {
+    let user = require_ceo_cloud_opt_in_admin(get_user(&state))?;
+    let ctx = scoped_admin_ctx(
+        &user,
+        idempotency_key,
+        SET_CEO_TELEGRAM_SECRET_STATUS_COMMAND,
+    )?;
+    let store = KeychainSecretStore;
+    set_ceo_openai_api_key_with_store(&state.db, &store, &ctx, &api_key).await
+}
+
+#[tauri::command]
+#[allow(dead_code)]
+pub async fn clear_ceo_openai_api_key(
+    state: State<'_, AppState>,
+    idempotency_key: String,
+) -> CommandResult<()> {
+    let user = require_ceo_cloud_opt_in_admin(get_user(&state))?;
+    let ctx = scoped_admin_ctx(
+        &user,
+        idempotency_key,
+        SET_CEO_TELEGRAM_SECRET_STATUS_COMMAND,
+    )?;
+    let store = KeychainSecretStore;
+    clear_ceo_openai_api_key_with_store(&state.db, &store, &ctx).await
+}
+
+#[tauri::command]
+#[allow(dead_code)]
+pub async fn get_ceo_telegram_gate_status(
+    state: State<'_, AppState>,
+) -> CommandResult<CeoTelegramGateStatus> {
+    let _user = require_ceo_cloud_opt_in_admin(get_user(&state))?;
+    let config = read_ceo_telegram_config(&state.db).await?;
+    let cloud_opt_in = read_ceo_cloud_data_opt_in(&state.db).await?;
+    Ok(config.evaluate_gate(cloud_opt_in))
+}
+
+#[allow(dead_code)]
+pub(crate) fn validate_telegram_user_id(value: &str) -> CommandResult<String> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() || !trimmed.chars().all(|character| character.is_ascii_digit()) {
+        return Err(CommandError::user(
+            codes::VALIDATION_INVALID_INPUT,
+            "Telegram user ID must contain digits only",
+        ));
+    }
+    Ok(trimmed.to_string())
+}
+
+#[allow(dead_code)]
+fn validate_optional_telegram_user_id(value: Option<String>) -> CommandResult<Option<String>> {
+    value
+        .map(|value| validate_telegram_user_id(&value))
+        .transpose()
+}
+
+#[allow(dead_code)]
+fn scoped_admin_ctx(
+    user: &User,
+    idempotency_key: String,
+    command_name: &'static str,
+) -> CommandResult<WriteCommandContext> {
+    let mut ctx = WriteCommandContext::for_scoped_command(
+        uuid::Uuid::new_v4().to_string(),
+        idempotency_key,
+        command_name,
+    )?;
+    ctx.actor_id = Some(user.id.clone());
+    Ok(ctx)
+}
+
+#[allow(dead_code)]
+pub(crate) async fn set_ceo_telegram_bot_token_with_store(
+    pool: &Pool<Sqlite>,
+    store: &dyn AgentSecretStore,
+    ctx: &WriteCommandContext,
+    token: &str,
+) -> CommandResult<()> {
+    set_agent_secret_with_store(pool, store, ctx, AgentSecretKind::TelegramBotToken, token).await
+}
+
+#[allow(dead_code)]
+pub(crate) async fn clear_ceo_telegram_bot_token_with_store(
+    pool: &Pool<Sqlite>,
+    store: &dyn AgentSecretStore,
+    ctx: &WriteCommandContext,
+) -> CommandResult<()> {
+    clear_agent_secret_with_store(pool, store, ctx, AgentSecretKind::TelegramBotToken).await
+}
+
+#[allow(dead_code)]
+pub(crate) async fn set_ceo_openai_api_key_with_store(
+    pool: &Pool<Sqlite>,
+    store: &dyn AgentSecretStore,
+    ctx: &WriteCommandContext,
+    api_key: &str,
+) -> CommandResult<()> {
+    set_agent_secret_with_store(pool, store, ctx, AgentSecretKind::OpenAiApiKey, api_key).await
+}
+
+#[allow(dead_code)]
+pub(crate) async fn clear_ceo_openai_api_key_with_store(
+    pool: &Pool<Sqlite>,
+    store: &dyn AgentSecretStore,
+    ctx: &WriteCommandContext,
+) -> CommandResult<()> {
+    clear_agent_secret_with_store(pool, store, ctx, AgentSecretKind::OpenAiApiKey).await
+}
+
+#[allow(dead_code)]
+async fn set_agent_secret_with_store(
+    pool: &Pool<Sqlite>,
+    store: &dyn AgentSecretStore,
+    ctx: &WriteCommandContext,
+    kind: AgentSecretKind,
+    value: &str,
+) -> CommandResult<()> {
+    validate_non_blank_secret(value)?;
+    store.set_secret(kind, value)?;
+
+    if let Err(error) = persist_secret_presence(pool, ctx, kind, true).await {
+        store.clear_secret(kind)?;
+        return Err(error);
+    }
+
+    Ok(())
+}
+
+#[allow(dead_code)]
+async fn clear_agent_secret_with_store(
+    pool: &Pool<Sqlite>,
+    store: &dyn AgentSecretStore,
+    ctx: &WriteCommandContext,
+    kind: AgentSecretKind,
+) -> CommandResult<()> {
+    store.clear_secret(kind)?;
+    persist_secret_presence(pool, ctx, kind, false).await
+}
+
+#[allow(dead_code)]
+async fn persist_secret_presence(
+    pool: &Pool<Sqlite>,
+    ctx: &WriteCommandContext,
+    kind: AgentSecretKind,
+    present: bool,
+) -> CommandResult<()> {
+    let (telegram_present, openai_present) = match kind {
+        AgentSecretKind::TelegramBotToken => (Some(present), None),
+        AgentSecretKind::OpenAiApiKey => (None, Some(present)),
+    };
+
+    update_ceo_telegram_secret_presence_idempotent(pool, ctx, telegram_present, openai_present)
+        .await
+        .map(|_| ())
+}
+
+#[allow(dead_code)]
+fn validate_non_blank_secret(value: &str) -> CommandResult<()> {
+    if value.trim().is_empty() {
+        return Err(CommandError::user(
+            codes::VALIDATION_INVALID_INPUT,
+            "Secret value must not be blank",
+        ));
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::app_error::{codes, AppErrorKind};
+    use crate::{
+        agent::secrets::{AgentSecretKind, AgentSecretStore, FakeSecretStore},
+        command_idempotency::{ActorType, WriteCommandContext},
+    };
+    use sqlx::{sqlite::SqlitePoolOptions, Pool, Sqlite};
 
     fn mock_user(role: &str) -> User {
         User {
@@ -75,5 +331,71 @@ mod tests {
             require_ceo_cloud_opt_in_admin(None).expect_err("missing user must be rejected");
         assert_eq!(error.code, codes::AUTH_NOT_AUTHENTICATED);
         assert_eq!(error.kind, AppErrorKind::User);
+    }
+
+    #[test]
+    fn numeric_telegram_user_id_validation_accepts_digits() {
+        assert!(validate_telegram_user_id("123456789").is_ok());
+    }
+
+    #[test]
+    fn numeric_telegram_user_id_validation_rejects_username() {
+        let error = validate_telegram_user_id("@owner").expect_err("username is not a numeric id");
+        assert_eq!(error.code, codes::VALIDATION_INVALID_INPUT);
+    }
+
+    async fn test_pool() -> Pool<Sqlite> {
+        let database_url = format!(
+            "sqlite://file:{}?mode=memory&cache=shared",
+            uuid::Uuid::new_v4()
+        );
+
+        let pool = SqlitePoolOptions::new()
+            .max_connections(5)
+            .connect(&database_url)
+            .await
+            .expect("failed to open sqlite test pool");
+
+        sqlx::query("PRAGMA foreign_keys = ON")
+            .execute(&pool)
+            .await
+            .expect("failed to enable foreign keys");
+
+        crate::db::run_migrations(&pool)
+            .await
+            .expect("failed to run migrations");
+
+        pool
+    }
+
+    fn write_ctx() -> WriteCommandContext {
+        let mut ctx = WriteCommandContext::for_internal_test(
+            "req-secret-command-1",
+            "idem-secret-command-1",
+            crate::agent::config::SET_CEO_TELEGRAM_SECRET_STATUS_COMMAND,
+        );
+        ctx.actor_type = ActorType::Human;
+        ctx.actor_id = Some("admin-1".to_string());
+        ctx
+    }
+
+    #[tokio::test]
+    async fn telegram_secret_write_clears_store_when_metadata_persistence_fails() {
+        let pool = test_pool().await;
+        pool.close().await;
+        let store = FakeSecretStore::default();
+        let ctx = write_ctx();
+
+        let error = set_ceo_telegram_bot_token_with_store(&pool, &store, &ctx, "telegram-token")
+            .await
+            .expect_err("closed pool must fail metadata persistence");
+
+        assert_eq!(error.code, codes::SYSTEM_INTERNAL_ERROR);
+        assert_eq!(
+            store
+                .get_secret(AgentSecretKind::TelegramBotToken)
+                .expect("store remains readable"),
+            None
+        );
     }
 }
