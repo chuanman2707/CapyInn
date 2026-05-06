@@ -21,6 +21,24 @@ servers:
         default: '61234'
         description: Gateway port shown in the CapyInn settings UI
 
+x-agent-safety:
+  read_only_not_guest_safe: true
+  data_sensitivity_classes:
+    - PublicHotelInfo
+    - GuestScoped
+    - StaffOperational
+    - CeoSensitive
+  cloud_data_opt_in:
+    statement: CEO cloud-data opt-in is persisted and revocable before CEO-sensitive PMS data can be sent to a cloud LLM.
+    setting_key: ceo_cloud_data_opt_in
+    default: false
+  retention:
+    raw_prompt_retention: not_stored
+    raw_response_retention: not_stored
+    raw_tool_output_retention: not_stored
+    raw_provider_error_retention: not_stored
+    session_policy: metadata_only_v1
+
 paths:
   /mcp:
     post:

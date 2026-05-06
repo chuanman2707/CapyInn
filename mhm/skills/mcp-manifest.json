@@ -74,6 +74,32 @@
             ]
         }
     },
+    "agent_safety": {
+        "read_only_not_guest_safe": true,
+        "data_sensitivity_classes": [
+            "PublicHotelInfo",
+            "GuestScoped",
+            "StaffOperational",
+            "CeoSensitive"
+        ],
+        "cloud_data_opt_in": {
+            "setting_key": "ceo_cloud_data_opt_in",
+            "default": false,
+            "required_for": [
+                "cloud_llm_requests_with_ceo_sensitive_pms_data"
+            ],
+            "revocable": true,
+            "audited": true
+        },
+        "retention": {
+            "raw_prompt_retention": "not_stored",
+            "raw_response_retention": "not_stored",
+            "raw_tool_output_retention": "not_stored",
+            "raw_provider_error_retention": "not_stored",
+            "session_policy": "metadata_only_v1",
+            "audit_policy": "metadata_only_v1"
+        }
+    },
     "tools": [
         {
             "name": "get_hotel_context",

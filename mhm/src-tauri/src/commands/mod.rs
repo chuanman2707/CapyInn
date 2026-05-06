@@ -80,6 +80,7 @@ pub(crate) fn emit_db_update(app: &tauri::AppHandle, entity: &str) {
     let _ = app.emit("db-updated", serde_json::json!({ "entity": entity }));
 }
 
+pub mod agent_settings;
 pub mod analytics;
 pub mod audit;
 pub mod auth;
