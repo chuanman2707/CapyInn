@@ -21,7 +21,10 @@ const OPENAI_MAX_RESPONSE_BYTES: u64 = 1024 * 1024;
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum ProviderTurn {
-    ToolCalls(Vec<ProviderToolCall>),
+    ToolCalls {
+        calls: Vec<ProviderToolCall>,
+        response_items: Vec<Value>,
+    },
     FinalText(String),
 }
 
@@ -44,6 +47,7 @@ pub struct ProviderRequest {
     pub system: String,
     pub user: String,
     pub tools: Vec<CeoReadToolSchema>,
+    pub response_items: Vec<Value>,
     pub tool_outputs: Vec<ProviderToolOutput>,
 }
 
@@ -59,8 +63,14 @@ impl ProviderRequest {
             system: system.into(),
             user: user.into(),
             tools,
+            response_items: Vec::new(),
             tool_outputs: Vec::new(),
         }
+    }
+
+    pub fn with_response_items(mut self, response_items: Vec<Value>) -> Self {
+        self.response_items = response_items;
+        self
     }
 
     pub fn with_tool_outputs(mut self, tool_outputs: Vec<ProviderToolOutput>) -> Self {
@@ -96,7 +106,7 @@ impl OpenAiResponsesRequest {
         }
     }
 
-    fn from_provider_request(request: &ProviderRequest) -> Self {
+    fn from_provider_request(request: &ProviderRequest) -> CommandResult<Self> {
         let mut dto = Self::new(
             &request.model,
             &request.system,
@@ -105,11 +115,19 @@ impl OpenAiResponsesRequest {
         );
 
         if !request.tool_outputs.is_empty() {
-            let mut input = Vec::with_capacity(request.tool_outputs.len() + 1);
+            if request.response_items.is_empty() {
+                return Err(scrub_provider_error(
+                    "provider continuation missing prior response items",
+                ));
+            }
+
+            let mut input =
+                Vec::with_capacity(request.response_items.len() + request.tool_outputs.len() + 1);
             input.push(json!({
                 "role": "user",
                 "content": request.user,
             }));
+            input.extend(request.response_items.iter().cloned());
             input.extend(request.tool_outputs.iter().map(|output| {
                 json!({
                     "type": "function_call_output",
@@ -120,7 +138,7 @@ impl OpenAiResponsesRequest {
             dto.input = Value::Array(input);
         }
 
-        dto
+        Ok(dto)
     }
 }
 
@@ -162,7 +180,7 @@ impl<S: AgentSecretStore> OpenAiProvider<S> {
                     "Missing OpenAI API key for CEO Telegram Chat.",
                 )
             })?;
-        let body = OpenAiResponsesRequest::from_provider_request(&request);
+        let body = OpenAiResponsesRequest::from_provider_request(&request)?;
 
         let response = self
             .client
@@ -274,12 +292,12 @@ fn parse_provider_turn(bytes: &[u8]) -> CommandResult<ProviderTurn> {
     let mut tool_calls = Vec::new();
     let mut final_text = None;
 
-    for output in response.output {
-        match output.item_type.as_str() {
-            "function_call" => tool_calls.push(parse_tool_call(output.raw)?),
-            "message" => {
+    for output in &response.output {
+        match output.get("type").and_then(Value::as_str) {
+            Some("function_call") => tool_calls.push(parse_tool_call(output.clone())?),
+            Some("message") => {
                 if final_text.is_none() {
-                    final_text = parse_message_text(&output.raw);
+                    final_text = parse_message_text(output);
                 }
             }
             _ => {}
@@ -287,7 +305,10 @@ fn parse_provider_turn(bytes: &[u8]) -> CommandResult<ProviderTurn> {
     }
 
     if !tool_calls.is_empty() {
-        return Ok(ProviderTurn::ToolCalls(tool_calls));
+        return Ok(ProviderTurn::ToolCalls {
+            calls: tool_calls,
+            response_items: response.output,
+        });
     }
 
     final_text
@@ -351,15 +372,7 @@ fn provider_lock_error<T>(error: PoisonError<T>) -> CommandError {
 
 #[derive(Debug, Deserialize)]
 struct OpenAiResponsesResponse {
-    output: Vec<OpenAiResponseOutput>,
-}
-
-#[derive(Debug, Deserialize)]
-struct OpenAiResponseOutput {
-    #[serde(rename = "type")]
-    item_type: String,
-    #[serde(flatten)]
-    raw: Value,
+    output: Vec<Value>,
 }
 
 #[cfg(test)]
@@ -392,5 +405,78 @@ mod tests {
 
         assert!(!err.message.contains("sk-secret"));
         assert!(!err.message.contains("abc"));
+    }
+
+    #[test]
+    fn parse_tool_call_turn_preserves_returned_response_items() {
+        let reasoning_item = serde_json::json!({
+            "type": "reasoning",
+            "id": "rs_123",
+            "summary": [{"type": "summary_text", "text": "Need hotel status."}],
+        });
+        let function_call_item = serde_json::json!({
+            "type": "function_call",
+            "id": "fc_123",
+            "call_id": "call_123",
+            "name": "get_hotel_status",
+            "arguments": "{}",
+        });
+        let response = serde_json::json!({
+            "output": [reasoning_item.clone(), function_call_item.clone()],
+        });
+
+        let turn = parse_provider_turn(response.to_string().as_bytes()).expect("parse turn");
+
+        match turn {
+            ProviderTurn::ToolCalls {
+                calls,
+                response_items,
+            } => {
+                assert_eq!(calls.len(), 1);
+                assert_eq!(calls[0].call_id, "call_123");
+                assert_eq!(response_items, vec![reasoning_item, function_call_item]);
+            }
+            ProviderTurn::FinalText(_) => panic!("expected tool call turn"),
+        }
+    }
+
+    #[test]
+    fn follow_up_request_includes_prior_response_items_before_tool_outputs() {
+        let prior_response_item = serde_json::json!({
+            "type": "function_call",
+            "id": "fc_123",
+            "call_id": "call_123",
+            "name": "get_hotel_status",
+            "arguments": "{}",
+        });
+        let request = ProviderRequest::new("gpt-5", "system", "user", Vec::new())
+            .with_response_items(vec![prior_response_item.clone()])
+            .with_tool_outputs(vec![ProviderToolOutput {
+                call_id: "call_123".to_string(),
+                output: serde_json::json!({"ok": true}),
+            }]);
+
+        let openai_request =
+            OpenAiResponsesRequest::from_provider_request(&request).expect("request DTO");
+
+        assert_eq!(openai_request.store, Some(false));
+        assert_eq!(openai_request.input[0]["role"], "user");
+        assert_eq!(openai_request.input[1], prior_response_item);
+        assert_eq!(openai_request.input[2]["type"], "function_call_output");
+        assert_eq!(openai_request.input[2]["call_id"], "call_123");
+    }
+
+    #[test]
+    fn follow_up_with_tool_outputs_without_response_items_is_rejected() {
+        let request = ProviderRequest::new("gpt-5", "system", "user", Vec::new())
+            .with_tool_outputs(vec![ProviderToolOutput {
+                call_id: "call_123".to_string(),
+                output: serde_json::json!({"ok": true}),
+            }]);
+
+        let error = OpenAiResponsesRequest::from_provider_request(&request)
+            .expect_err("tool output continuation must include prior response context");
+
+        assert_eq!(error.code, codes::AGENT_PROVIDER_REQUEST_FAILED);
     }
 }
