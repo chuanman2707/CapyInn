@@ -3,6 +3,8 @@ use crate::{
     app_error::{codes, CommandError, CommandResult},
 };
 
+pub mod ceo_chat;
+
 #[derive(Debug, Clone)]
 pub struct AgentRuntimePolicyInput {
     pub role: AgentRole,
