@@ -7,13 +7,12 @@ use crate::{
     },
     app_error::CommandResult,
     command_idempotency::{
-        system_error, IdempotentCommandResult, WriteCommandContext, WriteCommandExecutor,
-        WriteCommandRequest,
+        system_error, CommandLedgerSummary, IdempotentCommandResult, SanitizedLedgerIntent,
+        WriteCommandContext, WriteCommandExecutor, WriteCommandRequest,
     },
     services::settings_store,
 };
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
 use sqlx::{Pool, Sqlite, Transaction};
 
 pub const CEO_HOURLY_DIGEST_ENABLED_SETTING: &str = "ceo_hourly_digest_enabled";
@@ -120,18 +119,25 @@ pub async fn set_ceo_digest_config_idempotent(
     telegram_delivery_chat_id: Option<i64>,
 ) -> CommandResult<IdempotentCommandResult<serde_json::Value>> {
     let delivery_chat_id_present = telegram_delivery_chat_id.is_some();
-    let delivery_chat_id_fingerprint = telegram_delivery_chat_id
-        .map(|value| safe_fingerprint(&value.to_string()))
-        .unwrap_or_else(|| "none".to_string());
 
-    let request = WriteCommandRequest::new_low_risk(
-        serde_json::json!({
-            "digest_enabled": digest_enabled,
-            "delivery_chat_id_present": delivery_chat_id_present,
-            "delivery_chat_id_fingerprint": delivery_chat_id_fingerprint,
-            "setting_scope": "ceo_hourly_digest",
-        }),
-        "Set CEO hourly digest configuration",
+    let hash_payload = serde_json::json!({
+        "digest_enabled": digest_enabled,
+        "telegram_delivery_chat_id": telegram_delivery_chat_id,
+        "setting_scope": "ceo_hourly_digest",
+    });
+    let ledger_intent = SanitizedLedgerIntent::from_pairs([
+        ("digest_enabled", serde_json::json!(digest_enabled)),
+        (
+            "delivery_chat_id_present",
+            serde_json::json!(delivery_chat_id_present),
+        ),
+        ("setting_scope", serde_json::json!("ceo_hourly_digest")),
+    ])?;
+
+    let request = WriteCommandRequest::new_sanitized(
+        hash_payload,
+        ledger_intent,
+        CommandLedgerSummary::new("Set CEO hourly digest configuration")?,
     )?
     .with_primary_aggregate_key(CEO_DIGEST_SETTINGS_AGGREGATE)
     .with_lock_key_deriver(ceo_digest_settings_lock_keys);
@@ -242,18 +248,6 @@ async fn read_optional_i64_setting(pool: &Pool<Sqlite>, key: &str) -> CommandRes
         .transpose()
 }
 
-fn safe_fingerprint(value: &str) -> String {
-    Sha256::digest(value.as_bytes())
-        .iter()
-        .flat_map(|byte| {
-            [
-                char::from(b'a' + (byte >> 4)),
-                char::from(b'a' + (byte & 0x0f)),
-            ]
-        })
-        .collect()
-}
-
 #[allow(dead_code)]
 async fn read_bool_setting_tx(tx: &mut Transaction<'_, Sqlite>, key: &str) -> CommandResult<bool> {
     let value = sqlx::query_scalar::<_, String>("SELECT value FROM settings WHERE key = ?")
@@ -330,6 +324,16 @@ mod tests {
         .fetch_all(pool)
         .await
         .expect("read audit rows")
+    }
+
+    async fn command_intents(pool: &Pool<Sqlite>, command_name: &str) -> Vec<String> {
+        sqlx::query_scalar::<_, String>(
+            "SELECT intent_json FROM command_idempotency WHERE command_name = ? ORDER BY id ASC",
+        )
+        .bind(command_name)
+        .fetch_all(pool)
+        .await
+        .expect("read command intents")
     }
 
     #[test]
@@ -449,5 +453,11 @@ mod tests {
         assert!(digest_rows[0]
             .1
             .contains("\"delivery_chat_id_present\":true"));
+
+        let digest_intents = command_intents(&pool, SET_CEO_DIGEST_CONFIG_COMMAND).await;
+        assert_eq!(digest_intents.len(), 1);
+        assert!(!digest_intents[0].contains("987654321"));
+        assert!(!digest_intents[0].contains("fingerprint"));
+        assert!(digest_intents[0].contains("\"delivery_chat_id_present\":true"));
     }
 }
