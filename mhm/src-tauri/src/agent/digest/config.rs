@@ -112,6 +112,21 @@ pub async fn get_ceo_digest_config(pool: &Pool<Sqlite>) -> CommandResult<CeoDige
     ))
 }
 
+pub async fn set_ceo_telegram_delivery_chat_id_idempotent(
+    pool: &Pool<Sqlite>,
+    ctx: &WriteCommandContext,
+    telegram_delivery_chat_id: i64,
+) -> CommandResult<IdempotentCommandResult<serde_json::Value>> {
+    let current = get_ceo_digest_config(pool).await?;
+    set_ceo_digest_config_idempotent(
+        pool,
+        ctx,
+        current.digest_enabled,
+        Some(telegram_delivery_chat_id),
+    )
+    .await
+}
+
 pub async fn set_ceo_digest_config_idempotent(
     pool: &Pool<Sqlite>,
     ctx: &WriteCommandContext,

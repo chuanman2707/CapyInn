@@ -26,6 +26,8 @@ const SUPERVISOR_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(2);
 const SUPERVISOR_RETRY_DELAY: Duration = Duration::from_secs(5);
 const CEO_TELEGRAM_OFFSET_COMMAND: &str = "agent.set_ceo_telegram_last_update_id";
 const CEO_TELEGRAM_RUNTIME_ACTOR: &str = "ceo_telegram_runtime";
+const CEO_TELEGRAM_DELIVERY_CHAT_COMMAND: &str = "agent.set_ceo_telegram_delivery_chat_id";
+const CEO_TELEGRAM_DELIVERY_CHAT_ACTOR: &str = "ceo_telegram_runtime";
 
 pub struct AgentSupervisor {
     running: Mutex<Option<JoinHandle<()>>>,
@@ -198,6 +200,12 @@ where
         Box::pin(async move {
             let config = get_ceo_telegram_config(&self.pool).await?;
             let cloud_opt_in = get_ceo_cloud_data_opt_in(&self.pool).await?;
+            if let Err(error) = persist_delivery_chat_id(&self.pool, message.chat_id).await {
+                error!(
+                    "Failed to persist CEO Telegram delivery chat id: {} {}",
+                    error.code, error.message
+                );
+            }
             let reply = self
                 .chat_runtime
                 .handle_message(CeoChatMessage {
@@ -311,6 +319,25 @@ async fn persist_last_update_id(pool: &Pool<Sqlite>, last_update_id: i64) -> Com
         .map(|_| ())
 }
 
+async fn persist_delivery_chat_id(pool: &Pool<Sqlite>, chat_id: i64) -> CommandResult<()> {
+    let mut ctx = WriteCommandContext::for_scoped_command(
+        uuid::Uuid::new_v4().to_string(),
+        format!("ceo-telegram-delivery-chat-{chat_id}"),
+        CEO_TELEGRAM_DELIVERY_CHAT_COMMAND,
+    )?;
+    ctx.actor_type = ActorType::System;
+    ctx.actor_id = Some(CEO_TELEGRAM_DELIVERY_CHAT_ACTOR.to_string());
+
+    crate::agent::digest::config::set_ceo_telegram_delivery_chat_id_idempotent(pool, &ctx, chat_id)
+        .await
+        .map(|_| ())
+}
+
+#[cfg(test)]
+async fn persist_delivery_chat_id_for_test(pool: &Pool<Sqlite>, chat_id: i64) -> CommandResult<()> {
+    persist_delivery_chat_id(pool, chat_id).await
+}
+
 fn supervisor_lock_error() -> CommandError {
     CommandError::system(
         codes::SYSTEM_INTERNAL_ERROR,
@@ -392,5 +419,36 @@ mod tests {
         assert_eq!(supervisor.running_task_debug_id(), first_task_id);
 
         supervisor.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn paired_chat_persists_delivery_chat_id_for_digest() {
+        use crate::agent::digest::config::{
+            get_ceo_digest_config, CEO_TELEGRAM_DELIVERY_CHAT_ID_SETTING,
+        };
+        use sqlx::sqlite::SqlitePoolOptions;
+
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .expect("connect sqlite");
+        crate::db::run_migrations(&pool).await.expect("migrations");
+
+        persist_delivery_chat_id_for_test(&pool, 55)
+            .await
+            .expect("persist chat id");
+
+        let config = get_ceo_digest_config(&pool)
+            .await
+            .expect("read digest config");
+        assert_eq!(config.telegram_delivery_chat_id, Some(55));
+
+        let raw: String = sqlx::query_scalar("SELECT value FROM settings WHERE key = ?")
+            .bind(CEO_TELEGRAM_DELIVERY_CHAT_ID_SETTING)
+            .fetch_one(&pool)
+            .await
+            .expect("read raw setting");
+        assert_eq!(raw, "55");
     }
 }
