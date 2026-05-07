@@ -1122,7 +1122,7 @@ pub(crate) async fn run_migrations(pool: &Pool<Sqlite>) -> Result<(), sqlx::Erro
         .await?;
 
         sqlx::query(
-            "CREATE INDEX IF NOT EXISTS agent_digest_runs_due_status_idx
+            "CREATE INDEX IF NOT EXISTS agent_digest_runs_status_due_idx
              ON agent_digest_runs(status, due_at)",
         )
         .execute(&mut *tx)
@@ -1402,6 +1402,52 @@ mod tests {
             assert!(
                 column_exists(pool, "agent_memory_items", column).await,
                 "agent_memory_items.{column} exists"
+            );
+        }
+    }
+
+    async fn assert_agent_digest_runs_shape(pool: &SqlitePool) {
+        assert!(
+            table_exists(pool, "agent_digest_runs").await,
+            "agent_digest_runs table exists"
+        );
+
+        for column in [
+            "id",
+            "role",
+            "channel",
+            "channel_actor_id",
+            "delivery_chat_id",
+            "due_at",
+            "status",
+            "attempt_count",
+            "max_attempts",
+            "next_retry_at",
+            "claimed_at",
+            "claim_token",
+            "delivered_at",
+            "last_error_code",
+            "last_error_summary_json",
+            "delivery_summary_json",
+            "created_at",
+            "updated_at",
+        ] {
+            assert!(
+                column_exists(pool, "agent_digest_runs", column).await,
+                "agent_digest_runs.{column} exists"
+            );
+        }
+
+        for index in [
+            "agent_digest_runs_status_due_idx",
+            "agent_digest_runs_retry_idx",
+            "agent_digest_runs_delivered_idx",
+            "agent_digest_runs_actor_due_idx",
+        ] {
+            assert_eq!(
+                sqlite_index_count(pool, index).await,
+                1,
+                "{index} exists"
             );
         }
     }
@@ -2152,31 +2198,32 @@ mod tests {
         let pool = test_pool().await;
         run_migrations(&pool).await.expect("runs migrations");
 
-        for column in [
-            "id",
-            "role",
-            "channel",
-            "channel_actor_id",
-            "delivery_chat_id",
-            "due_at",
-            "status",
-            "attempt_count",
-            "max_attempts",
-            "next_retry_at",
-            "claimed_at",
-            "claim_token",
-            "delivered_at",
-            "last_error_code",
-            "last_error_summary_json",
-            "delivery_summary_json",
-            "created_at",
-            "updated_at",
-        ] {
-            assert!(
-                column_exists(&pool, "agent_digest_runs", column).await,
-                "agent_digest_runs.{column} exists"
-            );
-        }
+        assert_agent_digest_runs_shape(&pool).await;
+    }
+
+    #[tokio::test]
+    async fn migration_v19_upgrades_existing_v18_database_idempotently() {
+        let pool = SqlitePool::connect("sqlite::memory:")
+            .await
+            .expect("connects in-memory sqlite");
+        run_migrations(&pool).await.expect("initial migrations run");
+        sqlx::query("UPDATE schema_version SET version = 18")
+            .execute(&pool)
+            .await
+            .expect("rewinds schema version");
+        sqlx::query("DROP TABLE IF EXISTS agent_digest_runs")
+            .execute(&pool)
+            .await
+            .expect("removes v19 table");
+
+        run_migrations(&pool).await.expect("v19 migration reruns");
+        run_migrations(&pool)
+            .await
+            .expect("v19 migration is idempotent");
+
+        assert_agent_digest_runs_shape(&pool).await;
+        let version = get_schema_version(&pool).await.expect("schema version");
+        assert_eq!(version, 19);
     }
 
     #[tokio::test]
