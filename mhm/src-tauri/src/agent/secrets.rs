@@ -114,7 +114,7 @@ fn map_keyring_error(error: keyring::Error) -> CommandError {
 }
 
 pub fn redact_agent_secret_markers(value: &str) -> String {
-    let telegram_bot_url = Regex::new(r"(?i)\b(https?://api\.telegram\.org)/bot[^/\s]+/")
+    let telegram_bot_url = Regex::new(r"(?i)\b(https?://api\.telegram\.org)/bot\d+:[^/\s]+/")
         .expect("valid telegram bot URL redaction regex");
     let bearer = Regex::new(r"(?i)Bearer\s+\S+").expect("valid bearer redaction regex");
     let openai = Regex::new(r"(?i)\bsk-[A-Za-z0-9_-]+").expect("valid openai redaction regex");
@@ -199,6 +199,13 @@ mod tests {
     #[test]
     fn redaction_preserves_benign_botanical_urls() {
         let benign_url = "https://example.com/botanical/index.html";
+
+        assert_eq!(redact_agent_secret_markers(benign_url), benign_url);
+    }
+
+    #[test]
+    fn redaction_preserves_telegram_api_botanical_urls() {
+        let benign_url = "https://api.telegram.org/botanical/index.html";
 
         assert_eq!(redact_agent_secret_markers(benign_url), benign_url);
     }
