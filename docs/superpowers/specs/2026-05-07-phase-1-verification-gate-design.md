@@ -92,6 +92,8 @@ UI hiding không được coi là authorization boundary. Backend command tests 
 
 Static tests không thay thế runtime tests. Chúng là tripwire để tránh vô tình xóa hoặc bypass guardrails quan trọng.
 
+Trong verification, `CAPYINN_DISABLE_CEO_TELEGRAM=true` chỉ được hiểu là disable live Telegram polling và real Telegram HTTP transport. Flag này không được skip fake Telegram transports, injected runtimes, hoặc runtime-level smoke tests. Nếu fake smoke bị skip vì flag này, gate fail vì không còn chứng minh được read-only path.
+
 ### Deterministic Smoke/Probe Tests
 
 Gate phải có smoke/probe tests không gọi network thật:
@@ -111,12 +113,13 @@ Mỗi claim của #125 phải map tới ít nhất một test/probe trong `verif
 
 | Safety claim | Required coverage |
 | --- | --- |
-| Telegram/agent flow không mutate PMS tables | Snapshot/count hoặc row-hash trước/sau cho chat và digest. Chỉ agent metadata tables được phép thay đổi. |
+| Telegram/agent flow không mutate PMS tables | Row-content hash hoặc full deterministic snapshot trước/sau cho chat và digest. Row counts chỉ được dùng supplemental, không được là bằng chứng chính. Chỉ agent metadata tables được phép thay đổi. |
 | Registry không có dangerous tools | Assert exact eight CEO tools, `ReadOnly`, `PmsRead`, `CeoSensitive`, role `CeoSecretary`; reject write/generic/shell/file/browser/HTTP/dynamic MCP capabilities. |
 | Unknown/unpaired Telegram users không trigger LLM | Fake runtime/provider call count bằng 0; không prompt construction; không PMS read. |
-| Secrets không leak | Secret-like markers không xuất hiện trong logs/errors/audit/session/memory/tool output/digest run state/Telegram response. |
+| Secrets không leak | Secret-like markers không xuất hiện trong logs/errors/audit/session/memory/tool output/digest run state/Telegram response/model feedback. |
 | Memory không ảnh hưởng PMS query | Seed forbidden hoặc misleading memory rồi assert PMS read result vẫn đến từ DB/read tool output. |
 | Digest fixed read-only path | `CEO_DIGEST_TOOL_NAMES` match CEO registry; provider không nhận model-selected tools; session `uses_memory=false`. |
+| Digest readiness cases từ Spec C | Digest gate yêu cầu digest toggle, delivery chat ID, owner binding, Telegram token, OpenAI key, model, và cloud opt-in; `CEO Telegram Chat off + CEO Hourly Digest on + digest gate ready` vẫn cho phép digest scheduler chạy. |
 | Cloud opt-in/revocation | Default false blocks CEO-sensitive provider request; enabled allows; revoked blocks again. |
 | E2E smoke read-only path | Mocked status/chat/digest flow hoàn tất với fake provider/fake Telegram và PMS business tables unchanged. |
 
@@ -124,17 +127,19 @@ Mỗi claim của #125 phải map tới ít nhất một test/probe trong `verif
 
 Mutation checks phải phân biệt PMS business truth với agent metadata.
 
-PMS business tables include booking, room, guest, invoice, folio, payment, ledger, housekeeping, audit, pricing, group, outbox, and other operational truth tables. Chat và digest tests phải prove các bảng này unchanged across mocked turns.
+PMS business tables include booking, room, guest, invoice, folio, payment, ledger, housekeeping, audit, pricing, group, outbox, and other operational truth tables. Chat và digest tests phải prove row content của các bảng này unchanged across mocked turns.
 
-Allowed metadata changes during tests:
+Required snapshot rule:
 
-- `agent_sessions`
-- `agent_audit_events`
-- `agent_digest_runs`
-- non-secret agent settings/config rows needed by setup
-- command/audit metadata rows only when the test explicitly covers settings command behavior
+- Chat/digest read-only smoke tests must hash or snapshot row content for every classified PMS business table before and after the flow.
+- Row counts are supplemental only. They do not catch existing-row updates, delete+insert pairs, status changes, balance changes, or audit/outbox truth changes.
+- The implementation must define a concrete table classifier for tests. Unknown non-agent tables default to PMS business tables and must be included in the hash/snapshot until explicitly classified.
+- For chat/digest smoke tests, allowed changed tables are only `agent_sessions`, `agent_audit_events`, and `agent_digest_runs`.
+- Non-secret settings/config rows needed by setup should be written before the before-snapshot, or isolated in separate settings command tests.
+- Command ledger, command audit, and other command metadata rows are allowed to change only in settings-command tests that explicitly cover low-risk configuration writes. They are not allowed changes in chat/digest read-only smoke tests.
+- Tables whose names start with `agent_` are not automatically safe; each allowed `agent_` table must be listed by name for the test mode. For Phase 1 chat/digest smoke, the allowed names are exactly `agent_sessions`, `agent_audit_events`, and `agent_digest_runs`.
 
-Nếu snapshot test phát hiện PMS business table change, Phase 1 gate fails. Implementation phải investigate trước khi đóng issue #125.
+Nếu row-content hash hoặc full snapshot phát hiện PMS business table change, Phase 1 gate fails. Implementation phải investigate trước khi đóng issue #125.
 
 ## Registry Boundary
 
@@ -243,6 +248,23 @@ Gate must cover:
 
 Cloud-data opt-in is not a write approval. It only allows cloud LLM processing for CEO-sensitive read/report data. PMS writes remain out of scope for Phase 1.
 
+## Digest Gate Boundary
+
+Spec C digest readiness remains part of the Phase 1 verification gate.
+
+Gate must cover:
+
+- digest toggle disabled means digest gate is not ready
+- missing Telegram delivery chat ID means digest gate is not ready
+- missing owner binding means digest gate is not ready
+- missing Telegram bot token means digest gate is not ready
+- missing OpenAI API key means digest gate is not ready
+- missing OpenAI model means digest gate is not ready
+- missing CEO cloud-data opt-in means digest gate is not ready
+- `CEO Telegram Chat` runtime toggle off does not by itself block digest scheduler when `CEO Hourly Digest` is on and digest gate dependencies are ready
+
+This preserves the separation from Spec C: interactive chat and scheduled digest share safe dependencies, but their lifecycle toggles remain independent.
+
 ## End-To-End Smoke Paths
 
 Gate must include read-only smoke paths for the CEO-facing workflows.
@@ -278,12 +300,13 @@ Phase 1 verification passes only when:
 
 - `npm run verify:agent` passes locally without Telegram/OpenAI secrets.
 - Gate makes no real network calls to Telegram or OpenAI.
-- `CAPYINN_DISABLE_CEO_TELEGRAM=true` is set for verification runs.
+- `CAPYINN_DISABLE_CEO_TELEGRAM=true` is set for verification runs and disables only live Telegram polling/real Telegram HTTP transport, not fake smoke tests.
 - Every #125 claim maps to active tests in the gate.
 - No test depends on raw prompt, raw response, or raw tool output persistence.
 - Smoke paths complete through fake provider/fake Telegram read-only flows.
-- Business-table mutation checks pass for both chat and digest.
-- Secret markers are absent from all tested forbidden sinks.
+- Business-table row-content hash or full snapshot checks pass for both chat and digest.
+- Digest readiness tests include digest toggle, delivery chat ID, and chat-off/digest-on separation.
+- Secret markers are absent from all tested forbidden sinks, including session metadata, digest run state, and model feedback.
 
 If any safety assertion fails, Phase 1 is not closed. Do not treat partial pass as acceptance for #125.
 
@@ -333,10 +356,10 @@ This spec itself is the only required doc artifact for Spec D. Generated notes o
 
 #125:
 
-- Telegram flow cannot mutate PMS tables: covered by chat and digest business-table snapshot tests.
+- Telegram flow cannot mutate PMS tables: covered by chat and digest business-table row-content hash or full deterministic snapshot tests.
 - Registry contains no write/generic/shell/file/browser/HTTP/dynamic MCP tools: covered by exact registry tests and static guardrail tripwires.
 - Unknown and unpaired Telegram users cannot trigger LLM calls: covered by fake runtime/provider call-count tests before prompt construction.
-- Bot token and OpenAI key never appear in logs, memory, audit, tool output, or Telegram responses: covered by secret marker tests across provider/channel/runtime/digest failure paths and metadata sinks.
+- Bot token and OpenAI key never appear in logs, memory, audit, tool output, or Telegram responses: covered by secret marker tests across provider/channel/runtime/digest failure paths, session metadata, digest run state, and model feedback.
 - Agent memory cannot affect PMS query results: covered by misleading-memory tests and digest `uses_memory=false` assertions.
 
 Additional Phase 1 closeout:
