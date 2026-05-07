@@ -30,12 +30,16 @@ pub async fn load_night_audit_snapshot(
         .await?;
 
     let occupancy_checkout = revenue_queries::occupancy_checkout_date_sql("");
+    let check_in_date = format!("DATE({})", revenue_queries::local_date_sql("check_in_at"));
+    let audit_date_start = format!("DATE({})", revenue_queries::local_date_sql("?2"));
+    let audit_date_end_exclusive =
+        format!("DATE({}, '+1 day')", revenue_queries::local_date_sql("?1"));
     let rooms_sold_query = format!(
         "SELECT COUNT(DISTINCT room_id)
          FROM bookings
          WHERE status IN ('active', 'checked_out')
-           AND DATE(check_in_at) < DATE(?1, '+1 day')
-           AND DATE({occupancy_checkout}) > DATE(?2)"
+           AND {check_in_date} < {audit_date_end_exclusive}
+           AND DATE({occupancy_checkout}) > {audit_date_start}"
     );
     let rooms_sold: (i32,) = sqlx::query_as(&rooms_sold_query)
         .bind(audit_date)
@@ -96,6 +100,11 @@ pub async fn load_booking_export_rows(
     to_date: &str,
 ) -> Result<Vec<BookingExportRow>, sqlx::Error> {
     let reporting_checkout = revenue_queries::recognized_checkout_date_sql("b.");
+    let from_date_sql = format!("DATE({})", revenue_queries::local_date_sql("?1"));
+    let to_date_sql = format!("DATE({})", revenue_queries::local_date_sql("?2"));
+    let check_in_date_sql = format!("DATE({})", revenue_queries::local_date_sql("b.check_in_at"));
+    let cancellation_created_date_sql =
+        format!("DATE({})", revenue_queries::local_date_sql("tx.created_at"));
     let export_checkout = format!(
         "CASE
             WHEN b.status = 'checked_out' THEN {reporting_checkout}
@@ -138,18 +147,18 @@ pub async fn load_booking_export_rows(
          ) folio ON folio.booking_id = b.id
          WHERE (
                 b.status = 'checked_out'
-                AND DATE({reporting_checkout}) BETWEEN DATE(?1) AND DATE(?2)
+                AND DATE({reporting_checkout}) BETWEEN {from_date_sql} AND {to_date_sql}
             )
             OR (
                 b.status != 'checked_out'
-                AND DATE(b.check_in_at) BETWEEN DATE(?1) AND DATE(?2)
+                AND {check_in_date_sql} BETWEEN {from_date_sql} AND {to_date_sql}
             )
             OR EXISTS (
                 SELECT 1
                 FROM transactions tx
                 WHERE tx.booking_id = b.id
                   AND tx.type = 'cancellation_fee'
-                  AND DATE(tx.created_at) BETWEEN DATE(?1) AND DATE(?2)
+                  AND {cancellation_created_date_sql} BETWEEN {from_date_sql} AND {to_date_sql}
             )
          ORDER BY b.check_in_at DESC")
     )

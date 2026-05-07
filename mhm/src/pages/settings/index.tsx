@@ -1,6 +1,7 @@
 import { useState } from "react";
 import {
   BedDouble,
+  Bot,
   Building2,
   Camera,
   Clock,
@@ -17,6 +18,7 @@ import { useAuthStore } from "@/stores/useAuthStore";
 
 import AppearanceSection from "./AppearanceSection";
 import CheckinRulesSection from "./CheckinRulesSection";
+import CeoAgentSection from "./CeoAgentSection";
 import DataSection from "./DataSection";
 import DiagnosticsSection from "./DiagnosticsSection";
 import GatewaySection from "./GatewaySection";
@@ -36,6 +38,7 @@ type SettingsSectionKey =
   | "diagnostics"
   | "data"
   | "gateway"
+  | "ceo-agent"
   | "updates"
   | "pricing"
   | "users";
@@ -56,6 +59,7 @@ export default function SettingsPage() {
     { key: "updates" as const, label: "Software Update", icon: RefreshCcw },
     ...(isAdmin()
       ? [
+        { key: "ceo-agent" as const, label: "CEO Agent", icon: Bot },
         { key: "pricing" as const, label: "Pricing", icon: DollarSign },
         { key: "users" as const, label: "Users", icon: Users },
       ]
@@ -94,6 +98,7 @@ export default function SettingsPage() {
         {activeSection === "data" && <DataSection />}
         {activeSection === "gateway" && <GatewaySection />}
         {activeSection === "updates" && <SoftwareUpdateSection />}
+        {activeSection === "ceo-agent" && isAdmin() && <CeoAgentSection />}
         {activeSection === "pricing" && isAdmin() && <PricingSection />}
         {activeSection === "users" && isAdmin() && <UserManagement />}
       </Card>

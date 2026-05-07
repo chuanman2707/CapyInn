@@ -160,6 +160,71 @@
     "defaultMessage": "Cần xử lý khôi phục lệnh trước khi tiếp tục."
   },
   {
+    "code": "AGENT_RUNTIME_DISABLED",
+    "kind": "user",
+    "defaultMessage": "Trợ lý AI hiện đang bị tắt."
+  },
+  {
+    "code": "AGENT_CHANNEL_UNPAIRED",
+    "kind": "user",
+    "defaultMessage": "Kênh trợ lý AI chưa được liên kết."
+  },
+  {
+    "code": "AGENT_PROVIDER_DISABLED",
+    "kind": "user",
+    "defaultMessage": "Nhà cung cấp AI hiện đang bị tắt."
+  },
+  {
+    "code": "AGENT_CLOUD_DATA_OPT_IN_REQUIRED",
+    "kind": "user",
+    "defaultMessage": "Cần bật cho phép xử lý dữ liệu trên đám mây trước khi dùng trợ lý AI."
+  },
+  {
+    "code": "AGENT_TOOL_NOT_ALLOWED",
+    "kind": "user",
+    "defaultMessage": "Trợ lý AI không được phép dùng công cụ này."
+  },
+  {
+    "code": "AGENT_MEMORY_FORBIDDEN_TRUTH",
+    "kind": "user",
+    "defaultMessage": "Bộ nhớ trợ lý AI không được dùng làm dữ liệu PMS chính thức."
+  },
+  {
+    "code": "AGENT_RUNTIME_NOT_CONFIGURED",
+    "kind": "user",
+    "defaultMessage": "Cấu hình CEO Telegram Chat chưa đầy đủ."
+  },
+  {
+    "code": "AGENT_TELEGRAM_OWNER_NOT_BOUND",
+    "kind": "user",
+    "defaultMessage": "Chưa liên kết Telegram CEO."
+  },
+  {
+    "code": "AGENT_TELEGRAM_USER_DENIED",
+    "kind": "user",
+    "defaultMessage": "Tài khoản Telegram này chưa được phép dùng trợ lý CEO."
+  },
+  {
+    "code": "AGENT_SECRET_MISSING",
+    "kind": "user",
+    "defaultMessage": "Thiếu khóa bí mật cho CEO Telegram Chat."
+  },
+  {
+    "code": "AGENT_PROVIDER_REQUEST_FAILED",
+    "kind": "user",
+    "defaultMessage": "Không thể gọi nhà cung cấp AI."
+  },
+  {
+    "code": "AGENT_TOOL_LOOP_LIMIT",
+    "kind": "user",
+    "defaultMessage": "Trợ lý AI đã dừng vì vượt giới hạn gọi công cụ."
+  },
+  {
+    "code": "AGENT_UNSUPPORTED_PMS_QUESTION",
+    "kind": "user",
+    "defaultMessage": "Trợ lý AI không có đủ dữ liệu PMS để trả lời câu hỏi này."
+  },
+  {
     "code": "SYSTEM_INTERNAL_ERROR",
     "kind": "system",
     "defaultMessage": "Có lỗi hệ thống, vui lòng thử lại"

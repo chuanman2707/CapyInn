@@ -26,6 +26,7 @@ pub async fn init_db() -> Result<Pool<Sqlite>, sqlx::Error> {
     run_migrations(&pool).await?;
     ensure_setting_default(&pool, "setup_completed", "false").await?;
     ensure_setting_default(&pool, "send_crash_reports", "false").await?;
+    ensure_setting_default(&pool, "ceo_cloud_data_opt_in", "false").await?;
 
     Ok(pool)
 }
@@ -994,6 +995,164 @@ pub(crate) async fn run_migrations(pool: &Pool<Sqlite>) -> Result<(), sqlx::Erro
         set_schema_version(&mut tx, 17).await?;
         tx.commit().await?;
     }
+
+    // -- V18: Agent safety session, audit, and memory schema --
+    if current < 18 {
+        let mut tx = pool.begin().await?;
+
+        sqlx::query(
+            "CREATE TABLE IF NOT EXISTS agent_sessions (
+                id TEXT PRIMARY KEY,
+                role TEXT NOT NULL,
+                channel TEXT NOT NULL,
+                channel_actor_id TEXT,
+                status TEXT NOT NULL,
+                uses_memory INTEGER NOT NULL DEFAULT 0,
+                retention_policy TEXT NOT NULL,
+                metadata_json TEXT NOT NULL DEFAULT '{}',
+                started_at TEXT NOT NULL,
+                last_seen_at TEXT,
+                ended_at TEXT
+            )",
+        )
+        .execute(&mut *tx)
+        .await?;
+
+        sqlx::query(
+            "CREATE INDEX IF NOT EXISTS agent_sessions_actor_idx
+             ON agent_sessions(role, channel, channel_actor_id, last_seen_at)",
+        )
+        .execute(&mut *tx)
+        .await?;
+
+        sqlx::query(
+            "CREATE INDEX IF NOT EXISTS agent_sessions_status_idx
+             ON agent_sessions(status, started_at)",
+        )
+        .execute(&mut *tx)
+        .await?;
+
+        sqlx::query(
+            "CREATE TABLE IF NOT EXISTS agent_audit_events (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                session_id TEXT REFERENCES agent_sessions(id),
+                event_type TEXT NOT NULL,
+                actor_id TEXT,
+                role TEXT,
+                channel TEXT,
+                tool_name TEXT,
+                provider TEXT,
+                policy_outcome TEXT NOT NULL,
+                mutation_risk TEXT,
+                data_sensitivity TEXT,
+                summary_json TEXT NOT NULL DEFAULT '{}',
+                created_at TEXT NOT NULL
+            )",
+        )
+        .execute(&mut *tx)
+        .await?;
+
+        sqlx::query(
+            "CREATE INDEX IF NOT EXISTS agent_audit_events_type_idx
+             ON agent_audit_events(event_type, created_at)",
+        )
+        .execute(&mut *tx)
+        .await?;
+
+        sqlx::query(
+            "CREATE INDEX IF NOT EXISTS agent_audit_events_session_idx
+             ON agent_audit_events(session_id, created_at)",
+        )
+        .execute(&mut *tx)
+        .await?;
+
+        sqlx::query(
+            "CREATE INDEX IF NOT EXISTS agent_audit_events_role_channel_idx
+             ON agent_audit_events(role, channel, created_at)",
+        )
+        .execute(&mut *tx)
+        .await?;
+
+        sqlx::query(
+            "CREATE TABLE IF NOT EXISTS agent_memory_items (
+                id TEXT PRIMARY KEY,
+                role TEXT NOT NULL,
+                scope TEXT NOT NULL,
+                key TEXT NOT NULL,
+                value_json TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                UNIQUE(role, scope, key)
+            )",
+        )
+        .execute(&mut *tx)
+        .await?;
+
+        set_schema_version(&mut tx, 18).await?;
+        tx.commit().await?;
+    }
+
+    // -- V19: CEO hourly digest run state --
+    if current < 19 {
+        let mut tx = pool.begin().await?;
+
+        sqlx::query(
+            "CREATE TABLE IF NOT EXISTS agent_digest_runs (
+                id TEXT PRIMARY KEY,
+                role TEXT NOT NULL,
+                channel TEXT NOT NULL,
+                channel_actor_id TEXT,
+                delivery_chat_id TEXT,
+                due_at TEXT NOT NULL,
+                status TEXT NOT NULL,
+                attempt_count INTEGER NOT NULL DEFAULT 0,
+                max_attempts INTEGER NOT NULL,
+                next_retry_at TEXT,
+                claimed_at TEXT,
+                claim_token TEXT,
+                delivered_at TEXT,
+                last_error_code TEXT,
+                last_error_summary_json TEXT NOT NULL DEFAULT '{}',
+                delivery_summary_json TEXT NOT NULL DEFAULT '{}',
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            )",
+        )
+        .execute(&mut *tx)
+        .await?;
+
+        sqlx::query(
+            "CREATE INDEX IF NOT EXISTS agent_digest_runs_status_due_idx
+             ON agent_digest_runs(status, due_at)",
+        )
+        .execute(&mut *tx)
+        .await?;
+
+        sqlx::query(
+            "CREATE INDEX IF NOT EXISTS agent_digest_runs_retry_idx
+             ON agent_digest_runs(status, next_retry_at)
+             WHERE status = 'retry_waiting'",
+        )
+        .execute(&mut *tx)
+        .await?;
+
+        sqlx::query(
+            "CREATE INDEX IF NOT EXISTS agent_digest_runs_delivered_idx
+             ON agent_digest_runs(delivered_at)",
+        )
+        .execute(&mut *tx)
+        .await?;
+
+        sqlx::query(
+            "CREATE INDEX IF NOT EXISTS agent_digest_runs_actor_due_idx
+             ON agent_digest_runs(channel_actor_id, delivery_chat_id, due_at)",
+        )
+        .execute(&mut *tx)
+        .await?;
+
+        set_schema_version(&mut tx, 19).await?;
+        tx.commit().await?;
+    }
     Ok(())
 }
 
@@ -1149,6 +1308,148 @@ mod tests {
         .fetch_one(pool)
         .await
         .expect("checks sqlite table")
+    }
+
+    async fn table_exists(pool: &SqlitePool, table: &str) -> bool {
+        sqlite_table_count(pool, table).await == 1
+    }
+
+    async fn test_pool() -> SqlitePool {
+        SqlitePool::connect("sqlite::memory:")
+            .await
+            .expect("connects in-memory sqlite")
+    }
+
+    async fn column_exists(pool: &SqlitePool, table: &str, column: &str) -> bool {
+        let sql = match table {
+            "agent_sessions" => {
+                "SELECT COUNT(*) FROM pragma_table_info('agent_sessions') WHERE name = ?"
+            }
+            "agent_audit_events" => {
+                "SELECT COUNT(*) FROM pragma_table_info('agent_audit_events') WHERE name = ?"
+            }
+            "agent_memory_items" => {
+                "SELECT COUNT(*) FROM pragma_table_info('agent_memory_items') WHERE name = ?"
+            }
+            "agent_digest_runs" => {
+                "SELECT COUNT(*) FROM pragma_table_info('agent_digest_runs') WHERE name = ?"
+            }
+            _ => panic!("unsupported table {table}"),
+        };
+
+        let count: i64 = sqlx::query_scalar(sql)
+            .bind(column)
+            .fetch_one(pool)
+            .await
+            .expect("reads table info");
+        count == 1
+    }
+
+    async fn assert_agent_safety_shape(pool: &SqlitePool) {
+        for table in ["agent_sessions", "agent_audit_events", "agent_memory_items"] {
+            assert!(table_exists(pool, table).await, "{table} table exists");
+        }
+
+        for column in [
+            "id",
+            "role",
+            "channel",
+            "channel_actor_id",
+            "status",
+            "uses_memory",
+            "retention_policy",
+            "metadata_json",
+            "started_at",
+            "last_seen_at",
+            "ended_at",
+        ] {
+            assert!(
+                column_exists(pool, "agent_sessions", column).await,
+                "agent_sessions.{column} exists"
+            );
+        }
+
+        for column in [
+            "id",
+            "session_id",
+            "event_type",
+            "actor_id",
+            "role",
+            "channel",
+            "tool_name",
+            "provider",
+            "policy_outcome",
+            "mutation_risk",
+            "data_sensitivity",
+            "summary_json",
+            "created_at",
+        ] {
+            assert!(
+                column_exists(pool, "agent_audit_events", column).await,
+                "agent_audit_events.{column} exists"
+            );
+        }
+
+        for column in [
+            "id",
+            "role",
+            "scope",
+            "key",
+            "value_json",
+            "created_at",
+            "updated_at",
+        ] {
+            assert!(
+                column_exists(pool, "agent_memory_items", column).await,
+                "agent_memory_items.{column} exists"
+            );
+        }
+    }
+
+    async fn assert_agent_digest_runs_shape(pool: &SqlitePool) {
+        assert!(
+            table_exists(pool, "agent_digest_runs").await,
+            "agent_digest_runs table exists"
+        );
+
+        for column in [
+            "id",
+            "role",
+            "channel",
+            "channel_actor_id",
+            "delivery_chat_id",
+            "due_at",
+            "status",
+            "attempt_count",
+            "max_attempts",
+            "next_retry_at",
+            "claimed_at",
+            "claim_token",
+            "delivered_at",
+            "last_error_code",
+            "last_error_summary_json",
+            "delivery_summary_json",
+            "created_at",
+            "updated_at",
+        ] {
+            assert!(
+                column_exists(pool, "agent_digest_runs", column).await,
+                "agent_digest_runs.{column} exists"
+            );
+        }
+
+        for index in [
+            "agent_digest_runs_status_due_idx",
+            "agent_digest_runs_retry_idx",
+            "agent_digest_runs_delivered_idx",
+            "agent_digest_runs_actor_due_idx",
+        ] {
+            assert_eq!(
+                sqlite_index_count(pool, index).await,
+                1,
+                "{index} exists"
+            );
+        }
     }
 
     async fn outbox_column_count(pool: &SqlitePool, name: &str) -> i64 {
@@ -1337,7 +1638,7 @@ mod tests {
             .expect("reads final schema version")
             .get("version");
 
-        assert_eq!(version, 17);
+        assert_eq!(version, 19);
     }
 
     #[tokio::test]
@@ -1353,7 +1654,7 @@ mod tests {
             .expect("reads version")
             .get("version");
 
-        assert_eq!(version, 17);
+        assert_eq!(version, 19);
         assert_money_columns_are_integer(&pool).await;
     }
 
@@ -1641,7 +1942,7 @@ mod tests {
             .expect("reads final schema version")
             .get("version");
 
-        assert_eq!(version, 17);
+        assert_eq!(version, 19);
     }
 
     #[tokio::test]
@@ -1708,7 +2009,7 @@ mod tests {
             .expect("reads final schema version")
             .get("version");
 
-        assert_eq!(version, 17);
+        assert_eq!(version, 19);
     }
 
     #[tokio::test]
@@ -1788,7 +2089,7 @@ mod tests {
         );
 
         let version = get_schema_version(&pool).await.expect("schema version");
-        assert_eq!(version, 17);
+        assert_eq!(version, 19);
     }
 
     #[tokio::test]
@@ -1828,7 +2129,7 @@ mod tests {
 
         assert_outbox_shape(&pool).await;
         let version = get_schema_version(&pool).await.expect("schema version");
-        assert_eq!(version, 17);
+        assert_eq!(version, 19);
     }
 
     #[tokio::test]
@@ -1846,7 +2147,7 @@ mod tests {
 
         assert_outbox_shape(&pool).await;
         let version = get_schema_version(&pool).await.expect("schema version");
-        assert_eq!(version, 17);
+        assert_eq!(version, 19);
     }
 
     #[tokio::test]
@@ -1876,7 +2177,77 @@ mod tests {
             1
         );
         let version = get_schema_version(&pool).await.expect("schema version");
-        assert_eq!(version, 17);
+        assert_eq!(version, 19);
+    }
+
+    #[tokio::test]
+    async fn migration_v18_adds_agent_safety_tables() {
+        let pool = SqlitePool::connect("sqlite::memory:")
+            .await
+            .expect("connects in-memory sqlite");
+
+        run_migrations(&pool).await.expect("runs migrations");
+
+        assert_agent_safety_shape(&pool).await;
+        let version = get_schema_version(&pool).await.expect("schema version");
+        assert_eq!(version, 19);
+    }
+
+    #[tokio::test]
+    async fn v19_creates_agent_digest_runs_schema() {
+        let pool = test_pool().await;
+        run_migrations(&pool).await.expect("runs migrations");
+
+        assert_agent_digest_runs_shape(&pool).await;
+    }
+
+    #[tokio::test]
+    async fn migration_v19_upgrades_existing_v18_database_idempotently() {
+        let pool = SqlitePool::connect("sqlite::memory:")
+            .await
+            .expect("connects in-memory sqlite");
+        run_migrations(&pool).await.expect("initial migrations run");
+        sqlx::query("UPDATE schema_version SET version = 18")
+            .execute(&pool)
+            .await
+            .expect("rewinds schema version");
+        sqlx::query("DROP TABLE IF EXISTS agent_digest_runs")
+            .execute(&pool)
+            .await
+            .expect("removes v19 table");
+
+        run_migrations(&pool).await.expect("v19 migration reruns");
+        run_migrations(&pool)
+            .await
+            .expect("v19 migration is idempotent");
+
+        assert_agent_digest_runs_shape(&pool).await;
+        let version = get_schema_version(&pool).await.expect("schema version");
+        assert_eq!(version, 19);
+    }
+
+    #[tokio::test]
+    async fn migration_v18_upgrades_existing_v17_database() {
+        let pool = SqlitePool::connect("sqlite::memory:")
+            .await
+            .expect("connects in-memory sqlite");
+        run_migrations(&pool).await.expect("initial migrations run");
+        sqlx::query("UPDATE schema_version SET version = 17")
+            .execute(&pool)
+            .await
+            .expect("rewinds schema version");
+        for table in ["agent_audit_events", "agent_memory_items", "agent_sessions"] {
+            sqlx::query(&format!("DROP TABLE IF EXISTS {table}"))
+                .execute(&pool)
+                .await
+                .expect("removes v18 table");
+        }
+
+        run_migrations(&pool).await.expect("v18 migration reruns");
+
+        assert_agent_safety_shape(&pool).await;
+        let version = get_schema_version(&pool).await.expect("schema version");
+        assert_eq!(version, 19);
     }
 
     #[tokio::test]
