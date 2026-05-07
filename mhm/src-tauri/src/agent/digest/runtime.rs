@@ -293,6 +293,34 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn all_unavailable_tools_send_fallback_without_provider_call() {
+        let pool = test_pool().await;
+        pool.close().await;
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let provider = RecordingProvider {
+            requests: Arc::clone(&requests),
+            turn: ProviderTurn::FinalText("provider should not run".to_string()),
+        };
+        let telegram = RecordingTelegram::default();
+        let sent_messages = Arc::clone(&telegram.sent_messages);
+
+        let result = CeoDigestRuntime::new(pool, provider, telegram)
+            .deliver_digest(&claimed_run(), "gpt-test".to_string())
+            .await
+            .expect("deliver fallback digest");
+
+        assert!(requests.lock().expect("request lock").is_empty());
+        assert_eq!(result.unavailable_tools.len(), CEO_DIGEST_TOOL_NAMES.len());
+        assert_eq!(
+            *sent_messages.lock().expect("sent message lock"),
+            vec![(
+                55,
+                "Không có đủ dữ liệu PMS được phép để gửi digest hiện tại.".to_string()
+            )]
+        );
+    }
+
+    #[tokio::test]
     async fn missing_delivery_chat_id_fails_closed_before_provider_call() {
         let pool = test_pool().await;
         let requests = Arc::new(Mutex::new(Vec::new()));
