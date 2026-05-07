@@ -310,6 +310,7 @@ where
         ))
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn audit(
         &self,
         session_id: Option<&str>,
