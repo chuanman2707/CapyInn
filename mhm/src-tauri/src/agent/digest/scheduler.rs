@@ -41,7 +41,7 @@ pub async fn ensure_startup_digest_due_run(
     config: &CeoDigestConfig,
     now: DateTime<Utc>,
 ) -> CommandResult<bool> {
-    if last_delivery_is_recent(pool, now).await? {
+    if last_delivery_is_recent(pool, config, now).await? {
         return Ok(false);
     }
     let due_at = truncate_to_utc_second(now)?;
@@ -279,7 +279,7 @@ async fn ensure_hourly_digest_due_run(
     config: &CeoDigestConfig,
     now: DateTime<Utc>,
 ) -> CommandResult<bool> {
-    if last_delivery_is_recent(pool, now).await? {
+    if last_delivery_is_recent(pool, config, now).await? {
         return Ok(false);
     }
 
@@ -402,12 +402,25 @@ async fn existing_digest_run_matches(
     ))
 }
 
-async fn last_delivery_is_recent(pool: &Pool<Sqlite>, now: DateTime<Utc>) -> CommandResult<bool> {
+async fn last_delivery_is_recent(
+    pool: &Pool<Sqlite>,
+    config: &CeoDigestConfig,
+    now: DateTime<Utc>,
+) -> CommandResult<bool> {
+    let delivery_chat_id = config
+        .telegram_delivery_chat_id
+        .map(|value| value.to_string());
     let row = sqlx::query(
         "SELECT delivered_at FROM agent_digest_runs
          WHERE status = 'delivered'
+           AND ((? IS NULL AND channel_actor_id IS NULL) OR channel_actor_id = ?)
+           AND ((? IS NULL AND delivery_chat_id IS NULL) OR delivery_chat_id = ?)
          ORDER BY delivered_at DESC LIMIT 1",
     )
+    .bind(&config.telegram_user_id)
+    .bind(&config.telegram_user_id)
+    .bind(&delivery_chat_id)
+    .bind(&delivery_chat_id)
     .fetch_optional(pool)
     .await
     .map_err(system_error)?;
@@ -652,6 +665,39 @@ mod tests {
             .expect("claimed");
     }
 
+    async fn seed_delivered_digest_run(
+        pool: &Pool<Sqlite>,
+        id: &str,
+        telegram_user_id: &str,
+        telegram_delivery_chat_id: i64,
+        due_at: &str,
+        delivered_at: &str,
+    ) {
+        create_digest_run_if_absent(
+            pool,
+            NewDigestRun {
+                id: id.to_string(),
+                channel_actor_id: Some(telegram_user_id.to_string()),
+                delivery_chat_id: Some(telegram_delivery_chat_id),
+                due_at: due_at.to_string(),
+                max_attempts: CEO_DIGEST_MAX_ATTEMPTS,
+            },
+        )
+        .await
+        .expect("create delivered digest run");
+        sqlx::query(
+            "UPDATE agent_digest_runs
+             SET status = 'delivered', delivered_at = ?, updated_at = ?
+             WHERE id = ?",
+        )
+        .bind(delivered_at)
+        .bind(delivered_at)
+        .bind(id)
+        .execute(pool)
+        .await
+        .expect("mark delivered digest run");
+    }
+
     async fn make_claim_stale(pool: &Pool<Sqlite>, id: &str) {
         sqlx::query("UPDATE agent_digest_runs SET claimed_at = ? WHERE id = ?")
             .bind("2026-05-07T00:00:00Z")
@@ -812,6 +858,52 @@ mod tests {
             chat_ids,
             vec![Some("55".to_string()), Some("66".to_string())]
         );
+    }
+
+    #[tokio::test]
+    async fn startup_due_run_ignores_recent_delivery_for_stale_target() {
+        let pool = test_pool().await;
+        let now = "2026-05-07T02:10:00Z"
+            .parse::<DateTime<Utc>>()
+            .expect("now");
+        seed_delivered_digest_run(
+            &pool,
+            "old-delivered-target",
+            "123",
+            55,
+            "2026-05-07T01:00:00Z",
+            "2026-05-07T01:55:00Z",
+        )
+        .await;
+
+        let created =
+            ensure_startup_digest_due_run(&pool, &digest_config_for_target("123", 66), now)
+                .await
+                .expect("startup due run");
+        assert!(created);
+    }
+
+    #[tokio::test]
+    async fn hourly_due_run_ignores_recent_delivery_for_stale_target() {
+        let pool = test_pool().await;
+        let now = "2026-05-07T02:10:00Z"
+            .parse::<DateTime<Utc>>()
+            .expect("now");
+        seed_delivered_digest_run(
+            &pool,
+            "old-delivered-target",
+            "123",
+            55,
+            "2026-05-07T01:00:00Z",
+            "2026-05-07T01:55:00Z",
+        )
+        .await;
+
+        let created =
+            ensure_hourly_digest_due_run(&pool, &digest_config_for_target("123", 66), now)
+                .await
+                .expect("hourly due run");
+        assert!(created);
     }
 
     #[tokio::test]

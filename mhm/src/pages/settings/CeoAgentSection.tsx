@@ -469,10 +469,12 @@ export default function CeoAgentSection() {
           <input
             aria-label="Telegram delivery chat ID"
             inputMode="numeric"
-            pattern="[0-9]*"
+            pattern="-?[0-9]*"
             value={telegramDeliveryChatId}
             disabled={disabled}
-            onChange={(event) => setTelegramDeliveryChatId(event.target.value.replace(/\D/g, ""))}
+            onChange={(event) =>
+              setTelegramDeliveryChatId(event.target.value.replace(/[^\d-]/g, "").replace(/(?!^)-/g, ""))
+            }
             className="h-10 w-full rounded-xl border border-slate-200 bg-slate-50 px-3 text-sm focus:outline-none focus:ring-2 focus:ring-blue-200 disabled:opacity-60"
           />
         </label>
