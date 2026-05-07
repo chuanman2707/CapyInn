@@ -408,17 +408,19 @@ mod tests {
         .expect("read command intents")
     }
 
+    type CommandMetadataFields = (
+        String,
+        String,
+        String,
+        Option<String>,
+        Option<String>,
+        Option<String>,
+    );
+
     async fn command_metadata_fields(
         pool: &Pool<Sqlite>,
         command_name: &str,
-    ) -> Vec<(
-        String,
-        String,
-        String,
-        Option<String>,
-        Option<String>,
-        Option<String>,
-    )> {
+    ) -> Vec<CommandMetadataFields> {
         sqlx::query_as::<_, (_, _, _, _, _, _)>(
             "SELECT idempotency_key, intent_json, summary_json, response_json,
                     result_summary_json, error_summary_json
@@ -432,17 +434,7 @@ mod tests {
         .expect("read command metadata")
     }
 
-    fn assert_metadata_excludes_raw_chat_id(
-        rows: &[(
-            String,
-            String,
-            String,
-            Option<String>,
-            Option<String>,
-            Option<String>,
-        )],
-        raw_chat_id: &str,
-    ) {
+    fn assert_metadata_excludes_raw_chat_id(rows: &[CommandMetadataFields], raw_chat_id: &str) {
         for (index, row) in rows.iter().enumerate() {
             let fields = [
                 ("idempotency_key", Some(row.0.as_str())),

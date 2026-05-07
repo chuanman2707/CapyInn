@@ -599,7 +599,7 @@ mod tests {
         });
         let (claim_a, claim_b) = tokio::join!(claim_a, claim_b);
 
-        let results = vec![
+        let results = [
             claim_a.expect("claim task a").expect("claim a"),
             claim_b.expect("claim task b").expect("claim b"),
         ];
