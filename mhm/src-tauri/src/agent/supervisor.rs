@@ -8,7 +8,7 @@ use crate::{
             get_ceo_telegram_config, set_ceo_telegram_last_update_id_idempotent,
             CeoTelegramGateStatus,
         },
-        digest::config::SET_CEO_TELEGRAM_DELIVERY_CHAT_ID_COMMAND,
+        digest::config::{get_ceo_digest_config, SET_CEO_TELEGRAM_DELIVERY_CHAT_ID_COMMAND},
         provider::openai::{AiProvider, OpenAiProvider},
         runtime::ceo_chat::{CeoChatMessage, CeoChatRuntime},
         secrets::KeychainSecretStore,
@@ -31,8 +31,10 @@ const CEO_TELEGRAM_DELIVERY_CHAT_IDEMPOTENCY_KEY_PREFIX: &str = "ceo-telegram-de
 const CEO_TELEGRAM_DELIVERY_CHAT_ACTOR: &str = "ceo_telegram_runtime";
 
 pub struct AgentSupervisor {
-    running: Mutex<Option<JoinHandle<()>>>,
-    shutdown_tx: Mutex<Option<oneshot::Sender<()>>>,
+    chat_running: Mutex<Option<JoinHandle<()>>>,
+    chat_shutdown_tx: Mutex<Option<oneshot::Sender<()>>>,
+    digest_running: Mutex<Option<JoinHandle<()>>>,
+    digest_shutdown_tx: Mutex<Option<oneshot::Sender<()>>>,
     mode: SupervisorMode,
 }
 
@@ -47,8 +49,10 @@ enum SupervisorMode {
 impl AgentSupervisor {
     pub fn new(pool: Pool<Sqlite>) -> Self {
         Self {
-            running: Mutex::new(None),
-            shutdown_tx: Mutex::new(None),
+            chat_running: Mutex::new(None),
+            chat_shutdown_tx: Mutex::new(None),
+            digest_running: Mutex::new(None),
+            digest_shutdown_tx: Mutex::new(None),
             mode: SupervisorMode::Polling { pool },
         }
     }
@@ -56,54 +60,73 @@ impl AgentSupervisor {
     #[cfg(test)]
     pub fn new_for_test() -> Self {
         Self {
-            running: Mutex::new(None),
-            shutdown_tx: Mutex::new(None),
+            chat_running: Mutex::new(None),
+            chat_shutdown_tx: Mutex::new(None),
+            digest_running: Mutex::new(None),
+            digest_shutdown_tx: Mutex::new(None),
             mode: SupervisorMode::TestIdle,
         }
     }
 
     pub async fn reconcile(&self, gate: CeoTelegramGateStatus) -> CommandResult<()> {
         if gate.ready {
-            self.start_if_needed()
+            self.start_if_needed()?;
         } else {
-            self.shutdown().await;
+            self.shutdown_chat().await;
+        }
+        Ok(())
+    }
+
+    pub async fn reconcile_workflows(
+        &self,
+        chat_ready: bool,
+        digest_ready: bool,
+    ) -> CommandResult<()> {
+        let mut first_error = None;
+
+        if chat_ready {
+            if let Err(error) = self.start_chat_if_needed() {
+                first_error = Some(error);
+            }
+        } else {
+            self.shutdown_chat().await;
+        }
+
+        if digest_ready {
+            if let Err(error) = self.start_digest_if_needed() {
+                if first_error.is_none() {
+                    first_error = Some(error);
+                }
+            }
+        } else {
+            self.shutdown_digest().await;
+        }
+
+        if let Some(error) = first_error {
+            Err(error)
+        } else {
             Ok(())
         }
     }
 
     pub fn is_running(&self) -> bool {
-        self.running
-            .lock()
-            .ok()
-            .and_then(|guard| guard.as_ref().map(|handle| !handle.is_finished()))
-            .unwrap_or(false)
+        self.is_chat_running()
     }
 
     pub async fn shutdown(&self) {
-        let task = self.running.lock().ok().and_then(|mut guard| guard.take());
-        let shutdown_tx = self
-            .shutdown_tx
-            .lock()
-            .ok()
-            .and_then(|mut guard| guard.take());
-
-        if let Some(shutdown_tx) = shutdown_tx {
-            let _ = shutdown_tx.send(());
-        }
-
-        if let Some(mut task) = task {
-            if tokio::time::timeout(SUPERVISOR_SHUTDOWN_TIMEOUT, &mut task)
-                .await
-                .is_err()
-            {
-                task.abort();
-                let _ = tokio::time::timeout(SUPERVISOR_SHUTDOWN_TIMEOUT, task).await;
-            }
-        }
+        self.shutdown_chat().await;
+        self.shutdown_digest().await;
     }
 
     fn start_if_needed(&self) -> CommandResult<()> {
-        let mut running = self.running.lock().map_err(|_| supervisor_lock_error())?;
+        self.start_chat_if_needed()
+    }
+
+    fn start_chat_if_needed(&self) -> CommandResult<()> {
+        let mut running = self
+            .chat_running
+            .lock()
+            .map_err(|_| supervisor_lock_error())?;
         if running
             .as_ref()
             .map(|handle| !handle.is_finished())
@@ -112,12 +135,36 @@ impl AgentSupervisor {
             return Ok(());
         }
         let mut shutdown_tx_guard = self
-            .shutdown_tx
+            .chat_shutdown_tx
             .lock()
             .map_err(|_| supervisor_lock_error())?;
 
         let (shutdown_tx, shutdown_rx) = oneshot::channel();
         let task = self.spawn_runtime_task(shutdown_rx)?;
+        *running = Some(task);
+        *shutdown_tx_guard = Some(shutdown_tx);
+        Ok(())
+    }
+
+    fn start_digest_if_needed(&self) -> CommandResult<()> {
+        let mut running = self
+            .digest_running
+            .lock()
+            .map_err(|_| supervisor_lock_error())?;
+        if running
+            .as_ref()
+            .map(|handle| !handle.is_finished())
+            .unwrap_or(false)
+        {
+            return Ok(());
+        }
+        let mut shutdown_tx_guard = self
+            .digest_shutdown_tx
+            .lock()
+            .map_err(|_| supervisor_lock_error())?;
+
+        let (shutdown_tx, shutdown_rx) = oneshot::channel();
+        let task = self.spawn_digest_runtime_task(shutdown_rx)?;
         *running = Some(task);
         *shutdown_tx_guard = Some(shutdown_tx);
         Ok(())
@@ -149,13 +196,107 @@ impl AgentSupervisor {
         }
     }
 
+    fn spawn_digest_runtime_task(
+        &self,
+        shutdown_rx: oneshot::Receiver<()>,
+    ) -> CommandResult<JoinHandle<()>> {
+        match &self.mode {
+            SupervisorMode::Polling { pool } => {
+                let transport = HttpTelegramTransport::new(KeychainSecretStore)?;
+                let provider = OpenAiProvider::new(KeychainSecretStore)?;
+                let runtime = crate::agent::digest::runtime::CeoDigestRuntime::new(
+                    pool.clone(),
+                    provider,
+                    transport,
+                );
+                Ok(tokio::spawn(
+                    crate::agent::digest::scheduler::run_ceo_digest_scheduler(
+                        pool.clone(),
+                        runtime,
+                        shutdown_rx,
+                    ),
+                ))
+            }
+            #[cfg(test)]
+            SupervisorMode::TestIdle => Ok(tokio::spawn(async move {
+                let _ = shutdown_rx.await;
+            })),
+        }
+    }
+
+    async fn shutdown_chat(&self) {
+        Self::shutdown_workflow(&self.chat_running, &self.chat_shutdown_tx).await;
+    }
+
+    async fn shutdown_digest(&self) {
+        Self::shutdown_workflow(&self.digest_running, &self.digest_shutdown_tx).await;
+    }
+
+    async fn shutdown_workflow(
+        running: &Mutex<Option<JoinHandle<()>>>,
+        shutdown_tx: &Mutex<Option<oneshot::Sender<()>>>,
+    ) {
+        let task = running.lock().ok().and_then(|mut guard| guard.take());
+        let shutdown_tx = shutdown_tx.lock().ok().and_then(|mut guard| guard.take());
+
+        if let Some(shutdown_tx) = shutdown_tx {
+            let _ = shutdown_tx.send(());
+        }
+
+        if let Some(mut task) = task {
+            if tokio::time::timeout(SUPERVISOR_SHUTDOWN_TIMEOUT, &mut task)
+                .await
+                .is_err()
+            {
+                task.abort();
+                let _ = tokio::time::timeout(SUPERVISOR_SHUTDOWN_TIMEOUT, task).await;
+            }
+        }
+    }
+
+    fn is_chat_running(&self) -> bool {
+        workflow_is_running(&self.chat_running)
+    }
+
+    #[cfg(test)]
+    pub async fn reconcile_for_test(
+        &self,
+        chat_ready: bool,
+        digest_ready: bool,
+    ) -> CommandResult<()> {
+        self.reconcile_workflows(chat_ready, digest_ready).await
+    }
+
+    #[cfg(test)]
+    pub fn is_chat_running_for_test(&self) -> bool {
+        self.is_chat_running()
+    }
+
+    #[cfg(test)]
+    pub fn is_digest_running_for_test(&self) -> bool {
+        workflow_is_running(&self.digest_running)
+    }
+
     #[cfg(test)]
     fn running_task_debug_id(&self) -> Option<String> {
-        self.running
-            .lock()
-            .ok()
-            .and_then(|guard| guard.as_ref().map(|handle| format!("{:?}", handle.id())))
+        workflow_task_debug_id(&self.chat_running)
     }
+}
+
+fn workflow_is_running(running: &Mutex<Option<JoinHandle<()>>>) -> bool {
+    running
+        .lock()
+        .ok()
+        .and_then(|guard| guard.as_ref().map(|handle| !handle.is_finished()))
+        .unwrap_or(false)
+}
+
+#[cfg(test)]
+fn workflow_task_debug_id(running: &Mutex<Option<JoinHandle<()>>>) -> Option<String> {
+    running
+        .lock()
+        .ok()
+        .and_then(|guard| guard.as_ref().map(|handle| format!("{:?}", handle.id())))
 }
 
 #[cfg(test)]
@@ -178,10 +319,13 @@ pub async fn reconcile_managed_supervisor(
         return Ok(());
     }
 
-    let config = get_ceo_telegram_config(pool).await?;
+    let telegram_config = get_ceo_telegram_config(pool).await?;
     let cloud_opt_in = get_ceo_cloud_data_opt_in(pool).await?;
+    let chat_gate = telegram_config.evaluate_gate(cloud_opt_in);
+    let digest_config = get_ceo_digest_config(pool).await?;
+    let digest_gate = digest_config.evaluate_gate(cloud_opt_in);
     supervisor
-        .reconcile(config.evaluate_gate(cloud_opt_in))
+        .reconcile_workflows(chat_gate.ready, digest_gate.ready)
         .await
 }
 
@@ -422,6 +566,21 @@ mod tests {
 
         assert!(supervisor.is_running());
         assert_eq!(supervisor.running_task_debug_id(), first_task_id);
+
+        supervisor.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn supervisor_can_run_digest_when_chat_gate_is_not_ready() {
+        let supervisor = AgentSupervisor::new_for_test();
+
+        supervisor
+            .reconcile_for_test(false, true)
+            .await
+            .expect("digest-only reconcile succeeds");
+
+        assert!(!supervisor.is_chat_running_for_test());
+        assert!(supervisor.is_digest_running_for_test());
 
         supervisor.shutdown().await;
     }
