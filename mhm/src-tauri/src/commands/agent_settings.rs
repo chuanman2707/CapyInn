@@ -12,6 +12,10 @@ use crate::{
             CeoTelegramGateStatus, SET_CEO_TELEGRAM_CONFIG_COMMAND,
             SET_CEO_TELEGRAM_SECRET_STATUS_COMMAND,
         },
+        digest::config::{
+            get_ceo_digest_config as read_ceo_digest_config, set_ceo_digest_config_idempotent,
+            CeoDigestConfig, CeoDigestGateStatus, SET_CEO_DIGEST_CONFIG_COMMAND,
+        },
         secrets::{
             agent_secret_fingerprint, AgentSecretKind, AgentSecretStore, KeychainSecretStore,
         },
@@ -177,6 +181,44 @@ pub async fn get_ceo_telegram_gate_status(
     let config = read_ceo_telegram_config(&state.db).await?;
     let cloud_opt_in = read_ceo_cloud_data_opt_in(&state.db).await?;
     Ok(config.evaluate_gate(cloud_opt_in))
+}
+
+#[tauri::command]
+#[allow(dead_code)]
+pub async fn get_ceo_digest_config(state: State<'_, AppState>) -> CommandResult<CeoDigestConfig> {
+    let _user = require_ceo_cloud_opt_in_admin(get_user(&state))?;
+    read_ceo_digest_config(&state.db).await
+}
+
+#[tauri::command]
+#[allow(dead_code)]
+pub async fn get_ceo_digest_gate_status(
+    state: State<'_, AppState>,
+) -> CommandResult<CeoDigestGateStatus> {
+    let _user = require_ceo_cloud_opt_in_admin(get_user(&state))?;
+    let config = read_ceo_digest_config(&state.db).await?;
+    let cloud_opt_in = read_ceo_cloud_data_opt_in(&state.db).await?;
+    Ok(config.evaluate_gate(cloud_opt_in))
+}
+
+#[tauri::command]
+#[allow(dead_code)]
+pub async fn set_ceo_digest_config(
+    state: State<'_, AppState>,
+    supervisor: State<'_, AgentSupervisor>,
+    digest_enabled: bool,
+    telegram_delivery_chat_id: Option<i64>,
+    idempotency_key: String,
+) -> CommandResult<CeoDigestConfig> {
+    let user = require_ceo_cloud_opt_in_admin(get_user(&state))?;
+    let ctx = scoped_admin_ctx(&user, idempotency_key, SET_CEO_DIGEST_CONFIG_COMMAND)?;
+
+    set_ceo_digest_config_idempotent(&state.db, &ctx, digest_enabled, telegram_delivery_chat_id)
+        .await?;
+
+    reconcile_managed_supervisor(&state.db, Some(&*supervisor)).await?;
+
+    read_ceo_digest_config(&state.db).await
 }
 
 #[allow(dead_code)]

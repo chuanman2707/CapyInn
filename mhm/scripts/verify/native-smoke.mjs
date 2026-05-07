@@ -16,6 +16,11 @@ const baseConfigPath = path.join(cwd, "src-tauri", "tauri.conf.json");
 const smokeUpdaterPubkey =
   process.env.CAPYINN_SMOKE_UPDATER_PUBLIC_KEY ??
   "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDY2QzJBRjMwN0JDODIxRjAKUldUd0ljaDdNSy9DWnFydkdtM3BVQ1g0WXh2aWo5S0NkejhMbkxkeER2clZRVHFHVWtzZHJnZzMK";
+const readyTimeoutSeconds = Number(process.env.CAPYINN_NATIVE_SMOKE_TIMEOUT_SECONDS ?? "180");
+
+if (!Number.isInteger(readyTimeoutSeconds) || readyTimeoutSeconds <= 0) {
+  throw new Error("CAPYINN_NATIVE_SMOKE_TIMEOUT_SECONDS must be a positive integer.");
+}
 
 await rm(readyFile, { force: true });
 await mkdir(artifactsRoot, { recursive: true });
@@ -50,7 +55,7 @@ const { child, logPath } = await spawnLoggedProcess(
 let ready = false;
 
 try {
-  for (let attempt = 0; attempt < 60; attempt += 1) {
+  for (let attempt = 0; attempt < readyTimeoutSeconds; attempt += 1) {
     if (child.exitCode !== null) {
       throw new Error(`native smoke exited early with ${child.exitCode}; see ${logPath}`);
     }
@@ -77,7 +82,9 @@ try {
   }
 
   if (!ready) {
-    throw new Error(`native smoke never became ready under ${runtimeRoot}; see ${logPath}`);
+    throw new Error(
+      `native smoke never became ready under ${runtimeRoot} after ${readyTimeoutSeconds}s; see ${logPath}`,
+    );
   }
 } finally {
   await terminateChild(child);
