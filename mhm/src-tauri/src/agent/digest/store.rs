@@ -4,7 +4,7 @@ use crate::{
 };
 use chrono::Utc;
 use serde_json::Value;
-use sqlx::{Pool, Row, Sqlite};
+use sqlx::{Pool, Row, Sqlite, Transaction};
 
 pub const DIGEST_STATUS_PENDING: &str = "pending";
 pub const DIGEST_STATUS_IN_PROGRESS: &str = "in_progress";
@@ -36,6 +36,40 @@ pub struct ClaimedDigestRun {
 
 fn stable_json(value: &Value) -> CommandResult<String> {
     serde_json::to_string(value).map_err(system_error)
+}
+
+async fn update_selected_digest_run_claim_tx(
+    tx: &mut Transaction<'_, Sqlite>,
+    id: &str,
+    now: &str,
+    claim_token: &str,
+) -> CommandResult<u64> {
+    let result = sqlx::query(
+        "UPDATE agent_digest_runs
+         SET status = 'in_progress',
+             attempt_count = attempt_count + 1,
+             claimed_at = ?,
+             claim_token = ?,
+             next_retry_at = NULL,
+             updated_at = ?
+         WHERE id = ?
+           AND due_at <= ?
+           AND (
+             status = 'pending'
+             OR (status = 'retry_waiting' AND next_retry_at IS NOT NULL AND next_retry_at <= ?)
+           )",
+    )
+    .bind(now)
+    .bind(claim_token)
+    .bind(now)
+    .bind(id)
+    .bind(now)
+    .bind(now)
+    .execute(&mut **tx)
+    .await
+    .map_err(system_error)?;
+
+    Ok(result.rows_affected())
 }
 
 pub async fn create_digest_run_if_absent(
@@ -92,30 +126,9 @@ pub async fn claim_due_digest_run(
     };
 
     let id: String = row.get("id");
-    let result = sqlx::query(
-        "UPDATE agent_digest_runs
-         SET status = 'in_progress',
-             attempt_count = attempt_count + 1,
-             claimed_at = ?,
-             claim_token = ?,
-             next_retry_at = NULL,
-             updated_at = ?
-         WHERE id = ?
-           AND (
-             status = 'pending'
-             OR (status = 'retry_waiting' AND next_retry_at IS NOT NULL AND next_retry_at <= ?)
-           )",
-    )
-    .bind(now)
-    .bind(claim_token)
-    .bind(now)
-    .bind(&id)
-    .bind(now)
-    .execute(&mut *tx)
-    .await
-    .map_err(system_error)?;
+    let rows_affected = update_selected_digest_run_claim_tx(&mut tx, &id, now, claim_token).await?;
 
-    if result.rows_affected() == 0 {
+    if rows_affected == 0 {
         tx.commit().await.map_err(system_error)?;
         return Ok(None);
     }
@@ -284,6 +297,45 @@ mod tests {
             .await
             .expect("claim");
         assert!(second.is_none());
+    }
+
+    #[tokio::test]
+    async fn claim_update_rechecks_due_time_after_selection() {
+        let pool = test_pool().await;
+        create_digest_run_if_absent(&pool, run("digest-1", "2026-05-07T01:00:00Z"))
+            .await
+            .expect("insert");
+
+        let mut tx = pool.begin().await.expect("begin tx");
+        sqlx::query("UPDATE agent_digest_runs SET due_at = ? WHERE id = ?")
+            .bind("2026-05-07T02:00:00Z")
+            .bind("digest-1")
+            .execute(&mut *tx)
+            .await
+            .expect("move due_at forward");
+
+        let rows_affected = update_selected_digest_run_claim_tx(
+            &mut tx,
+            "digest-1",
+            "2026-05-07T01:00:01Z",
+            "claim-a",
+        )
+        .await
+        .expect("claim update");
+        tx.commit().await.expect("commit");
+
+        assert_eq!(rows_affected, 0);
+
+        let row = sqlx::query(
+            "SELECT status, attempt_count, claim_token FROM agent_digest_runs WHERE id = ?",
+        )
+        .bind("digest-1")
+        .fetch_one(&pool)
+        .await
+        .expect("row");
+        assert_eq!(row.get::<String, _>("status"), DIGEST_STATUS_PENDING);
+        assert_eq!(row.get::<i64, _>("attempt_count"), 0);
+        assert_eq!(row.get::<Option<String>, _>("claim_token"), None);
     }
 
     #[tokio::test]
