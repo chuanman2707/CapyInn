@@ -42,14 +42,15 @@ pub async fn ensure_startup_digest_due_run(
     if last_delivery_is_recent(pool, now).await? {
         return Ok(false);
     }
+    let due_at = truncate_to_utc_second(now)?;
 
     create_due_run_if_absent_for_hour(
         pool,
         NewDigestRun {
-            id: digest_run_id(now),
+            id: digest_run_id(due_at),
             channel_actor_id: config.telegram_user_id.clone(),
             delivery_chat_id: config.telegram_delivery_chat_id,
-            due_at: now.to_rfc3339(),
+            due_at: due_at.to_rfc3339(),
             max_attempts: CEO_DIGEST_MAX_ATTEMPTS,
         },
         now,
@@ -427,6 +428,15 @@ fn truncate_to_utc_hour(now: DateTime<Utc>) -> CommandResult<DateTime<Utc>> {
         })
 }
 
+fn truncate_to_utc_second(now: DateTime<Utc>) -> CommandResult<DateTime<Utc>> {
+    now.with_nanosecond(0).ok_or_else(|| {
+        CommandError::system(
+            codes::SYSTEM_INTERNAL_ERROR,
+            "Cannot calculate digest scheduler second.",
+        )
+    })
+}
+
 fn parse_utc_timestamp(value: &str) -> CommandResult<DateTime<Utc>> {
     DateTime::parse_from_rfc3339(value)
         .map(|value| value.with_timezone(&Utc))
@@ -637,6 +647,38 @@ mod tests {
             .await
             .expect("ensure due again");
         assert!(!second);
+
+        let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM agent_digest_runs")
+            .fetch_one(&pool)
+            .await
+            .expect("count");
+        assert_eq!(count, 1);
+    }
+
+    #[tokio::test]
+    async fn startup_and_hourly_due_run_are_idempotent_at_top_of_hour_with_subseconds() {
+        let pool = test_pool().await;
+        let now = "2026-05-07T02:00:00.123Z"
+            .parse::<DateTime<Utc>>()
+            .expect("now");
+        let config = digest_config();
+
+        let startup_created = ensure_startup_digest_due_run(&pool, &config, now)
+            .await
+            .expect("startup due");
+        assert!(startup_created);
+
+        let hourly_created = ensure_hourly_digest_due_run(&pool, &config, now)
+            .await
+            .expect("hourly due");
+        assert!(!hourly_created);
+
+        let row = sqlx::query("SELECT id, due_at FROM agent_digest_runs")
+            .fetch_one(&pool)
+            .await
+            .expect("digest row");
+        assert_eq!(row.get::<String, _>("id"), "ceo-digest-20260507T020000Z");
+        assert_eq!(row.get::<String, _>("due_at"), "2026-05-07T02:00:00+00:00");
 
         let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM agent_digest_runs")
             .fetch_one(&pool)

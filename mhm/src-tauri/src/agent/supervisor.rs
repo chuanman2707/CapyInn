@@ -31,11 +31,67 @@ const CEO_TELEGRAM_DELIVERY_CHAT_IDEMPOTENCY_KEY_PREFIX: &str = "ceo-telegram-de
 const CEO_TELEGRAM_DELIVERY_CHAT_ACTOR: &str = "ceo_telegram_runtime";
 
 pub struct AgentSupervisor {
-    chat_running: Mutex<Option<JoinHandle<()>>>,
-    chat_shutdown_tx: Mutex<Option<oneshot::Sender<()>>>,
-    digest_running: Mutex<Option<JoinHandle<()>>>,
-    digest_shutdown_tx: Mutex<Option<oneshot::Sender<()>>>,
+    chat: Mutex<WorkflowTaskState>,
+    digest: Mutex<WorkflowTaskState>,
     mode: SupervisorMode,
+}
+
+struct WorkflowTaskState {
+    running: Option<JoinHandle<()>>,
+    shutdown_tx: Option<oneshot::Sender<()>>,
+}
+
+struct WorkflowShutdown {
+    task: Option<JoinHandle<()>>,
+    shutdown_tx: Option<oneshot::Sender<()>>,
+}
+
+impl WorkflowTaskState {
+    fn new() -> Self {
+        Self {
+            running: None,
+            shutdown_tx: None,
+        }
+    }
+
+    fn is_running(&self) -> bool {
+        self.running
+            .as_ref()
+            .map(|handle| !handle.is_finished())
+            .unwrap_or(false)
+    }
+
+    #[cfg(test)]
+    fn is_empty(&self) -> bool {
+        self.running.is_none() && self.shutdown_tx.is_none()
+    }
+
+    #[cfg(test)]
+    fn task_debug_id(&self) -> Option<String> {
+        self.running
+            .as_ref()
+            .map(|handle| format!("{:?}", handle.id()))
+    }
+}
+
+impl WorkflowShutdown {
+    fn signal(&mut self) {
+        if let Some(shutdown_tx) = self.shutdown_tx.take() {
+            let _ = shutdown_tx.send(());
+        }
+    }
+
+    async fn wait(mut self) {
+        if let Some(mut task) = self.task.take() {
+            if tokio::time::timeout(SUPERVISOR_SHUTDOWN_TIMEOUT, &mut task)
+                .await
+                .is_err()
+            {
+                task.abort();
+                let _ = tokio::time::timeout(SUPERVISOR_SHUTDOWN_TIMEOUT, task).await;
+            }
+        }
+    }
 }
 
 enum SupervisorMode {
@@ -49,10 +105,8 @@ enum SupervisorMode {
 impl AgentSupervisor {
     pub fn new(pool: Pool<Sqlite>) -> Self {
         Self {
-            chat_running: Mutex::new(None),
-            chat_shutdown_tx: Mutex::new(None),
-            digest_running: Mutex::new(None),
-            digest_shutdown_tx: Mutex::new(None),
+            chat: Mutex::new(WorkflowTaskState::new()),
+            digest: Mutex::new(WorkflowTaskState::new()),
             mode: SupervisorMode::Polling { pool },
         }
     }
@@ -60,10 +114,8 @@ impl AgentSupervisor {
     #[cfg(test)]
     pub fn new_for_test() -> Self {
         Self {
-            chat_running: Mutex::new(None),
-            chat_shutdown_tx: Mutex::new(None),
-            digest_running: Mutex::new(None),
-            digest_shutdown_tx: Mutex::new(None),
+            chat: Mutex::new(WorkflowTaskState::new()),
+            digest: Mutex::new(WorkflowTaskState::new()),
             mode: SupervisorMode::TestIdle,
         }
     }
@@ -114,8 +166,12 @@ impl AgentSupervisor {
     }
 
     pub async fn shutdown(&self) {
-        self.shutdown_chat().await;
-        self.shutdown_digest().await;
+        let mut chat = Self::take_workflow_for_shutdown(&self.chat);
+        let mut digest = Self::take_workflow_for_shutdown(&self.digest);
+        chat.signal();
+        digest.signal();
+        chat.wait().await;
+        digest.wait().await;
     }
 
     fn start_if_needed(&self) -> CommandResult<()> {
@@ -123,50 +179,28 @@ impl AgentSupervisor {
     }
 
     fn start_chat_if_needed(&self) -> CommandResult<()> {
-        let mut running = self
-            .chat_running
-            .lock()
-            .map_err(|_| supervisor_lock_error())?;
-        if running
-            .as_ref()
-            .map(|handle| !handle.is_finished())
-            .unwrap_or(false)
-        {
+        let mut state = self.chat.lock().map_err(|_| supervisor_lock_error())?;
+        if state.is_running() {
             return Ok(());
         }
-        let mut shutdown_tx_guard = self
-            .chat_shutdown_tx
-            .lock()
-            .map_err(|_| supervisor_lock_error())?;
 
         let (shutdown_tx, shutdown_rx) = oneshot::channel();
         let task = self.spawn_runtime_task(shutdown_rx)?;
-        *running = Some(task);
-        *shutdown_tx_guard = Some(shutdown_tx);
+        state.running = Some(task);
+        state.shutdown_tx = Some(shutdown_tx);
         Ok(())
     }
 
     fn start_digest_if_needed(&self) -> CommandResult<()> {
-        let mut running = self
-            .digest_running
-            .lock()
-            .map_err(|_| supervisor_lock_error())?;
-        if running
-            .as_ref()
-            .map(|handle| !handle.is_finished())
-            .unwrap_or(false)
-        {
+        let mut state = self.digest.lock().map_err(|_| supervisor_lock_error())?;
+        if state.is_running() {
             return Ok(());
         }
-        let mut shutdown_tx_guard = self
-            .digest_shutdown_tx
-            .lock()
-            .map_err(|_| supervisor_lock_error())?;
 
         let (shutdown_tx, shutdown_rx) = oneshot::channel();
         let task = self.spawn_digest_runtime_task(shutdown_rx)?;
-        *running = Some(task);
-        *shutdown_tx_guard = Some(shutdown_tx);
+        state.running = Some(task);
+        state.shutdown_tx = Some(shutdown_tx);
         Ok(())
     }
 
@@ -225,37 +259,34 @@ impl AgentSupervisor {
     }
 
     async fn shutdown_chat(&self) {
-        Self::shutdown_workflow(&self.chat_running, &self.chat_shutdown_tx).await;
+        Self::shutdown_workflow(&self.chat).await;
     }
 
     async fn shutdown_digest(&self) {
-        Self::shutdown_workflow(&self.digest_running, &self.digest_shutdown_tx).await;
+        Self::shutdown_workflow(&self.digest).await;
     }
 
-    async fn shutdown_workflow(
-        running: &Mutex<Option<JoinHandle<()>>>,
-        shutdown_tx: &Mutex<Option<oneshot::Sender<()>>>,
-    ) {
-        let task = running.lock().ok().and_then(|mut guard| guard.take());
-        let shutdown_tx = shutdown_tx.lock().ok().and_then(|mut guard| guard.take());
+    async fn shutdown_workflow(state: &Mutex<WorkflowTaskState>) {
+        let mut workflow = Self::take_workflow_for_shutdown(state);
+        workflow.signal();
+        workflow.wait().await;
+    }
 
-        if let Some(shutdown_tx) = shutdown_tx {
-            let _ = shutdown_tx.send(());
-        }
-
-        if let Some(mut task) = task {
-            if tokio::time::timeout(SUPERVISOR_SHUTDOWN_TIMEOUT, &mut task)
-                .await
-                .is_err()
-            {
-                task.abort();
-                let _ = tokio::time::timeout(SUPERVISOR_SHUTDOWN_TIMEOUT, task).await;
-            }
-        }
+    fn take_workflow_for_shutdown(state: &Mutex<WorkflowTaskState>) -> WorkflowShutdown {
+        state
+            .lock()
+            .map(|mut guard| WorkflowShutdown {
+                task: guard.running.take(),
+                shutdown_tx: guard.shutdown_tx.take(),
+            })
+            .unwrap_or(WorkflowShutdown {
+                task: None,
+                shutdown_tx: None,
+            })
     }
 
     fn is_chat_running(&self) -> bool {
-        workflow_is_running(&self.chat_running)
+        workflow_is_running(&self.chat)
     }
 
     #[cfg(test)]
@@ -274,29 +305,40 @@ impl AgentSupervisor {
 
     #[cfg(test)]
     pub fn is_digest_running_for_test(&self) -> bool {
-        workflow_is_running(&self.digest_running)
+        workflow_is_running(&self.digest)
+    }
+
+    #[cfg(test)]
+    fn workflow_states_empty_for_test(&self) -> bool {
+        workflow_state_is_empty(&self.chat) && workflow_state_is_empty(&self.digest)
     }
 
     #[cfg(test)]
     fn running_task_debug_id(&self) -> Option<String> {
-        workflow_task_debug_id(&self.chat_running)
+        workflow_task_debug_id(&self.chat)
     }
 }
 
-fn workflow_is_running(running: &Mutex<Option<JoinHandle<()>>>) -> bool {
-    running
+fn workflow_is_running(state: &Mutex<WorkflowTaskState>) -> bool {
+    state
         .lock()
         .ok()
-        .and_then(|guard| guard.as_ref().map(|handle| !handle.is_finished()))
+        .map(|guard| guard.is_running())
         .unwrap_or(false)
 }
 
 #[cfg(test)]
-fn workflow_task_debug_id(running: &Mutex<Option<JoinHandle<()>>>) -> Option<String> {
-    running
+fn workflow_state_is_empty(state: &Mutex<WorkflowTaskState>) -> bool {
+    state
         .lock()
         .ok()
-        .and_then(|guard| guard.as_ref().map(|handle| format!("{:?}", handle.id())))
+        .map(|guard| guard.is_empty())
+        .unwrap_or(false)
+}
+
+#[cfg(test)]
+fn workflow_task_debug_id(state: &Mutex<WorkflowTaskState>) -> Option<String> {
+    state.lock().ok().and_then(|guard| guard.task_debug_id())
 }
 
 #[cfg(test)]
@@ -583,6 +625,25 @@ mod tests {
         assert!(supervisor.is_digest_running_for_test());
 
         supervisor.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn supervisor_repeated_reconcile_shutdown_clears_workflow_state() {
+        let supervisor = AgentSupervisor::new_for_test();
+
+        for _ in 0..3 {
+            supervisor
+                .reconcile_for_test(true, true)
+                .await
+                .expect("start both workflows");
+            assert!(supervisor.is_chat_running_for_test());
+            assert!(supervisor.is_digest_running_for_test());
+
+            supervisor.shutdown().await;
+            assert!(!supervisor.is_chat_running_for_test());
+            assert!(!supervisor.is_digest_running_for_test());
+            assert!(supervisor.workflow_states_empty_for_test());
+        }
     }
 
     #[tokio::test]
