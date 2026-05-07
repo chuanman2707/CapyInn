@@ -131,7 +131,12 @@ pub async fn run_ceo_digest_scheduler<P, T>(
             continue;
         }
 
-        match deliver_next_due_digest(&pool, &runtime, &config).await {
+        let delivery_result = tokio::select! {
+            _ = &mut shutdown_rx => break,
+            result = deliver_next_due_digest(&pool, &runtime, &config) => result,
+        };
+
+        match delivery_result {
             Ok(_) => {}
             Err(error) => {
                 error!(
@@ -369,8 +374,25 @@ async fn wait_for_scheduler_delay_or_shutdown(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::agent::config::CeoTelegramConfig;
+    use crate::agent::{
+        channel::telegram::TelegramUpdate,
+        config::{
+            CeoTelegramConfig, CEO_OPENAI_KEY_PRESENT_SETTING, CEO_TELEGRAM_OPENAI_MODEL_SETTING,
+            CEO_TELEGRAM_TOKEN_PRESENT_SETTING, CEO_TELEGRAM_USER_ID_SETTING,
+        },
+        digest::config::{
+            CEO_HOURLY_DIGEST_ENABLED_SETTING, CEO_TELEGRAM_DELIVERY_CHAT_ID_SETTING,
+        },
+        provider::openai::{ProviderRequest, ProviderTurn},
+        settings::CEO_CLOUD_DATA_OPT_IN_SETTING,
+    };
     use sqlx::sqlite::SqlitePoolOptions;
+    use std::{
+        future::{pending, Future},
+        pin::Pin,
+        sync::{Arc, Mutex},
+    };
+    use tokio::sync::oneshot;
 
     async fn test_pool() -> Pool<Sqlite> {
         let pool = SqlitePoolOptions::new()
@@ -397,6 +419,65 @@ mod tests {
         )
     }
 
+    async fn save_test_setting(pool: &Pool<Sqlite>, key: &str, value: &str) {
+        crate::services::settings_store::save_setting(pool, key, value)
+            .await
+            .expect("save setting");
+    }
+
+    async fn configure_ready_digest_gate(pool: &Pool<Sqlite>) {
+        save_test_setting(pool, CEO_CLOUD_DATA_OPT_IN_SETTING, "true").await;
+        save_test_setting(pool, CEO_HOURLY_DIGEST_ENABLED_SETTING, "true").await;
+        save_test_setting(pool, CEO_TELEGRAM_USER_ID_SETTING, "123").await;
+        save_test_setting(pool, CEO_TELEGRAM_DELIVERY_CHAT_ID_SETTING, "55").await;
+        save_test_setting(pool, CEO_TELEGRAM_TOKEN_PRESENT_SETTING, "true").await;
+        save_test_setting(pool, CEO_OPENAI_KEY_PRESENT_SETTING, "true").await;
+        save_test_setting(pool, CEO_TELEGRAM_OPENAI_MODEL_SETTING, "gpt-test").await;
+    }
+
+    struct StaticProvider;
+
+    impl AiProvider for StaticProvider {
+        fn create_turn<'a>(
+            &'a self,
+            _request: ProviderRequest,
+        ) -> Pin<Box<dyn Future<Output = CommandResult<ProviderTurn>> + Send + 'a>> {
+            Box::pin(async { Ok(ProviderTurn::FinalText("Digest test".to_string())) })
+        }
+    }
+
+    #[derive(Clone)]
+    struct BlockingTelegram {
+        send_started_tx: Arc<Mutex<Option<oneshot::Sender<()>>>>,
+    }
+
+    impl TelegramTransport for BlockingTelegram {
+        fn get_updates<'a>(
+            &'a self,
+            _offset: Option<i64>,
+        ) -> Pin<Box<dyn Future<Output = CommandResult<Vec<TelegramUpdate>>> + Send + 'a>> {
+            Box::pin(async { Ok(Vec::new()) })
+        }
+
+        fn send_message<'a>(
+            &'a self,
+            _chat_id: i64,
+            _text: String,
+        ) -> Pin<Box<dyn Future<Output = CommandResult<()>> + Send + 'a>> {
+            Box::pin(async move {
+                let send_started_tx = self
+                    .send_started_tx
+                    .lock()
+                    .expect("send started lock")
+                    .take();
+                if let Some(send_started_tx) = send_started_tx {
+                    let _ = send_started_tx.send(());
+                }
+                pending::<CommandResult<()>>().await
+            })
+        }
+    }
+
     #[tokio::test]
     async fn startup_creates_one_digest_when_last_delivery_is_old() {
         let pool = test_pool().await;
@@ -419,5 +500,30 @@ mod tests {
             .await
             .expect("count");
         assert_eq!(count, 1);
+    }
+
+    #[tokio::test]
+    async fn scheduler_shutdown_exits_while_delivery_is_blocked() {
+        let pool = test_pool().await;
+        configure_ready_digest_gate(&pool).await;
+        let (send_started_tx, send_started_rx) = oneshot::channel();
+        let telegram = BlockingTelegram {
+            send_started_tx: Arc::new(Mutex::new(Some(send_started_tx))),
+        };
+        let runtime = CeoDigestRuntime::new(pool.clone(), StaticProvider, telegram);
+        let (shutdown_tx, shutdown_rx) = oneshot::channel();
+
+        let scheduler = tokio::spawn(run_ceo_digest_scheduler(pool, runtime, shutdown_rx));
+
+        tokio::time::timeout(StdDuration::from_secs(5), send_started_rx)
+            .await
+            .expect("delivery starts")
+            .expect("delivery signal is sent");
+        shutdown_tx.send(()).expect("send shutdown");
+
+        tokio::time::timeout(StdDuration::from_millis(200), scheduler)
+            .await
+            .expect("scheduler exits promptly")
+            .expect("scheduler task succeeds");
     }
 }
