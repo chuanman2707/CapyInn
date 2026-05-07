@@ -94,13 +94,67 @@ export default function CeoAgentSection() {
     setOpenaiModel(nextConfig.openai_model);
   };
 
+  const applyDigestConfig = (nextConfig: CeoDigestConfig) => {
+    setDigestConfig(nextConfig);
+    setTelegramDeliveryChatId(nextConfig.telegram_delivery_chat_id?.toString() ?? "");
+  };
+
+  const applyDigestCredentialState = (nextConfig: CeoDigestConfig) => {
+    setDigestConfig((current) => ({
+      ...current,
+      telegram_user_id: nextConfig.telegram_user_id,
+      telegram_bot_token_present: nextConfig.telegram_bot_token_present,
+      openai_api_key_present: nextConfig.openai_api_key_present,
+      openai_model: nextConfig.openai_model,
+    }));
+  };
+
+  const refreshDigestGateStatus = async () => {
+    const nextGate = await invokeCommand<CeoDigestGateStatus>("get_ceo_digest_gate_status");
+    setDigestGateStatus(nextGate);
+  };
+
+  const refreshDigestGateStatusBestEffort = async () => {
+    try {
+      await refreshDigestGateStatus();
+    } catch {
+      toast.error("Unable to refresh CEO Hourly Digest status");
+    }
+  };
+
+  const refreshDigestCredentialStateAndGateBestEffort = async () => {
+    try {
+      const [nextDigestConfig, nextDigestGate] = await Promise.all([
+        invokeCommand<CeoDigestConfig>("get_ceo_digest_config"),
+        invokeCommand<CeoDigestGateStatus>("get_ceo_digest_gate_status"),
+      ]);
+      applyDigestCredentialState(nextDigestConfig);
+      setDigestGateStatus(nextDigestGate);
+    } catch {
+      toast.error("Unable to refresh CEO Hourly Digest status");
+    }
+  };
+
+  const loadDigestStateBestEffort = async () => {
+    try {
+      const [nextDigestConfig, nextDigestGate] = await Promise.all([
+        invokeCommand<CeoDigestConfig>("get_ceo_digest_config"),
+        invokeCommand<CeoDigestGateStatus>("get_ceo_digest_gate_status"),
+      ]);
+      applyDigestConfig(nextDigestConfig);
+      setDigestGateStatus(nextDigestGate);
+    } catch {
+      setDigestConfig(DEFAULT_DIGEST_CONFIG);
+      setTelegramDeliveryChatId("");
+      setDigestGateStatus({ ready: false, missing: ["digest_enabled"] });
+      setStatusMessage("Unable to load CEO Hourly Digest settings");
+    }
+  };
+
   const refreshGateStatus = async () => {
-    const [nextGate, nextDigestGate] = await Promise.all([
-      invokeCommand<CeoTelegramGateStatus>("get_ceo_telegram_gate_status"),
-      invokeCommand<CeoDigestGateStatus>("get_ceo_digest_gate_status"),
-    ]);
+    const nextGate = await invokeCommand<CeoTelegramGateStatus>("get_ceo_telegram_gate_status");
     setGateStatus(nextGate);
-    setDigestGateStatus(nextDigestGate);
+    await refreshDigestGateStatusBestEffort();
   };
 
   const refreshGateStatusBestEffort = async () => {
@@ -112,11 +166,9 @@ export default function CeoAgentSection() {
   };
 
   const refreshCredentialStateAndGate = async () => {
-    const [nextConfig, nextGate, nextDigestConfig, nextDigestGate] = await Promise.all([
+    const [nextConfig, nextGate] = await Promise.all([
       invokeCommand<CeoTelegramConfig>("get_ceo_telegram_config"),
       invokeCommand<CeoTelegramGateStatus>("get_ceo_telegram_gate_status"),
-      invokeCommand<CeoDigestConfig>("get_ceo_digest_config"),
-      invokeCommand<CeoDigestGateStatus>("get_ceo_digest_gate_status"),
     ]);
     setConfig((current) => ({
       ...current,
@@ -124,16 +176,9 @@ export default function CeoAgentSection() {
       openai_api_key_present: nextConfig.openai_api_key_present,
       last_update_id: nextConfig.last_update_id,
     }));
-    setDigestConfig((current) => ({
-      ...current,
-      telegram_user_id: nextDigestConfig.telegram_user_id,
-      telegram_bot_token_present: nextDigestConfig.telegram_bot_token_present,
-      openai_api_key_present: nextDigestConfig.openai_api_key_present,
-      openai_model: nextDigestConfig.openai_model,
-    }));
     setGateStatus(nextGate);
-    setDigestGateStatus(nextDigestGate);
     setLoadError(null);
+    await refreshDigestCredentialStateAndGateBestEffort();
   };
 
   const refreshCredentialStateAndGateBestEffort = async () => {
@@ -145,21 +190,16 @@ export default function CeoAgentSection() {
   };
 
   const loadState = async () => {
-    const [nextCloudOptIn, nextConfig, nextGate, nextDigestConfig, nextDigestGate] =
-      await Promise.all([
-        invokeCommand<boolean>("get_ceo_cloud_data_opt_in"),
-        invokeCommand<CeoTelegramConfig>("get_ceo_telegram_config"),
-        invokeCommand<CeoTelegramGateStatus>("get_ceo_telegram_gate_status"),
-        invokeCommand<CeoDigestConfig>("get_ceo_digest_config"),
-        invokeCommand<CeoDigestGateStatus>("get_ceo_digest_gate_status"),
-      ]);
+    const [nextCloudOptIn, nextConfig, nextGate] = await Promise.all([
+      invokeCommand<boolean>("get_ceo_cloud_data_opt_in"),
+      invokeCommand<CeoTelegramConfig>("get_ceo_telegram_config"),
+      invokeCommand<CeoTelegramGateStatus>("get_ceo_telegram_gate_status"),
+    ]);
     setCloudOptIn(nextCloudOptIn);
     applyConfig(nextConfig);
     setGateStatus(nextGate);
-    setDigestConfig(nextDigestConfig);
-    setTelegramDeliveryChatId(nextDigestConfig.telegram_delivery_chat_id?.toString() ?? "");
-    setDigestGateStatus(nextDigestGate);
     setLoadError(null);
+    await loadDigestStateBestEffort();
   };
 
   useEffect(() => {
@@ -242,12 +282,10 @@ export default function CeoAgentSection() {
         digestEnabled: digestConfig.digest_enabled,
         telegramDeliveryChatId: deliveryChatId,
       });
-      setDigestConfig(nextConfig);
-      setTelegramDeliveryChatId(nextConfig.telegram_delivery_chat_id?.toString() ?? "");
-      const nextGate = await invokeCommand<CeoDigestGateStatus>("get_ceo_digest_gate_status");
-      setDigestGateStatus(nextGate);
+      applyDigestConfig(nextConfig);
       setStatusMessage("CEO Hourly Digest config saved");
       toast.success("CEO Hourly Digest config saved");
+      await refreshDigestGateStatusBestEffort();
     } catch {
       setDigestConfig(previous);
       setTelegramDeliveryChatId(previousTelegramDeliveryChatId);

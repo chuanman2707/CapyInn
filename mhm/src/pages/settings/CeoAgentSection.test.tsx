@@ -274,6 +274,41 @@ describe("CeoAgentSection", () => {
     });
   });
 
+  it("keeps saved digest config when post-save gate refresh fails", async () => {
+    const user = userEvent.setup();
+    let digestGateCalls = 0;
+    mockInitialState();
+    setMockResponses({
+      get_ceo_digest_gate_status: () => {
+        digestGateCalls += 1;
+        if (digestGateCalls === 1) {
+          return {
+            ready: false,
+            missing: ["digest_enabled", "telegram_delivery_chat_id"],
+          };
+        }
+        throw new Error("digest gate refresh failed");
+      },
+    });
+
+    render(<CeoAgentSection />);
+
+    const digestEnabled = await screen.findByRole("checkbox", {
+      name: "CEO Hourly Digest enabled",
+    });
+    await user.click(digestEnabled);
+    await user.type(screen.getByLabelText("Telegram delivery chat ID"), "55");
+    await user.click(screen.getByRole("button", { name: "Save digest config" }));
+
+    await waitFor(() =>
+      expect(toastSuccess).toHaveBeenCalledWith("CEO Hourly Digest config saved"),
+    );
+    expect(toastError).toHaveBeenCalledWith("Unable to refresh CEO Hourly Digest status");
+    expect(toastError).not.toHaveBeenCalledWith("Unable to save CEO Hourly Digest config");
+    expect(digestEnabled).toBeChecked();
+    expect(screen.getByLabelText("Telegram delivery chat ID")).toHaveValue("55");
+  });
+
   it("saves and clears Telegram and OpenAI secrets", async () => {
     const user = userEvent.setup();
     mockInitialState(readyConfig, { ready: true, missing: [] });
@@ -345,6 +380,28 @@ describe("CeoAgentSection", () => {
       );
     });
     expect(ownerInput).toHaveValue("987654");
+  });
+
+  it("keeps CEO Telegram Chat settings enabled when initial digest load fails", async () => {
+    mockInitialState(readyConfig, { ready: true, missing: [] });
+    setMockResponses({
+      get_ceo_digest_config: () => {
+        throw new Error("digest config unavailable");
+      },
+      get_ceo_digest_gate_status: () => {
+        throw new Error("digest gate unavailable");
+      },
+    });
+
+    render(<CeoAgentSection />);
+
+    const optInCheckbox = await screen.findByRole("checkbox", {
+      name: "Allow CEO cloud-data processing",
+    });
+
+    expect(screen.queryByText("Unable to load CEO Telegram Chat settings")).not.toBeInTheDocument();
+    expect(optInCheckbox).toBeEnabled();
+    expect(screen.getByRole("checkbox", { name: "Runtime enabled" })).toBeEnabled();
   });
 
   it("keeps controls disabled when loading settings fails", async () => {
