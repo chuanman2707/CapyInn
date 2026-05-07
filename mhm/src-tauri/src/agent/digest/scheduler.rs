@@ -5,9 +5,10 @@ use crate::{
             config::{get_ceo_digest_config, CeoDigestConfig},
             runtime::CeoDigestRuntime,
             store::{
-                claim_due_digest_run, create_digest_run_if_absent, mark_digest_delivered,
-                mark_digest_retry_or_failed, NewDigestRun, CEO_DIGEST_MAX_ATTEMPTS,
-                DIGEST_STATUS_FAILED, DIGEST_STATUS_IN_PROGRESS, DIGEST_STATUS_RETRY_WAITING,
+                claim_due_digest_run_for_target, create_digest_run_if_absent,
+                mark_digest_delivered, mark_digest_retry_or_failed, NewDigestRun,
+                CEO_DIGEST_MAX_ATTEMPTS, DIGEST_STATUS_FAILED, DIGEST_STATUS_IN_PROGRESS,
+                DIGEST_STATUS_RETRY_WAITING,
             },
         },
         provider::openai::AiProvider,
@@ -19,6 +20,7 @@ use crate::{
 use chrono::{DateTime, Duration, Timelike, Utc};
 use log::{error, info};
 use serde_json::json;
+use sha2::{Digest, Sha256};
 use sqlx::{Pool, Row, Sqlite};
 use std::time::Duration as StdDuration;
 use tokio::sync::oneshot;
@@ -47,7 +49,11 @@ pub async fn ensure_startup_digest_due_run(
     create_due_run_if_absent_for_hour(
         pool,
         NewDigestRun {
-            id: digest_run_id(due_at),
+            id: digest_run_id(
+                due_at,
+                &config.telegram_user_id,
+                config.telegram_delivery_chat_id,
+            ),
             channel_actor_id: config.telegram_user_id.clone(),
             delivery_chat_id: config.telegram_delivery_chat_id,
             due_at: due_at.to_rfc3339(),
@@ -197,7 +203,14 @@ where
     T: TelegramTransport,
 {
     let claim_token = uuid::Uuid::new_v4().to_string();
-    let Some(run) = claim_due_digest_run(pool, &Utc::now().to_rfc3339(), &claim_token).await?
+    let Some(run) = claim_due_digest_run_for_target(
+        pool,
+        &Utc::now().to_rfc3339(),
+        &claim_token,
+        config.telegram_user_id.as_deref(),
+        config.telegram_delivery_chat_id,
+    )
+    .await?
     else {
         return Ok(DigestSchedulerStep::Continue);
     };
@@ -274,7 +287,11 @@ async fn ensure_hourly_digest_due_run(
     create_due_run_if_absent_for_hour(
         pool,
         NewDigestRun {
-            id: hourly_digest_run_id(hour),
+            id: hourly_digest_run_id(
+                hour,
+                &config.telegram_user_id,
+                config.telegram_delivery_chat_id,
+            ),
             channel_actor_id: config.telegram_user_id.clone(),
             delivery_chat_id: config.telegram_delivery_chat_id,
             due_at: hour.to_rfc3339(),
@@ -293,29 +310,39 @@ async fn recover_stale_in_progress_digest_runs(
         (now - Duration::seconds(CEO_DIGEST_IN_PROGRESS_RECOVERY_AFTER_SECONDS)).to_rfc3339();
     let now = now.to_rfc3339();
     let summary = serde_json::to_string(&safe_recovery_error_summary()).map_err(system_error)?;
+    let send_started_summary =
+        serde_json::to_string(&safe_recovery_after_send_started_error_summary())
+            .map_err(system_error)?;
     let result = sqlx::query(
         "UPDATE agent_digest_runs
          SET status = CASE
+                 WHEN json_extract(delivery_summary_json, '$.telegram_send_started') = 1 THEN ?
                  WHEN attempt_count >= max_attempts THEN ?
                  ELSE ?
              END,
              next_retry_at = CASE
+                 WHEN json_extract(delivery_summary_json, '$.telegram_send_started') = 1 THEN NULL
                  WHEN attempt_count >= max_attempts THEN NULL
                  ELSE ?
              END,
              claimed_at = NULL,
              claim_token = NULL,
              last_error_code = ?,
-             last_error_summary_json = ?,
+             last_error_summary_json = CASE
+                 WHEN json_extract(delivery_summary_json, '$.telegram_send_started') = 1 THEN ?
+                 ELSE ?
+             END,
              updated_at = ?
          WHERE status = ?
            AND claimed_at IS NOT NULL
            AND claimed_at <= ?",
     )
     .bind(DIGEST_STATUS_FAILED)
+    .bind(DIGEST_STATUS_FAILED)
     .bind(DIGEST_STATUS_RETRY_WAITING)
     .bind(&now)
     .bind(codes::AGENT_RUNTIME_DISABLED)
+    .bind(send_started_summary)
     .bind(summary)
     .bind(&now)
     .bind(DIGEST_STATUS_IN_PROGRESS)
@@ -340,7 +367,7 @@ async fn create_due_run_if_absent_for_hour(
         return Ok(true);
     }
 
-    if digest_run_exists_in_hour(pool, now).await? {
+    if digest_run_exists_in_hour(pool, now, &input).await? {
         return Ok(false);
     }
 
@@ -397,23 +424,65 @@ async fn last_delivery_is_recent(pool: &Pool<Sqlite>, now: DateTime<Utc>) -> Com
         < Duration::minutes(CEO_DIGEST_STARTUP_CATCHUP_AFTER_MINUTES))
 }
 
-async fn digest_run_exists_in_hour(pool: &Pool<Sqlite>, now: DateTime<Utc>) -> CommandResult<bool> {
+async fn digest_run_exists_in_hour(
+    pool: &Pool<Sqlite>,
+    now: DateTime<Utc>,
+    input: &NewDigestRun,
+) -> CommandResult<bool> {
     let hour = truncate_to_utc_hour(now)?;
     let like_pattern = format!("ceo-digest-{}%", hour.format("%Y%m%dT%H"));
-    let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM agent_digest_runs WHERE id LIKE ?")
-        .bind(like_pattern)
-        .fetch_one(pool)
-        .await
-        .map_err(system_error)?;
+    let delivery_chat_id = input.delivery_chat_id.map(|value| value.to_string());
+    let count: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM agent_digest_runs
+         WHERE id LIKE ?
+           AND ((? IS NULL AND channel_actor_id IS NULL) OR channel_actor_id = ?)
+           AND ((? IS NULL AND delivery_chat_id IS NULL) OR delivery_chat_id = ?)",
+    )
+    .bind(like_pattern)
+    .bind(&input.channel_actor_id)
+    .bind(&input.channel_actor_id)
+    .bind(&delivery_chat_id)
+    .bind(&delivery_chat_id)
+    .fetch_one(pool)
+    .await
+    .map_err(system_error)?;
     Ok(count > 0)
 }
 
-fn digest_run_id(now: DateTime<Utc>) -> String {
-    format!("ceo-digest-{}", now.format("%Y%m%dT%H%M%SZ"))
+fn digest_run_id(
+    now: DateTime<Utc>,
+    channel_actor_id: &Option<String>,
+    delivery_chat_id: Option<i64>,
+) -> String {
+    format!(
+        "ceo-digest-{}-{}",
+        now.format("%Y%m%dT%H%M%SZ"),
+        delivery_target_fingerprint(channel_actor_id, delivery_chat_id)
+    )
 }
 
-fn hourly_digest_run_id(hour: DateTime<Utc>) -> String {
-    format!("ceo-digest-{}", hour.format("%Y%m%dT%H0000Z"))
+fn hourly_digest_run_id(
+    hour: DateTime<Utc>,
+    channel_actor_id: &Option<String>,
+    delivery_chat_id: Option<i64>,
+) -> String {
+    format!(
+        "ceo-digest-{}-{}",
+        hour.format("%Y%m%dT%H0000Z"),
+        delivery_target_fingerprint(channel_actor_id, delivery_chat_id)
+    )
+}
+
+fn delivery_target_fingerprint(
+    channel_actor_id: &Option<String>,
+    delivery_chat_id: Option<i64>,
+) -> String {
+    let actor = channel_actor_id.as_deref().unwrap_or("");
+    let chat_id = delivery_chat_id
+        .map(|value| value.to_string())
+        .unwrap_or_default();
+    let digest = Sha256::digest(format!("actor={actor}\nchat={chat_id}").as_bytes());
+    format!("{digest:x}").chars().take(16).collect()
 }
 
 fn truncate_to_utc_hour(now: DateTime<Utc>) -> CommandResult<DateTime<Utc>> {
@@ -470,6 +539,14 @@ fn safe_recovery_error_summary() -> serde_json::Value {
     })
 }
 
+fn safe_recovery_after_send_started_error_summary() -> serde_json::Value {
+    json!({
+        "code": codes::AGENT_RUNTIME_DISABLED,
+        "message": "CEO digest scheduler recovered an abandoned run after Telegram send started; retry suppressed to avoid duplicate delivery.",
+        "retry_suppressed": true,
+    })
+}
+
 fn next_retry_at() -> String {
     (Utc::now() + Duration::seconds(CEO_DIGEST_RETRY_DELAY.as_secs() as i64)).to_rfc3339()
 }
@@ -496,6 +573,7 @@ mod tests {
         digest::config::{
             CEO_HOURLY_DIGEST_ENABLED_SETTING, CEO_TELEGRAM_DELIVERY_CHAT_ID_SETTING,
         },
+        digest::store::claim_due_digest_run,
         provider::openai::{ProviderRequest, ProviderTurn},
         settings::CEO_CLOUD_DATA_OPT_IN_SETTING,
     };
@@ -518,17 +596,24 @@ mod tests {
     }
 
     fn digest_config() -> CeoDigestConfig {
+        digest_config_for_target("123", 55)
+    }
+
+    fn digest_config_for_target(
+        telegram_user_id: &str,
+        telegram_delivery_chat_id: i64,
+    ) -> CeoDigestConfig {
         CeoDigestConfig::from_telegram_config(
             CeoTelegramConfig {
                 runtime_enabled: false,
-                telegram_user_id: Some("123".to_string()),
+                telegram_user_id: Some(telegram_user_id.to_string()),
                 telegram_bot_token_present: true,
                 openai_api_key_present: true,
                 openai_model: "gpt-5".to_string(),
                 last_update_id: None,
             },
             true,
-            Some(55),
+            Some(telegram_delivery_chat_id),
         )
     }
 
@@ -677,7 +762,12 @@ mod tests {
             .fetch_one(&pool)
             .await
             .expect("digest row");
-        assert_eq!(row.get::<String, _>("id"), "ceo-digest-20260507T020000Z");
+        let id = row.get::<String, _>("id");
+        assert!(
+            id.starts_with("ceo-digest-20260507T020000Z-"),
+            "digest id keeps hour prefix"
+        );
+        assert!(!id.contains("55"), "digest id must not expose raw chat id");
         assert_eq!(row.get::<String, _>("due_at"), "2026-05-07T02:00:00+00:00");
 
         let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM agent_digest_runs")
@@ -685,6 +775,43 @@ mod tests {
             .await
             .expect("count");
         assert_eq!(count, 1);
+    }
+
+    #[tokio::test]
+    async fn current_target_hourly_run_is_created_when_stale_target_exists_for_hour() {
+        let pool = test_pool().await;
+        let now = "2026-05-07T02:10:00Z"
+            .parse::<DateTime<Utc>>()
+            .expect("now");
+
+        let old_created =
+            ensure_hourly_digest_due_run(&pool, &digest_config_for_target("123", 55), now)
+                .await
+                .expect("old target due run");
+        assert!(old_created);
+
+        let current_created =
+            ensure_hourly_digest_due_run(&pool, &digest_config_for_target("123", 66), now)
+                .await
+                .expect("current target due run");
+        assert!(current_created);
+
+        let rows = sqlx::query(
+            "SELECT delivery_chat_id
+             FROM agent_digest_runs
+             ORDER BY delivery_chat_id ASC",
+        )
+        .fetch_all(&pool)
+        .await
+        .expect("digest rows");
+        let chat_ids = rows
+            .iter()
+            .map(|row| row.get::<Option<String>, _>("delivery_chat_id"))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            chat_ids,
+            vec![Some("55".to_string()), Some("66".to_string())]
+        );
     }
 
     #[tokio::test]
@@ -720,11 +847,8 @@ mod tests {
         .fetch_one(&assertion_pool)
         .await
         .expect("digest run row");
-        assert_eq!(row.get::<String, _>("status"), "retry_waiting");
-        assert!(
-            row.get::<Option<String>, _>("next_retry_at").is_some(),
-            "shutdown retry must have next_retry_at"
-        );
+        assert_eq!(row.get::<String, _>("status"), "failed");
+        assert_eq!(row.get::<Option<String>, _>("next_retry_at"), None);
         assert_eq!(
             row.get::<Option<String>, _>("last_error_code"),
             Some(codes::AGENT_RUNTIME_DISABLED.to_string())
@@ -734,10 +858,7 @@ mod tests {
             serde_json::from_str(&row.get::<String, _>("last_error_summary_json"))
                 .expect("safe summary json");
         assert_eq!(summary["code"], codes::AGENT_RUNTIME_DISABLED);
-        assert_eq!(
-            summary["message"],
-            "CEO digest scheduler shut down before delivery completed."
-        );
+        assert_eq!(summary["retry_suppressed"], true);
     }
 
     #[tokio::test]
@@ -777,6 +898,52 @@ mod tests {
             .await
             .expect("claim recovered");
         assert!(claim.is_some(), "recovered retry should be claimable");
+    }
+
+    #[tokio::test]
+    async fn stale_in_progress_after_telegram_send_started_is_not_retried() {
+        let pool = test_pool().await;
+        let now = "2026-05-07T02:00:00Z"
+            .parse::<DateTime<Utc>>()
+            .expect("now");
+        seed_claimed_digest_run(&pool, "digest-send-started", CEO_DIGEST_MAX_ATTEMPTS).await;
+        sqlx::query(
+            "UPDATE agent_digest_runs
+             SET claimed_at = ?,
+                 delivery_summary_json = ?
+             WHERE id = ?",
+        )
+        .bind("2026-05-07T00:00:00Z")
+        .bind(
+            serde_json::json!({
+                "telegram_send_started": true,
+                "reply_char_count": 12,
+                "unavailable_tools": [],
+            })
+            .to_string(),
+        )
+        .bind("digest-send-started")
+        .execute(&pool)
+        .await
+        .expect("mark send started");
+
+        let recovered = recover_stale_in_progress_digest_runs(&pool, now)
+            .await
+            .expect("recover stale send-started claim");
+
+        assert_eq!(recovered, 1);
+        let row = digest_run_state(&pool, "digest-send-started").await;
+        assert_eq!(row.get::<String, _>("status"), "failed");
+        assert_eq!(row.get::<Option<String>, _>("next_retry_at"), None);
+        assert_eq!(
+            row.get::<Option<String>, _>("last_error_code"),
+            Some(codes::AGENT_RUNTIME_DISABLED.to_string())
+        );
+        let summary: serde_json::Value =
+            serde_json::from_str(&row.get::<String, _>("last_error_summary_json"))
+                .expect("safe summary");
+        assert_eq!(summary["code"], codes::AGENT_RUNTIME_DISABLED);
+        assert_eq!(summary["retry_suppressed"], true);
     }
 
     #[tokio::test]
