@@ -150,8 +150,9 @@ describe("agentic integration guardrails", () => {
         const secrets = readWorkspaceFile("src-tauri/src/agent/secrets.rs");
 
         expect(secrets).toContain("redaction_removes_telegram_bot_url_tokens");
-        expect(secrets).toContain('Regex::new(r"(?i)/bot[^/\\s]+/")');
-        expect(secrets).toContain('"/bot[redacted]/"');
+        expect(secrets).toContain("redaction_preserves_benign_botanical_urls");
+        expect(secrets).toContain("api\\.telegram\\.org");
+        expect(secrets).toContain("bot[redacted]");
     });
 
     it("keeps CEO chat and digest runtime business tables read-only", () => {
@@ -169,7 +170,10 @@ describe("agentic integration guardrails", () => {
         expect(digestRuntime).toContain(
             "digest_runtime_does_not_mutate_business_tables",
         );
-        expect(digestRuntime).toContain("business_table_counts");
+        expect(digestRuntime).toContain("business_table_snapshots");
+        expect(digestRuntime).toContain(
+            "business_table_snapshots_detect_existing_row_updates",
+        );
     });
 
     it("runs agent guardrails from verify:agent with Telegram disabled", () => {
