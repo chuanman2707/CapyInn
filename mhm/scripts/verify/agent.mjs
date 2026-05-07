@@ -30,3 +30,10 @@ await run(
   ["test", "--", "--run", "src/pages/settings/CeoAgentSection.test.tsx"],
   { cwd, env },
 );
+
+await run(
+  "agent-guardrails-tests",
+  "npm",
+  ["test", "--", "--run", "tests/agentic-guardrails.test.ts"],
+  { cwd, env },
+);
