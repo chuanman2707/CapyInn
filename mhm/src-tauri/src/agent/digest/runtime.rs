@@ -136,6 +136,7 @@ mod tests {
         channel::telegram::{FakeTelegramTransport, TelegramUpdate},
         provider::openai::{ProviderRequest, ProviderTurn},
     };
+    use chrono::{Duration, Local};
     use serde_json::{Map, Number, Value};
     use sqlx::{
         sqlite::{SqlitePoolOptions, SqliteRow},
@@ -380,6 +381,28 @@ mod tests {
         assert_ne!(after, before);
     }
 
+    #[tokio::test]
+    async fn digest_business_fixture_covers_digest_source_tables() {
+        let pool = test_pool().await;
+        seed_digest_business_room(&pool).await;
+        let snapshots = business_table_snapshots(&pool).await;
+
+        for table in [
+            "rooms",
+            "guests",
+            "bookings",
+            "transactions",
+            "folio_lines",
+            "expenses",
+        ] {
+            let (_, rows) = snapshots
+                .iter()
+                .find(|(name, _)| name == table)
+                .unwrap_or_else(|| panic!("missing {table} snapshot"));
+            assert!(!rows.is_empty(), "{table} fixture should not be empty");
+        }
+    }
+
     #[test]
     fn digest_tool_list_matches_phase_one_read_registry() {
         let registry_names = crate::agent::registry::CEO_PHASE_A_TOOLS
@@ -435,6 +458,14 @@ mod tests {
     }
 
     async fn seed_digest_business_room(pool: &Pool<Sqlite>) {
+        let today = Local::now().date_naive();
+        let yesterday = today - Duration::days(1);
+        let tomorrow = today + Duration::days(1);
+        let today = today.format("%Y-%m-%d").to_string();
+        let yesterday = yesterday.format("%Y-%m-%d").to_string();
+        let tomorrow = tomorrow.format("%Y-%m-%d").to_string();
+        let created_at = format!("{today}T09:00:00+07:00");
+
         sqlx::query(
             "INSERT INTO rooms (
                 id, name, type, floor, has_balcony, base_price, max_guests, extra_person_fee, status
@@ -446,6 +477,101 @@ mod tests {
         .execute(pool)
         .await
         .expect("seed digest business room");
+
+        sqlx::query(
+            "INSERT INTO guests (
+                id, guest_type, full_name, doc_number, created_at
+             )
+             VALUES (
+                'DIGEST-GUEST-1', 'domestic', 'Digest Visible Guest', 'DIGEST-DOC-1', ?
+             )",
+        )
+        .bind(&created_at)
+        .execute(pool)
+        .await
+        .expect("seed digest guest");
+
+        sqlx::query(
+            "INSERT INTO bookings (
+                id, room_id, primary_guest_id, check_in_at, expected_checkout,
+                actual_checkout, nights, total_price, paid_amount, status,
+                source, notes, scheduled_checkin, scheduled_checkout, created_at
+             )
+             VALUES (
+                'DIGEST-ARRIVAL-BOOKING', 'DIGEST-SNAPSHOT-ROOM', 'DIGEST-GUEST-1', ?, ?,
+                NULL, 1, 200000, 50000, 'booked',
+                'walk-in', 'digest arrival fixture', ?, ?, ?
+             )",
+        )
+        .bind(&today)
+        .bind(&tomorrow)
+        .bind(&today)
+        .bind(&tomorrow)
+        .bind(&created_at)
+        .execute(pool)
+        .await
+        .expect("seed digest arrival booking");
+
+        sqlx::query(
+            "INSERT INTO bookings (
+                id, room_id, primary_guest_id, check_in_at, expected_checkout,
+                actual_checkout, nights, total_price, paid_amount, status,
+                source, notes, scheduled_checkin, scheduled_checkout, created_at
+             )
+             VALUES (
+                'DIGEST-CHECKOUT-BOOKING', 'DIGEST-SNAPSHOT-ROOM', 'DIGEST-GUEST-1', ?, ?,
+                NULL, 1, 300000, 100000, 'active',
+                'walk-in', 'digest checkout fixture', ?, ?, ?
+             )",
+        )
+        .bind(&yesterday)
+        .bind(&today)
+        .bind(&yesterday)
+        .bind(&today)
+        .bind(&created_at)
+        .execute(pool)
+        .await
+        .expect("seed digest checkout booking");
+
+        sqlx::query(
+            "INSERT INTO transactions (
+                id, booking_id, amount, type, created_at
+             )
+             VALUES (
+                'DIGEST-TRANSACTION-1', 'DIGEST-CHECKOUT-BOOKING', 25000, 'cancellation_fee', ?
+             )",
+        )
+        .bind(&created_at)
+        .execute(pool)
+        .await
+        .expect("seed digest transaction");
+
+        sqlx::query(
+            "INSERT INTO folio_lines (
+                id, booking_id, category, description, amount, created_at
+             )
+             VALUES (
+                'DIGEST-FOLIO-1', 'DIGEST-CHECKOUT-BOOKING', 'service', 'Digest service line', 35000, ?
+             )",
+        )
+        .bind(&created_at)
+        .execute(pool)
+        .await
+        .expect("seed digest folio line");
+
+        sqlx::query(
+            "INSERT INTO expenses (
+                id, category, amount, expense_date, created_at
+             )
+             VALUES (
+                'DIGEST-EXPENSE-1', 'operations', 15000, ?, ?
+             )",
+        )
+        .bind(&today)
+        .bind(&created_at)
+        .execute(pool)
+        .await
+        .expect("seed digest expense");
     }
 
     async fn business_table_snapshots(pool: &Pool<Sqlite>) -> Vec<(String, Vec<Value>)> {

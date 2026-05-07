@@ -151,7 +151,9 @@ describe("agentic integration guardrails", () => {
 
         expect(secrets).toContain("redaction_removes_telegram_bot_url_tokens");
         expect(secrets).toContain("redaction_preserves_benign_botanical_urls");
+        expect(secrets).toContain("redaction_preserves_telegram_api_botanical_urls");
         expect(secrets).toContain("api\\.telegram\\.org");
+        expect(secrets).toContain("bot\\d+:");
         expect(secrets).toContain("bot[redacted]");
     });
 
@@ -173,6 +175,9 @@ describe("agentic integration guardrails", () => {
         expect(digestRuntime).toContain("business_table_snapshots");
         expect(digestRuntime).toContain(
             "business_table_snapshots_detect_existing_row_updates",
+        );
+        expect(digestRuntime).toContain(
+            "digest_business_fixture_covers_digest_source_tables",
         );
     });
 
