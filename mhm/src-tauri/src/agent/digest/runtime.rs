@@ -136,7 +136,11 @@ mod tests {
         channel::telegram::{FakeTelegramTransport, TelegramUpdate},
         provider::openai::{ProviderRequest, ProviderTurn},
     };
-    use sqlx::{sqlite::SqlitePoolOptions, Pool, Row, Sqlite};
+    use serde_json::{Map, Number, Value};
+    use sqlx::{
+        sqlite::{SqlitePoolOptions, SqliteRow},
+        Pool, Row, Sqlite, TypeInfo as _, ValueRef as _,
+    };
     use std::{
         future::Future,
         pin::Pin,
@@ -344,7 +348,8 @@ mod tests {
     #[tokio::test]
     async fn digest_runtime_does_not_mutate_business_tables() {
         let pool = test_pool().await;
-        let before = business_table_counts(&pool).await;
+        seed_digest_business_room(&pool).await;
+        let before = business_table_snapshots(&pool).await;
         let provider = RecordingProvider {
             requests: Arc::new(Mutex::new(Vec::new())),
             turn: ProviderTurn::FinalText("Không có thay đổi dữ liệu PMS.".to_string()),
@@ -355,9 +360,24 @@ mod tests {
             .deliver_digest(&claimed_run(), "gpt-test".to_string())
             .await
             .expect("deliver digest");
-        let after = business_table_counts(&pool).await;
+        let after = business_table_snapshots(&pool).await;
 
         assert_eq!(after, before);
+    }
+
+    #[tokio::test]
+    async fn business_table_snapshots_detect_existing_row_updates() {
+        let pool = test_pool().await;
+        seed_digest_business_room(&pool).await;
+        let before = business_table_snapshots(&pool).await;
+
+        sqlx::query("UPDATE rooms SET status = 'cleaning' WHERE id = 'DIGEST-SNAPSHOT-ROOM'")
+            .execute(&pool)
+            .await
+            .expect("mutate seeded room");
+        let after = business_table_snapshots(&pool).await;
+
+        assert_ne!(after, before);
     }
 
     #[test]
@@ -414,7 +434,21 @@ mod tests {
         assert!(sent_messages.lock().expect("sent message lock").is_empty());
     }
 
-    async fn business_table_counts(pool: &Pool<Sqlite>) -> Vec<(String, i64)> {
+    async fn seed_digest_business_room(pool: &Pool<Sqlite>) {
+        sqlx::query(
+            "INSERT INTO rooms (
+                id, name, type, floor, has_balcony, base_price, max_guests, extra_person_fee, status
+             )
+             VALUES (
+                'DIGEST-SNAPSHOT-ROOM', 'Digest Snapshot Room', 'standard', 1, 0, 100000, 2, 0, 'vacant'
+             )",
+        )
+        .execute(pool)
+        .await
+        .expect("seed digest business room");
+    }
+
+    async fn business_table_snapshots(pool: &Pool<Sqlite>) -> Vec<(String, Vec<Value>)> {
         let rows = sqlx::query(
             "SELECT name FROM sqlite_master
              WHERE type = 'table'
@@ -436,15 +470,76 @@ mod tests {
         .await
         .expect("list tables");
 
-        let mut counts = Vec::new();
+        let mut snapshots = Vec::new();
         for row in rows {
             let table: String = row.get("name");
-            let count: i64 = sqlx::query_scalar(&format!("SELECT COUNT(*) FROM {table}"))
-                .fetch_one(pool)
+            let columns = table_column_names(pool, &table).await;
+            let select_sql = format!("SELECT * FROM {}", quote_identifier(&table));
+            let row_values = sqlx::query(&select_sql)
+                .fetch_all(pool)
                 .await
-                .expect("count table rows");
-            counts.push((table, count));
+                .expect("snapshot table rows")
+                .into_iter()
+                .map(|row| sqlite_row_json(&row, &columns))
+                .collect::<Vec<_>>();
+            let mut serialized_rows = row_values
+                .into_iter()
+                .map(|value| serde_json::to_string(&value).expect("serialize snapshot row"))
+                .collect::<Vec<_>>();
+            serialized_rows.sort();
+            let sorted_rows = serialized_rows
+                .into_iter()
+                .map(|value| serde_json::from_str(&value).expect("deserialize snapshot row"))
+                .collect::<Vec<_>>();
+            snapshots.push((table, sorted_rows));
         }
-        counts
+        snapshots
+    }
+
+    async fn table_column_names(pool: &Pool<Sqlite>, table: &str) -> Vec<String> {
+        let pragma_sql = format!("PRAGMA table_info({})", quote_identifier(table));
+        let mut columns = sqlx::query(&pragma_sql)
+            .fetch_all(pool)
+            .await
+            .expect("list table columns")
+            .into_iter()
+            .map(|row| (row.get::<i64, _>("cid"), row.get::<String, _>("name")))
+            .collect::<Vec<_>>();
+        columns.sort_by_key(|(cid, _)| *cid);
+        columns.into_iter().map(|(_, name)| name).collect()
+    }
+
+    fn sqlite_row_json(row: &SqliteRow, columns: &[String]) -> Value {
+        let mut object = Map::new();
+        for column in columns {
+            object.insert(column.clone(), sqlite_cell_json(row, column));
+        }
+        Value::Object(object)
+    }
+
+    fn sqlite_cell_json(row: &SqliteRow, column: &str) -> Value {
+        let raw = row.try_get_raw(column).expect("read raw sqlite value");
+        if raw.is_null() {
+            return Value::Null;
+        }
+
+        match raw.type_info().name() {
+            "INTEGER" | "BOOLEAN" => Value::from(row.get::<i64, _>(column)),
+            "REAL" => Number::from_f64(row.get::<f64, _>(column))
+                .map(Value::Number)
+                .unwrap_or(Value::Null),
+            "TEXT" | "DATE" | "TIME" | "DATETIME" => Value::from(row.get::<String, _>(column)),
+            "BLOB" => Value::Array(
+                row.get::<Vec<u8>, _>(column)
+                    .into_iter()
+                    .map(Value::from)
+                    .collect(),
+            ),
+            other => Value::from(format!("[unsupported sqlite type: {other}]")),
+        }
+    }
+
+    fn quote_identifier(identifier: &str) -> String {
+        format!("\"{}\"", identifier.replace('"', "\"\""))
     }
 }
