@@ -33,10 +33,11 @@ Nếu CapyInn bị tắt hoặc offline vài giờ, khi mở lại app chỉ g�
 
 Dùng workflow riêng `agent::digest`.
 
-Digest có toggle bật/tắt riêng và persisted run state riêng, nhưng dùng chung các CEO Telegram readiness gates:
+Digest có toggle bật/tắt riêng, persisted run state riêng, và gate riêng. Gate này dùng chung các dependency an toàn của CEO Telegram, nhưng không phụ thuộc vào chat runtime toggle:
 
 - CEO cloud-data opt-in
 - bound numeric Telegram CEO user ID
+- persisted Telegram delivery chat ID
 - Telegram bot token presence
 - OpenAI API key presence
 - OpenAI model selection
@@ -64,6 +65,16 @@ Core modules:
 - Tắt chat không tự động tắt digest, trừ khi một shared dependency gate bị thiếu.
 - Tắt digest không làm dừng interactive chat.
 
+Implementation phải tách rõ `CeoTelegramConfig::evaluate_gate(...)` cho interactive chat khỏi digest gate mới, ví dụ `CeoDigestGateStatus` hoặc `evaluate_digest_gate(...)`. Digest gate không được dùng `ceo_telegram_runtime_enabled`; nó phải dùng setting riêng như `ceo_hourly_digest_enabled`.
+
+Supervisor reconcile cũng phải tách hai lifecycle:
+
+- chat task start/stop theo chat gate
+- digest task start/stop theo digest gate
+- supervisor object vẫn có thể quản lý cả hai, nhưng readiness của workflow này không được vô tình stop workflow kia
+
+Verification phải cover case `CEO Telegram Chat` off nhưng `CEO Hourly Digest` on và digest gate đủ dependency thì digest scheduler vẫn chạy.
+
 Digest runtime không được expose SQL handle, repository, transaction, command executor, shell tool, file tool, browser tool, generic HTTP tool, generic MCP discovery, hoặc PMS write tool cho model.
 
 ## Settings và gates
@@ -74,6 +85,7 @@ Gate requirements:
 
 - CEO cloud-data opt-in đang bật.
 - CEO Telegram owner binding tồn tại.
+- Telegram delivery chat ID tồn tại.
 - Telegram bot token present.
 - OpenAI API key present.
 - OpenAI model đã cấu hình.
@@ -82,6 +94,22 @@ Gate requirements:
 Digest toggle là low-risk configuration write. Khi thực tế triển khai, nó nên đi qua command-boundary pattern hiện có nếu phù hợp và phải ghi sanitized audit metadata.
 
 Receptionist và non-admin user không được cấu hình digest. Ẩn UI không đủ; backend authorization vẫn bắt buộc.
+
+### Telegram delivery target
+
+Scheduled digest không có incoming `message.chat.id`, nên phải có delivery target persisted rõ ràng.
+
+Add non-secret setting:
+
+- `ceo_telegram_delivery_chat_id`
+
+Nguồn giá trị:
+
+- Khi paired CEO gửi message qua interactive chat, backend lưu `message.chat.id` vào `ceo_telegram_delivery_chat_id` bằng low-risk command-boundary path hoặc một internal idempotent system command.
+- Admin có thể xem trạng thái present/missing trong Settings. Nếu cần nhập tay, input này vẫn phải là admin-only low-risk config write.
+- CEO phải từng start bot hoặc gửi message cho bot trước khi Telegram cho phép bot gửi private message.
+
+Digest delivery luôn dùng `ceo_telegram_delivery_chat_id`, không dùng raw Telegram username/display name để authorize hoặc deliver. Nếu chat ID missing, digest gate không ready và Settings phải nói rõ CEO cần gửi một message tới bot hoặc admin cấu hình chat ID.
 
 ## Data flow của digest
 
@@ -126,6 +154,7 @@ Required columns:
 - `role TEXT NOT NULL`
 - `channel TEXT NOT NULL`
 - `channel_actor_id TEXT`
+- `delivery_chat_id TEXT`
 - `due_at TEXT NOT NULL`
 - `status TEXT NOT NULL`
 - `attempt_count INTEGER NOT NULL DEFAULT 0`
@@ -155,6 +184,7 @@ Indexes:
 - next retry time và status
 - delivered time
 - channel actor và due time
+- delivery chat ID và due time
 
 Table này chỉ lưu delivery metadata. Nó không được lưu raw prompt, raw OpenAI response, raw PMS tool output, Telegram bot token, OpenAI API key, hoặc raw Telegram message.
 
@@ -227,6 +257,8 @@ Required behavior:
 
 Error summaries phải được scrub trước khi log, audit, persist, trả về Settings, hoặc gửi qua Telegram.
 
+Log scrubbing là một phần của #125 gate, không chỉ là best effort. Provider và Telegram channel failures phải được test/probe bằng secret-like markers để chứng minh OpenAI key và Telegram bot token không xuất hiện trong logs, kể cả Telegram URL dạng `/bot<TOKEN>/...`.
+
 ## Verification gate
 
 `npm run verify:agent` trở thành focused completion gate cho slice này.
@@ -243,10 +275,13 @@ Backend coverage phải chứng minh:
 - digest sessions luôn dùng `uses_memory=false`
 - digest chỉ dùng đúng fixed CEO read-only tool set
 - unavailable tool data được biểu diễn rõ ràng
+- `chat off + digest on + digest gate ready` vẫn cho phép digest scheduler chạy
+- missing Telegram delivery chat ID làm digest gate not ready
 - digest flow không mutate PMS business tables
 - chat và digest registries không chứa write, generic, shell, file, browser, HTTP, hoặc dynamic MCP tools
 - unknown và unpaired Telegram users không trigger provider calls
-- bot token và OpenAI key không xuất hiện trong audit, session, memory, tool output, digest run state, hoặc Telegram responses
+- bot token và OpenAI key không xuất hiện trong logs, audit, session, memory, tool output, digest run state, hoặc Telegram responses
+- log-capture test hoặc probe cover Telegram/OpenAI failure path với secret-like markers
 - agent memory không ảnh hưởng PMS query results
 
 Frontend coverage phải chứng minh:
