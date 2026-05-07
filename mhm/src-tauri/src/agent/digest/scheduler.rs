@@ -26,6 +26,11 @@ pub const CEO_DIGEST_STARTUP_CATCHUP_AFTER_MINUTES: i64 = 60;
 pub const CEO_DIGEST_SCHEDULER_POLL_DELAY: StdDuration = StdDuration::from_secs(30);
 pub const CEO_DIGEST_RETRY_DELAY: StdDuration = StdDuration::from_secs(60);
 
+enum DigestSchedulerStep {
+    Continue,
+    Shutdown,
+}
+
 pub async fn ensure_startup_digest_due_run(
     pool: &Pool<Sqlite>,
     config: &CeoDigestConfig,
@@ -131,13 +136,9 @@ pub async fn run_ceo_digest_scheduler<P, T>(
             continue;
         }
 
-        let delivery_result = tokio::select! {
-            _ = &mut shutdown_rx => break,
-            result = deliver_next_due_digest(&pool, &runtime, &config) => result,
-        };
-
-        match delivery_result {
-            Ok(_) => {}
+        match deliver_next_due_digest(&pool, &runtime, &config, &mut shutdown_rx).await {
+            Ok(DigestSchedulerStep::Continue) => {}
+            Ok(DigestSchedulerStep::Shutdown) => break,
             Err(error) => {
                 error!(
                     "CEO digest delivery failed: {} {}",
@@ -166,7 +167,8 @@ async fn deliver_next_due_digest<P, T>(
     pool: &Pool<Sqlite>,
     runtime: &CeoDigestRuntime<P, T>,
     config: &CeoDigestConfig,
-) -> CommandResult<()>
+    shutdown_rx: &mut oneshot::Receiver<()>,
+) -> CommandResult<DigestSchedulerStep>
 where
     P: AiProvider,
     T: TelegramTransport,
@@ -174,13 +176,32 @@ where
     let claim_token = uuid::Uuid::new_v4().to_string();
     let Some(run) = claim_due_digest_run(pool, &Utc::now().to_rfc3339(), &claim_token).await?
     else {
-        return Ok(());
+        return Ok(DigestSchedulerStep::Continue);
     };
 
-    match runtime
-        .deliver_digest(&run, config.openai_model.clone())
-        .await
-    {
+    let delivery_result = tokio::select! {
+        _ = shutdown_rx => {
+            if let Err(mark_error) = mark_digest_retry_or_failed(
+                pool,
+                &run.id,
+                &run.claim_token,
+                codes::AGENT_RUNTIME_DISABLED,
+                safe_shutdown_error_summary(),
+                Some(next_retry_at()),
+            )
+            .await
+            {
+                error!(
+                    "Failed to mark CEO digest shutdown retry state: {} {}",
+                    mark_error.code, mark_error.message
+                );
+            }
+            return Ok(DigestSchedulerStep::Shutdown);
+        }
+        result = runtime.deliver_digest(&run, config.openai_model.clone()) => result,
+    };
+
+    match delivery_result {
         Ok(result) => {
             mark_digest_delivered(
                 pool,
@@ -191,19 +212,17 @@ where
                     "unavailable_tools": result.unavailable_tools,
                 }),
             )
-            .await
+            .await?;
+            Ok(DigestSchedulerStep::Continue)
         }
         Err(error) => {
-            let retry_at = (Utc::now()
-                + Duration::seconds(CEO_DIGEST_RETRY_DELAY.as_secs() as i64))
-            .to_rfc3339();
             let mark_result = mark_digest_retry_or_failed(
                 pool,
                 &run.id,
                 &run.claim_token,
                 &error.code,
                 safe_delivery_error_summary(&error),
-                Some(retry_at),
+                Some(next_retry_at()),
             )
             .await;
             if let Err(mark_error) = mark_result {
@@ -361,6 +380,17 @@ fn safe_delivery_error_summary(error: &CommandError) -> serde_json::Value {
     })
 }
 
+fn safe_shutdown_error_summary() -> serde_json::Value {
+    json!({
+        "code": codes::AGENT_RUNTIME_DISABLED,
+        "message": "CEO digest scheduler shut down before delivery completed.",
+    })
+}
+
+fn next_retry_at() -> String {
+    (Utc::now() + Duration::seconds(CEO_DIGEST_RETRY_DELAY.as_secs() as i64)).to_rfc3339()
+}
+
 async fn wait_for_scheduler_delay_or_shutdown(
     shutdown_rx: &mut oneshot::Receiver<()>,
     delay: StdDuration,
@@ -386,7 +416,7 @@ mod tests {
         provider::openai::{ProviderRequest, ProviderTurn},
         settings::CEO_CLOUD_DATA_OPT_IN_SETTING,
     };
-    use sqlx::sqlite::SqlitePoolOptions;
+    use sqlx::{sqlite::SqlitePoolOptions, Row};
     use std::{
         future::{pending, Future},
         pin::Pin,
@@ -506,6 +536,7 @@ mod tests {
     async fn scheduler_shutdown_exits_while_delivery_is_blocked() {
         let pool = test_pool().await;
         configure_ready_digest_gate(&pool).await;
+        let assertion_pool = pool.clone();
         let (send_started_tx, send_started_rx) = oneshot::channel();
         let telegram = BlockingTelegram {
             send_started_tx: Arc::new(Mutex::new(Some(send_started_tx))),
@@ -525,5 +556,32 @@ mod tests {
             .await
             .expect("scheduler exits promptly")
             .expect("scheduler task succeeds");
+
+        let row = sqlx::query(
+            "SELECT status, next_retry_at, last_error_code, last_error_summary_json
+             FROM agent_digest_runs
+             LIMIT 1",
+        )
+        .fetch_one(&assertion_pool)
+        .await
+        .expect("digest run row");
+        assert_eq!(row.get::<String, _>("status"), "retry_waiting");
+        assert!(
+            row.get::<Option<String>, _>("next_retry_at").is_some(),
+            "shutdown retry must have next_retry_at"
+        );
+        assert_eq!(
+            row.get::<Option<String>, _>("last_error_code"),
+            Some(codes::AGENT_RUNTIME_DISABLED.to_string())
+        );
+
+        let summary: serde_json::Value =
+            serde_json::from_str(&row.get::<String, _>("last_error_summary_json"))
+                .expect("safe summary json");
+        assert_eq!(summary["code"], codes::AGENT_RUNTIME_DISABLED);
+        assert_eq!(
+            summary["message"],
+            "CEO digest scheduler shut down before delivery completed."
+        );
     }
 }
