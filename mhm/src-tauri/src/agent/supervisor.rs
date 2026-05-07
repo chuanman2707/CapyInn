@@ -27,7 +27,7 @@ const SUPERVISOR_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(2);
 const SUPERVISOR_RETRY_DELAY: Duration = Duration::from_secs(5);
 const CEO_TELEGRAM_OFFSET_COMMAND: &str = "agent.set_ceo_telegram_last_update_id";
 const CEO_TELEGRAM_RUNTIME_ACTOR: &str = "ceo_telegram_runtime";
-const CEO_TELEGRAM_DELIVERY_CHAT_IDEMPOTENCY_KEY: &str = "ceo-telegram-delivery-chat";
+const CEO_TELEGRAM_DELIVERY_CHAT_IDEMPOTENCY_KEY_PREFIX: &str = "ceo-telegram-delivery-chat";
 const CEO_TELEGRAM_DELIVERY_CHAT_ACTOR: &str = "ceo_telegram_runtime";
 
 pub struct AgentSupervisor {
@@ -323,7 +323,11 @@ async fn persist_last_update_id(pool: &Pool<Sqlite>, last_update_id: i64) -> Com
 async fn persist_delivery_chat_id(pool: &Pool<Sqlite>, chat_id: i64) -> CommandResult<()> {
     let mut ctx = WriteCommandContext::for_scoped_command(
         uuid::Uuid::new_v4().to_string(),
-        CEO_TELEGRAM_DELIVERY_CHAT_IDEMPOTENCY_KEY,
+        format!(
+            "{}-{}",
+            CEO_TELEGRAM_DELIVERY_CHAT_IDEMPOTENCY_KEY_PREFIX,
+            uuid::Uuid::new_v4()
+        ),
         SET_CEO_TELEGRAM_DELIVERY_CHAT_ID_COMMAND,
     )?;
     ctx.actor_type = ActorType::System;
@@ -454,6 +458,31 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn paired_chat_updates_delivery_chat_id_when_chat_changes() {
+        use crate::agent::digest::config::get_ceo_digest_config;
+        use sqlx::sqlite::SqlitePoolOptions;
+
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .expect("connect sqlite");
+        crate::db::run_migrations(&pool).await.expect("migrations");
+
+        persist_delivery_chat_id_for_test(&pool, 55)
+            .await
+            .expect("persist first chat id");
+        persist_delivery_chat_id_for_test(&pool, 66)
+            .await
+            .expect("persist second chat id");
+
+        let config = get_ceo_digest_config(&pool)
+            .await
+            .expect("read digest config");
+        assert_eq!(config.telegram_delivery_chat_id, Some(66));
+    }
+
+    #[tokio::test]
     async fn paired_chat_delivery_command_metadata_excludes_raw_chat_id() {
         use crate::agent::digest::config::SET_CEO_TELEGRAM_DELIVERY_CHAT_ID_COMMAND;
         use sqlx::sqlite::SqlitePoolOptions;
@@ -468,6 +497,9 @@ mod tests {
         persist_delivery_chat_id_for_test(&pool, 55)
             .await
             .expect("persist chat id");
+        persist_delivery_chat_id_for_test(&pool, 66)
+            .await
+            .expect("persist updated chat id");
 
         let rows = sqlx::query_as::<
             _,
@@ -490,7 +522,7 @@ mod tests {
         .await
         .expect("read command metadata");
 
-        assert_eq!(rows.len(), 1);
+        assert_eq!(rows.len(), 2);
         for (index, row) in rows.iter().enumerate() {
             let fields = [
                 ("idempotency_key", Some(row.0.as_str())),
@@ -502,10 +534,12 @@ mod tests {
 
             for (field_name, value) in fields {
                 if let Some(value) = value {
-                    assert!(
-                        !value.contains("55"),
-                        "{field_name} leaked raw chat id in command metadata row {index}: {value}"
-                    );
+                    for raw_chat_id in ["55", "66"] {
+                        assert!(
+                            !value.contains(raw_chat_id),
+                            "{field_name} leaked raw chat id in command metadata row {index}: {value}"
+                        );
+                    }
                 }
             }
         }
