@@ -524,8 +524,28 @@ mod tests {
 
         assert_eq!(rows.len(), 2);
         for (index, row) in rows.iter().enumerate() {
+            let expected_key_prefix =
+                format!("{CEO_TELEGRAM_DELIVERY_CHAT_IDEMPOTENCY_KEY_PREFIX}-");
+            let key_suffix = row.0.strip_prefix(&expected_key_prefix).unwrap_or_else(|| {
+                panic!(
+                    "idempotency key in command metadata row {index} had unexpected prefix: {}",
+                    row.0
+                )
+            });
+            uuid::Uuid::parse_str(key_suffix).unwrap_or_else(|error| {
+                panic!(
+                    "idempotency key suffix in command metadata row {index} was not a UUID: {error}"
+                )
+            });
+            for raw_chat_id in ["55", "66"] {
+                assert_ne!(
+                    row.0,
+                    format!("{expected_key_prefix}{raw_chat_id}"),
+                    "idempotency key used raw chat id shape in command metadata row {index}"
+                );
+            }
+
             let fields = [
-                ("idempotency_key", Some(row.0.as_str())),
                 ("intent_json", Some(row.1.as_str())),
                 ("response_json", row.2.as_deref()),
                 ("result_summary_json", row.3.as_deref()),
