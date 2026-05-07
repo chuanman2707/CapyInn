@@ -136,7 +136,7 @@ mod tests {
         channel::telegram::{FakeTelegramTransport, TelegramUpdate},
         provider::openai::{ProviderRequest, ProviderTurn},
     };
-    use sqlx::{sqlite::SqlitePoolOptions, Pool, Sqlite};
+    use sqlx::{sqlite::SqlitePoolOptions, Pool, Row, Sqlite};
     use std::{
         future::Future,
         pin::Pin,
@@ -342,6 +342,34 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn digest_runtime_does_not_mutate_business_tables() {
+        let pool = test_pool().await;
+        let before = business_table_counts(&pool).await;
+        let provider = RecordingProvider {
+            requests: Arc::new(Mutex::new(Vec::new())),
+            turn: ProviderTurn::FinalText("Không có thay đổi dữ liệu PMS.".to_string()),
+        };
+        let telegram = RecordingTelegram::default();
+
+        CeoDigestRuntime::new(pool.clone(), provider, telegram)
+            .deliver_digest(&claimed_run(), "gpt-test".to_string())
+            .await
+            .expect("deliver digest");
+        let after = business_table_counts(&pool).await;
+
+        assert_eq!(after, before);
+    }
+
+    #[test]
+    fn digest_tool_list_matches_phase_one_read_registry() {
+        let registry_names = crate::agent::registry::CEO_PHASE_A_TOOLS
+            .iter()
+            .map(|tool| tool.name)
+            .collect::<Vec<_>>();
+        assert_eq!(CEO_DIGEST_TOOL_NAMES, registry_names.as_slice());
+    }
+
+    #[tokio::test]
     async fn digest_runtime_sends_final_reply_to_delivery_chat() {
         let pool = test_pool().await;
         let requests = Arc::new(Mutex::new(Vec::new()));
@@ -384,5 +412,39 @@ mod tests {
 
         assert_eq!(error.code, codes::AGENT_TOOL_NOT_ALLOWED);
         assert!(sent_messages.lock().expect("sent message lock").is_empty());
+    }
+
+    async fn business_table_counts(pool: &Pool<Sqlite>) -> Vec<(String, i64)> {
+        let rows = sqlx::query(
+            "SELECT name FROM sqlite_master
+             WHERE type = 'table'
+               AND name NOT LIKE 'sqlite_%'
+               AND name NOT IN (
+                 'schema_version',
+                 'settings',
+                 'agent_sessions',
+                 'agent_audit_events',
+                 'agent_memory_items',
+                 'agent_digest_runs',
+                 'command_idempotency',
+                 'command_recovery_actions',
+                 'outbox_events'
+               )
+             ORDER BY name ASC",
+        )
+        .fetch_all(pool)
+        .await
+        .expect("list tables");
+
+        let mut counts = Vec::new();
+        for row in rows {
+            let table: String = row.get("name");
+            let count: i64 = sqlx::query_scalar(&format!("SELECT COUNT(*) FROM {table}"))
+                .fetch_one(pool)
+                .await
+                .expect("count table rows");
+            counts.push((table, count));
+        }
+        counts
     }
 }
