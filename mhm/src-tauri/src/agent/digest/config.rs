@@ -117,14 +117,71 @@ pub async fn set_ceo_telegram_delivery_chat_id_idempotent(
     ctx: &WriteCommandContext,
     telegram_delivery_chat_id: i64,
 ) -> CommandResult<IdempotentCommandResult<serde_json::Value>> {
-    let current = get_ceo_digest_config(pool).await?;
-    set_ceo_digest_config_idempotent(
-        pool,
-        ctx,
-        current.digest_enabled,
-        Some(telegram_delivery_chat_id),
-    )
-    .await
+    let delivery_chat_id_present = true;
+
+    let hash_payload = serde_json::json!({
+        "telegram_delivery_chat_id": telegram_delivery_chat_id,
+        "setting_scope": "ceo_hourly_digest_delivery_chat",
+    });
+    let ledger_intent = SanitizedLedgerIntent::from_pairs([
+        (
+            "delivery_chat_id_present",
+            serde_json::json!(delivery_chat_id_present),
+        ),
+        (
+            "setting_scope",
+            serde_json::json!("ceo_hourly_digest_delivery_chat"),
+        ),
+    ])?;
+
+    let request = WriteCommandRequest::new_sanitized(
+        hash_payload,
+        ledger_intent,
+        CommandLedgerSummary::new("Set CEO Telegram delivery chat")?,
+    )?
+    .with_primary_aggregate_key(CEO_DIGEST_SETTINGS_AGGREGATE)
+    .with_lock_key_deriver(ceo_digest_settings_lock_keys);
+
+    let actor_id = ctx.actor_id.clone();
+    WriteCommandExecutor::new(pool.clone())
+        .execute_atomic(ctx, request, move |tx| {
+            Box::pin(async move {
+                settings_store::save_setting_tx(
+                    tx,
+                    CEO_TELEGRAM_DELIVERY_CHAT_ID_SETTING,
+                    &telegram_delivery_chat_id.to_string(),
+                )
+                .await
+                .map_err(system_error)?;
+
+                insert_agent_audit_event_tx(
+                    tx,
+                    NewAgentAuditEvent {
+                        session_id: None,
+                        event_type: "ceo_telegram_delivery_chat_id.updated".to_string(),
+                        actor_id,
+                        role: Some(AgentRole::CeoSecretary),
+                        channel: Some(AgentChannel::Telegram),
+                        tool_name: None,
+                        provider: Some(AgentProvider::None),
+                        policy_outcome: "allowed".to_string(),
+                        mutation_risk: Some(MutationRisk::LowWrite),
+                        data_sensitivity: Some(DataSensitivity::CeoSensitive),
+                        summary: serde_json::json!({
+                            "delivery_chat_id_present": delivery_chat_id_present,
+                            "setting_scope": "ceo_hourly_digest_delivery_chat",
+                        }),
+                    },
+                )
+                .await?;
+
+                Ok(serde_json::json!({
+                    "delivery_chat_id_present": delivery_chat_id_present,
+                    "setting_scope": "ceo_hourly_digest_delivery_chat",
+                }))
+            })
+        })
+        .await
 }
 
 pub async fn set_ceo_digest_config_idempotent(
@@ -351,6 +408,62 @@ mod tests {
         .expect("read command intents")
     }
 
+    async fn command_metadata_fields(
+        pool: &Pool<Sqlite>,
+        command_name: &str,
+    ) -> Vec<(
+        String,
+        String,
+        String,
+        Option<String>,
+        Option<String>,
+        Option<String>,
+    )> {
+        sqlx::query_as::<_, (_, _, _, _, _, _)>(
+            "SELECT idempotency_key, intent_json, summary_json, response_json,
+                    result_summary_json, error_summary_json
+             FROM command_idempotency
+             WHERE command_name = ?
+             ORDER BY id ASC",
+        )
+        .bind(command_name)
+        .fetch_all(pool)
+        .await
+        .expect("read command metadata")
+    }
+
+    fn assert_metadata_excludes_raw_chat_id(
+        rows: &[(
+            String,
+            String,
+            String,
+            Option<String>,
+            Option<String>,
+            Option<String>,
+        )],
+        raw_chat_id: &str,
+    ) {
+        for (index, row) in rows.iter().enumerate() {
+            let fields = [
+                ("idempotency_key", Some(row.0.as_str())),
+                ("intent_json", Some(row.1.as_str())),
+                ("summary_json", Some(row.2.as_str())),
+                ("response_json", row.3.as_deref()),
+                ("result_summary_json", row.4.as_deref()),
+                ("error_summary_json", row.5.as_deref()),
+            ];
+
+            for (field_name, value) in fields {
+                if let Some(value) = value {
+                    assert!(
+                        !value.contains(raw_chat_id),
+                        "{field_name} leaked raw chat id in command metadata row {index}: {value}"
+                    );
+                }
+            }
+        }
+    }
+
     #[test]
     fn digest_gate_does_not_require_chat_runtime_enabled() {
         let telegram = CeoTelegramConfig {
@@ -474,5 +587,118 @@ mod tests {
         assert!(!digest_intents[0].contains("987654321"));
         assert!(!digest_intents[0].contains("fingerprint"));
         assert!(digest_intents[0].contains("\"delivery_chat_id_present\":true"));
+    }
+
+    #[tokio::test]
+    async fn delivery_chat_id_write_preserves_digest_enabled_and_does_not_create_setting() {
+        for (case_name, initial_digest_enabled) in [
+            ("missing", None),
+            ("enabled", Some("true")),
+            ("disabled", Some("false")),
+        ] {
+            let pool = test_pool().await;
+            if let Some(value) = initial_digest_enabled {
+                crate::services::settings_store::save_setting(
+                    &pool,
+                    CEO_HOURLY_DIGEST_ENABLED_SETTING,
+                    value,
+                )
+                .await
+                .expect("seed digest enabled setting");
+            }
+
+            let ctx = write_ctx(
+                &format!("req-delivery-preserve-{case_name}"),
+                &format!("idem-delivery-preserve-{case_name}"),
+                SET_CEO_TELEGRAM_DELIVERY_CHAT_ID_COMMAND,
+            );
+            let result = set_ceo_telegram_delivery_chat_id_idempotent(&pool, &ctx, 55)
+                .await
+                .expect("delivery chat write succeeds");
+            assert!(!result.replayed);
+
+            assert_eq!(
+                setting_value(&pool, CEO_TELEGRAM_DELIVERY_CHAT_ID_SETTING)
+                    .await
+                    .as_deref(),
+                Some("55")
+            );
+            assert_eq!(
+                setting_value(&pool, CEO_HOURLY_DIGEST_ENABLED_SETTING)
+                    .await
+                    .as_deref(),
+                initial_digest_enabled
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn delivery_chat_id_write_replays_after_digest_enabled_changes() {
+        let pool = test_pool().await;
+        let ctx = write_ctx(
+            "req-delivery-replay-1",
+            "idem-delivery-replay-1",
+            SET_CEO_TELEGRAM_DELIVERY_CHAT_ID_COMMAND,
+        );
+
+        let first = set_ceo_telegram_delivery_chat_id_idempotent(&pool, &ctx, 55)
+            .await
+            .expect("first delivery chat write succeeds");
+        assert!(!first.replayed);
+
+        let second = set_ceo_telegram_delivery_chat_id_idempotent(&pool, &ctx, 55)
+            .await
+            .expect("same delivery chat write replays");
+        assert!(second.replayed);
+
+        crate::services::settings_store::save_setting(
+            &pool,
+            CEO_HOURLY_DIGEST_ENABLED_SETTING,
+            "true",
+        )
+        .await
+        .expect("toggle digest enabled");
+
+        let third = set_ceo_telegram_delivery_chat_id_idempotent(&pool, &ctx, 55)
+            .await
+            .expect("delivery chat write still replays after digest toggle");
+        assert!(third.replayed);
+        assert_eq!(
+            setting_value(&pool, CEO_TELEGRAM_DELIVERY_CHAT_ID_SETTING)
+                .await
+                .as_deref(),
+            Some("55")
+        );
+        assert_eq!(
+            setting_value(&pool, CEO_HOURLY_DIGEST_ENABLED_SETTING)
+                .await
+                .as_deref(),
+            Some("true")
+        );
+    }
+
+    #[tokio::test]
+    async fn delivery_chat_id_command_metadata_excludes_raw_chat_id() {
+        let pool = test_pool().await;
+        let ctx = write_ctx(
+            "req-delivery-metadata-1",
+            "idem-delivery-metadata-1",
+            SET_CEO_TELEGRAM_DELIVERY_CHAT_ID_COMMAND,
+        );
+
+        set_ceo_telegram_delivery_chat_id_idempotent(&pool, &ctx, 55)
+            .await
+            .expect("delivery chat write succeeds");
+
+        let rows = command_metadata_fields(&pool, SET_CEO_TELEGRAM_DELIVERY_CHAT_ID_COMMAND).await;
+        assert_eq!(rows.len(), 1);
+        assert_metadata_excludes_raw_chat_id(&rows, "55");
+
+        for (_, summary_json) in audit_rows(&pool).await {
+            assert!(
+                !summary_json.contains("55"),
+                "audit summary leaked raw chat id: {summary_json}"
+            );
+        }
     }
 }

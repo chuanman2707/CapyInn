@@ -8,6 +8,7 @@ use crate::{
             get_ceo_telegram_config, set_ceo_telegram_last_update_id_idempotent,
             CeoTelegramGateStatus,
         },
+        digest::config::SET_CEO_TELEGRAM_DELIVERY_CHAT_ID_COMMAND,
         provider::openai::{AiProvider, OpenAiProvider},
         runtime::ceo_chat::{CeoChatMessage, CeoChatRuntime},
         secrets::KeychainSecretStore,
@@ -26,7 +27,7 @@ const SUPERVISOR_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(2);
 const SUPERVISOR_RETRY_DELAY: Duration = Duration::from_secs(5);
 const CEO_TELEGRAM_OFFSET_COMMAND: &str = "agent.set_ceo_telegram_last_update_id";
 const CEO_TELEGRAM_RUNTIME_ACTOR: &str = "ceo_telegram_runtime";
-const CEO_TELEGRAM_DELIVERY_CHAT_COMMAND: &str = "agent.set_ceo_telegram_delivery_chat_id";
+const CEO_TELEGRAM_DELIVERY_CHAT_IDEMPOTENCY_KEY: &str = "ceo-telegram-delivery-chat";
 const CEO_TELEGRAM_DELIVERY_CHAT_ACTOR: &str = "ceo_telegram_runtime";
 
 pub struct AgentSupervisor {
@@ -322,8 +323,8 @@ async fn persist_last_update_id(pool: &Pool<Sqlite>, last_update_id: i64) -> Com
 async fn persist_delivery_chat_id(pool: &Pool<Sqlite>, chat_id: i64) -> CommandResult<()> {
     let mut ctx = WriteCommandContext::for_scoped_command(
         uuid::Uuid::new_v4().to_string(),
-        format!("ceo-telegram-delivery-chat-{chat_id}"),
-        CEO_TELEGRAM_DELIVERY_CHAT_COMMAND,
+        CEO_TELEGRAM_DELIVERY_CHAT_IDEMPOTENCY_KEY,
+        SET_CEO_TELEGRAM_DELIVERY_CHAT_ID_COMMAND,
     )?;
     ctx.actor_type = ActorType::System;
     ctx.actor_id = Some(CEO_TELEGRAM_DELIVERY_CHAT_ACTOR.to_string());
@@ -450,5 +451,63 @@ mod tests {
             .await
             .expect("read raw setting");
         assert_eq!(raw, "55");
+    }
+
+    #[tokio::test]
+    async fn paired_chat_delivery_command_metadata_excludes_raw_chat_id() {
+        use crate::agent::digest::config::SET_CEO_TELEGRAM_DELIVERY_CHAT_ID_COMMAND;
+        use sqlx::sqlite::SqlitePoolOptions;
+
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .expect("connect sqlite");
+        crate::db::run_migrations(&pool).await.expect("migrations");
+
+        persist_delivery_chat_id_for_test(&pool, 55)
+            .await
+            .expect("persist chat id");
+
+        let rows = sqlx::query_as::<
+            _,
+            (
+                String,
+                String,
+                Option<String>,
+                Option<String>,
+                Option<String>,
+            ),
+        >(
+            "SELECT idempotency_key, intent_json, response_json,
+                    result_summary_json, error_summary_json
+             FROM command_idempotency
+             WHERE command_name = ?
+             ORDER BY id ASC",
+        )
+        .bind(SET_CEO_TELEGRAM_DELIVERY_CHAT_ID_COMMAND)
+        .fetch_all(&pool)
+        .await
+        .expect("read command metadata");
+
+        assert_eq!(rows.len(), 1);
+        for (index, row) in rows.iter().enumerate() {
+            let fields = [
+                ("idempotency_key", Some(row.0.as_str())),
+                ("intent_json", Some(row.1.as_str())),
+                ("response_json", row.2.as_deref()),
+                ("result_summary_json", row.3.as_deref()),
+                ("error_summary_json", row.4.as_deref()),
+            ];
+
+            for (field_name, value) in fields {
+                if let Some(value) = value {
+                    assert!(
+                        !value.contains("55"),
+                        "{field_name} leaked raw chat id in command metadata row {index}: {value}"
+                    );
+                }
+            }
+        }
     }
 }
