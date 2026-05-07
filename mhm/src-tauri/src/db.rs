@@ -1091,6 +1091,68 @@ pub(crate) async fn run_migrations(pool: &Pool<Sqlite>) -> Result<(), sqlx::Erro
         set_schema_version(&mut tx, 18).await?;
         tx.commit().await?;
     }
+
+    // -- V19: CEO hourly digest run state --
+    if current < 19 {
+        let mut tx = pool.begin().await?;
+
+        sqlx::query(
+            "CREATE TABLE IF NOT EXISTS agent_digest_runs (
+                id TEXT PRIMARY KEY,
+                role TEXT NOT NULL,
+                channel TEXT NOT NULL,
+                channel_actor_id TEXT,
+                delivery_chat_id TEXT,
+                due_at TEXT NOT NULL,
+                status TEXT NOT NULL,
+                attempt_count INTEGER NOT NULL DEFAULT 0,
+                max_attempts INTEGER NOT NULL,
+                next_retry_at TEXT,
+                claimed_at TEXT,
+                claim_token TEXT,
+                delivered_at TEXT,
+                last_error_code TEXT,
+                last_error_summary_json TEXT NOT NULL DEFAULT '{}',
+                delivery_summary_json TEXT NOT NULL DEFAULT '{}',
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            )",
+        )
+        .execute(&mut *tx)
+        .await?;
+
+        sqlx::query(
+            "CREATE INDEX IF NOT EXISTS agent_digest_runs_due_status_idx
+             ON agent_digest_runs(status, due_at)",
+        )
+        .execute(&mut *tx)
+        .await?;
+
+        sqlx::query(
+            "CREATE INDEX IF NOT EXISTS agent_digest_runs_retry_idx
+             ON agent_digest_runs(status, next_retry_at)
+             WHERE status = 'retry_waiting'",
+        )
+        .execute(&mut *tx)
+        .await?;
+
+        sqlx::query(
+            "CREATE INDEX IF NOT EXISTS agent_digest_runs_delivered_idx
+             ON agent_digest_runs(delivered_at)",
+        )
+        .execute(&mut *tx)
+        .await?;
+
+        sqlx::query(
+            "CREATE INDEX IF NOT EXISTS agent_digest_runs_actor_due_idx
+             ON agent_digest_runs(channel_actor_id, delivery_chat_id, due_at)",
+        )
+        .execute(&mut *tx)
+        .await?;
+
+        set_schema_version(&mut tx, 19).await?;
+        tx.commit().await?;
+    }
     Ok(())
 }
 
@@ -1252,6 +1314,12 @@ mod tests {
         sqlite_table_count(pool, table).await == 1
     }
 
+    async fn test_pool() -> SqlitePool {
+        SqlitePool::connect("sqlite::memory:")
+            .await
+            .expect("connects in-memory sqlite")
+    }
+
     async fn column_exists(pool: &SqlitePool, table: &str, column: &str) -> bool {
         let sql = match table {
             "agent_sessions" => {
@@ -1262,6 +1330,9 @@ mod tests {
             }
             "agent_memory_items" => {
                 "SELECT COUNT(*) FROM pragma_table_info('agent_memory_items') WHERE name = ?"
+            }
+            "agent_digest_runs" => {
+                "SELECT COUNT(*) FROM pragma_table_info('agent_digest_runs') WHERE name = ?"
             }
             _ => panic!("unsupported table {table}"),
         };
@@ -1521,7 +1592,7 @@ mod tests {
             .expect("reads final schema version")
             .get("version");
 
-        assert_eq!(version, 18);
+        assert_eq!(version, 19);
     }
 
     #[tokio::test]
@@ -1537,7 +1608,7 @@ mod tests {
             .expect("reads version")
             .get("version");
 
-        assert_eq!(version, 18);
+        assert_eq!(version, 19);
         assert_money_columns_are_integer(&pool).await;
     }
 
@@ -1825,7 +1896,7 @@ mod tests {
             .expect("reads final schema version")
             .get("version");
 
-        assert_eq!(version, 18);
+        assert_eq!(version, 19);
     }
 
     #[tokio::test]
@@ -1892,7 +1963,7 @@ mod tests {
             .expect("reads final schema version")
             .get("version");
 
-        assert_eq!(version, 18);
+        assert_eq!(version, 19);
     }
 
     #[tokio::test]
@@ -1972,7 +2043,7 @@ mod tests {
         );
 
         let version = get_schema_version(&pool).await.expect("schema version");
-        assert_eq!(version, 18);
+        assert_eq!(version, 19);
     }
 
     #[tokio::test]
@@ -2012,7 +2083,7 @@ mod tests {
 
         assert_outbox_shape(&pool).await;
         let version = get_schema_version(&pool).await.expect("schema version");
-        assert_eq!(version, 18);
+        assert_eq!(version, 19);
     }
 
     #[tokio::test]
@@ -2030,7 +2101,7 @@ mod tests {
 
         assert_outbox_shape(&pool).await;
         let version = get_schema_version(&pool).await.expect("schema version");
-        assert_eq!(version, 18);
+        assert_eq!(version, 19);
     }
 
     #[tokio::test]
@@ -2060,7 +2131,7 @@ mod tests {
             1
         );
         let version = get_schema_version(&pool).await.expect("schema version");
-        assert_eq!(version, 18);
+        assert_eq!(version, 19);
     }
 
     #[tokio::test]
@@ -2073,7 +2144,39 @@ mod tests {
 
         assert_agent_safety_shape(&pool).await;
         let version = get_schema_version(&pool).await.expect("schema version");
-        assert_eq!(version, 18);
+        assert_eq!(version, 19);
+    }
+
+    #[tokio::test]
+    async fn v19_creates_agent_digest_runs_schema() {
+        let pool = test_pool().await;
+        run_migrations(&pool).await.expect("runs migrations");
+
+        for column in [
+            "id",
+            "role",
+            "channel",
+            "channel_actor_id",
+            "delivery_chat_id",
+            "due_at",
+            "status",
+            "attempt_count",
+            "max_attempts",
+            "next_retry_at",
+            "claimed_at",
+            "claim_token",
+            "delivered_at",
+            "last_error_code",
+            "last_error_summary_json",
+            "delivery_summary_json",
+            "created_at",
+            "updated_at",
+        ] {
+            assert!(
+                column_exists(&pool, "agent_digest_runs", column).await,
+                "agent_digest_runs.{column} exists"
+            );
+        }
     }
 
     #[tokio::test]
@@ -2097,7 +2200,7 @@ mod tests {
 
         assert_agent_safety_shape(&pool).await;
         let version = get_schema_version(&pool).await.expect("schema version");
-        assert_eq!(version, 18);
+        assert_eq!(version, 19);
     }
 
     #[tokio::test]
