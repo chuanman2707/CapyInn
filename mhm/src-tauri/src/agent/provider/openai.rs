@@ -297,8 +297,10 @@ fn parse_provider_turn(bytes: &[u8]) -> CommandResult<ProviderTurn> {
     for output in &response.output {
         match output.get("type").and_then(Value::as_str) {
             Some("function_call") => tool_calls.push(parse_tool_call(output.clone())?),
-            Some("message") if final_text.is_none() => {
-                final_text = parse_message_text(output);
+            Some("message") => {
+                if final_text.is_none() {
+                    final_text = parse_message_text(output);
+                }
             }
             _ => {}
         }

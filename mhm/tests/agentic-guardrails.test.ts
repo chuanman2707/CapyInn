@@ -166,9 +166,12 @@ describe("agentic integration guardrails", () => {
         );
 
         expect(chatRuntime).toContain(
-            "business_table_counts_are_unchanged_across_mocked_chat_turn",
+            "business_table_snapshots_are_unchanged_across_mocked_chat_turn",
         );
-        expect(chatRuntime).toContain("business_table_counts");
+        expect(chatRuntime).toContain(
+            "business_table_snapshots_detect_existing_chat_row_updates",
+        );
+        expect(chatRuntime).toContain("phase_one_pms_table_snapshots");
         expect(digestRuntime).toContain(
             "digest_runtime_does_not_mutate_business_tables",
         );
@@ -179,6 +182,47 @@ describe("agentic integration guardrails", () => {
         expect(digestRuntime).toContain(
             "digest_business_fixture_covers_digest_source_tables",
         );
+        expect(digestRuntime).toContain(
+            "digest_snapshot_includes_outbox_and_agent_memory_tables",
+        );
+    });
+
+    it("keeps CEO digest readiness cases in the phase gate", () => {
+        const digestConfig = readWorkspaceFile(
+            "src-tauri/src/agent/digest/config.rs",
+        );
+        const settingsUi = readWorkspaceFile(
+            "src/pages/settings/CeoAgentSection.tsx",
+        );
+
+        expect(digestConfig).toContain("digest_gate_requires_openai_model");
+        expect(digestConfig).toContain(
+            "digest_gate_reports_every_missing_dependency",
+        );
+        expect(digestConfig).toContain(
+            "digest_gate_does_not_require_chat_runtime_enabled",
+        );
+        expect(digestConfig).toContain("digest_gate_requires_delivery_chat_id");
+        expect(digestConfig).toContain("CeoDigestGateMissing::OpenAiModel");
+        expect(settingsUi).toContain('open_ai_model: "OpenAI model"');
+    });
+
+    it("keeps CEO agent final replies behind secret redaction", () => {
+        const chatRuntime = readWorkspaceFile(
+            "src-tauri/src/agent/runtime/ceo_chat.rs",
+        );
+        const digestRuntime = readWorkspaceFile(
+            "src-tauri/src/agent/digest/runtime.rs",
+        );
+
+        expect(chatRuntime).toContain(
+            "final_reply_redacts_secret_like_markers_before_delivery",
+        );
+        expect(chatRuntime).toContain("redact_agent_secret_markers(&text)");
+        expect(digestRuntime).toContain(
+            "digest_final_reply_redacts_secret_like_markers_before_telegram_send",
+        );
+        expect(digestRuntime).toContain("redact_agent_secret_markers(&text)");
     });
 
     it("runs agent guardrails from verify:agent with Telegram disabled", () => {

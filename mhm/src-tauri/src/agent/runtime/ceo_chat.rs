@@ -6,6 +6,7 @@ use crate::{
         },
         provider::openai::{AiProvider, ProviderRequest, ProviderToolOutput, ProviderTurn},
         retention::SESSION_RETENTION_METADATA_ONLY,
+        secrets::redact_agent_secret_markers,
         store::{
             create_agent_session, insert_agent_audit_event, NewAgentAuditEvent, NewAgentSession,
         },
@@ -44,16 +45,6 @@ pub struct CeoChatRuntime<P> {
     provider: P,
 }
 
-struct CeoChatAuditEvent {
-    session_id: Option<String>,
-    event_type: &'static str,
-    actor_id: Option<String>,
-    provider: Option<AgentProvider>,
-    policy_outcome: &'static str,
-    tool_name: Option<String>,
-    summary: Value,
-}
-
 impl<P> CeoChatRuntime<P>
 where
     P: AiProvider,
@@ -82,35 +73,35 @@ where
         )
         .await?;
 
-        self.audit(CeoChatAuditEvent {
-            session_id: Some(session_id.clone()),
-            event_type: "ceo_chat.message_received",
-            actor_id: message.actor.stable_actor_id.clone(),
-            provider: None,
-            policy_outcome: "received",
-            tool_name: None,
-            summary: json!({
+        self.audit(
+            Some(&session_id),
+            "ceo_chat.message_received",
+            message.actor.stable_actor_id.clone(),
+            None,
+            "received",
+            None,
+            json!({
                 "chat_id": message.chat_id,
                 "source": "telegram_read_only_chat",
                 "message_chars": message.text.chars().count(),
             }),
-        })
+        )
         .await?;
 
         if let Err(error) = gate_result {
-            self.audit(CeoChatAuditEvent {
-                session_id: Some(session_id.clone()),
-                event_type: "ceo_chat.denied",
-                actor_id: message.actor.stable_actor_id.clone(),
-                provider: None,
-                policy_outcome: "denied",
-                tool_name: None,
-                summary: json!({
+            self.audit(
+                Some(&session_id),
+                "ceo_chat.denied",
+                message.actor.stable_actor_id.clone(),
+                None,
+                "denied",
+                None,
+                json!({
                     "chat_id": message.chat_id,
                     "source": "telegram_read_only_chat",
                     "reason_code": error.code,
                 }),
-            })
+            )
             .await?;
             return Err(error);
         }
@@ -118,19 +109,19 @@ where
         match self.run_provider_loop(&session_id, &message).await {
             Ok(reply) => Ok(reply),
             Err(error) => {
-                self.audit(CeoChatAuditEvent {
-                    session_id: Some(session_id.clone()),
-                    event_type: "ceo_chat.error",
-                    actor_id: message.actor.stable_actor_id.clone(),
-                    provider: Some(AgentProvider::OpenAi),
-                    policy_outcome: "error",
-                    tool_name: None,
-                    summary: json!({
+                self.audit(
+                    Some(&session_id),
+                    "ceo_chat.error",
+                    message.actor.stable_actor_id.clone(),
+                    Some(AgentProvider::OpenAi),
+                    "error",
+                    None,
+                    json!({
                         "chat_id": message.chat_id,
                         "source": "telegram_read_only_chat",
                         "reason_code": error.code,
                     }),
-                })
+                )
                 .await?;
                 Err(error)
             }
@@ -177,19 +168,20 @@ where
 
             match self.provider.create_turn(request).await? {
                 ProviderTurn::FinalText(text) => {
+                    let text = redact_agent_secret_markers(&text);
                     let reply = CeoChatReply {
                         text,
                         tools_called,
                         termination_reason: "final_text".to_string(),
                     };
-                    self.audit(CeoChatAuditEvent {
-                        session_id: Some(session_id.to_string()),
-                        event_type: "ceo_chat.final_reply",
-                        actor_id: message.actor.stable_actor_id.clone(),
-                        provider: Some(AgentProvider::OpenAi),
-                        policy_outcome: "allowed",
-                        tool_name: None,
-                        summary: json!({
+                    self.audit(
+                        Some(session_id),
+                        "ceo_chat.final_reply",
+                        message.actor.stable_actor_id.clone(),
+                        Some(AgentProvider::OpenAi),
+                        "allowed",
+                        None,
+                        json!({
                             "chat_id": message.chat_id,
                             "source": "telegram_read_only_chat",
                             "termination_reason": reply.termination_reason,
@@ -197,7 +189,7 @@ where
                             "reply_chars": reply.text.chars().count(),
                             "data_unavailable": reply.text.trim() == DATA_UNAVAILABLE_MESSAGE,
                         }),
-                    })
+                    )
                     .await?;
                     return Ok(reply);
                 }
@@ -216,21 +208,21 @@ where
 
                         let envelope =
                             dispatch_ceo_read_tool(&self.pool, &call.name, call.arguments).await?;
-                        self.audit(CeoChatAuditEvent {
-                            session_id: Some(session_id.to_string()),
-                            event_type: "ceo_chat.tool_called",
-                            actor_id: message.actor.stable_actor_id.clone(),
-                            provider: Some(AgentProvider::OpenAi),
-                            policy_outcome: "allowed",
-                            tool_name: Some(call.name.clone()),
-                            summary: json!({
+                        self.audit(
+                            Some(session_id),
+                            "ceo_chat.tool_called",
+                            message.actor.stable_actor_id.clone(),
+                            Some(AgentProvider::OpenAi),
+                            "allowed",
+                            Some(call.name.clone()),
+                            json!({
                                 "chat_id": message.chat_id,
                                 "source": "telegram_read_only_chat",
                                 "tool_name": call.name,
                                 "args_hash": stable_hash(&canonical_args),
                                 "tool_metadata": envelope.metadata,
                             }),
-                        })
+                        )
                         .await?;
                         tools_called.push(envelope.tool.clone());
                         tool_outputs.push(ProviderToolOutput {
@@ -250,21 +242,31 @@ where
         Err(tool_loop_limit_error())
     }
 
-    async fn audit(&self, event: CeoChatAuditEvent) -> CommandResult<()> {
+    #[allow(clippy::too_many_arguments)]
+    async fn audit(
+        &self,
+        session_id: Option<&str>,
+        event_type: &str,
+        actor_id: Option<String>,
+        provider: Option<AgentProvider>,
+        policy_outcome: &str,
+        tool_name: Option<String>,
+        summary: Value,
+    ) -> CommandResult<()> {
         insert_agent_audit_event(
             &self.pool,
             NewAgentAuditEvent {
-                session_id: event.session_id,
-                event_type: event.event_type.to_string(),
-                actor_id: event.actor_id,
+                session_id: session_id.map(str::to_string),
+                event_type: event_type.to_string(),
+                actor_id,
                 role: Some(AgentRole::CeoSecretary),
                 channel: Some(AgentChannel::Telegram),
-                tool_name: event.tool_name,
-                provider: event.provider,
-                policy_outcome: event.policy_outcome.to_string(),
+                tool_name,
+                provider,
+                policy_outcome: policy_outcome.to_string(),
                 mutation_risk: Some(MutationRisk::ReadOnly),
                 data_sensitivity: Some(DataSensitivity::CeoSensitive),
-                summary: event.summary,
+                summary,
             },
         )
         .await
@@ -320,7 +322,7 @@ fn canonical_json(value: &Value) -> String {
         }
         Value::Object(map) => {
             let mut entries = map.iter().collect::<Vec<_>>();
-            entries.sort_by_key(|(left, _)| *left);
+            entries.sort_by(|(left, _), (right, _)| left.cmp(right));
             let items = entries
                 .into_iter()
                 .map(|(key, child)| {
@@ -344,11 +346,12 @@ mod tests {
             config::CeoTelegramConfig,
             model::{AgentChannel, ChannelActor},
             provider::openai::{AiProvider, ProviderRequest, ProviderToolCall, ProviderTurn},
+            test_support::phase_one_pms_table_snapshots as business_table_snapshots,
         },
         app_error::{codes, CommandError, CommandResult},
     };
     use serde_json::{json, Value};
-    use sqlx::{sqlite::SqlitePoolOptions, Pool, Row, Sqlite};
+    use sqlx::{sqlite::SqlitePoolOptions, Pool, Sqlite};
     use std::{
         future::Future,
         pin::Pin,
@@ -530,9 +533,27 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn business_table_counts_are_unchanged_across_mocked_chat_turn() {
+    async fn final_reply_redacts_secret_like_markers_before_delivery() {
         let pool = test_pool().await;
-        let before = business_table_counts(&pool).await;
+        let provider = RecordingProvider::new(vec![Ok(ProviderTurn::FinalText(
+            "Không trả secret sk-live-secret hoặc https://api.telegram.org/bot123456:ABC-secret/sendMessage".to_string(),
+        ))]);
+
+        let reply = CeoChatRuntime::new(pool, provider)
+            .handle_message(message(ready_config()))
+            .await
+            .expect("chat succeeds");
+
+        assert!(!reply.text.contains("sk-live-secret"));
+        assert!(!reply.text.contains("123456:ABC-secret"));
+        assert!(reply.text.contains("[redacted]"));
+    }
+
+    #[tokio::test]
+    async fn business_table_snapshots_are_unchanged_across_mocked_chat_turn() {
+        let pool = test_pool().await;
+        seed_chat_business_room(&pool).await;
+        let before = business_table_snapshots(&pool).await;
         let provider = RecordingProvider::new(vec![
             Ok(ProviderTurn::ToolCalls {
                 calls: vec![tool_call("list_room_status", json!({}))],
@@ -549,41 +570,37 @@ mod tests {
             .handle_message(message(ready_config()))
             .await
             .expect("chat succeeds");
-        let after = business_table_counts(&pool).await;
+        let after = business_table_snapshots(&pool).await;
 
         assert_eq!(after, before);
     }
 
-    async fn business_table_counts(pool: &Pool<Sqlite>) -> Vec<(String, i64)> {
-        let rows = sqlx::query(
-            "SELECT name FROM sqlite_master
-             WHERE type = 'table'
-               AND name NOT LIKE 'sqlite_%'
-               AND name NOT IN (
-                 'schema_version',
-                 'settings',
-                 'agent_sessions',
-                 'agent_audit_events',
-                 'agent_memory_items',
-                 'command_idempotency',
-                 'command_recovery_actions',
-                 'outbox_events'
-               )
-             ORDER BY name ASC",
-        )
-        .fetch_all(pool)
-        .await
-        .expect("list tables");
+    #[tokio::test]
+    async fn business_table_snapshots_detect_existing_chat_row_updates() {
+        let pool = test_pool().await;
+        seed_chat_business_room(&pool).await;
+        let before = business_table_snapshots(&pool).await;
 
-        let mut counts = Vec::new();
-        for row in rows {
-            let table: String = row.get("name");
-            let count: i64 = sqlx::query_scalar(&format!("SELECT COUNT(*) FROM {table}"))
-                .fetch_one(pool)
-                .await
-                .expect("count table rows");
-            counts.push((table, count));
-        }
-        counts
+        sqlx::query("UPDATE rooms SET status = 'cleaning' WHERE id = 'CHAT-SNAPSHOT-ROOM'")
+            .execute(&pool)
+            .await
+            .expect("mutate seeded room");
+        let after = business_table_snapshots(&pool).await;
+
+        assert_ne!(after, before);
+    }
+
+    async fn seed_chat_business_room(pool: &Pool<Sqlite>) {
+        sqlx::query(
+            "INSERT INTO rooms (
+                id, name, type, floor, has_balcony, base_price, max_guests, extra_person_fee, status
+             )
+             VALUES (
+                'CHAT-SNAPSHOT-ROOM', 'Chat Snapshot Room', 'standard', 1, 0, 100000, 2, 0, 'vacant'
+             )",
+        )
+        .execute(pool)
+        .await
+        .expect("seed chat room");
     }
 }
