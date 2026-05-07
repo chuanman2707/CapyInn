@@ -74,13 +74,12 @@ where
                         )
                     })?)
                 }
-                Err(error) => {
+                Err(_) => {
                     unavailable_tools.push((*tool_name).to_string());
                     tool_results.push(json!({
                         "ok": false,
                         "tool": tool_name,
                         "error": {
-                            "code": error.code,
                             "message": "data unavailable",
                         },
                         "metadata": {
@@ -242,6 +241,55 @@ mod tests {
         for tool in CEO_DIGEST_TOOL_NAMES {
             assert!(request.user.contains(tool), "payload includes {tool}");
         }
+    }
+
+    #[tokio::test]
+    async fn unavailable_tool_payload_does_not_expose_internal_error_details() {
+        let pool = test_pool().await;
+        sqlx::query("DROP TABLE rooms")
+            .execute(&pool)
+            .await
+            .expect("make room-backed tools unavailable");
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let provider = RecordingProvider {
+            requests: Arc::clone(&requests),
+            turn: ProviderTurn::FinalText("Digest có một phần thiếu dữ liệu.".to_string()),
+        };
+        let telegram = FakeTelegramTransport::with_updates(Vec::<TelegramUpdate>::new());
+
+        let result = CeoDigestRuntime::new(pool, provider, telegram)
+            .deliver_digest(&claimed_run(), "gpt-test".to_string())
+            .await
+            .expect("deliver digest");
+
+        assert!(
+            !result.unavailable_tools.is_empty(),
+            "test setup must force at least one unavailable tool"
+        );
+        let request = requests
+            .lock()
+            .expect("request lock")
+            .first()
+            .cloned()
+            .expect("request");
+        assert!(request.user.contains("data unavailable"));
+        assert!(request.user.contains("\"unavailable\":true"));
+        assert!(!request.user.contains(codes::SYSTEM_INTERNAL_ERROR));
+        assert!(!request.user.contains("Cannot execute CEO read tool"));
+
+        let payload: serde_json::Value =
+            serde_json::from_str(&request.user).expect("provider payload is json");
+        let unavailable_entry = payload["tools"]
+            .as_array()
+            .expect("tools array")
+            .iter()
+            .find(|entry| entry["metadata"]["unavailable"] == true)
+            .expect("unavailable tool entry");
+        assert_eq!(unavailable_entry["error"]["message"], "data unavailable");
+        assert!(
+            unavailable_entry["error"].get("code").is_none(),
+            "unavailable entries must not expose original error codes"
+        );
     }
 
     #[tokio::test]
