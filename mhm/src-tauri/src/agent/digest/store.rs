@@ -38,6 +38,37 @@ fn stable_json(value: &Value) -> CommandResult<String> {
     serde_json::to_string(value).map_err(system_error)
 }
 
+fn digest_payload_conflict_error() -> CommandError {
+    CommandError::system(
+        codes::SYSTEM_INTERNAL_ERROR,
+        "Digest run id already exists with different payload.",
+    )
+}
+
+fn invalid_delivery_chat_id_error() -> CommandError {
+    CommandError::system(
+        codes::SYSTEM_INTERNAL_ERROR,
+        "Digest run persisted delivery chat id is invalid.",
+    )
+}
+
+fn missing_retry_time_error() -> CommandError {
+    CommandError::system(
+        codes::SYSTEM_INTERNAL_ERROR,
+        "Digest retry requires next_retry_at before max attempts.",
+    )
+}
+
+fn parse_delivery_chat_id(value: Option<String>) -> CommandResult<Option<i64>> {
+    value
+        .map(|value| {
+            value
+                .parse::<i64>()
+                .map_err(|_| invalid_delivery_chat_id_error())
+        })
+        .transpose()
+}
+
 async fn update_selected_digest_run_claim_tx(
     tx: &mut Transaction<'_, Sqlite>,
     id: &str,
@@ -77,7 +108,7 @@ pub async fn create_digest_run_if_absent(
     input: NewDigestRun,
 ) -> CommandResult<()> {
     let now = Utc::now().to_rfc3339();
-    sqlx::query(
+    let result = sqlx::query(
         "INSERT OR IGNORE INTO agent_digest_runs (
             id, role, channel, channel_actor_id, delivery_chat_id, due_at, status,
             attempt_count, max_attempts, last_error_summary_json, delivery_summary_json,
@@ -94,7 +125,36 @@ pub async fn create_digest_run_if_absent(
     .execute(pool)
     .await
     .map_err(system_error)?;
-    Ok(())
+
+    if result.rows_affected() > 0 {
+        return Ok(());
+    }
+
+    let row = sqlx::query(
+        "SELECT channel_actor_id, delivery_chat_id, due_at, max_attempts
+         FROM agent_digest_runs
+         WHERE id = ?",
+    )
+    .bind(&input.id)
+    .fetch_one(pool)
+    .await
+    .map_err(system_error)?;
+
+    let persisted_channel_actor_id: Option<String> = row.get("channel_actor_id");
+    let persisted_delivery_chat_id =
+        parse_delivery_chat_id(row.get::<Option<String>, _>("delivery_chat_id"))?;
+    let persisted_due_at: String = row.get("due_at");
+    let persisted_max_attempts: i64 = row.get("max_attempts");
+
+    if persisted_channel_actor_id == input.channel_actor_id
+        && persisted_delivery_chat_id == input.delivery_chat_id
+        && persisted_due_at == input.due_at
+        && persisted_max_attempts == input.max_attempts
+    {
+        return Ok(());
+    }
+
+    Err(digest_payload_conflict_error())
 }
 
 pub async fn claim_due_digest_run(
@@ -102,7 +162,10 @@ pub async fn claim_due_digest_run(
     now: &str,
     claim_token: &str,
 ) -> CommandResult<Option<ClaimedDigestRun>> {
-    let mut tx = pool.begin().await.map_err(system_error)?;
+    let mut tx = pool
+        .begin_with("BEGIN IMMEDIATE")
+        .await
+        .map_err(system_error)?;
     let row = sqlx::query(
         "SELECT id, channel_actor_id, delivery_chat_id, due_at, attempt_count, max_attempts
          FROM agent_digest_runs
@@ -126,6 +189,7 @@ pub async fn claim_due_digest_run(
     };
 
     let id: String = row.get("id");
+    let delivery_chat_id = parse_delivery_chat_id(row.get("delivery_chat_id"))?;
     let rows_affected = update_selected_digest_run_claim_tx(&mut tx, &id, now, claim_token).await?;
 
     if rows_affected == 0 {
@@ -136,9 +200,7 @@ pub async fn claim_due_digest_run(
     let claimed = ClaimedDigestRun {
         id,
         channel_actor_id: row.get("channel_actor_id"),
-        delivery_chat_id: row
-            .get::<Option<String>, _>("delivery_chat_id")
-            .and_then(|value| value.parse::<i64>().ok()),
+        delivery_chat_id,
         due_at: row.get("due_at"),
         attempt_count: row.get::<i64, _>("attempt_count") + 1,
         max_attempts: row.get("max_attempts"),
@@ -206,7 +268,7 @@ pub async fn mark_digest_retry_or_failed(
     let retry_at = if status == DIGEST_STATUS_FAILED {
         None
     } else {
-        next_retry_at
+        Some(next_retry_at.ok_or_else(missing_retry_time_error)?)
     };
 
     let result = sqlx::query(
@@ -242,14 +304,22 @@ mod tests {
     use super::*;
     use sqlx::{sqlite::SqlitePoolOptions, Row};
 
-    async fn test_pool() -> Pool<Sqlite> {
+    async fn test_pool_with_max_connections(max_connections: u32) -> Pool<Sqlite> {
+        let database_url = format!(
+            "sqlite://file:{}?mode=memory&cache=shared",
+            uuid::Uuid::new_v4()
+        );
         let pool = SqlitePoolOptions::new()
-            .max_connections(1)
-            .connect("sqlite::memory:")
+            .max_connections(max_connections)
+            .connect(&database_url)
             .await
             .expect("connect sqlite");
         crate::db::run_migrations(&pool).await.expect("migrations");
         pool
+    }
+
+    async fn test_pool() -> Pool<Sqlite> {
+        test_pool_with_max_connections(1).await
     }
 
     fn run(id: &str, due_at: &str) -> NewDigestRun {
@@ -280,6 +350,39 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn create_digest_run_rejects_same_id_with_different_payload() {
+        let pool = test_pool().await;
+        create_digest_run_if_absent(&pool, run("digest-1", "2026-05-07T01:00:00Z"))
+            .await
+            .expect("first insert");
+
+        let mut drifted = run("digest-1", "2026-05-07T02:00:00Z");
+        drifted.delivery_chat_id = Some(66);
+        create_digest_run_if_absent(&pool, drifted)
+            .await
+            .expect_err("payload drift rejected");
+
+        let row = sqlx::query(
+            "SELECT due_at, channel_actor_id, delivery_chat_id, max_attempts
+             FROM agent_digest_runs
+             WHERE id = 'digest-1'",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("row");
+        assert_eq!(row.get::<String, _>("due_at"), "2026-05-07T01:00:00Z");
+        assert_eq!(
+            row.get::<Option<String>, _>("channel_actor_id"),
+            Some("123".to_string())
+        );
+        assert_eq!(
+            row.get::<Option<String>, _>("delivery_chat_id"),
+            Some("55".to_string())
+        );
+        assert_eq!(row.get::<i64, _>("max_attempts"), CEO_DIGEST_MAX_ATTEMPTS);
+    }
+
+    #[tokio::test]
     async fn claim_due_digest_run_allows_only_one_claim() {
         let pool = test_pool().await;
         create_digest_run_if_absent(&pool, run("digest-1", "2026-05-07T01:00:00Z"))
@@ -297,6 +400,63 @@ mod tests {
             .await
             .expect("claim");
         assert!(second.is_none());
+    }
+
+    #[tokio::test]
+    async fn concurrent_claims_return_one_claim_and_one_none() {
+        let pool = test_pool_with_max_connections(2).await;
+        create_digest_run_if_absent(&pool, run("digest-1", "2026-05-07T01:00:00Z"))
+            .await
+            .expect("insert");
+
+        let pool_a = pool.clone();
+        let pool_b = pool.clone();
+        let claim_a = tokio::spawn(async move {
+            claim_due_digest_run(&pool_a, "2026-05-07T01:00:01Z", "claim-a").await
+        });
+        let claim_b = tokio::spawn(async move {
+            claim_due_digest_run(&pool_b, "2026-05-07T01:00:01Z", "claim-b").await
+        });
+        let (claim_a, claim_b) = tokio::join!(claim_a, claim_b);
+
+        let results = vec![
+            claim_a.expect("claim task a").expect("claim a"),
+            claim_b.expect("claim task b").expect("claim b"),
+        ];
+        assert_eq!(results.iter().filter(|result| result.is_some()).count(), 1);
+        assert_eq!(results.iter().filter(|result| result.is_none()).count(), 1);
+
+        let row = sqlx::query(
+            "SELECT status, attempt_count, claim_token FROM agent_digest_runs WHERE id = 'digest-1'",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("row");
+        assert_eq!(row.get::<String, _>("status"), DIGEST_STATUS_IN_PROGRESS);
+        assert_eq!(row.get::<i64, _>("attempt_count"), 1);
+        assert!(["claim-a", "claim-b"].contains(
+            &row.get::<Option<String>, _>("claim_token")
+                .expect("claim token")
+                .as_str()
+        ));
+    }
+
+    #[tokio::test]
+    async fn claim_due_digest_run_fails_closed_on_invalid_delivery_chat_id() {
+        let pool = test_pool().await;
+        create_digest_run_if_absent(&pool, run("digest-1", "2026-05-07T01:00:00Z"))
+            .await
+            .expect("insert");
+        sqlx::query("UPDATE agent_digest_runs SET delivery_chat_id = ? WHERE id = ?")
+            .bind("not-an-integer")
+            .bind("digest-1")
+            .execute(&pool)
+            .await
+            .expect("corrupt delivery chat id");
+
+        claim_due_digest_run(&pool, "2026-05-07T01:00:01Z", "claim-a")
+            .await
+            .expect_err("invalid delivery chat id rejected");
     }
 
     #[tokio::test]
@@ -336,6 +496,45 @@ mod tests {
         assert_eq!(row.get::<String, _>("status"), DIGEST_STATUS_PENDING);
         assert_eq!(row.get::<i64, _>("attempt_count"), 0);
         assert_eq!(row.get::<Option<String>, _>("claim_token"), None);
+    }
+
+    #[tokio::test]
+    async fn retry_requires_next_retry_time_before_max_attempts() {
+        let pool = test_pool().await;
+        create_digest_run_if_absent(&pool, run("digest-1", "2026-05-07T01:00:00Z"))
+            .await
+            .expect("insert");
+        let claim = claim_due_digest_run(&pool, "2026-05-07T01:00:01Z", "claim-a")
+            .await
+            .expect("claim")
+            .expect("claimed");
+
+        mark_digest_retry_or_failed(
+            &pool,
+            &claim.id,
+            &claim.claim_token,
+            "AGENT_PROVIDER_REQUEST_FAILED",
+            serde_json::json!({"message": "network unavailable"}),
+            None,
+        )
+        .await
+        .expect_err("retry without next_retry_at rejected");
+
+        let row = sqlx::query(
+            "SELECT status, attempt_count, claim_token, next_retry_at
+             FROM agent_digest_runs
+             WHERE id = 'digest-1'",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("row");
+        assert_eq!(row.get::<String, _>("status"), DIGEST_STATUS_IN_PROGRESS);
+        assert_eq!(row.get::<i64, _>("attempt_count"), 1);
+        assert_eq!(
+            row.get::<Option<String>, _>("claim_token"),
+            Some("claim-a".to_string())
+        );
+        assert_eq!(row.get::<Option<String>, _>("next_retry_at"), None);
     }
 
     #[tokio::test]
