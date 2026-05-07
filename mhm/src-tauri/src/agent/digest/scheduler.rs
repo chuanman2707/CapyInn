@@ -7,6 +7,7 @@ use crate::{
             store::{
                 claim_due_digest_run, create_digest_run_if_absent, mark_digest_delivered,
                 mark_digest_retry_or_failed, NewDigestRun, CEO_DIGEST_MAX_ATTEMPTS,
+                DIGEST_STATUS_FAILED, DIGEST_STATUS_IN_PROGRESS, DIGEST_STATUS_RETRY_WAITING,
             },
         },
         provider::openai::AiProvider,
@@ -25,10 +26,12 @@ use tokio::sync::oneshot;
 pub const CEO_DIGEST_STARTUP_CATCHUP_AFTER_MINUTES: i64 = 60;
 pub const CEO_DIGEST_SCHEDULER_POLL_DELAY: StdDuration = StdDuration::from_secs(30);
 pub const CEO_DIGEST_RETRY_DELAY: StdDuration = StdDuration::from_secs(60);
+pub const CEO_DIGEST_IN_PROGRESS_RECOVERY_AFTER_SECONDS: i64 = 60;
 
 enum DigestSchedulerStep {
     Continue,
     Shutdown,
+    ShutdownCleanupFailed(CommandError),
 }
 
 pub async fn ensure_startup_digest_due_run(
@@ -103,6 +106,18 @@ pub async fn run_ceo_digest_scheduler<P, T>(
         }
 
         let now = Utc::now();
+        if let Err(error) = recover_stale_in_progress_digest_runs(&pool, now).await {
+            error!(
+                "Failed to recover stale CEO digest claims: {} {}",
+                error.code, error.message
+            );
+            if wait_for_scheduler_delay_or_shutdown(&mut shutdown_rx, CEO_DIGEST_RETRY_DELAY).await
+            {
+                break;
+            }
+            continue;
+        }
+
         if !startup_due_checked {
             match ensure_startup_digest_due_run(&pool, &config, now).await {
                 Ok(_) => startup_due_checked = true,
@@ -139,6 +154,13 @@ pub async fn run_ceo_digest_scheduler<P, T>(
         match deliver_next_due_digest(&pool, &runtime, &config, &mut shutdown_rx).await {
             Ok(DigestSchedulerStep::Continue) => {}
             Ok(DigestSchedulerStep::Shutdown) => break,
+            Ok(DigestSchedulerStep::ShutdownCleanupFailed(error)) => {
+                error!(
+                    "CEO digest shutdown cleanup failed: {} {}",
+                    error.code, error.message
+                );
+                break;
+            }
             Err(error) => {
                 error!(
                     "CEO digest delivery failed: {} {}",
@@ -195,6 +217,7 @@ where
                     "Failed to mark CEO digest shutdown retry state: {} {}",
                     mark_error.code, mark_error.message
                 );
+                return Ok(DigestSchedulerStep::ShutdownCleanupFailed(mark_error));
             }
             return Ok(DigestSchedulerStep::Shutdown);
         }
@@ -230,6 +253,7 @@ where
                     "Failed to mark CEO digest retry state: {} {}",
                     mark_error.code, mark_error.message
                 );
+                return Err(mark_error);
             }
             Err(error)
         }
@@ -258,6 +282,48 @@ async fn ensure_hourly_digest_due_run(
         now,
     )
     .await
+}
+
+async fn recover_stale_in_progress_digest_runs(
+    pool: &Pool<Sqlite>,
+    now: DateTime<Utc>,
+) -> CommandResult<u64> {
+    let stale_before =
+        (now - Duration::seconds(CEO_DIGEST_IN_PROGRESS_RECOVERY_AFTER_SECONDS)).to_rfc3339();
+    let now = now.to_rfc3339();
+    let summary = serde_json::to_string(&safe_recovery_error_summary()).map_err(system_error)?;
+    let result = sqlx::query(
+        "UPDATE agent_digest_runs
+         SET status = CASE
+                 WHEN attempt_count >= max_attempts THEN ?
+                 ELSE ?
+             END,
+             next_retry_at = CASE
+                 WHEN attempt_count >= max_attempts THEN NULL
+                 ELSE ?
+             END,
+             claimed_at = NULL,
+             claim_token = NULL,
+             last_error_code = ?,
+             last_error_summary_json = ?,
+             updated_at = ?
+         WHERE status = ?
+           AND claimed_at IS NOT NULL
+           AND claimed_at <= ?",
+    )
+    .bind(DIGEST_STATUS_FAILED)
+    .bind(DIGEST_STATUS_RETRY_WAITING)
+    .bind(&now)
+    .bind(codes::AGENT_RUNTIME_DISABLED)
+    .bind(summary)
+    .bind(&now)
+    .bind(DIGEST_STATUS_IN_PROGRESS)
+    .bind(stale_before)
+    .execute(pool)
+    .await
+    .map_err(system_error)?;
+
+    Ok(result.rows_affected())
 }
 
 async fn create_due_run_if_absent_for_hour(
@@ -387,6 +453,13 @@ fn safe_shutdown_error_summary() -> serde_json::Value {
     })
 }
 
+fn safe_recovery_error_summary() -> serde_json::Value {
+    json!({
+        "code": codes::AGENT_RUNTIME_DISABLED,
+        "message": "CEO digest scheduler recovered an abandoned in-progress run.",
+    })
+}
+
 fn next_retry_at() -> String {
     (Utc::now() + Duration::seconds(CEO_DIGEST_RETRY_DELAY.as_secs() as i64)).to_rfc3339()
 }
@@ -463,6 +536,46 @@ mod tests {
         save_test_setting(pool, CEO_TELEGRAM_TOKEN_PRESENT_SETTING, "true").await;
         save_test_setting(pool, CEO_OPENAI_KEY_PRESENT_SETTING, "true").await;
         save_test_setting(pool, CEO_TELEGRAM_OPENAI_MODEL_SETTING, "gpt-test").await;
+    }
+
+    async fn seed_claimed_digest_run(pool: &Pool<Sqlite>, id: &str, max_attempts: i64) {
+        create_digest_run_if_absent(
+            pool,
+            NewDigestRun {
+                id: id.to_string(),
+                channel_actor_id: Some("123".to_string()),
+                delivery_chat_id: Some(55),
+                due_at: "2026-05-07T01:00:00Z".to_string(),
+                max_attempts,
+            },
+        )
+        .await
+        .expect("create digest run");
+        claim_due_digest_run(pool, "2026-05-07T01:00:01Z", &format!("claim-{id}"))
+            .await
+            .expect("claim")
+            .expect("claimed");
+    }
+
+    async fn make_claim_stale(pool: &Pool<Sqlite>, id: &str) {
+        sqlx::query("UPDATE agent_digest_runs SET claimed_at = ? WHERE id = ?")
+            .bind("2026-05-07T00:00:00Z")
+            .bind(id)
+            .execute(pool)
+            .await
+            .expect("make claim stale");
+    }
+
+    async fn digest_run_state(pool: &Pool<Sqlite>, id: &str) -> sqlx::sqlite::SqliteRow {
+        sqlx::query(
+            "SELECT status, next_retry_at, last_error_code, last_error_summary_json
+             FROM agent_digest_runs
+             WHERE id = ?",
+        )
+        .bind(id)
+        .fetch_one(pool)
+        .await
+        .expect("digest run row")
     }
 
     struct StaticProvider;
@@ -582,6 +695,76 @@ mod tests {
         assert_eq!(
             summary["message"],
             "CEO digest scheduler shut down before delivery completed."
+        );
+    }
+
+    #[tokio::test]
+    async fn stale_in_progress_digest_run_recovers_to_retry_waiting_and_can_be_claimed() {
+        let pool = test_pool().await;
+        let now = "2026-05-07T02:00:00Z"
+            .parse::<DateTime<Utc>>()
+            .expect("now");
+        seed_claimed_digest_run(&pool, "digest-stale", CEO_DIGEST_MAX_ATTEMPTS).await;
+        make_claim_stale(&pool, "digest-stale").await;
+
+        let recovered = recover_stale_in_progress_digest_runs(&pool, now)
+            .await
+            .expect("recover stale claims");
+
+        assert_eq!(recovered, 1);
+        let row = digest_run_state(&pool, "digest-stale").await;
+        assert_eq!(row.get::<String, _>("status"), "retry_waiting");
+        assert!(
+            row.get::<Option<String>, _>("next_retry_at").is_some(),
+            "recovered retry must be claimable"
+        );
+        assert_eq!(
+            row.get::<Option<String>, _>("last_error_code"),
+            Some(codes::AGENT_RUNTIME_DISABLED.to_string())
+        );
+        let summary: serde_json::Value =
+            serde_json::from_str(&row.get::<String, _>("last_error_summary_json"))
+                .expect("safe summary");
+        assert_eq!(summary["code"], codes::AGENT_RUNTIME_DISABLED);
+        assert_eq!(
+            summary["message"],
+            "CEO digest scheduler recovered an abandoned in-progress run."
+        );
+
+        let claim = claim_due_digest_run(&pool, &now.to_rfc3339(), "claim-recovered")
+            .await
+            .expect("claim recovered");
+        assert!(claim.is_some(), "recovered retry should be claimable");
+    }
+
+    #[tokio::test]
+    async fn stale_in_progress_digest_run_recovers_to_failed_when_attempts_are_exhausted() {
+        let pool = test_pool().await;
+        let now = "2026-05-07T02:00:00Z"
+            .parse::<DateTime<Utc>>()
+            .expect("now");
+        seed_claimed_digest_run(&pool, "digest-exhausted", 1).await;
+        make_claim_stale(&pool, "digest-exhausted").await;
+
+        let recovered = recover_stale_in_progress_digest_runs(&pool, now)
+            .await
+            .expect("recover stale exhausted claim");
+
+        assert_eq!(recovered, 1);
+        let row = digest_run_state(&pool, "digest-exhausted").await;
+        assert_eq!(row.get::<String, _>("status"), "failed");
+        assert_eq!(row.get::<Option<String>, _>("next_retry_at"), None);
+        assert_eq!(
+            row.get::<Option<String>, _>("last_error_code"),
+            Some(codes::AGENT_RUNTIME_DISABLED.to_string())
+        );
+        let summary: serde_json::Value =
+            serde_json::from_str(&row.get::<String, _>("last_error_summary_json"))
+                .expect("safe summary");
+        assert_eq!(summary["code"], codes::AGENT_RUNTIME_DISABLED);
+        assert_eq!(
+            summary["message"],
+            "CEO digest scheduler recovered an abandoned in-progress run."
         );
     }
 }
