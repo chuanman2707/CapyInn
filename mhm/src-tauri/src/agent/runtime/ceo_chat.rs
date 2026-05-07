@@ -344,11 +344,12 @@ mod tests {
             config::CeoTelegramConfig,
             model::{AgentChannel, ChannelActor},
             provider::openai::{AiProvider, ProviderRequest, ProviderToolCall, ProviderTurn},
+            test_support::phase_one_pms_table_snapshots as business_table_snapshots,
         },
         app_error::{codes, CommandError, CommandResult},
     };
     use serde_json::{json, Value};
-    use sqlx::{sqlite::SqlitePoolOptions, Pool, Row, Sqlite};
+    use sqlx::{sqlite::SqlitePoolOptions, Pool, Sqlite};
     use std::{
         future::Future,
         pin::Pin,
@@ -530,9 +531,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn business_table_counts_are_unchanged_across_mocked_chat_turn() {
+    async fn business_table_snapshots_are_unchanged_across_mocked_chat_turn() {
         let pool = test_pool().await;
-        let before = business_table_counts(&pool).await;
+        seed_chat_business_room(&pool).await;
+        let before = business_table_snapshots(&pool).await;
         let provider = RecordingProvider::new(vec![
             Ok(ProviderTurn::ToolCalls {
                 calls: vec![tool_call("list_room_status", json!({}))],
@@ -549,41 +551,37 @@ mod tests {
             .handle_message(message(ready_config()))
             .await
             .expect("chat succeeds");
-        let after = business_table_counts(&pool).await;
+        let after = business_table_snapshots(&pool).await;
 
         assert_eq!(after, before);
     }
 
-    async fn business_table_counts(pool: &Pool<Sqlite>) -> Vec<(String, i64)> {
-        let rows = sqlx::query(
-            "SELECT name FROM sqlite_master
-             WHERE type = 'table'
-               AND name NOT LIKE 'sqlite_%'
-               AND name NOT IN (
-                 'schema_version',
-                 'settings',
-                 'agent_sessions',
-                 'agent_audit_events',
-                 'agent_memory_items',
-                 'command_idempotency',
-                 'command_recovery_actions',
-                 'outbox_events'
-               )
-             ORDER BY name ASC",
-        )
-        .fetch_all(pool)
-        .await
-        .expect("list tables");
+    #[tokio::test]
+    async fn business_table_snapshots_detect_existing_chat_row_updates() {
+        let pool = test_pool().await;
+        seed_chat_business_room(&pool).await;
+        let before = business_table_snapshots(&pool).await;
 
-        let mut counts = Vec::new();
-        for row in rows {
-            let table: String = row.get("name");
-            let count: i64 = sqlx::query_scalar(&format!("SELECT COUNT(*) FROM {table}"))
-                .fetch_one(pool)
-                .await
-                .expect("count table rows");
-            counts.push((table, count));
-        }
-        counts
+        sqlx::query("UPDATE rooms SET status = 'cleaning' WHERE id = 'CHAT-SNAPSHOT-ROOM'")
+            .execute(&pool)
+            .await
+            .expect("mutate seeded room");
+        let after = business_table_snapshots(&pool).await;
+
+        assert_ne!(after, before);
+    }
+
+    async fn seed_chat_business_room(pool: &Pool<Sqlite>) {
+        sqlx::query(
+            "INSERT INTO rooms (
+                id, name, type, floor, has_balcony, base_price, max_guests, extra_person_fee, status
+             )
+             VALUES (
+                'CHAT-SNAPSHOT-ROOM', 'Chat Snapshot Room', 'standard', 1, 0, 100000, 2, 0, 'vacant'
+             )",
+        )
+        .execute(pool)
+        .await
+        .expect("seed chat room");
     }
 }
