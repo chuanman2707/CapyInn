@@ -1,5 +1,6 @@
 pub mod channel;
 pub mod config;
+pub mod digest;
 pub mod model;
 pub mod provider;
 pub mod registry;

@@ -114,4 +114,80 @@ describe("agentic integration guardrails", () => {
             manifest.agent_safety.retention.raw_provider_error_retention,
         ).toBe("not_stored");
     });
+
+    it("keeps CEO digest runtime bounded to the fixed read registry", () => {
+        const runtime = readWorkspaceFile("src-tauri/src/agent/digest/runtime.rs");
+
+        expect(runtime).toContain("pub const CEO_DIGEST_TOOL_NAMES");
+        expect(runtime).toContain("crate::agent::registry::CEO_PHASE_A_TOOLS");
+        expect(runtime).toContain(
+            "digest_tool_list_matches_phase_one_read_registry",
+        );
+        expect(runtime).toMatch(
+            /ProviderRequest::new\([\s\S]*CEO_DIGEST_SYSTEM_PROMPT[\s\S]*Vec::new\(\)/,
+        );
+        expect(runtime).toContain("ProviderTurn::ToolCalls");
+        expect(runtime).toContain("codes::AGENT_TOOL_NOT_ALLOWED");
+    });
+
+    it("keeps Telegram CEO channel sender denials before runtime calls", () => {
+        const telegram = readWorkspaceFile(
+            "src-tauri/src/agent/channel/telegram.rs",
+        );
+
+        expect(telegram).toContain(
+            "unknown_sender_gets_denial_without_runtime_call",
+        );
+        expect(telegram).toContain(
+            "missing_sender_gets_denial_without_runtime_call",
+        );
+        expect(telegram).toContain("assert_eq!(runtime.call_count(), 0)");
+        expect(telegram).toContain("owner_denial_message(sender.id)");
+        expect(telegram).toContain("MISSING_SENDER_DENIAL.to_string()");
+    });
+
+    it("keeps agent secret scrubbing for Telegram bot URLs", () => {
+        const secrets = readWorkspaceFile("src-tauri/src/agent/secrets.rs");
+
+        expect(secrets).toContain("redaction_removes_telegram_bot_url_tokens");
+        expect(secrets).toContain("redaction_preserves_benign_botanical_urls");
+        expect(secrets).toContain("redaction_preserves_telegram_api_botanical_urls");
+        expect(secrets).toContain("api\\.telegram\\.org");
+        expect(secrets).toContain("bot\\d+:");
+        expect(secrets).toContain("bot[redacted]");
+    });
+
+    it("keeps CEO chat and digest runtime business tables read-only", () => {
+        const chatRuntime = readWorkspaceFile(
+            "src-tauri/src/agent/runtime/ceo_chat.rs",
+        );
+        const digestRuntime = readWorkspaceFile(
+            "src-tauri/src/agent/digest/runtime.rs",
+        );
+
+        expect(chatRuntime).toContain(
+            "business_table_counts_are_unchanged_across_mocked_chat_turn",
+        );
+        expect(chatRuntime).toContain("business_table_counts");
+        expect(digestRuntime).toContain(
+            "digest_runtime_does_not_mutate_business_tables",
+        );
+        expect(digestRuntime).toContain("business_table_snapshots");
+        expect(digestRuntime).toContain(
+            "business_table_snapshots_detect_existing_row_updates",
+        );
+        expect(digestRuntime).toContain(
+            "digest_business_fixture_covers_digest_source_tables",
+        );
+    });
+
+    it("runs agent guardrails from verify:agent with Telegram disabled", () => {
+        const verifyAgent = readWorkspaceFile("scripts/verify/agent.mjs");
+
+        expect(verifyAgent).toContain(
+            'const env = { CAPYINN_DISABLE_CEO_TELEGRAM: "true" }',
+        );
+        expect(verifyAgent).toContain('"agent-guardrails-tests"');
+        expect(verifyAgent).toContain('"tests/agentic-guardrails.test.ts"');
+    });
 });

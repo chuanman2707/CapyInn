@@ -114,6 +114,8 @@ fn map_keyring_error(error: keyring::Error) -> CommandError {
 }
 
 pub fn redact_agent_secret_markers(value: &str) -> String {
+    let telegram_bot_url = Regex::new(r"(?i)\b(https?://api\.telegram\.org)/bot\d+:[^/\s]+/")
+        .expect("valid telegram bot URL redaction regex");
     let bearer = Regex::new(r"(?i)Bearer\s+\S+").expect("valid bearer redaction regex");
     let openai = Regex::new(r"(?i)\bsk-[A-Za-z0-9_-]+").expect("valid openai redaction regex");
     let assignment = Regex::new(
@@ -121,7 +123,8 @@ pub fn redact_agent_secret_markers(value: &str) -> String {
     )
     .expect("valid assignment redaction regex");
 
-    let redacted = bearer.replace_all(value, "Bearer [redacted]");
+    let redacted = telegram_bot_url.replace_all(value, "$1/bot[redacted]/");
+    let redacted = bearer.replace_all(&redacted, "Bearer [redacted]");
     let redacted = openai.replace_all(&redacted, "[redacted]");
     assignment
         .replace_all(&redacted, "$1=[redacted]")
@@ -180,6 +183,31 @@ mod tests {
         assert!(!redacted.contains("sk-test"));
         assert!(!redacted.contains("abc"));
         assert!(redacted.contains("[redacted]"));
+    }
+
+    #[test]
+    fn redaction_removes_telegram_bot_url_tokens() {
+        let redacted = redact_agent_secret_markers(
+            "request failed for https://api.telegram.org/bot123456:ABC-secret/sendMessage and Bearer sk-test-secret",
+        );
+
+        assert!(!redacted.contains("123456:ABC-secret"));
+        assert!(!redacted.contains("sk-test-secret"));
+        assert!(redacted.contains("[redacted]"));
+    }
+
+    #[test]
+    fn redaction_preserves_benign_botanical_urls() {
+        let benign_url = "https://example.com/botanical/index.html";
+
+        assert_eq!(redact_agent_secret_markers(benign_url), benign_url);
+    }
+
+    #[test]
+    fn redaction_preserves_telegram_api_botanical_urls() {
+        let benign_url = "https://api.telegram.org/botanical/index.html";
+
+        assert_eq!(redact_agent_secret_markers(benign_url), benign_url);
     }
 
     #[test]
