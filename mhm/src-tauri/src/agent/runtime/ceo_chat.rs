@@ -6,6 +6,7 @@ use crate::{
         },
         provider::openai::{AiProvider, ProviderRequest, ProviderToolOutput, ProviderTurn},
         retention::SESSION_RETENTION_METADATA_ONLY,
+        secrets::redact_agent_secret_markers,
         store::{
             create_agent_session, insert_agent_audit_event, NewAgentAuditEvent, NewAgentSession,
         },
@@ -167,6 +168,7 @@ where
 
             match self.provider.create_turn(request).await? {
                 ProviderTurn::FinalText(text) => {
+                    let text = redact_agent_secret_markers(&text);
                     let reply = CeoChatReply {
                         text,
                         tools_called,
@@ -528,6 +530,23 @@ mod tests {
         assert_eq!(reply.text, DATA_UNAVAILABLE_MESSAGE);
         assert!(reply.tools_called.is_empty());
         assert_eq!(reply.termination_reason, "final_text");
+    }
+
+    #[tokio::test]
+    async fn final_reply_redacts_secret_like_markers_before_delivery() {
+        let pool = test_pool().await;
+        let provider = RecordingProvider::new(vec![Ok(ProviderTurn::FinalText(
+            "Không trả secret sk-live-secret hoặc https://api.telegram.org/bot123456:ABC-secret/sendMessage".to_string(),
+        ))]);
+
+        let reply = CeoChatRuntime::new(pool, provider)
+            .handle_message(message(ready_config()))
+            .await
+            .expect("chat succeeds");
+
+        assert!(!reply.text.contains("sk-live-secret"));
+        assert!(!reply.text.contains("123456:ABC-secret"));
+        assert!(reply.text.contains("[redacted]"));
     }
 
     #[tokio::test]

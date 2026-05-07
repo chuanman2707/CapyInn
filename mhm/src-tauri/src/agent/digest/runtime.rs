@@ -8,6 +8,7 @@ use crate::{
         model::{AgentChannel, AgentProvider, AgentRole, DataSensitivity, MutationRisk},
         provider::openai::{AiProvider, ProviderRequest, ProviderTurn},
         retention::SESSION_RETENTION_METADATA_ONLY,
+        secrets::redact_agent_secret_markers,
         store::{
             create_agent_session, insert_agent_audit_event, NewAgentAuditEvent, NewAgentSession,
         },
@@ -183,7 +184,7 @@ where
                         }),
                     )
                     .await?;
-                    text
+                    redact_agent_secret_markers(&text)
                 }
                 ProviderTurn::ToolCalls { .. } => {
                     self.audit(
@@ -751,6 +752,31 @@ mod tests {
             *sent_messages.lock().expect("sent message lock"),
             vec![(55, "Báo cáo đã sẵn sàng.".to_string())]
         );
+    }
+
+    #[tokio::test]
+    async fn digest_final_reply_redacts_secret_like_markers_before_telegram_send() {
+        let pool = test_pool().await;
+        let run = persisted_claimed_run(&pool, "digest-redacted-reply").await;
+        let provider = RecordingProvider {
+            requests: Arc::new(Mutex::new(Vec::new())),
+            turn: ProviderTurn::FinalText(
+                "Digest không gửi sk-live-secret hoặc https://api.telegram.org/bot123456:ABC-secret/sendMessage".to_string(),
+            ),
+        };
+        let telegram = RecordingTelegram::default();
+        let sent_messages = Arc::clone(&telegram.sent_messages);
+
+        CeoDigestRuntime::new(pool, provider, telegram)
+            .deliver_digest(&run, "gpt-test".to_string())
+            .await
+            .expect("deliver digest");
+
+        let messages = sent_messages.lock().expect("sent message lock");
+        let (_, text) = messages.first().expect("sent digest message");
+        assert!(!text.contains("sk-live-secret"));
+        assert!(!text.contains("123456:ABC-secret"));
+        assert!(text.contains("[redacted]"));
     }
 
     #[tokio::test]
