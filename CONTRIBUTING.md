@@ -1,11 +1,12 @@
-# Contributing to MHM
+# Contributing to CapyInn
 
 Thanks for contributing.
 
 ## Project Layout
 
-- `mhm/` is the core PMS application.
-- `docs/plans/` contains public implementation plans and release prep notes.
+- `mhm/` is the current implementation path for the CapyInn PMS application. It is rename debt, not the product name.
+- `docs/architecture/core-pms-boundaries.md` is the canonical guardrail for core PMS, experimental runtime, command safety, and the postponed `mhm/` rename.
+- `docs/plans/` contains public implementation plans and release prep notes when present.
 
 ## Prerequisites
 
@@ -55,6 +56,18 @@ cargo clippy --all-targets -- -D warnings
 - TypeScript should stay strict and type-safe.
 - Rust should compile cleanly and pass clippy.
 - Avoid committing secrets, local paths, exported browser cookies, or internal agent files.
+
+## PMS Architecture Guardrails
+
+- Core PMS includes rooms, stays, reservations, guests, housekeeping, billing, invoices, groups, night audit, settings, and auth.
+- Experimental runtime includes gateway, MCP, agent runtime, observer streams, digest, Telegram, CEO, and OpenAI surfaces.
+- Experimental disabled means normal PMS operation has no experimental background tasks, no required external API keys, no Telegram/OpenAI/MCP/gateway config, no agent direct PMS table mutation, and no experimental UI in the normal profile.
+- Business writes must enter through Tauri commands and continue through service/lifecycle modules.
+- Reads should use Tauri commands and query modules when read SQL is shared, growing, or part of a review hotspot.
+- The intended orchestration is `UI -> command -> service/lifecycle` for writes and `UI -> command -> query` for reads.
+- Command safety is core PMS infrastructure: preserve actor, command name, idempotency key, canonical payload hash, timestamp, request context, stable lock keys, audit writes, command ledger metadata, and transactional outbox writes.
+- UI, bots, agents, and integrations must not mutate PMS tables directly.
+- Do not rename `mhm/` until canonical docs, CI, smoke tests, and normal-profile runtime boundaries are stable.
 
 ## Commits
 
