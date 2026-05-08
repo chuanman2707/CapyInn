@@ -64,6 +64,7 @@ const DIGEST_GATE_LABELS: Record<string, string> = {
   telegram_owner_binding: "Telegram owner binding",
   telegram_bot_token: "Telegram bot token",
   open_ai_api_key: "OpenAI API key",
+  open_ai_model: "OpenAI model",
 };
 
 export default function CeoAgentSection() {

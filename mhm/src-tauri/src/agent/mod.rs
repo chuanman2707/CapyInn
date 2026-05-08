@@ -11,3 +11,6 @@ pub mod settings;
 pub mod store;
 pub mod supervisor;
 pub mod tools;
+
+#[cfg(test)]
+pub(crate) mod test_support;

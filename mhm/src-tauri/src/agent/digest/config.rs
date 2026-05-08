@@ -42,6 +42,7 @@ pub enum CeoDigestGateMissing {
     TelegramDeliveryChatId,
     TelegramBotToken,
     OpenAiApiKey,
+    OpenAiModel,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -90,6 +91,9 @@ impl CeoDigestConfig {
         }
         if !self.openai_api_key_present {
             missing.push(CeoDigestGateMissing::OpenAiApiKey);
+        }
+        if self.openai_model.trim().is_empty() {
+            missing.push(CeoDigestGateMissing::OpenAiModel);
         }
 
         CeoDigestGateStatus {
@@ -492,6 +496,53 @@ mod tests {
         assert_eq!(
             gate.missing,
             vec![CeoDigestGateMissing::TelegramDeliveryChatId]
+        );
+    }
+
+    #[test]
+    fn digest_gate_requires_openai_model() {
+        let telegram = CeoTelegramConfig {
+            runtime_enabled: false,
+            telegram_user_id: Some("123456789".to_string()),
+            telegram_bot_token_present: true,
+            openai_api_key_present: true,
+            openai_model: "   ".to_string(),
+            last_update_id: None,
+        };
+        let config = CeoDigestConfig::from_telegram_config(telegram, true, Some(987654321));
+
+        let gate = config.evaluate_gate(true);
+
+        assert!(!gate.ready);
+        assert_eq!(gate.missing, vec![CeoDigestGateMissing::OpenAiModel]);
+    }
+
+    #[test]
+    fn digest_gate_reports_every_missing_dependency() {
+        let telegram = CeoTelegramConfig {
+            runtime_enabled: false,
+            telegram_user_id: Some("  ".to_string()),
+            telegram_bot_token_present: false,
+            openai_api_key_present: false,
+            openai_model: "".to_string(),
+            last_update_id: None,
+        };
+        let config = CeoDigestConfig::from_telegram_config(telegram, false, None);
+
+        let gate = config.evaluate_gate(false);
+
+        assert!(!gate.ready);
+        assert_eq!(
+            gate.missing,
+            vec![
+                CeoDigestGateMissing::CloudDataOptIn,
+                CeoDigestGateMissing::DigestEnabled,
+                CeoDigestGateMissing::TelegramOwnerBinding,
+                CeoDigestGateMissing::TelegramDeliveryChatId,
+                CeoDigestGateMissing::TelegramBotToken,
+                CeoDigestGateMissing::OpenAiApiKey,
+                CeoDigestGateMissing::OpenAiModel,
+            ]
         );
     }
 
