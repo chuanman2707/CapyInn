@@ -144,6 +144,20 @@ describe("CeoAgentSection", () => {
     expect(screen.getByLabelText("Telegram delivery chat ID: missing")).toBeInTheDocument();
   });
 
+  it("shows missing digest OpenAI model requirement", async () => {
+    mockInitialState();
+    setMockResponses({
+      get_ceo_digest_gate_status: () => ({
+        ready: false,
+        missing: ["open_ai_model"],
+      }),
+    });
+
+    render(<CeoAgentSection />);
+
+    expect(await screen.findByLabelText("OpenAI model: missing")).toBeInTheDocument();
+  });
+
   it("allows an admin to toggle opt-in on via an idempotent write command", async () => {
     const user = userEvent.setup();
     mockInitialState();

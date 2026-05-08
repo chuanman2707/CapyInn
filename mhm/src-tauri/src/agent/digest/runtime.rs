@@ -8,6 +8,7 @@ use crate::{
         model::{AgentChannel, AgentProvider, AgentRole, DataSensitivity, MutationRisk},
         provider::openai::{AiProvider, ProviderRequest, ProviderTurn},
         retention::SESSION_RETENTION_METADATA_ONLY,
+        secrets::redact_agent_secret_markers,
         store::{
             create_agent_session, insert_agent_audit_event, NewAgentAuditEvent, NewAgentSession,
         },
@@ -183,7 +184,7 @@ where
                         }),
                     )
                     .await?;
-                    text
+                    redact_agent_secret_markers(&text)
                 }
                 ProviderTurn::ToolCalls { .. } => {
                     self.audit(
@@ -350,13 +351,11 @@ mod tests {
         digest::config::CEO_TELEGRAM_DELIVERY_CHAT_ID_SETTING,
         digest::store::{claim_due_digest_run, create_digest_run_if_absent, NewDigestRun},
         provider::openai::{ProviderRequest, ProviderTurn},
+        test_support::phase_one_pms_table_snapshots as business_table_snapshots,
     };
     use chrono::{Duration, Local};
-    use serde_json::{Map, Number, Value};
-    use sqlx::{
-        sqlite::{SqlitePoolOptions, SqliteRow},
-        Pool, Row, Sqlite, TypeInfo as _, ValueRef as _,
-    };
+    use serde_json::Value;
+    use sqlx::{sqlite::SqlitePoolOptions, Pool, Row, Sqlite};
     use std::{
         future::Future,
         pin::Pin,
@@ -584,8 +583,7 @@ mod tests {
         assert!(!request.user.contains(codes::SYSTEM_INTERNAL_ERROR));
         assert!(!request.user.contains("Cannot execute CEO read tool"));
 
-        let payload: serde_json::Value =
-            serde_json::from_str(&request.user).expect("provider payload is json");
+        let payload: Value = serde_json::from_str(&request.user).expect("provider payload is json");
         let unavailable_entry = payload["tools"]
             .as_array()
             .expect("tools array")
@@ -686,6 +684,23 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn digest_snapshot_includes_outbox_and_agent_memory_tables() {
+        let pool = test_pool().await;
+        let snapshots = business_table_snapshots(&pool).await;
+        let names = snapshots
+            .iter()
+            .map(|(name, _)| name.clone())
+            .collect::<Vec<_>>();
+
+        assert!(names.contains(&"outbox_events".to_string()));
+        assert!(names.contains(&"agent_memory_items".to_string()));
+        assert!(names.contains(&"settings".to_string()));
+        assert!(!names.contains(&"agent_sessions".to_string()));
+        assert!(!names.contains(&"agent_audit_events".to_string()));
+        assert!(!names.contains(&"agent_digest_runs".to_string()));
+    }
+
+    #[tokio::test]
     async fn digest_business_fixture_covers_digest_source_tables() {
         let pool = test_pool().await;
         seed_digest_business_room(&pool).await;
@@ -740,6 +755,31 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn digest_final_reply_redacts_secret_like_markers_before_telegram_send() {
+        let pool = test_pool().await;
+        let run = persisted_claimed_run(&pool, "digest-redacted-reply").await;
+        let provider = RecordingProvider {
+            requests: Arc::new(Mutex::new(Vec::new())),
+            turn: ProviderTurn::FinalText(
+                "Digest không gửi sk-live-secret hoặc https://api.telegram.org/bot123456:ABC-secret/sendMessage".to_string(),
+            ),
+        };
+        let telegram = RecordingTelegram::default();
+        let sent_messages = Arc::clone(&telegram.sent_messages);
+
+        CeoDigestRuntime::new(pool, provider, telegram)
+            .deliver_digest(&run, "gpt-test".to_string())
+            .await
+            .expect("deliver digest");
+
+        let messages = sent_messages.lock().expect("sent message lock");
+        let (_, text) = messages.first().expect("sent digest message");
+        assert!(!text.contains("sk-live-secret"));
+        assert!(!text.contains("123456:ABC-secret"));
+        assert!(text.contains("[redacted]"));
+    }
+
+    #[tokio::test]
     async fn digest_runtime_marks_telegram_send_started_before_returning_success() {
         let pool = test_pool().await;
         let run = persisted_claimed_run(&pool, "digest-send-started").await;
@@ -764,9 +804,8 @@ mod tests {
         .await
         .expect("digest row");
         assert_eq!(row.get::<String, _>("status"), "in_progress");
-        let summary: serde_json::Value =
-            serde_json::from_str(&row.get::<String, _>("delivery_summary_json"))
-                .expect("delivery summary json");
+        let summary: Value = serde_json::from_str(&row.get::<String, _>("delivery_summary_json"))
+            .expect("delivery summary json");
         assert_eq!(summary["telegram_send_started"], true);
         assert_eq!(
             summary["reply_char_count"],
@@ -809,9 +848,8 @@ mod tests {
             session.get::<String, _>("retention_policy"),
             "metadata_only_v1"
         );
-        let metadata: serde_json::Value =
-            serde_json::from_str(&session.get::<String, _>("metadata_json"))
-                .expect("session metadata json");
+        let metadata: Value = serde_json::from_str(&session.get::<String, _>("metadata_json"))
+            .expect("session metadata json");
         assert_eq!(metadata["digest_run_id"], "digest-audit");
         assert_eq!(metadata["delivery_chat_id_present"], true);
         assert!(metadata.get("chat_id").is_none());
@@ -880,8 +918,7 @@ mod tests {
         .fetch_one(&pool)
         .await
         .expect("delivery summary");
-        let summary: serde_json::Value =
-            serde_json::from_str(&summary_json).expect("delivery summary json");
+        let summary: Value = serde_json::from_str(&summary_json).expect("delivery summary json");
         assert!(
             summary.get("telegram_send_started").is_none(),
             "send-started marker must not be written after target drift"
@@ -1026,100 +1063,5 @@ mod tests {
         .execute(pool)
         .await
         .expect("seed digest expense");
-    }
-
-    async fn business_table_snapshots(pool: &Pool<Sqlite>) -> Vec<(String, Vec<Value>)> {
-        let rows = sqlx::query(
-            "SELECT name FROM sqlite_master
-             WHERE type = 'table'
-               AND name NOT LIKE 'sqlite_%'
-               AND name NOT IN (
-                 'schema_version',
-                 'settings',
-                 'agent_sessions',
-                 'agent_audit_events',
-                 'agent_memory_items',
-                 'agent_digest_runs',
-                 'command_idempotency',
-                 'command_recovery_actions',
-                 'outbox_events'
-               )
-             ORDER BY name ASC",
-        )
-        .fetch_all(pool)
-        .await
-        .expect("list tables");
-
-        let mut snapshots = Vec::new();
-        for row in rows {
-            let table: String = row.get("name");
-            let columns = table_column_names(pool, &table).await;
-            let select_sql = format!("SELECT * FROM {}", quote_identifier(&table));
-            let row_values = sqlx::query(&select_sql)
-                .fetch_all(pool)
-                .await
-                .expect("snapshot table rows")
-                .into_iter()
-                .map(|row| sqlite_row_json(&row, &columns))
-                .collect::<Vec<_>>();
-            let mut serialized_rows = row_values
-                .into_iter()
-                .map(|value| serde_json::to_string(&value).expect("serialize snapshot row"))
-                .collect::<Vec<_>>();
-            serialized_rows.sort();
-            let sorted_rows = serialized_rows
-                .into_iter()
-                .map(|value| serde_json::from_str(&value).expect("deserialize snapshot row"))
-                .collect::<Vec<_>>();
-            snapshots.push((table, sorted_rows));
-        }
-        snapshots
-    }
-
-    async fn table_column_names(pool: &Pool<Sqlite>, table: &str) -> Vec<String> {
-        let pragma_sql = format!("PRAGMA table_info({})", quote_identifier(table));
-        let mut columns = sqlx::query(&pragma_sql)
-            .fetch_all(pool)
-            .await
-            .expect("list table columns")
-            .into_iter()
-            .map(|row| (row.get::<i64, _>("cid"), row.get::<String, _>("name")))
-            .collect::<Vec<_>>();
-        columns.sort_by_key(|(cid, _)| *cid);
-        columns.into_iter().map(|(_, name)| name).collect()
-    }
-
-    fn sqlite_row_json(row: &SqliteRow, columns: &[String]) -> Value {
-        let mut object = Map::new();
-        for column in columns {
-            object.insert(column.clone(), sqlite_cell_json(row, column));
-        }
-        Value::Object(object)
-    }
-
-    fn sqlite_cell_json(row: &SqliteRow, column: &str) -> Value {
-        let raw = row.try_get_raw(column).expect("read raw sqlite value");
-        if raw.is_null() {
-            return Value::Null;
-        }
-
-        match raw.type_info().name() {
-            "INTEGER" | "BOOLEAN" => Value::from(row.get::<i64, _>(column)),
-            "REAL" => Number::from_f64(row.get::<f64, _>(column))
-                .map(Value::Number)
-                .unwrap_or(Value::Null),
-            "TEXT" | "DATE" | "TIME" | "DATETIME" => Value::from(row.get::<String, _>(column)),
-            "BLOB" => Value::Array(
-                row.get::<Vec<u8>, _>(column)
-                    .into_iter()
-                    .map(Value::from)
-                    .collect(),
-            ),
-            other => Value::from(format!("[unsupported sqlite type: {other}]")),
-        }
-    }
-
-    fn quote_identifier(identifier: &str) -> String {
-        format!("\"{}\"", identifier.replace('"', "\"\""))
     }
 }
