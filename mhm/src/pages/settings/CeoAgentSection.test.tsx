@@ -288,6 +288,26 @@ describe("CeoAgentSection", () => {
     });
   });
 
+  it("saves signed digest delivery chat ids for Telegram groups", async () => {
+    const user = userEvent.setup();
+    mockInitialState();
+    render(<CeoAgentSection />);
+
+    await user.type(await screen.findByLabelText("Telegram delivery chat ID"), "-10055");
+    await user.click(screen.getByRole("button", { name: "Save digest config" }));
+
+    await waitFor(() => {
+      expect(invoke).toHaveBeenCalledWith(
+        "set_ceo_digest_config",
+        expect.objectContaining({
+          telegramDeliveryChatId: -10055,
+          idempotencyKey: expect.stringMatching(/^set_ceo_digest_config:/),
+        }),
+      );
+    });
+    expect(screen.getByLabelText("Telegram delivery chat ID")).toHaveValue("-10055");
+  });
+
   it("keeps saved digest config when post-save gate refresh fails", async () => {
     const user = userEvent.setup();
     let digestGateCalls = 0;
