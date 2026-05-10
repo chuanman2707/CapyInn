@@ -111,6 +111,10 @@ function mockInitialState(
   });
 }
 
+async function waitForEnabled(element: HTMLElement) {
+  await waitFor(() => expect(element).toBeEnabled());
+}
+
 describe("CeoAgentSection", () => {
   beforeEach(() => {
     clearMockResponses();
@@ -132,8 +136,8 @@ describe("CeoAgentSection", () => {
     render(<CeoAgentSection />);
 
     expect(await screen.findByText("CEO Telegram Chat")).toBeInTheDocument();
-    expect(screen.getByLabelText("Telegram owner binding: missing")).toBeInTheDocument();
-    expect(screen.getByLabelText("OpenAI API key: missing")).toBeInTheDocument();
+    expect(await screen.findByLabelText("Telegram owner binding: missing")).toBeInTheDocument();
+    expect(await screen.findByLabelText("OpenAI API key: missing")).toBeInTheDocument();
   });
 
   it("renders separate CEO Hourly Digest gate status", async () => {
@@ -141,7 +145,7 @@ describe("CeoAgentSection", () => {
     render(<CeoAgentSection />);
 
     expect(await screen.findByText("CEO Hourly Digest")).toBeInTheDocument();
-    expect(screen.getByLabelText("Telegram delivery chat ID: missing")).toBeInTheDocument();
+    expect(await screen.findByLabelText("Telegram delivery chat ID: missing")).toBeInTheDocument();
   });
 
   it("shows missing digest OpenAI model requirement", async () => {
@@ -349,8 +353,13 @@ describe("CeoAgentSection", () => {
 
     render(<CeoAgentSection />);
 
-    await user.type(await screen.findByLabelText("Telegram bot token"), "telegram-token");
-    await user.click(screen.getByRole("button", { name: "Save token" }));
+    const telegramTokenInput = await screen.findByLabelText("Telegram bot token");
+    await waitForEnabled(telegramTokenInput);
+    await user.type(telegramTokenInput, "telegram-token");
+
+    const saveTokenButton = screen.getByRole("button", { name: "Save token" });
+    await waitForEnabled(saveTokenButton);
+    await user.click(saveTokenButton);
     await waitFor(() => {
       expect(invoke).toHaveBeenCalledWith(
         "set_ceo_telegram_bot_token",
@@ -361,7 +370,9 @@ describe("CeoAgentSection", () => {
       );
     });
 
-    await user.click(screen.getByRole("button", { name: "Clear token" }));
+    const clearTokenButton = screen.getByRole("button", { name: "Clear token" });
+    await waitForEnabled(clearTokenButton);
+    await user.click(clearTokenButton);
     await waitFor(() => {
       expect(invoke).toHaveBeenCalledWith(
         "clear_ceo_telegram_bot_token",
@@ -371,8 +382,13 @@ describe("CeoAgentSection", () => {
       );
     });
 
-    await user.type(screen.getByLabelText("OpenAI API key"), "sk-test");
-    await user.click(screen.getByRole("button", { name: "Save key" }));
+    const openAiApiKeyInput = screen.getByLabelText("OpenAI API key");
+    await waitForEnabled(openAiApiKeyInput);
+    await user.type(openAiApiKeyInput, "sk-test");
+
+    const saveKeyButton = screen.getByRole("button", { name: "Save key" });
+    await waitForEnabled(saveKeyButton);
+    await user.click(saveKeyButton);
     await waitFor(() => {
       expect(invoke).toHaveBeenCalledWith(
         "set_ceo_openai_api_key",
@@ -383,7 +399,9 @@ describe("CeoAgentSection", () => {
       );
     });
 
-    await user.click(screen.getByRole("button", { name: "Clear key" }));
+    const clearKeyButton = screen.getByRole("button", { name: "Clear key" });
+    await waitForEnabled(clearKeyButton);
+    await user.click(clearKeyButton);
     await waitFor(() => {
       expect(invoke).toHaveBeenCalledWith(
         "clear_ceo_openai_api_key",
@@ -401,9 +419,16 @@ describe("CeoAgentSection", () => {
     render(<CeoAgentSection />);
 
     const ownerInput = await screen.findByLabelText("Telegram owner ID");
+    await waitForEnabled(ownerInput);
     await user.type(ownerInput, "987654");
-    await user.type(screen.getByLabelText("Telegram bot token"), "telegram-token");
-    await user.click(screen.getByRole("button", { name: "Save token" }));
+
+    const telegramTokenInput = screen.getByLabelText("Telegram bot token");
+    await waitForEnabled(telegramTokenInput);
+    await user.type(telegramTokenInput, "telegram-token");
+
+    const saveTokenButton = screen.getByRole("button", { name: "Save token" });
+    await waitForEnabled(saveTokenButton);
+    await user.click(saveTokenButton);
 
     await waitFor(() => {
       expect(invoke).toHaveBeenCalledWith(
