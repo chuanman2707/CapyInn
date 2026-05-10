@@ -1164,6 +1164,43 @@ mod tests {
     };
     use sqlx::{Row, SqlitePool};
 
+    const PMS_CORE_TABLES: &[&str] = &[
+        "rooms",
+        "guests",
+        "bookings",
+        "booking_guests",
+        "transactions",
+        "expenses",
+        "housekeeping",
+        "settings",
+        "users",
+        "audit_logs",
+        "pricing_rules",
+        "special_dates",
+        "folio_lines",
+        "night_audit_logs",
+        "room_types",
+        "room_calendar",
+        "invoices",
+        "booking_groups",
+        "group_services",
+    ];
+
+    const COMMAND_SAFETY_TABLES: &[&str] = &[
+        "command_idempotency",
+        "command_recovery_actions",
+        "outbox_events",
+    ];
+
+    const EXPERIMENTAL_GATEWAY_TABLES: &[&str] = &["gateway_api_keys"];
+
+    const EXPERIMENTAL_AGENT_TABLES: &[&str] = &[
+        "agent_sessions",
+        "agent_audit_events",
+        "agent_memory_items",
+        "agent_digest_runs",
+    ];
+
     #[tokio::test]
     async fn configured_pool_applies_connection_pragmas() {
         let pool = connect_configured_sqlite_pool("sqlite::memory:")
@@ -1312,6 +1349,15 @@ mod tests {
 
     async fn table_exists(pool: &SqlitePool, table: &str) -> bool {
         sqlite_table_count(pool, table).await == 1
+    }
+
+    async fn assert_table_group_exists(pool: &SqlitePool, group: &str, tables: &[&str]) {
+        for table in tables {
+            assert!(
+                table_exists(pool, table).await,
+                "missing {group} table {table}"
+            );
+        }
     }
 
     async fn test_pool() -> SqlitePool {
@@ -1639,6 +1685,30 @@ mod tests {
             .get("version");
 
         assert_eq!(version, 19);
+    }
+
+    #[tokio::test]
+    async fn fresh_database_migration_creates_required_table_groups() {
+        let pool = test_pool().await;
+
+        run_migrations(&pool).await.expect("runs migrations");
+
+        let version: i32 = sqlx::query_scalar("SELECT version FROM schema_version LIMIT 1")
+            .fetch_one(&pool)
+            .await
+            .expect("reads final schema version");
+
+        assert_eq!(version, 19);
+
+        assert_table_group_exists(&pool, "PMS core", PMS_CORE_TABLES).await;
+        assert_table_group_exists(&pool, "command safety", COMMAND_SAFETY_TABLES).await;
+        assert_table_group_exists(
+            &pool,
+            "experimental gateway",
+            EXPERIMENTAL_GATEWAY_TABLES,
+        )
+        .await;
+        assert_table_group_exists(&pool, "experimental agent", EXPERIMENTAL_AGENT_TABLES).await;
     }
 
     #[tokio::test]
