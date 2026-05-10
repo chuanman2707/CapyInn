@@ -136,8 +136,8 @@ describe("CeoAgentSection", () => {
     render(<CeoAgentSection />);
 
     expect(await screen.findByText("CEO Telegram Chat")).toBeInTheDocument();
-    expect(screen.getByLabelText("Telegram owner binding: missing")).toBeInTheDocument();
-    expect(screen.getByLabelText("OpenAI API key: missing")).toBeInTheDocument();
+    expect(await screen.findByLabelText("Telegram owner binding: missing")).toBeInTheDocument();
+    expect(await screen.findByLabelText("OpenAI API key: missing")).toBeInTheDocument();
   });
 
   it("renders separate CEO Hourly Digest gate status", async () => {
@@ -145,7 +145,7 @@ describe("CeoAgentSection", () => {
     render(<CeoAgentSection />);
 
     expect(await screen.findByText("CEO Hourly Digest")).toBeInTheDocument();
-    expect(screen.getByLabelText("Telegram delivery chat ID: missing")).toBeInTheDocument();
+    expect(await screen.findByLabelText("Telegram delivery chat ID: missing")).toBeInTheDocument();
   });
 
   it("shows missing digest OpenAI model requirement", async () => {
