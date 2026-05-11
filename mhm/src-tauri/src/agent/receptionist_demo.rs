@@ -3,12 +3,15 @@ use crate::services::settings_store;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sqlx::{Pool, Row, Sqlite};
+use std::time::Duration;
 
 pub const DEFAULT_LOCAL_RECEPTIONIST_ENDPOINT: &str = "http://127.0.0.1:8080/v1/chat/completions";
 pub const DEFAULT_LOCAL_RECEPTIONIST_MODEL: &str = "capyinn-gemma4-e2b-q5km";
 const MAX_MESSAGE_CHARS: usize = 2_000;
 const MAX_MODEL_CHARS: usize = 128;
 const MAX_ENDPOINT_CHARS: usize = 2_048;
+const LOCAL_PROVIDER_TIMEOUT_SECONDS: u64 = 60;
+const MAX_PROVIDER_RESPONSE_BYTES: usize = 1024 * 1024;
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 pub struct LocalReceptionistChatRequest {
@@ -22,6 +25,36 @@ pub struct LocalReceptionistChatResponse {
     pub answer: String,
     pub provider: String,
     pub model: String,
+}
+
+#[derive(Debug, Serialize)]
+struct LocalChatCompletionRequest {
+    model: String,
+    messages: Vec<LocalChatMessage>,
+    temperature: f32,
+    max_tokens: u16,
+    stream: bool,
+}
+
+#[derive(Debug, Serialize)]
+struct LocalChatMessage {
+    role: String,
+    content: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct LocalChatCompletionResponse {
+    choices: Vec<LocalChatChoice>,
+}
+
+#[derive(Debug, Deserialize)]
+struct LocalChatChoice {
+    message: LocalChatChoiceMessage,
+}
+
+#[derive(Debug, Deserialize)]
+struct LocalChatChoiceMessage {
+    content: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -79,6 +112,69 @@ pub(crate) async fn build_guest_facing_context(
     })
 }
 
+pub(crate) fn build_local_provider_client() -> CommandResult<reqwest::Client> {
+    reqwest::Client::builder()
+        .timeout(Duration::from_secs(LOCAL_PROVIDER_TIMEOUT_SECONDS))
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .map_err(|_| internal_error("Cannot create local provider client."))
+}
+
+pub(crate) async fn call_local_provider(
+    client: &reqwest::Client,
+    endpoint: &str,
+    model: &str,
+    system_prompt: &str,
+    user_message: &str,
+) -> CommandResult<String> {
+    validate_local_http_endpoint(endpoint)?;
+
+    let body = LocalChatCompletionRequest {
+        model: model.to_string(),
+        messages: vec![
+            LocalChatMessage {
+                role: "system".to_string(),
+                content: system_prompt.to_string(),
+            },
+            LocalChatMessage {
+                role: "user".to_string(),
+                content: user_message.to_string(),
+            },
+        ],
+        temperature: 0.2,
+        max_tokens: 512,
+        stream: false,
+    };
+
+    let response = client
+        .post(endpoint)
+        .json(&body)
+        .send()
+        .await
+        .map_err(|error| {
+            if error.is_timeout() {
+                provider_timeout_error()
+            } else {
+                provider_unreachable_error()
+            }
+        })?;
+
+    let status = response.status();
+    if status.is_redirection() || !status.is_success() {
+        return Err(provider_rejected_error());
+    }
+
+    let bytes = read_limited_provider_response(response).await?;
+    let parsed: LocalChatCompletionResponse =
+        serde_json::from_slice(&bytes).map_err(|_| provider_unsupported_error())?;
+    parsed
+        .choices
+        .first()
+        .map(|choice| choice.message.content.trim().to_string())
+        .filter(|content| !content.is_empty())
+        .ok_or_else(provider_unsupported_error)
+}
+
 pub(crate) fn validate_request(
     request: LocalReceptionistChatRequest,
 ) -> CommandResult<ValidatedLocalReceptionistRequest> {
@@ -133,6 +229,70 @@ fn validate_local_http_endpoint(endpoint: &str) -> CommandResult<()> {
 
 fn validation_error(message: &'static str) -> CommandError {
     CommandError::user(codes::VALIDATION_INVALID_INPUT, message)
+}
+
+async fn read_limited_provider_response(response: reqwest::Response) -> CommandResult<Vec<u8>> {
+    if response
+        .content_length()
+        .is_some_and(|length| length > MAX_PROVIDER_RESPONSE_BYTES as u64)
+    {
+        return Err(provider_too_large_error());
+    }
+
+    let mut response = response;
+    let mut bytes = Vec::new();
+    while let Some(chunk) = response.chunk().await.map_err(|error| {
+        if error.is_timeout() {
+            provider_timeout_error()
+        } else {
+            provider_unreachable_error()
+        }
+    })? {
+        if bytes.len().saturating_add(chunk.len()) > MAX_PROVIDER_RESPONSE_BYTES {
+            return Err(provider_too_large_error());
+        }
+        bytes.extend_from_slice(&chunk);
+    }
+    Ok(bytes)
+}
+
+fn provider_unreachable_error() -> CommandError {
+    CommandError::system(
+        codes::AGENT_PROVIDER_REQUEST_FAILED,
+        "Local provider is not reachable. Start llama-server and try again.",
+    )
+}
+
+fn provider_timeout_error() -> CommandError {
+    CommandError::system(
+        codes::AGENT_PROVIDER_REQUEST_FAILED,
+        "Local provider timed out. Try a shorter question or restart llama-server.",
+    )
+}
+
+fn provider_rejected_error() -> CommandError {
+    CommandError::system(
+        codes::AGENT_PROVIDER_REQUEST_FAILED,
+        "Local provider rejected the request. Check the endpoint and model name.",
+    )
+}
+
+fn provider_too_large_error() -> CommandError {
+    CommandError::system(
+        codes::AGENT_PROVIDER_REQUEST_FAILED,
+        "Local provider response was too large. Try a shorter answer.",
+    )
+}
+
+fn provider_unsupported_error() -> CommandError {
+    CommandError::system(
+        codes::AGENT_PROVIDER_REQUEST_FAILED,
+        "Local provider returned an unsupported response.",
+    )
+}
+
+fn internal_error(message: &'static str) -> CommandError {
+    CommandError::system(codes::SYSTEM_INTERNAL_ERROR, message)
 }
 
 async fn load_hotel_context(pool: &Pool<Sqlite>) -> CommandResult<HotelContext> {
@@ -247,7 +407,16 @@ fn system_error(message: String) -> CommandError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use axum::{
+        extract::State,
+        http::StatusCode,
+        response::{IntoResponse, Redirect},
+        routing::post,
+        Json, Router,
+    };
     use sqlx::{sqlite::SqlitePoolOptions, Pool, Sqlite};
+    use std::sync::{Arc, Mutex};
+    use tokio::net::TcpListener;
 
     fn valid_request() -> LocalReceptionistChatRequest {
         LocalReceptionistChatRequest {
@@ -294,6 +463,187 @@ mod tests {
             .execute(pool)
             .await
             .expect("failed to save setting");
+    }
+
+    async fn spawn_chat_server(router: Router) -> String {
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("failed to bind test chat server");
+        let addr = listener
+            .local_addr()
+            .expect("failed to read test chat server address");
+
+        tokio::spawn(async move {
+            axum::serve(listener, router)
+                .await
+                .expect("test chat server failed");
+        });
+
+        format!("http://{addr}/v1/chat/completions")
+    }
+
+    #[tokio::test]
+    async fn local_provider_parses_openai_compatible_response() {
+        let captured_body = Arc::new(Mutex::new(None::<Value>));
+        let endpoint = spawn_chat_server(
+            Router::new()
+                .route(
+                    "/v1/chat/completions",
+                    post(
+                        |State(captured_body): State<Arc<Mutex<Option<Value>>>>,
+                         Json(body): Json<Value>| async move {
+                            *captured_body.lock().expect("capture body lock") = Some(body);
+                            Json(serde_json::json!({
+                                "choices": [
+                                    {
+                                        "message": {
+                                            "content": "Hello from local Gemma."
+                                        }
+                                    }
+                                ]
+                            }))
+                        },
+                    ),
+                )
+                .with_state(captured_body.clone()),
+        )
+        .await;
+        let client = build_local_provider_client().expect("client should build");
+
+        let answer = call_local_provider(
+            &client,
+            &endpoint,
+            "gemma",
+            "system prompt",
+            "guest question",
+        )
+        .await
+        .expect("provider response should parse");
+
+        assert_eq!(answer, "Hello from local Gemma.");
+        let body = captured_body
+            .lock()
+            .expect("capture body lock")
+            .clone()
+            .expect("request body should be captured");
+        assert_eq!(body["model"], "gemma");
+        assert_eq!(body["temperature"], 0.2);
+        assert_eq!(body["max_tokens"], 512);
+        assert_eq!(body["stream"], false);
+        assert_eq!(body["messages"][0]["role"], "system");
+        assert_eq!(body["messages"][0]["content"], "system prompt");
+        assert_eq!(body["messages"][1]["role"], "user");
+        assert_eq!(body["messages"][1]["content"], "guest question");
+    }
+
+    #[tokio::test]
+    async fn local_provider_rejects_remote_endpoint_before_sending() {
+        let client = build_local_provider_client().expect("client should build");
+
+        let error = call_local_provider(
+            &client,
+            "http://example.com/v1/chat/completions",
+            "gemma",
+            "system prompt",
+            "guest question",
+        )
+        .await
+        .expect_err("remote endpoint should be rejected before provider call");
+
+        assert_eq!(error.code, codes::VALIDATION_INVALID_INPUT);
+        assert!(error.support_id.is_none());
+    }
+
+    #[tokio::test]
+    async fn local_provider_rejects_too_large_content_length() {
+        let endpoint = spawn_chat_server(Router::new().route(
+            "/v1/chat/completions",
+            post(|| async { "x".repeat(MAX_PROVIDER_RESPONSE_BYTES + 1) }),
+        ))
+        .await;
+        let client = build_local_provider_client().expect("client should build");
+
+        let error = call_local_provider(
+            &client,
+            &endpoint,
+            "gemma",
+            "system prompt",
+            "guest question",
+        )
+        .await
+        .expect_err("oversized response should fail");
+
+        assert_eq!(error.code, codes::AGENT_PROVIDER_REQUEST_FAILED);
+        assert!(error.message.contains("too large"));
+    }
+
+    #[tokio::test]
+    async fn local_provider_rejects_redirects_without_following() {
+        let endpoint = spawn_chat_server(Router::new().route(
+            "/v1/chat/completions",
+            post(|| async { Redirect::temporary("https://example.com/leak") }),
+        ))
+        .await;
+        let client = build_local_provider_client().expect("client should build");
+
+        let error = call_local_provider(
+            &client,
+            &endpoint,
+            "gemma",
+            "system prompt",
+            "guest question",
+        )
+        .await
+        .expect_err("redirect should be rejected");
+
+        assert_eq!(error.code, codes::AGENT_PROVIDER_REQUEST_FAILED);
+        assert!(error.message.contains("rejected"));
+    }
+
+    #[tokio::test]
+    async fn local_provider_rejects_malformed_response() {
+        let endpoint = spawn_chat_server(Router::new().route(
+            "/v1/chat/completions",
+            post(|| async { Json(serde_json::json!({ "choices": [] })) }),
+        ))
+        .await;
+        let client = build_local_provider_client().expect("client should build");
+
+        let error = call_local_provider(
+            &client,
+            &endpoint,
+            "gemma",
+            "system prompt",
+            "guest question",
+        )
+        .await
+        .expect_err("malformed response should be rejected");
+
+        assert_eq!(error.code, codes::AGENT_PROVIDER_REQUEST_FAILED);
+        assert!(error.message.contains("unsupported"));
+    }
+
+    #[tokio::test]
+    async fn local_provider_rejects_non_success_status() {
+        let endpoint = spawn_chat_server(Router::new().route(
+            "/v1/chat/completions",
+            post(|| async { StatusCode::BAD_REQUEST.into_response() }),
+        ))
+        .await;
+        let client = build_local_provider_client().expect("client should build");
+
+        let error = call_local_provider(
+            &client,
+            &endpoint,
+            "gemma",
+            "system prompt",
+            "guest question",
+        )
+        .await
+        .expect_err("non-success status should be rejected");
+
+        assert_eq!(error.code, codes::AGENT_PROVIDER_REQUEST_FAILED);
+        assert!(error.message.contains("rejected"));
     }
 
     #[test]
