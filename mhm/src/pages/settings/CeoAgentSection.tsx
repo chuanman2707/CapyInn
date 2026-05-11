@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { toast } from "sonner";
 
 import { invokeCommand, invokeWriteCommand } from "@/lib/invokeCommand";
+import LocalReceptionistDemo from "./LocalReceptionistDemo";
 
 type CeoTelegramConfig = {
   runtime_enabled: boolean;
@@ -389,6 +390,8 @@ export default function CeoAgentSection() {
           Owner-bound Telegram access to read-only PMS answers.
         </p>
       </div>
+
+      <LocalReceptionistDemo />
 
       <section className="space-y-3 rounded-xl border border-slate-200 p-4">
         <div className="flex items-center justify-between gap-4">

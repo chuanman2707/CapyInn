@@ -1,4 +1,4 @@
-import { render, screen, waitFor } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -46,6 +46,16 @@ type CeoDigestGateFixture = {
   ready: boolean;
   missing: string[];
 };
+
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((promiseResolve, promiseReject) => {
+    resolve = promiseResolve;
+    reject = promiseReject;
+  });
+  return { promise, resolve, reject };
+}
 
 const disabledConfig: CeoTelegramConfigFixture = {
   runtime_enabled: false,
@@ -121,6 +131,7 @@ describe("CeoAgentSection", () => {
     invoke.mockClear();
     toastSuccess.mockReset();
     toastError.mockReset();
+    window.localStorage.clear();
 
     useAuthStore.setState({
       user: { id: "u1", name: "Admin", role: "admin", active: true, created_at: "" },
@@ -482,6 +493,237 @@ describe("CeoAgentSection", () => {
       expect(screen.getByText("Unable to load CEO Telegram Chat settings")).toBeInTheDocument();
     });
     expect(checkbox).toBeDisabled();
+  });
+
+  it("renders the local receptionist demo and persists endpoint and model", async () => {
+    const user = userEvent.setup();
+    mockInitialState();
+
+    render(<CeoAgentSection />);
+
+    expect(await screen.findByText("Local Receptionist Demo")).toBeInTheDocument();
+    const endpoint = screen.getByLabelText("Local provider endpoint");
+    const model = screen.getByLabelText("Local model name");
+
+    await user.clear(endpoint);
+    await user.type(endpoint, "http://localhost:8081/v1/chat/completions");
+    await user.clear(model);
+    await user.type(model, "capyinn-local-test");
+
+    expect(window.localStorage.getItem("capyinn.localReceptionist.endpoint")).toBe(
+      "http://localhost:8081/v1/chat/completions",
+    );
+    expect(window.localStorage.getItem("capyinn.localReceptionist.model")).toBe(
+      "capyinn-local-test",
+    );
+  });
+
+  it("calls local_receptionist_chat and shows the answer", async () => {
+    const user = userEvent.setup();
+    mockInitialState();
+    setMockResponses({
+      local_receptionist_chat: (args) => ({
+        answer: `Answer for ${(args?.message as string) ?? ""}`,
+        provider: "local",
+        model: (args?.model as string) ?? "capyinn-gemma4-e2b-q5km",
+      }),
+    });
+
+    render(<CeoAgentSection />);
+
+    await user.type(
+      await screen.findByLabelText("Receptionist message"),
+      "Do you have hourly rooms?",
+    );
+    await user.click(screen.getByRole("button", { name: "Ask local Gemma" }));
+
+    await waitFor(() => {
+      expect(invoke).toHaveBeenCalledWith(
+        "local_receptionist_chat",
+        expect.objectContaining({
+          endpoint: "http://127.0.0.1:8080/v1/chat/completions",
+          model: "capyinn-gemma4-e2b-q5km",
+          message: "Do you have hourly rooms?",
+        }),
+      );
+    });
+    expect(await screen.findByText("Answer for Do you have hourly rooms?")).toBeInTheDocument();
+  });
+
+  it("disables local receptionist submit for blank messages", async () => {
+    mockInitialState();
+
+    render(<CeoAgentSection />);
+
+    expect(await screen.findByRole("button", { name: "Ask local Gemma" })).toBeDisabled();
+  });
+
+  it("shows field validation and does not invoke for remote endpoints", async () => {
+    const user = userEvent.setup();
+    mockInitialState();
+
+    render(<CeoAgentSection />);
+
+    await user.clear(await screen.findByLabelText("Local provider endpoint"));
+    await user.type(
+      screen.getByLabelText("Local provider endpoint"),
+      "https://example.com/v1/chat/completions",
+    );
+    await user.type(await screen.findByLabelText("Receptionist message"), "Hello");
+    await user.click(screen.getByRole("button", { name: "Ask local Gemma" }));
+
+    expect(
+      await screen.findByText("Endpoint must be http://127.0.0.1 or http://localhost."),
+    ).toBeInTheDocument();
+    expect(screen.getByLabelText("Local provider endpoint")).toHaveAttribute(
+      "aria-describedby",
+      "local-receptionist-endpoint-error",
+    );
+    expect(screen.getByLabelText("Local provider endpoint")).toHaveAttribute("aria-invalid", "true");
+    expect(invoke).not.toHaveBeenCalledWith("local_receptionist_chat", expect.anything());
+  });
+
+  it("shows endpoint length validation on the endpoint field", async () => {
+    const user = userEvent.setup();
+    mockInitialState();
+
+    render(<CeoAgentSection />);
+
+    const endpoint = await screen.findByLabelText("Local provider endpoint");
+    fireEvent.change(endpoint, {
+      target: { value: `http://127.0.0.1/${"a".repeat(2048)}` },
+    });
+    await user.type(await screen.findByLabelText("Receptionist message"), "Hello");
+    await user.click(screen.getByRole("button", { name: "Ask local Gemma" }));
+
+    expect(await screen.findByText("Endpoint is too long.")).toBeInTheDocument();
+    expect(endpoint).toHaveAttribute("aria-describedby", "local-receptionist-endpoint-error");
+    expect(endpoint).toHaveAttribute("aria-invalid", "true");
+    expect(invoke).not.toHaveBeenCalledWith("local_receptionist_chat", expect.anything());
+  });
+
+  it("shows field validation and does not invoke for blank model names", async () => {
+    const user = userEvent.setup();
+    mockInitialState();
+
+    render(<CeoAgentSection />);
+
+    await user.clear(await screen.findByLabelText("Local model name"));
+    await user.type(await screen.findByLabelText("Receptionist message"), "Hello");
+    await user.click(screen.getByRole("button", { name: "Ask local Gemma" }));
+
+    expect(await screen.findByText("Model name is required.")).toBeInTheDocument();
+    expect(screen.getByLabelText("Local model name")).toHaveAttribute(
+      "aria-describedby",
+      "local-receptionist-model-error",
+    );
+    expect(screen.getByLabelText("Local model name")).toHaveAttribute("aria-invalid", "true");
+    expect(invoke).not.toHaveBeenCalledWith("local_receptionist_chat", expect.anything());
+  });
+
+  it("shows message validation on the message field", async () => {
+    const user = userEvent.setup();
+    mockInitialState();
+
+    render(<CeoAgentSection />);
+
+    const message = await screen.findByLabelText("Receptionist message");
+    fireEvent.change(message, { target: { value: "x".repeat(2001) } });
+    await user.click(screen.getByRole("button", { name: "Ask local Gemma" }));
+
+    expect(await screen.findByText("Message is too long.")).toBeInTheDocument();
+    expect(message).toHaveAttribute("aria-describedby", "local-receptionist-message-error");
+    expect(message).toHaveAttribute("aria-invalid", "true");
+    expect(invoke).not.toHaveBeenCalledWith("local_receptionist_chat", expect.anything());
+  });
+
+  it("disables local receptionist fields while a request is in flight", async () => {
+    const user = userEvent.setup();
+    const pending = deferred<{ answer: string; provider: "local"; model: string }>();
+    mockInitialState();
+    setMockResponses({
+      local_receptionist_chat: () => pending.promise,
+    });
+
+    render(<CeoAgentSection />);
+
+    const endpoint = await screen.findByLabelText("Local provider endpoint");
+    const model = screen.getByLabelText("Local model name");
+    const message = screen.getByLabelText("Receptionist message");
+    await user.type(message, "Hello");
+    await user.click(screen.getByRole("button", { name: "Ask local Gemma" }));
+
+    expect(await screen.findByRole("button", { name: "Asking local Gemma..." })).toBeDisabled();
+    expect(endpoint).toBeDisabled();
+    expect(model).toBeDisabled();
+    expect(message).toBeDisabled();
+
+    pending.resolve({
+      answer: "Local answer",
+      provider: "local",
+      model: "capyinn-gemma4-e2b-q5km",
+    });
+
+    expect(await screen.findByText("Local answer")).toBeInTheDocument();
+  });
+
+  it.each([
+    [
+      "request timed out after 60 seconds with raw endpoint details",
+      "Local provider timed out. Try a shorter question or restart llama-server.",
+    ],
+    [
+      "provider rejected request with raw status 500",
+      "Local provider rejected the request. Check the endpoint and model name.",
+    ],
+    [
+      "provider response too large with raw byte count",
+      "Local provider response was too large. Try a shorter answer.",
+    ],
+    [
+      "unsupported provider response with raw schema details",
+      "Local provider returned an unsupported response.",
+    ],
+    [
+      "invalid request with raw validation details",
+      "Please check the local endpoint, model name, and message.",
+    ],
+  ])("shows a short local provider error for %s", async (rawError, expectedMessage) => {
+    const user = userEvent.setup();
+    mockInitialState();
+    setMockResponses({
+      local_receptionist_chat: () => {
+        throw new Error(rawError);
+      },
+    });
+
+    render(<CeoAgentSection />);
+
+    await user.type(await screen.findByLabelText("Receptionist message"), "Hello");
+    await user.click(screen.getByRole("button", { name: "Ask local Gemma" }));
+
+    expect(await screen.findByText(expectedMessage)).toBeInTheDocument();
+    expect(screen.queryByText(/raw/i)).not.toBeInTheDocument();
+  });
+
+  it("shows a short local provider error without raw details", async () => {
+    const user = userEvent.setup();
+    mockInitialState();
+    setMockResponses({
+      local_receptionist_chat: () => {
+        throw new Error("raw tcp connect ECONNREFUSED with internal details");
+      },
+    });
+
+    render(<CeoAgentSection />);
+
+    await user.type(await screen.findByLabelText("Receptionist message"), "Hello");
+    await user.click(screen.getByRole("button", { name: "Ask local Gemma" }));
+
+    expect(
+      await screen.findByText("Local provider is not reachable. Start llama-server and try again."),
+    ).toBeInTheDocument();
+    expect(screen.queryByText(/ECONNREFUSED/)).not.toBeInTheDocument();
   });
 });
 
