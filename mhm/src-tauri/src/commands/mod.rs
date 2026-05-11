@@ -92,6 +92,7 @@ pub mod diagnostics;
 pub mod groups;
 pub mod guests;
 pub mod invoices;
+pub mod local_receptionist;
 pub mod onboarding;
 pub mod pricing;
 pub mod reservations;

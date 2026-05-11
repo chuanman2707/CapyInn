@@ -12,6 +12,7 @@ const MAX_MODEL_CHARS: usize = 128;
 const MAX_ENDPOINT_CHARS: usize = 2_048;
 const LOCAL_PROVIDER_TIMEOUT_SECONDS: u64 = 60;
 const MAX_PROVIDER_RESPONSE_BYTES: usize = 1024 * 1024;
+const MAX_CONTEXT_BYTES: usize = 24 * 1024;
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 pub struct LocalReceptionistChatRequest {
@@ -110,6 +111,51 @@ pub(crate) async fn build_guest_facing_context(
         room_types: load_room_type_names(pool).await?,
         pricing_rules: load_receptionist_pricing_rules(pool).await?,
     })
+}
+
+pub async fn run_local_receptionist_chat(
+    pool: &Pool<Sqlite>,
+    request: LocalReceptionistChatRequest,
+) -> CommandResult<LocalReceptionistChatResponse> {
+    let request = validate_request(request)?;
+    let context = build_guest_facing_context(pool).await?;
+    let context_json = serde_json::to_string_pretty(&context)
+        .map_err(|_| internal_error("Cannot serialize receptionist context."))?;
+    if context_json.len() > MAX_CONTEXT_BYTES {
+        return Err(CommandError::system(
+            codes::AGENT_PROVIDER_REQUEST_FAILED,
+            "Local receptionist context is too large.",
+        ));
+    }
+
+    let system_prompt = build_system_prompt(&context_json);
+    let client = build_local_provider_client()?;
+    let answer = call_local_provider(
+        &client,
+        &request.endpoint,
+        &request.model,
+        &system_prompt,
+        &request.message,
+    )
+    .await?;
+
+    Ok(LocalReceptionistChatResponse {
+        answer,
+        provider: "local".to_string(),
+        model: request.model,
+    })
+}
+
+fn build_system_prompt(context_json: &str) -> String {
+    format!(
+        "You are CapyInn Local Receptionist Demo, a front-desk assistant for a small hotel PMS.\n\
+Answer in the same language as the user.\n\
+Use only the provided hotel context.\n\
+Do not invent prices, policies, availability, bookings, payments, or guest data.\n\
+Do not confirm or create reservations.\n\
+If information is missing, say that staff should confirm it in CapyInn.\n\n\
+HOTEL CONTEXT:\n{context_json}"
+    )
 }
 
 pub(crate) fn build_local_provider_client() -> CommandResult<reqwest::Client> {
@@ -465,6 +511,34 @@ mod tests {
             .expect("failed to save setting");
     }
 
+    async fn protected_table_counts(pool: &Pool<Sqlite>) -> Vec<(String, i64)> {
+        let seeded_read_tables = ["settings", "room_types", "pricing_rules"];
+        let tables: Vec<String> = sqlx::query_scalar(
+            "SELECT name
+             FROM sqlite_master
+             WHERE type = 'table'
+               AND name NOT LIKE 'sqlite_%'
+               AND name != 'schema_version'
+             ORDER BY name",
+        )
+        .fetch_all(pool)
+        .await
+        .expect("list sqlite tables");
+        let mut counts = Vec::new();
+        for table in tables {
+            if seeded_read_tables.contains(&table.as_str()) {
+                continue;
+            }
+            let sql = format!("SELECT COUNT(*) FROM \"{}\"", table.replace('"', "\"\""));
+            let count = sqlx::query_scalar::<_, i64>(&sql)
+                .fetch_one(pool)
+                .await
+                .unwrap_or_else(|error| panic!("count table {table}: {error}"));
+            counts.push((table, count));
+        }
+        counts
+    }
+
     async fn spawn_chat_server(router: Router) -> String {
         let listener = TcpListener::bind("127.0.0.1:0")
             .await
@@ -644,6 +718,69 @@ mod tests {
 
         assert_eq!(error.code, codes::AGENT_PROVIDER_REQUEST_FAILED);
         assert!(error.message.contains("rejected"));
+    }
+
+    #[tokio::test]
+    async fn run_local_receptionist_chat_returns_answer_and_does_not_write_pms_tables() {
+        let pool = test_pool().await;
+        save_setting_for_test(
+            &pool,
+            "hotel_info",
+            r#"{"name":"CapyInn Test","address":"Da Nang","phone":"0900","rating":"4.7"}"#,
+        )
+        .await;
+        sqlx::query("INSERT INTO room_types (id, name, created_at) VALUES ('standard', 'Standard', '2026-05-11T00:00:00+07:00')")
+            .execute(&pool)
+            .await
+            .expect("seed room type");
+        sqlx::query(
+            "INSERT INTO pricing_rules (
+                id, room_type, hourly_rate, overnight_rate, daily_rate,
+                overnight_start, overnight_end, daily_checkin, daily_checkout,
+                early_checkin_surcharge_pct, late_checkout_surcharge_pct, weekend_uplift_pct,
+                created_at, updated_at
+            ) VALUES (
+                'price-standard', 'standard', 80000, 300000, 400000,
+                '22:00', '11:00', '14:00', '12:00',
+                30.0, 30.0, 0.0,
+                '2026-05-11T00:00:00+07:00', '2026-05-11T00:00:00+07:00'
+            )",
+        )
+        .execute(&pool)
+        .await
+        .expect("seed pricing");
+        let endpoint = spawn_chat_server(Router::new().route(
+            "/v1/chat/completions",
+            post(|| async {
+                Json(serde_json::json!({
+                    "choices": [
+                        { "message": { "content": "Hourly rooms are listed in CapyInn pricing." } }
+                    ]
+                }))
+            }),
+        ))
+        .await;
+        let before = protected_table_counts(&pool).await;
+
+        let response = run_local_receptionist_chat(
+            &pool,
+            LocalReceptionistChatRequest {
+                endpoint,
+                model: DEFAULT_LOCAL_RECEPTIONIST_MODEL.to_string(),
+                message: "Do you have hourly rooms?".to_string(),
+            },
+        )
+        .await
+        .expect("chat succeeds");
+
+        let after = protected_table_counts(&pool).await;
+        assert_eq!(
+            response.answer,
+            "Hourly rooms are listed in CapyInn pricing."
+        );
+        assert_eq!(response.provider, "local");
+        assert_eq!(response.model, DEFAULT_LOCAL_RECEPTIONIST_MODEL);
+        assert_eq!(after, before);
     }
 
     #[test]
