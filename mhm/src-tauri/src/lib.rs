@@ -290,6 +290,7 @@ pub fn run() {
             commands::agent_settings::get_ceo_digest_config,
             commands::agent_settings::get_ceo_digest_gate_status,
             commands::agent_settings::set_ceo_digest_config,
+            commands::local_receptionist::local_receptionist_chat,
             commands::diagnostics::record_js_crash,
             commands::diagnostics::get_pending_crash_report,
             commands::diagnostics::mark_crash_report_submitted,
