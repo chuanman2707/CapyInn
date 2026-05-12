@@ -4509,6 +4509,215 @@ async fn reservation_command_idempotency_same_plain_key_across_commands_scopes_o
 }
 
 #[tokio::test]
+async fn reservation_lifecycle_smoke_covers_confirm_and_cancel_paths() {
+    let pool = test_pool().await;
+    seed_room(&pool, "R-SMOKE-CONFIRM")
+        .await
+        .expect("seed confirm room");
+    seed_room(&pool, "R-SMOKE-CANCEL")
+        .await
+        .expect("seed cancel room");
+    seed_pricing_rule(&pool, "standard", 600_000)
+        .await
+        .expect("seed pricing");
+
+    let today = Local::now().date_naive();
+    let reservation_request = |room_id: &str, start_offset_days: i64| {
+        let check_in = today + Duration::days(start_offset_days);
+        let check_out = check_in + Duration::days(2);
+        CreateReservationRequest {
+            room_id: room_id.to_string(),
+            guest_name: format!("Smoke Guest {room_id}"),
+            guest_phone: Some("0900000137".to_string()),
+            guest_doc_number: Some(format!("DOC-{room_id}")),
+            check_in_date: check_in.format("%Y-%m-%d").to_string(),
+            check_out_date: check_out.format("%Y-%m-%d").to_string(),
+            nights: 2,
+            deposit_amount: Some(50_000),
+            source: Some("phone".to_string()),
+            notes: Some("reservation smoke".to_string()),
+        }
+    };
+
+    let create_confirm_ctx = crate::command_idempotency::WriteCommandContext::for_internal_test(
+        "req-smoke-reservation-create-confirm",
+        "idem-smoke-reservation-create-confirm",
+        "create_reservation",
+    );
+    let created_for_confirm = reservation_lifecycle::create_reservation_idempotent(
+        &pool,
+        &create_confirm_ctx,
+        reservation_request("R-SMOKE-CONFIRM", 0),
+    )
+    .await
+    .expect("reservation create succeeds for confirm branch");
+    let confirm_booking_id = created_for_confirm.response["id"]
+        .as_str()
+        .expect("created reservation id")
+        .to_string();
+
+    assert_eq!(
+        created_for_confirm.response["status"],
+        serde_json::json!("booked")
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, String>("SELECT status FROM rooms WHERE id = ?")
+            .bind("R-SMOKE-CONFIRM")
+            .fetch_one(&pool)
+            .await
+            .expect("confirm room status after create"),
+        "vacant"
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM room_calendar WHERE booking_id = ? AND status = 'booked'",
+        )
+        .bind(&confirm_booking_id)
+        .fetch_one(&pool)
+        .await
+        .expect("booked calendar rows after create"),
+        2
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT COALESCE(SUM(amount), 0) FROM transactions WHERE booking_id = ? AND type = 'deposit'",
+        )
+        .bind(&confirm_booking_id)
+        .fetch_one(&pool)
+        .await
+        .expect("reservation deposit total"),
+        50_000
+    );
+    assert_single_outbox_event(&pool, &create_confirm_ctx, "booking.reservation_created").await;
+
+    let confirm_ctx = crate::command_idempotency::WriteCommandContext::for_internal_test(
+        "req-smoke-reservation-confirm",
+        "idem-smoke-reservation-confirm",
+        "confirm_reservation",
+    );
+    let confirmed = reservation_lifecycle::confirm_reservation_idempotent(
+        &pool,
+        &confirm_ctx,
+        &confirm_booking_id,
+    )
+    .await
+    .expect("reservation confirm succeeds");
+    let confirmed_nights = confirmed.response["nights"]
+        .as_i64()
+        .expect("confirmed reservation nights");
+    let confirmed_total_price = confirmed.response["total_price"]
+        .as_i64()
+        .expect("confirmed reservation total price");
+
+    assert_eq!(confirmed.response["status"], serde_json::json!("active"));
+    assert_eq!(
+        sqlx::query_scalar::<_, String>("SELECT status FROM bookings WHERE id = ?")
+            .bind(&confirm_booking_id)
+            .fetch_one(&pool)
+            .await
+            .expect("confirmed booking status"),
+        "active"
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, String>("SELECT status FROM rooms WHERE id = ?")
+            .bind("R-SMOKE-CONFIRM")
+            .fetch_one(&pool)
+            .await
+            .expect("confirm room status"),
+        "occupied"
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM room_calendar WHERE booking_id = ? AND status = 'occupied'",
+        )
+        .bind(&confirm_booking_id)
+        .fetch_one(&pool)
+        .await
+        .expect("occupied calendar rows after confirm"),
+        confirmed_nights
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT COALESCE(SUM(amount), 0) FROM transactions WHERE booking_id = ? AND type = 'charge'",
+        )
+        .bind(&confirm_booking_id)
+        .fetch_one(&pool)
+        .await
+        .expect("reservation room charge total"),
+        confirmed_total_price
+    );
+    assert_single_outbox_event(&pool, &confirm_ctx, "booking.reservation_confirmed").await;
+
+    let create_cancel_ctx = crate::command_idempotency::WriteCommandContext::for_internal_test(
+        "req-smoke-reservation-create-cancel",
+        "idem-smoke-reservation-create-cancel",
+        "create_reservation",
+    );
+    let created_for_cancel = reservation_lifecycle::create_reservation_idempotent(
+        &pool,
+        &create_cancel_ctx,
+        reservation_request("R-SMOKE-CANCEL", 0),
+    )
+    .await
+    .expect("reservation create succeeds for cancel branch");
+    let cancel_booking_id = created_for_cancel.response["id"]
+        .as_str()
+        .expect("created cancel reservation id")
+        .to_string();
+    assert_single_outbox_event(&pool, &create_cancel_ctx, "booking.reservation_created").await;
+
+    let cancel_ctx = crate::command_idempotency::WriteCommandContext::for_internal_test(
+        "req-smoke-reservation-cancel",
+        "idem-smoke-reservation-cancel",
+        "cancel_reservation",
+    );
+    let cancelled = reservation_lifecycle::cancel_reservation_idempotent(
+        &pool,
+        &cancel_ctx,
+        &cancel_booking_id,
+    )
+    .await
+    .expect("reservation cancel succeeds");
+
+    assert_eq!(cancelled.response["ok"], serde_json::json!(true));
+    assert_eq!(
+        sqlx::query_scalar::<_, String>("SELECT status FROM bookings WHERE id = ?")
+            .bind(&cancel_booking_id)
+            .fetch_one(&pool)
+            .await
+            .expect("cancelled booking status"),
+        "cancelled"
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, String>("SELECT status FROM rooms WHERE id = ?")
+            .bind("R-SMOKE-CANCEL")
+            .fetch_one(&pool)
+            .await
+            .expect("cancel room status"),
+        "vacant"
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM room_calendar WHERE booking_id = ?")
+            .bind(&cancel_booking_id)
+            .fetch_one(&pool)
+            .await
+            .expect("cancelled calendar rows"),
+        0
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT COALESCE(SUM(amount), 0) FROM transactions WHERE booking_id = ? AND type = 'cancellation_fee'",
+        )
+        .bind(&cancel_booking_id)
+        .fetch_one(&pool)
+        .await
+        .expect("cancellation fee total"),
+        50_000
+    );
+    assert_single_outbox_event(&pool, &cancel_ctx, "booking.reservation_cancelled").await;
+}
+
+#[tokio::test]
 async fn cancel_reservation_releases_calendar_and_keeps_fee_record() {
     let pool = test_pool().await;
     seed_room(&pool, "R161").await.unwrap();
