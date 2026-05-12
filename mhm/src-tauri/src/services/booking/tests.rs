@@ -5328,6 +5328,204 @@ async fn check_in_posts_charge_and_marks_room_occupied() {
 }
 
 #[tokio::test]
+async fn stay_lifecycle_smoke_covers_checkin_extend_and_checkout() {
+    let pool = test_pool().await;
+    seed_room(&pool, "R-SMOKE-STAY")
+        .await
+        .expect("seed stay room");
+    seed_pricing_rule(&pool, "standard", 250_000)
+        .await
+        .expect("seed stay pricing");
+
+    let check_in_ctx = crate::command_idempotency::WriteCommandContext::for_internal_test(
+        "req-smoke-stay-checkin",
+        "idem-smoke-stay-checkin",
+        "check_in",
+    );
+    let mut check_in_req = minimal_checkin_request("R-SMOKE-STAY");
+    check_in_req.paid_amount = Some(50_000);
+
+    let checked_in = stay_lifecycle::check_in_idempotent(
+        &pool,
+        &check_in_ctx,
+        check_in_req,
+        Some("user-smoke".to_string()),
+    )
+    .await
+    .expect("stay check-in succeeds");
+    let booking_id = checked_in.response["id"]
+        .as_str()
+        .expect("checked-in booking id")
+        .to_string();
+    let initial_expected_checkout = checked_in.response["expected_checkout"]
+        .as_str()
+        .expect("initial expected checkout")
+        .to_string();
+
+    assert_eq!(checked_in.response["status"], serde_json::json!("active"));
+    assert_eq!(
+        sqlx::query_scalar::<_, String>("SELECT status FROM bookings WHERE id = ?")
+            .bind(&booking_id)
+            .fetch_one(&pool)
+            .await
+            .expect("active booking status"),
+        "active"
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, String>("SELECT status FROM rooms WHERE id = ?")
+            .bind("R-SMOKE-STAY")
+            .fetch_one(&pool)
+            .await
+            .expect("occupied stay room"),
+        "occupied"
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM room_calendar WHERE booking_id = ? AND status = 'occupied'",
+        )
+        .bind(&booking_id)
+        .fetch_one(&pool)
+        .await
+        .expect("occupied calendar rows after check-in"),
+        2
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT COALESCE(SUM(amount), 0) FROM transactions WHERE booking_id = ? AND type = 'charge'",
+        )
+        .bind(&booking_id)
+        .fetch_one(&pool)
+        .await
+        .expect("check-in charge total"),
+        500_000
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT COALESCE(SUM(amount), 0) FROM transactions WHERE booking_id = ? AND type = 'payment' AND note = 'Thanh toán khi check-in'",
+        )
+        .bind(&booking_id)
+        .fetch_one(&pool)
+        .await
+        .expect("check-in payment total"),
+        50_000
+    );
+    assert_single_outbox_event(&pool, &check_in_ctx, "booking.checked_in").await;
+
+    let extend_ctx = crate::command_idempotency::WriteCommandContext::for_internal_test(
+        "req-smoke-stay-extend",
+        "idem-smoke-stay-extend",
+        "extend_stay",
+    );
+    let extended = stay_lifecycle::extend_stay_idempotent(&pool, &extend_ctx, &booking_id)
+        .await
+        .expect("stay extend succeeds");
+    let extended_expected_checkout = extended.response["expected_checkout"]
+        .as_str()
+        .expect("extended expected checkout");
+    let initial_checkout = chrono::DateTime::parse_from_rfc3339(&initial_expected_checkout)
+        .expect("initial checkout parses");
+    let extended_checkout = chrono::DateTime::parse_from_rfc3339(extended_expected_checkout)
+        .expect("extended checkout parses");
+
+    assert_eq!(extended.response["nights"], serde_json::json!(3));
+    assert_eq!(extended.response["total_price"], serde_json::json!(750_000));
+    assert_eq!(extended_checkout, initial_checkout + Duration::days(1));
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM room_calendar WHERE booking_id = ? AND status = 'occupied'",
+        )
+        .bind(&booking_id)
+        .fetch_one(&pool)
+        .await
+        .expect("occupied calendar rows after extend"),
+        3
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT COALESCE(SUM(amount), 0) FROM transactions WHERE booking_id = ? AND type = 'charge' AND note = 'Extended stay +1 night'",
+        )
+        .bind(&booking_id)
+        .fetch_one(&pool)
+        .await
+        .expect("extension charge total"),
+        250_000
+    );
+    assert_single_outbox_event(&pool, &extend_ctx, "booking.stay_extended").await;
+
+    let check_out_ctx = crate::command_idempotency::WriteCommandContext::for_internal_test(
+        "req-smoke-stay-checkout",
+        "idem-smoke-stay-checkout",
+        "check_out",
+    );
+    let checked_out = stay_lifecycle::check_out_idempotent(
+        &pool,
+        &check_out_ctx,
+        CheckOutRequest {
+            booking_id: booking_id.clone(),
+            settlement_mode: CheckoutSettlementMode::BookedNights,
+            final_total: 750_000,
+        },
+    )
+    .await
+    .expect("stay checkout succeeds");
+
+    assert_eq!(checked_out.response["ok"], serde_json::json!(true));
+    assert_eq!(
+        sqlx::query_scalar::<_, String>("SELECT status FROM bookings WHERE id = ?")
+            .bind(&booking_id)
+            .fetch_one(&pool)
+            .await
+            .expect("checked-out booking status"),
+        "checked_out"
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, String>("SELECT status FROM rooms WHERE id = ?")
+            .bind("R-SMOKE-STAY")
+            .fetch_one(&pool)
+            .await
+            .expect("room status after checkout"),
+        "cleaning"
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM housekeeping WHERE room_id = ? AND status = 'needs_cleaning'",
+        )
+        .bind("R-SMOKE-STAY")
+        .fetch_one(&pool)
+        .await
+        .expect("checkout housekeeping task"),
+        1
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM room_calendar WHERE booking_id = ?")
+            .bind(&booking_id)
+            .fetch_one(&pool)
+            .await
+            .expect("calendar rows removed after checkout"),
+        0
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT COALESCE(SUM(amount), 0) FROM transactions WHERE booking_id = ? AND type = 'payment' AND note = 'Thanh toán khi check-out'",
+        )
+        .bind(&booking_id)
+        .fetch_one(&pool)
+        .await
+        .expect("checkout payment delta"),
+        700_000
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT paid_amount FROM bookings WHERE id = ?")
+            .bind(&booking_id)
+            .fetch_one(&pool)
+            .await
+            .expect("paid amount after checkout"),
+        750_000
+    );
+    assert_single_outbox_event(&pool, &check_out_ctx, "booking.checked_out").await;
+}
+
+#[tokio::test]
 async fn check_in_idempotent_retry_replays_and_does_not_duplicate_rows() {
     let pool = test_pool().await;
     seed_room(&pool, "R-CHECKIN-IDEM").await.unwrap();
