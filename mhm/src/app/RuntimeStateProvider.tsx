@@ -94,9 +94,23 @@ export function RuntimeStateProvider({
       return;
     }
 
+    let cancelled = false;
+
     invoke<{ running: boolean }>("gateway_get_status")
-      .then((status) => setGatewayRunning(status.running))
-      .catch(() => setGatewayRunning(false));
+      .then((status) => {
+        if (!cancelled) {
+          setGatewayRunning(status.running);
+        }
+      })
+      .catch(() => {
+        if (!cancelled) {
+          setGatewayRunning(false);
+        }
+      });
+
+    return () => {
+      cancelled = true;
+    };
   }, [experimentalGatewayUi, isAuthenticated]);
 
   useEffect(() => {
@@ -234,14 +248,20 @@ export function RuntimeStateProvider({
     }
 
     setCrashPromptBusy(true);
+    let sendSucceeded = false;
     try {
       await submitCrashBundle(pendingCrashReport);
+      sendSucceeded = true;
     } catch {
       await invoke("mark_crash_report_send_failed", {
         bundle_id: pendingCrashReport.bundle_id,
       });
       toast.error("Gửi crash report thất bại");
       return;
+    } finally {
+      if (!sendSucceeded) {
+        setCrashPromptBusy(false);
+      }
     }
 
     try {
