@@ -8,6 +8,9 @@ const host = process.env.TAURI_DEV_HOST;
 const updaterEnabled = ["1", "true", "yes", "on"].includes(
   (process.env.CAPYINN_ENABLE_UPDATER ?? "").toLowerCase(),
 );
+const experimentalGatewayUi = ["1", "true", "yes", "on"].includes(
+  (process.env.CAPYINN_EXPERIMENTAL_GATEWAY_UI ?? "").toLowerCase(),
+);
 const sentryDsn = process.env.CAPYINN_SENTRY_DSN ?? "";
 const sentryEnvironment = process.env.NODE_ENV === "production" ? "production" : "development";
 const sentryRelease = `capyinn@${process.env.npm_package_version ?? "0.0.0"}`;
@@ -22,6 +25,7 @@ export default defineConfig(async () => ({
   define: {
     __APP_VERSION__: JSON.stringify(process.env.npm_package_version ?? "0.0.0"),
     __UPDATER_ENABLED__: JSON.stringify(updaterEnabled),
+    __EXPERIMENTAL_GATEWAY_UI__: JSON.stringify(experimentalGatewayUi),
     __SENTRY_DSN__: JSON.stringify(sentryDsn),
     __SENTRY_RELEASE__: JSON.stringify(sentryRelease),
     __SENTRY_ENVIRONMENT__: JSON.stringify(sentryEnvironment),

@@ -13,6 +13,7 @@ import {
   Wifi,
 } from "lucide-react";
 
+import { isExperimentalGatewayUiEnabled } from "@/app/runtimeProfile";
 import { Card } from "@/components/ui/card";
 import { useAuthStore } from "@/stores/useAuthStore";
 
@@ -46,6 +47,7 @@ type SettingsSectionKey =
 export default function SettingsPage() {
   const { isAdmin } = useAuthStore();
   const [activeSection, setActiveSection] = useState<SettingsSectionKey>("hotel");
+  const experimentalGatewayUi = isExperimentalGatewayUiEnabled();
 
   const sections = [
     { key: "hotel" as const, label: "Hotel Info", icon: Building2 },
@@ -55,7 +57,9 @@ export default function SettingsPage() {
     { key: "appearance" as const, label: "Appearance", icon: Palette },
     { key: "diagnostics" as const, label: "Diagnostics", icon: Database },
     { key: "data" as const, label: "Data & Backup", icon: Database },
-    { key: "gateway" as const, label: "MCP Gateway", icon: Wifi },
+    ...(experimentalGatewayUi
+      ? [{ key: "gateway" as const, label: "MCP Gateway", icon: Wifi }]
+      : []),
     { key: "updates" as const, label: "Software Update", icon: RefreshCcw },
     ...(isAdmin()
       ? [
@@ -96,7 +100,7 @@ export default function SettingsPage() {
         {activeSection === "appearance" && <AppearanceSection />}
         {activeSection === "diagnostics" && <DiagnosticsSection />}
         {activeSection === "data" && <DataSection />}
-        {activeSection === "gateway" && <GatewaySection />}
+        {activeSection === "gateway" && experimentalGatewayUi && <GatewaySection />}
         {activeSection === "updates" && <SoftwareUpdateSection />}
         {activeSection === "ceo-agent" && isAdmin() && <CeoAgentSection />}
         {activeSection === "pricing" && isAdmin() && <PricingSection />}
