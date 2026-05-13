@@ -1,5 +1,4 @@
-import { useState, useEffect, useRef, type ComponentType } from "react";
-import { listen } from "@tauri-apps/api/event";
+import { useState, useEffect, type ComponentType } from "react";
 import { useHotelStore } from "./stores/useHotelStore";
 import { useAuthStore } from "./stores/useAuthStore";
 import Dashboard from "./pages/Dashboard";
@@ -18,10 +17,7 @@ import CrashReportPrompt from "./components/CrashReportPrompt";
 import AppUpdateBadge from "./components/AppUpdateBadge";
 import AppUpdateRestartModal from "./components/AppUpdateRestartModal";
 import { BackupStatusIndicator } from "./components/BackupStatusIndicator";
-import {
-  BackupFailureAlert,
-  type BackupFailureAlertState,
-} from "./components/BackupFailureAlert";
+import { BackupFailureAlert } from "./components/BackupFailureAlert";
 import { Home, Calendar, BedDouble, Users, Sparkles, BarChart3, Settings as SettingsIcon, ChevronsLeft, ChevronsRight, LogOut, Moon, UsersRound } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -29,15 +25,11 @@ import { AppToaster } from "@/app/AppToaster";
 import { AppUpdateRuntime } from "@/app/AppUpdateRuntime";
 import { AuthGate } from "@/app/AuthGate";
 import { BootstrapGate } from "@/app/BootstrapGate";
-import { BootstrapStateProvider, useBootstrapState } from "@/app/BootstrapState";
+import { BootstrapStateProvider } from "@/app/BootstrapState";
+import { RuntimeStateProvider, useRuntimeState } from "@/app/RuntimeStateProvider";
+import { isExperimentalGatewayUiEnabled } from "@/app/runtimeProfile";
 import { useAppUpdate } from "@/contexts/AppUpdateContext";
 import { APP_NAME } from "@/lib/appIdentity";
-import { hasRemoteCrashReporting, submitCrashBundle } from "@/lib/crashReporting/sentry";
-import type { CrashReportSummary } from "@/lib/crashReporting/types";
-import { createDeferredCleanup } from "@/lib/deferredCleanup";
-import { toast } from "sonner";
-import { invoke } from "@tauri-apps/api/core";
-import type { BackupIndicatorPhase, BackupStatusPayload } from "@/types";
 
 const NAV_MAIN = [
   { key: "dashboard" as const, label: "Dashboard", icon: Home },
@@ -69,201 +61,46 @@ const PAGE_TITLES: Record<string, string> = {
   audit: "Night Audit",
 };
 
-type BackupUiState = {
-  visible: boolean;
-  phase: BackupIndicatorPhase;
-  message: string;
-  pendingJobs: number;
-};
-
-const INITIAL_BACKUP_UI: BackupUiState = {
-  visible: false,
-  phase: "saved",
-  message: "",
-  pendingJobs: 0,
-};
-
 export default function App() {
+  const experimentalGatewayUi = isExperimentalGatewayUiEnabled();
+
   return (
     <BootstrapStateProvider>
       <AppUpdateRuntime>
-        <BootstrapGate>
-          {({ bootstrap }) => (
-            <AuthGate bootstrap={bootstrap}>
-              <CurrentAppShell />
-            </AuthGate>
-          )}
-        </BootstrapGate>
+        <RuntimeStateProvider experimentalGatewayUi={experimentalGatewayUi}>
+          <BootstrapGate>
+            {({ bootstrap }) => (
+              <AuthGate bootstrap={bootstrap}>
+                <CurrentAppShell experimentalGatewayUi={experimentalGatewayUi} />
+              </AuthGate>
+            )}
+          </BootstrapGate>
+        </RuntimeStateProvider>
       </AppUpdateRuntime>
     </BootstrapStateProvider>
   );
 }
 
-function CurrentAppShell() {
+function CurrentAppShell({ experimentalGatewayUi }: { experimentalGatewayUi: boolean }) {
   const appUpdate = useAppUpdate();
-  const { shellReady } = useBootstrapState();
-  const { activeTab, setTab, setCheckinOpen, setGroupCheckinOpen, checkinRoomId, fetchRooms, fetchStats } = useHotelStore();
-  const { user, isAuthenticated, logout } = useAuthStore();
+  const { activeTab, setTab, setCheckinOpen, setGroupCheckinOpen, checkinRoomId } = useHotelStore();
+  const { user, logout } = useAuthStore();
+  const {
+    backupUi,
+    visibleBackupFailure,
+    onDismissBackupFailure,
+    pendingCrashReport,
+    crashPromptBusy,
+    crashExportPath,
+    onSendCrashReport,
+    onDismissCrashReport,
+    onExportCrashReport,
+    gatewayRunning,
+    remoteCrashReportingEnabled,
+  } = useRuntimeState();
   const [collapsed, setCollapsed] = useState(() => {
     return localStorage.getItem("sidebar-collapsed") === "true";
   });
-  const [gatewayRunning, setGatewayRunning] = useState(false);
-  const [backupUi, setBackupUi] = useState<BackupUiState>(INITIAL_BACKUP_UI);
-  const [backupFailure, setBackupFailure] = useState<BackupFailureAlertState | null>(null);
-  const [dismissedBackupFailureJobId, setDismissedBackupFailureJobId] = useState<string | null>(
-    null,
-  );
-  const [pendingCrashReport, setPendingCrashReport] = useState<CrashReportSummary | null>(null);
-  const [crashPromptBusy, setCrashPromptBusy] = useState(false);
-  const [crashExportPath, setCrashExportPath] = useState<string | null>(null);
-  const didCrashRecoveryCheckRef = useRef(false);
-  const hideBackupRef = useRef<number | null>(null);
-
-  useEffect(() => {
-    if (!isAuthenticated) return;
-
-    const cleanup = createDeferredCleanup(listen<{ entity: string }>("db-updated", () => {
-      // Always refresh rooms and stats on any DB change
-      fetchRooms();
-      fetchStats();
-    }));
-
-    return cleanup;
-  }, [isAuthenticated]);
-
-  // Gateway status check
-  useEffect(() => {
-    if (!isAuthenticated) return;
-    invoke<{ running: boolean }>("gateway_get_status")
-      .then((s) => setGatewayRunning(s.running))
-      .catch(() => setGatewayRunning(false));
-  }, [isAuthenticated]);
-
-  // MCP Gateway events: AI agent reservation notifications
-  useEffect(() => {
-    if (!isAuthenticated) return;
-    const cleanup = createDeferredCleanup(listen<{ booking_id: string; room_id: string }>("mcp_reservation_created", (e) => {
-      toast("🤖 AI Agent vừa tạo booking mới", {
-        description: `Phòng ${e.payload.room_id} — ID: ${e.payload.booking_id}`,
-      });
-      fetchRooms();
-      fetchStats();
-    }));
-    return cleanup;
-  }, [isAuthenticated]);
-
-  useEffect(() => {
-    const cleanup = createDeferredCleanup(
-      listen<BackupStatusPayload>("backup-status", ({ payload }) => {
-        if (hideBackupRef.current !== null) {
-          window.clearTimeout(hideBackupRef.current);
-          hideBackupRef.current = null;
-        }
-
-        if (payload.state === "started") {
-          setBackupUi({
-            visible: true,
-            phase: "saving",
-            message: "Đang sao lưu dữ liệu...",
-            pendingJobs: payload.pending_jobs,
-          });
-          return;
-        }
-
-        if (payload.state === "failed") {
-          toast.error(payload.message ?? "Sao lưu dữ liệu thất bại");
-          setDismissedBackupFailureJobId((current) =>
-            current === payload.job_id ? current : null,
-          );
-          setBackupFailure({
-            jobId: payload.job_id,
-            reason: payload.reason,
-            message: payload.message,
-          });
-          setBackupUi({
-            visible: true,
-            phase: "failed",
-            message: "Sao lưu thất bại",
-            pendingJobs: payload.pending_jobs,
-          });
-          return;
-        }
-
-        if (payload.pending_jobs > 0) {
-          setBackupUi({
-            visible: true,
-            phase: "saving",
-            message: "Đang sao lưu dữ liệu...",
-            pendingJobs: payload.pending_jobs,
-          });
-          return;
-        }
-
-        setBackupFailure(null);
-        setDismissedBackupFailureJobId(null);
-        setBackupUi({
-          visible: true,
-          phase: "saved",
-          message: "Đã sao lưu",
-          pendingJobs: 0,
-        });
-
-        hideBackupRef.current = window.setTimeout(() => {
-          setBackupUi(INITIAL_BACKUP_UI);
-          hideBackupRef.current = null;
-        }, 1800);
-      }),
-    );
-
-    return () => {
-      if (hideBackupRef.current !== null) {
-        window.clearTimeout(hideBackupRef.current);
-        hideBackupRef.current = null;
-      }
-      cleanup();
-    };
-  }, []);
-
-  useEffect(() => {
-    if (!shellReady || didCrashRecoveryCheckRef.current) {
-      return;
-    }
-
-    didCrashRecoveryCheckRef.current = true;
-
-    void invoke<boolean>("get_crash_reporting_preference")
-      .then(async (enabled) => {
-        const pending = await invoke<CrashReportSummary | null>("get_pending_crash_report");
-        if (!pending) {
-          return;
-        }
-
-        setCrashExportPath(null);
-
-        if (enabled && hasRemoteCrashReporting()) {
-          try {
-            await submitCrashBundle(pending);
-          } catch {
-            await invoke("mark_crash_report_send_failed", { bundle_id: pending.bundle_id });
-            setPendingCrashReport(pending);
-            return;
-          }
-
-          try {
-            await invoke("mark_crash_report_submitted", { bundle_id: pending.bundle_id });
-            return;
-          } catch {
-            toast.error("Crash report đã gửi nhưng không thể dọn bundle cục bộ");
-            setPendingCrashReport(null);
-          }
-        }
-
-        setPendingCrashReport(pending);
-      })
-      .catch(() => {
-        // Diagnostics lookups must never block the shell.
-      });
-  }, [shellReady]);
 
   // Responsive: auto-collapse sidebar when window is narrow
   useEffect(() => {
@@ -315,79 +152,6 @@ function CurrentAppShell() {
     }
   };
 
-  const handleSendCrashReport = async () => {
-    if (!pendingCrashReport) {
-      return;
-    }
-
-    setCrashPromptBusy(true);
-    try {
-      await submitCrashBundle(pendingCrashReport);
-    } catch {
-      await invoke("mark_crash_report_send_failed", {
-        bundle_id: pendingCrashReport.bundle_id,
-      });
-      toast.error("Gửi crash report thất bại");
-      return;
-    }
-
-    try {
-      await invoke("set_crash_reporting_preference", { enabled: true });
-      await invoke("mark_crash_report_submitted", {
-        bundle_id: pendingCrashReport.bundle_id,
-      });
-      setPendingCrashReport(null);
-      setCrashExportPath(null);
-    } catch {
-      toast.error("Crash report đã gửi nhưng không thể hoàn tất cleanup cục bộ");
-    } finally {
-      setCrashPromptBusy(false);
-    }
-  };
-
-  const handleDismissCrashReport = async () => {
-    if (!pendingCrashReport) {
-      return;
-    }
-
-    const report = pendingCrashReport;
-    setCrashPromptBusy(true);
-    try {
-      await invoke("mark_crash_report_dismissed", {
-        bundle_id: report.bundle_id,
-      });
-    } catch {
-      toast.error("Không thể dọn crash report cục bộ. Prompt sẽ được ẩn cho phiên này.");
-    } finally {
-      setPendingCrashReport(null);
-      setCrashExportPath(null);
-      setCrashPromptBusy(false);
-    }
-  };
-
-  const handleExportCrashReport = async () => {
-    if (!pendingCrashReport) {
-      return;
-    }
-
-    setCrashPromptBusy(true);
-    try {
-      const path = await invoke<string>("export_crash_report", {
-        bundle_id: pendingCrashReport.bundle_id,
-      });
-      setCrashExportPath(path);
-    } finally {
-      setCrashPromptBusy(false);
-    }
-  };
-
-  const visibleBackupFailure =
-    backupFailure && backupFailure.jobId !== dismissedBackupFailureJobId ? backupFailure : null;
-
-  const handleDismissBackupFailure = (jobId: string) => {
-    setDismissedBackupFailureJobId(jobId);
-  };
-
   return (
     <div className="flex h-screen w-screen bg-brand-bg font-sans text-brand-text overflow-hidden select-none">
         <BackupStatusIndicator
@@ -404,12 +168,12 @@ function CurrentAppShell() {
         {pendingCrashReport && (
           <CrashReportPrompt
             report={pendingCrashReport}
-            remoteEnabled={hasRemoteCrashReporting()}
+            remoteEnabled={remoteCrashReportingEnabled}
             busy={crashPromptBusy}
             exportPath={crashExportPath}
-            onSend={handleSendCrashReport}
-            onDismiss={handleDismissCrashReport}
-            onExport={handleExportCrashReport}
+            onSend={onSendCrashReport}
+            onDismiss={onDismissCrashReport}
+            onExport={onExportCrashReport}
           />
         )}
 
@@ -502,9 +266,11 @@ function CurrentAppShell() {
                 {user.role === 'admin' ? '👑 Admin' : '🏨 Lễ tân'}
               </Badge>
             )}
-            <Badge className={`${gatewayRunning ? 'bg-emerald-50 text-emerald-700' : 'bg-red-50 text-red-500'} border-0 rounded-full py-1.5 px-3 uppercase tracking-wider text-[10px] font-bold cursor-pointer`} onClick={() => setTab('settings' as any)}>
-              {gatewayRunning ? '● MCP Gateway' : '○ Gateway Off'}
-            </Badge>
+            {experimentalGatewayUi && (
+              <Badge className={`${gatewayRunning ? 'bg-emerald-50 text-emerald-700' : 'bg-red-50 text-red-500'} border-0 rounded-full py-1.5 px-3 uppercase tracking-wider text-[10px] font-bold cursor-pointer`} onClick={() => setTab('settings' as any)}>
+                {gatewayRunning ? '● MCP Gateway' : '○ Gateway Off'}
+              </Badge>
+            )}
             <Badge className="bg-green-50 text-green-700 border-0 rounded-full py-1.5 px-3 uppercase tracking-wider text-[10px] font-bold">
               ● Scanner Ready
             </Badge>
@@ -521,7 +287,7 @@ function CurrentAppShell() {
           <div className="shrink-0 px-10 pb-4 pt-16">
             <BackupFailureAlert
               failure={visibleBackupFailure}
-              onDismiss={handleDismissBackupFailure}
+              onDismiss={onDismissBackupFailure}
             />
           </div>
         )}
