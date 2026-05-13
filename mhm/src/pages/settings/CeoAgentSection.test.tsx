@@ -294,9 +294,16 @@ describe("CeoAgentSection", () => {
     mockInitialState();
     render(<CeoAgentSection />);
 
-    await user.click(await screen.findByRole("checkbox", { name: "CEO Hourly Digest enabled" }));
-    await user.type(screen.getByLabelText("Telegram delivery chat ID"), "55");
-    await user.click(screen.getByRole("button", { name: "Save digest config" }));
+    const digestEnabled = await screen.findByRole("checkbox", { name: "CEO Hourly Digest enabled" });
+    const deliveryChatInput = screen.getByLabelText("Telegram delivery chat ID");
+    const saveButton = screen.getByRole("button", { name: "Save digest config" });
+
+    await waitForEnabled(digestEnabled);
+    await waitForEnabled(deliveryChatInput);
+    await user.click(digestEnabled);
+    await user.type(deliveryChatInput, "55");
+    await waitForEnabled(saveButton);
+    await user.click(saveButton);
 
     await waitFor(() => {
       expect(invoke).toHaveBeenCalledWith(
@@ -315,8 +322,13 @@ describe("CeoAgentSection", () => {
     mockInitialState();
     render(<CeoAgentSection />);
 
-    await user.type(await screen.findByLabelText("Telegram delivery chat ID"), "-10055");
-    await user.click(screen.getByRole("button", { name: "Save digest config" }));
+    const deliveryChatInput = await screen.findByLabelText("Telegram delivery chat ID");
+    const saveButton = screen.getByRole("button", { name: "Save digest config" });
+
+    await waitForEnabled(deliveryChatInput);
+    await user.type(deliveryChatInput, "-10055");
+    await waitForEnabled(saveButton);
+    await user.click(saveButton);
 
     await waitFor(() => {
       expect(invoke).toHaveBeenCalledWith(
@@ -352,9 +364,15 @@ describe("CeoAgentSection", () => {
     const digestEnabled = await screen.findByRole("checkbox", {
       name: "CEO Hourly Digest enabled",
     });
+    const deliveryChatInput = screen.getByLabelText("Telegram delivery chat ID");
+    const saveButton = screen.getByRole("button", { name: "Save digest config" });
+
+    await waitForEnabled(digestEnabled);
+    await waitForEnabled(deliveryChatInput);
     await user.click(digestEnabled);
-    await user.type(screen.getByLabelText("Telegram delivery chat ID"), "55");
-    await user.click(screen.getByRole("button", { name: "Save digest config" }));
+    await user.type(deliveryChatInput, "55");
+    await waitForEnabled(saveButton);
+    await user.click(saveButton);
 
     await waitFor(() =>
       expect(toastSuccess).toHaveBeenCalledWith("CEO Hourly Digest config saved"),
