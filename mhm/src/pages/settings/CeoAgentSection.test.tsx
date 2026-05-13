@@ -260,13 +260,20 @@ describe("CeoAgentSection", () => {
 
     render(<CeoAgentSection />);
 
-    await user.type(await screen.findByLabelText("Telegram owner ID"), "abc123456");
-    await user.click(screen.getByRole("checkbox", { name: "Runtime enabled" }));
+    const ownerInput = await screen.findByLabelText("Telegram owner ID");
+    const runtimeCheckbox = screen.getByRole("checkbox", { name: "Runtime enabled" });
+    const saveButton = screen.getByRole("button", { name: "Save Telegram config" });
+
+    await waitForEnabled(ownerInput);
+    await waitForEnabled(runtimeCheckbox);
+    await user.type(ownerInput, "abc123456");
+    await user.click(runtimeCheckbox);
     expect(invoke.mock.calls.some(([command]) => command === "set_ceo_telegram_config")).toBe(
       false,
     );
 
-    await user.click(screen.getByRole("button", { name: "Save Telegram config" }));
+    await waitForEnabled(saveButton);
+    await user.click(saveButton);
 
     await waitFor(() => {
       expect(invoke).toHaveBeenCalledWith(
