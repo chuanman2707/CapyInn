@@ -10,8 +10,6 @@ import Housekeeping from "./pages/Housekeeping";
 import Analytics from "./pages/Analytics";
 import Settings from "./pages/settings";
 import NightAudit from "./pages/NightAudit";
-import LoginScreen from "./pages/LoginScreen";
-import OnboardingWizard from "./pages/onboarding";
 import CheckinSheet from "./components/CheckinSheet";
 import GroupCheckinSheet from "./components/GroupCheckinSheet";
 import GroupManagement from "./pages/GroupManagement";
@@ -27,15 +25,19 @@ import {
 import { Home, Calendar, BedDouble, Users, Sparkles, BarChart3, Settings as SettingsIcon, ChevronsLeft, ChevronsRight, LogOut, Moon, UsersRound } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { AppUpdateProvider } from "@/contexts/AppUpdateContext";
+import { AppToaster } from "@/app/AppToaster";
+import { AppUpdateRuntime } from "@/app/AppUpdateRuntime";
+import { AuthGate } from "@/app/AuthGate";
+import { BootstrapGate } from "@/app/BootstrapGate";
+import { BootstrapStateProvider, useBootstrapState } from "@/app/BootstrapState";
+import { useAppUpdate } from "@/contexts/AppUpdateContext";
 import { APP_NAME } from "@/lib/appIdentity";
 import { hasRemoteCrashReporting, submitCrashBundle } from "@/lib/crashReporting/sentry";
 import type { CrashReportSummary } from "@/lib/crashReporting/types";
 import { createDeferredCleanup } from "@/lib/deferredCleanup";
-import { useAppUpdateController } from "@/hooks/useAppUpdateController";
-import { Toaster, toast } from "sonner";
+import { toast } from "sonner";
 import { invoke } from "@tauri-apps/api/core";
-import type { BackupIndicatorPhase, BackupStatusPayload, BootstrapStatus } from "@/types";
+import type { BackupIndicatorPhase, BackupStatusPayload } from "@/types";
 
 const NAV_MAIN = [
   { key: "dashboard" as const, label: "Dashboard", icon: Home },
@@ -82,14 +84,30 @@ const INITIAL_BACKUP_UI: BackupUiState = {
 };
 
 export default function App() {
+  return (
+    <BootstrapStateProvider>
+      <AppUpdateRuntime>
+        <BootstrapGate>
+          {({ bootstrap }) => (
+            <AuthGate bootstrap={bootstrap}>
+              <CurrentAppShell />
+            </AuthGate>
+          )}
+        </BootstrapGate>
+      </AppUpdateRuntime>
+    </BootstrapStateProvider>
+  );
+}
+
+function CurrentAppShell() {
+  const appUpdate = useAppUpdate();
+  const { shellReady } = useBootstrapState();
   const { activeTab, setTab, setCheckinOpen, setGroupCheckinOpen, checkinRoomId, fetchRooms, fetchStats } = useHotelStore();
-  const { user, isAuthenticated, checkSession, logout, hydrateFromBootstrap } = useAuthStore();
+  const { user, isAuthenticated, logout } = useAuthStore();
   const [collapsed, setCollapsed] = useState(() => {
     return localStorage.getItem("sidebar-collapsed") === "true";
   });
   const [gatewayRunning, setGatewayRunning] = useState(false);
-  const [bootstrap, setBootstrap] = useState<BootstrapStatus | null>(null);
-  const [bootstrapLoading, setBootstrapLoading] = useState(true);
   const [backupUi, setBackupUi] = useState<BackupUiState>(INITIAL_BACKUP_UI);
   const [backupFailure, setBackupFailure] = useState<BackupFailureAlertState | null>(null);
   const [dismissedBackupFailureJobId, setDismissedBackupFailureJobId] = useState<string | null>(
@@ -98,35 +116,8 @@ export default function App() {
   const [pendingCrashReport, setPendingCrashReport] = useState<CrashReportSummary | null>(null);
   const [crashPromptBusy, setCrashPromptBusy] = useState(false);
   const [crashExportPath, setCrashExportPath] = useState<string | null>(null);
-  const didAutoCheckRef = useRef(false);
   const didCrashRecoveryCheckRef = useRef(false);
   const hideBackupRef = useRef<number | null>(null);
-  const shellReady =
-    !bootstrapLoading &&
-    Boolean(bootstrap?.setup_completed) &&
-    (!bootstrap?.app_lock_enabled || isAuthenticated);
-  const appUpdate = useAppUpdateController({
-    enabled: shellReady,
-    supported: __UPDATER_ENABLED__,
-    currentVersion: __APP_VERSION__,
-  });
-
-  useEffect(() => {
-    invoke<BootstrapStatus>("get_bootstrap_status")
-      .then((status) => {
-        setBootstrap(status);
-        if (status.current_user) {
-          hydrateFromBootstrap(status.current_user);
-        }
-      })
-      .finally(() => setBootstrapLoading(false));
-  }, []);
-
-  // Check session on mount for locked mode only
-  useEffect(() => {
-    if (!bootstrap?.app_lock_enabled) return;
-    checkSession();
-  }, [bootstrap?.app_lock_enabled]);
 
   useEffect(() => {
     if (!isAuthenticated) return;
@@ -234,15 +225,6 @@ export default function App() {
   }, []);
 
   useEffect(() => {
-    if (!shellReady || didAutoCheckRef.current) {
-      return;
-    }
-
-    didAutoCheckRef.current = true;
-    void appUpdate.checkForUpdates({ silent: true });
-  }, [appUpdate, shellReady]);
-
-  useEffect(() => {
     if (!shellReady || didCrashRecoveryCheckRef.current) {
       return;
     }
@@ -301,36 +283,6 @@ export default function App() {
     setCollapsed(next);
     localStorage.setItem("sidebar-collapsed", String(next));
   };
-
-  if (bootstrapLoading) {
-    return (
-      <div className="h-screen w-screen grid place-items-center bg-brand-bg text-sm text-brand-muted">
-        Loading...
-      </div>
-    );
-  }
-
-  if (bootstrap && !bootstrap.setup_completed) {
-    return (
-      <>
-        <OnboardingWizard onCompleted={(status) => {
-          setBootstrap(status);
-          hydrateFromBootstrap(status.current_user);
-        }} />
-        <Toaster position="bottom-right" toastOptions={{ className: "rounded-xl shadow-float font-sans" }} />
-      </>
-    );
-  }
-
-  // If app lock is enabled and user is not authenticated, show login screen
-  if (bootstrap?.app_lock_enabled && !isAuthenticated) {
-    return (
-      <>
-        <LoginScreen />
-        <Toaster position="bottom-right" toastOptions={{ className: "rounded-xl shadow-float font-sans" }} />
-      </>
-    );
-  }
 
   const today = new Date().toLocaleDateString("vi-VN", {
     weekday: "long",
@@ -437,8 +389,7 @@ export default function App() {
   };
 
   return (
-    <AppUpdateProvider value={appUpdate}>
-      <div className="flex h-screen w-screen bg-brand-bg font-sans text-brand-text overflow-hidden select-none">
+    <div className="flex h-screen w-screen bg-brand-bg font-sans text-brand-text overflow-hidden select-none">
         <BackupStatusIndicator
           visible={backupUi.visible}
           phase={backupUi.phase}
@@ -594,8 +545,7 @@ export default function App() {
 
         <CheckinSheet preSelectedRoomId={checkinRoomId ?? undefined} />
         <GroupCheckinSheet />
-        <Toaster position="bottom-right" toastOptions={{ className: "rounded-xl shadow-float font-sans" }} />
+        <AppToaster />
       </div>
-    </AppUpdateProvider>
   );
 }
