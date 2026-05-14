@@ -1,5 +1,6 @@
 import { readdirSync, readFileSync, statSync } from "node:fs";
 import { join, relative } from "node:path";
+import * as ts from "typescript";
 import { describe, expect, it } from "vitest";
 
 type RawInvokeOccurrence = {
@@ -56,6 +57,8 @@ const RAW_INVOKE_ALLOWED_COMMANDS: Record<string, string> = {
   set_crash_reporting_preference: "diagnostics preference action excluded from PMS wrapper scope",
 };
 
+let rawInvokeOccurrencesCache: RawInvokeOccurrence[] | undefined;
+
 function listSourceFiles(dir: string): string[] {
   return readdirSync(dir).flatMap((entry) => {
     const path = join(dir, entry);
@@ -76,21 +79,124 @@ function listSourceFiles(dir: string): string[] {
   });
 }
 
-function lineNumberForIndex(source: string, index: number): number {
-  return source.slice(0, index).split("\n").length;
+function sourceKindForFile(file: string): ts.ScriptKind {
+  return file.endsWith(".tsx") ? ts.ScriptKind.TSX : ts.ScriptKind.TS;
+}
+
+function findTauriInvokeImports(sourceFile: ts.SourceFile): {
+  invokeLocals: Set<string>;
+  namespaceLocals: Set<string>;
+} {
+  const invokeLocals = new Set<string>();
+  const namespaceLocals = new Set<string>();
+
+  for (const statement of sourceFile.statements) {
+    if (!ts.isImportDeclaration(statement)) {
+      continue;
+    }
+    if (
+      !ts.isStringLiteral(statement.moduleSpecifier) ||
+      statement.moduleSpecifier.text !== "@tauri-apps/api/core"
+    ) {
+      continue;
+    }
+
+    const importClause = statement.importClause;
+    const namedBindings = importClause?.namedBindings;
+    if (!namedBindings) {
+      continue;
+    }
+
+    if (ts.isNamespaceImport(namedBindings)) {
+      namespaceLocals.add(namedBindings.name.text);
+      continue;
+    }
+
+    for (const element of namedBindings.elements) {
+      const importedName = element.propertyName?.text ?? element.name.text;
+      if (importedName === "invoke") {
+        invokeLocals.add(element.name.text);
+      }
+    }
+  }
+
+  return { invokeLocals, namespaceLocals };
+}
+
+function isImportedInvokeCall(
+  expression: ts.Expression,
+  invokeLocals: Set<string>,
+  namespaceLocals: Set<string>,
+): boolean {
+  if (ts.isIdentifier(expression)) {
+    return invokeLocals.has(expression.text);
+  }
+
+  return (
+    ts.isPropertyAccessExpression(expression) &&
+    expression.name.text === "invoke" &&
+    ts.isIdentifier(expression.expression) &&
+    namespaceLocals.has(expression.expression.text)
+  );
+}
+
+function stringCommandFromExpression(expression: ts.Expression): string | undefined {
+  if (ts.isStringLiteral(expression) || ts.isNoSubstitutionTemplateLiteral(expression)) {
+    return expression.text;
+  }
+
+  return undefined;
+}
+
+function findRawInvokeOccurrencesInSource(
+  file: string,
+  source: string,
+): RawInvokeOccurrence[] {
+  const sourceFile = ts.createSourceFile(
+    file,
+    source,
+    ts.ScriptTarget.Latest,
+    true,
+    sourceKindForFile(file),
+  );
+  const { invokeLocals, namespaceLocals } = findTauriInvokeImports(sourceFile);
+  const occurrences: RawInvokeOccurrence[] = [];
+
+  function visit(node: ts.Node): void {
+    if (
+      ts.isCallExpression(node) &&
+      isImportedInvokeCall(node.expression, invokeLocals, namespaceLocals)
+    ) {
+      const command = node.arguments[0]
+        ? stringCommandFromExpression(node.arguments[0])
+        : undefined;
+
+      if (command) {
+        occurrences.push({
+          command,
+          file: relative(process.cwd(), file),
+          line: sourceFile.getLineAndCharacterOfPosition(node.getStart(sourceFile)).line + 1,
+        });
+      }
+    }
+
+    ts.forEachChild(node, visit);
+  }
+
+  visit(sourceFile);
+  return occurrences;
 }
 
 function findRawInvokeOccurrences(): RawInvokeOccurrence[] {
-  const invokePattern = /\binvoke(?:<[^>]+>)?\(\s*["']([^"']+)["']/g;
-
   return listSourceFiles(FRONTEND_SRC_ROOT).flatMap((file) => {
     const source = readFileSync(file, "utf8");
-    return Array.from(source.matchAll(invokePattern), (match) => ({
-      command: match[1],
-      file: relative(process.cwd(), file),
-      line: lineNumberForIndex(source, match.index ?? 0),
-    }));
+    return findRawInvokeOccurrencesInSource(file, source);
   });
+}
+
+function getRawInvokeOccurrences(): RawInvokeOccurrence[] {
+  rawInvokeOccurrencesCache ??= findRawInvokeOccurrences();
+  return rawInvokeOccurrencesCache;
 }
 
 function formatOccurrences(occurrences: RawInvokeOccurrence[]): string {
@@ -100,8 +206,29 @@ function formatOccurrences(occurrences: RawInvokeOccurrence[]): string {
 }
 
 describe("frontend invoke wrapper guardrails", () => {
+  it("detects aliased, namespaced, and typed raw Tauri invoke calls", () => {
+    const source = `
+      import { invoke, invoke as tauriInvoke } from "@tauri-apps/api/core";
+      import * as tauriCore from "@tauri-apps/api/core";
+
+      invoke<Result<Foo>>("save_pricing_rule");
+      tauriInvoke("save_settings");
+      tauriCore.invoke(\`update_housekeeping\`);
+    `;
+
+    expect(
+      findRawInvokeOccurrencesInSource("src/example.ts", source).map(
+        ({ command }) => command,
+      ),
+    ).toEqual([
+      "save_pricing_rule",
+      "save_settings",
+      "update_housekeeping",
+    ]);
+  });
+
   it("keeps Batch 1 PMS writes out of raw Tauri invoke calls", () => {
-    const forbidden = findRawInvokeOccurrences().filter(({ command }) =>
+    const forbidden = getRawInvokeOccurrences().filter(({ command }) =>
       PMS_WRITE_COMMANDS_REQUIRING_WRAPPER.has(command),
     );
 
@@ -110,7 +237,7 @@ describe("frontend invoke wrapper guardrails", () => {
 
   it("keeps every remaining raw Tauri invoke explicitly categorized", () => {
     const rawCommands = new Set(
-      findRawInvokeOccurrences().map(({ command }) => command),
+      getRawInvokeOccurrences().map(({ command }) => command),
     );
 
     for (const [command, reason] of Object.entries(RAW_INVOKE_ALLOWED_COMMANDS)) {
@@ -118,7 +245,7 @@ describe("frontend invoke wrapper guardrails", () => {
       expect(rawCommands.has(command), `${command} is not a remaining raw invoke`).toBe(true);
     }
 
-    const unknown = findRawInvokeOccurrences().filter(
+    const unknown = getRawInvokeOccurrences().filter(
       ({ command }) =>
         !PMS_WRITE_COMMANDS_REQUIRING_WRAPPER.has(command) &&
         !(command in RAW_INVOKE_ALLOWED_COMMANDS),
