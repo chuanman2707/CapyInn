@@ -17,9 +17,7 @@ const PMS_WRITE_COMMANDS_REQUIRING_WRAPPER = new Set([
 ]);
 
 const RAW_INVOKE_ALLOWED_COMMANDS: Record<string, string> = {
-  auto_assign_rooms: "read-style room assignment preview; no PMS mutation is committed",
   backup_database: "system backup/export action, not a PMS business write wrapper target",
-  calculate_price_preview: "read-only pricing preview",
   check_availability: "read-only reservation availability lookup",
   complete_onboarding: "bootstrap setup command excluded from Batch 1 PMS wrapper scope",
   export_bookings_csv: "system export action, not a PMS business write wrapper target",
@@ -111,8 +109,13 @@ describe("frontend invoke wrapper guardrails", () => {
   });
 
   it("keeps every remaining raw Tauri invoke explicitly categorized", () => {
+    const rawCommands = new Set(
+      findRawInvokeOccurrences().map(({ command }) => command),
+    );
+
     for (const [command, reason] of Object.entries(RAW_INVOKE_ALLOWED_COMMANDS)) {
       expect(reason, `${command} needs an allowlist reason`).toMatch(/\S.{10,}/);
+      expect(rawCommands.has(command), `${command} is not a remaining raw invoke`).toBe(true);
     }
 
     const unknown = findRawInvokeOccurrences().filter(
