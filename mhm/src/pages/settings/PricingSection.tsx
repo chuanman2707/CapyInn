@@ -6,6 +6,7 @@ import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { invokeWriteCommand } from "@/lib/invokeCommand";
 import { assertNonNegativeMoneyVnd } from "@/lib/money";
 import type { PricingRuleData } from "@/types";
 
@@ -43,7 +44,7 @@ export default function PricingSection() {
       const hourlyRate = assertNonNegativeMoneyVnd(form.hourly_rate, "hourly_rate");
       const overnightRate = assertNonNegativeMoneyVnd(form.overnight_rate, "overnight_rate");
       const dailyRate = assertNonNegativeMoneyVnd(form.daily_rate, "daily_rate");
-      await invoke("save_pricing_rule", {
+      await invokeWriteCommand("save_pricing_rule", {
         roomType: form.room_type,
         hourlyRate,
         overnightRate,
