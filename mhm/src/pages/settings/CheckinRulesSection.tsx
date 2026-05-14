@@ -5,6 +5,7 @@ import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { invokeWriteCommand } from "@/lib/invokeCommand";
 
 function readSavedTime(
   value: Record<string, unknown>,
@@ -55,7 +56,7 @@ export default function CheckinRulesSection() {
 
   const handleSave = () => {
     const value = JSON.stringify({ checkin: checkinTime, checkout: checkoutTime });
-    invoke("save_settings", { key: "checkin_rules", value })
+    invokeWriteCommand("save_settings", { key: "checkin_rules", value })
       .then(() => toast.success("Đã lưu quy tắc check-in!"))
       .catch(() => toast.error("Lỗi khi lưu!"));
   };
