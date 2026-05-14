@@ -213,7 +213,7 @@ export const useHotelStore = create<HotelStore>((set, get) => {
     },
 
     updateHousekeeping: async (taskId, status, note) => {
-      await invoke("update_housekeeping", { taskId, newStatus: status, note });
+      await invokeWriteCommand("update_housekeeping", { taskId, newStatus: status, note });
       await get().fetchHousekeeping();
       await get().fetchRooms();
     },
