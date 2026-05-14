@@ -50,6 +50,7 @@ describe("06 — Housekeeping", () => {
             taskId: "hk-1",
             newStatus: "cleaning",
             note: "Started cleaning",
+            idempotencyKey: expect.stringMatching(/^update_housekeeping:/),
         });
     });
 

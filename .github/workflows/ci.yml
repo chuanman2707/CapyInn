@@ -29,6 +29,7 @@ jobs:
         with:
           workspaces: |
             mhm/src-tauri -> target
+          cache-bin: false
 
       - name: Install frontend dependencies
         working-directory: mhm
@@ -77,6 +78,7 @@ jobs:
         with:
           workspaces: |
             mhm/src-tauri -> target
+          cache-bin: false
 
       - name: Install frontend dependencies
         working-directory: mhm

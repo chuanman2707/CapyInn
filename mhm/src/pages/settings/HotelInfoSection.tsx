@@ -6,6 +6,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { APP_NAME } from "@/lib/appIdentity";
+import { invokeWriteCommand } from "@/lib/invokeCommand";
 
 export default function HotelInfoSection() {
   const [hotelName, setHotelName] = useState(APP_NAME);
@@ -32,7 +33,7 @@ export default function HotelInfoSection() {
 
   const handleSave = () => {
     const value = JSON.stringify({ name: hotelName, address, phone, rating });
-    invoke("save_settings", { key: "hotel_info", value })
+    invokeWriteCommand("save_settings", { key: "hotel_info", value })
       .then(() => toast.success("Đã lưu thông tin khách sạn!"))
       .catch(() => toast.error("Lỗi khi lưu!"));
   };

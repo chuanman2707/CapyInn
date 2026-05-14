@@ -35,6 +35,10 @@ describe("useHotelStore monitoring context", () => {
         return [];
       }
 
+      if (command === "get_housekeeping_tasks") {
+        return [];
+      }
+
       if (command === "get_dashboard_stats") {
         return {
           total_rooms: 10,
@@ -273,6 +277,20 @@ describe("useHotelStore monitoring context", () => {
     });
     expect(invoke).not.toHaveBeenCalledWith(
       "remove_group_service",
+      expect.anything(),
+    );
+  });
+
+  it("routes updateHousekeeping through invokeWriteCommand", async () => {
+    await useHotelStore.getState().updateHousekeeping("task-1", "cleaning", "Started");
+
+    expect(invokeWriteCommand).toHaveBeenCalledWith("update_housekeeping", {
+      taskId: "task-1",
+      newStatus: "cleaning",
+      note: "Started",
+    });
+    expect(invoke).not.toHaveBeenCalledWith(
+      "update_housekeeping",
       expect.anything(),
     );
   });

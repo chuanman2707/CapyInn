@@ -4,11 +4,16 @@ import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const invoke = vi.hoisted(() => vi.fn());
+const invokeWriteCommand = vi.hoisted(() => vi.fn());
 const toastError = vi.hoisted(() => vi.fn());
 const toastSuccess = vi.hoisted(() => vi.fn());
 
 vi.mock("@tauri-apps/api/core", () => ({
   invoke,
+}));
+
+vi.mock("@/lib/invokeCommand", () => ({
+  invokeWriteCommand,
 }));
 
 vi.mock("sonner", () => ({
@@ -60,12 +65,10 @@ import PricingSection from "./PricingSection";
 describe("PricingSection", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    invokeWriteCommand.mockResolvedValue(undefined);
     invoke.mockImplementation(async (command: string) => {
       if (command === "get_pricing_rules") {
         return [];
-      }
-      if (command === "save_pricing_rule") {
-        return undefined;
       }
       throw new Error(`Unexpected command: ${command}`);
     });
@@ -93,9 +96,45 @@ describe("PricingSection", () => {
       "save_pricing_rule",
       expect.anything(),
     );
+    expect(invokeWriteCommand).not.toHaveBeenCalledWith(
+      "save_pricing_rule",
+      expect.anything(),
+    );
     expect(toastError).toHaveBeenCalledWith(
       "hourly_rate must be a safe integer VND value",
     );
     expect(toastSuccess).not.toHaveBeenCalled();
+  });
+
+  it("saves pricing rules through invokeWriteCommand", async () => {
+    const user = userEvent.setup();
+    render(<PricingSection />);
+
+    await waitFor(() => {
+      expect(invoke).toHaveBeenCalledWith("get_pricing_rules");
+    });
+
+    fireEvent.change(screen.getByLabelText("Loại phòng"), {
+      target: { value: "standard" },
+    });
+
+    await user.click(screen.getByRole("button", { name: "Thêm" }));
+
+    await waitFor(() => {
+      expect(invokeWriteCommand).toHaveBeenCalledWith("save_pricing_rule", {
+        roomType: "standard",
+        hourlyRate: 80000,
+        overnightRate: 300000,
+        dailyRate: 400000,
+        earlyPct: 30,
+        latePct: 30,
+        weekendPct: 20,
+      });
+    });
+    expect(invoke).not.toHaveBeenCalledWith(
+      "save_pricing_rule",
+      expect.anything(),
+    );
+    expect(toastSuccess).toHaveBeenCalledWith("Đã lưu bảng giá!");
   });
 });
