@@ -8,9 +8,11 @@ Planned PR title: `frontend: normalize PMS invoke wrapper usage`
 
 ## Goal
 
-Normalize obvious frontend PMS write calls through the existing Tauri invocation wrapper without changing backend command names, business request payloads, response shapes, or frontend store architecture.
+Normalize obvious frontend PMS write calls through the existing Tauri invocation wrapper without changing backend command names, business request fields, response shapes, or frontend store architecture.
 
 The work should make raw `invoke` usage easier to audit. PMS business writes should go through `invokeWriteCommand` when practical. Raw `invoke` may remain for system, runtime, export, diagnostics, gateway, bootstrap, and other non-PMS or low-risk calls when there is a clear reason.
+
+Issue #140 says not to change request/response payloads. This spec interprets that as: do not change business request fields, command names, response shapes, or UI behavior. Converted writes may add only the wrapper metadata that `invokeWriteCommand` already owns, currently `idempotencyKey` and optional `correlationId`, and only after the compatibility checks below show the command can tolerate that metadata. If a command cannot tolerate wrapper metadata, it must stay raw in Batch 1 and be recorded as a follow-up rather than forcing a backend change into this frontend batch.
 
 ## Scope
 
@@ -19,7 +21,7 @@ In scope:
 - Convert clear raw frontend PMS writes to `invokeWriteCommand`.
 - Preserve business payload fields and command names at each converted call site.
 - Keep `invokeWriteCommand` as the canonical place that adds `idempotencyKey`, optional `correlationId`, app-error normalization, and monitored command failure capture.
-- Add lightweight guard coverage or documentation so remaining raw `invoke` calls are intentional and explainable.
+- Add a static frontend guardrail test so remaining raw `invoke` calls are intentional and explainable.
 - Update focused frontend tests for converted call sites where the existing test surface can verify wrapper usage and payload shape.
 - Validate with `npm test`, `npm run build`, and an `rg` scan for remaining raw invokes.
 
@@ -42,7 +44,15 @@ Out of scope:
 
 Several frontend PMS writes already use `invokeWriteCommand`, including reservation confirmation/cancel, reservation create/modify, check-in, check-out, group checkout, group services, invoice generation, and CEO agent settings.
 
+That list is descriptive, not scope expansion. Existing wrapper users such as CEO agent settings are not Batch 1 candidates unless they are already touched by the explicit tasks below.
+
 The remaining raw `invoke` usage contains a mix of reads, system/runtime calls, exports, diagnostics, gateway calls, and a small number of obvious PMS writes.
+
+## PMS Safety Boundary
+
+The frontend wrapper is not the full PMS command boundary described in `AGENTS.md`. It can supply or forward frontend metadata, but backend command handling is responsible for actor resolution, command name persistence, canonical payload hashing, timestamping, request context, authorization, locking, mutation, audit, outbox writes, and transactionality.
+
+For backend commands that already use `WriteCommandContext` or an equivalent backend command executor, `invokeWriteCommand` participates in that boundary by supplying an idempotency key and optional correlation id. For legacy backend commands that do not consume wrapper metadata, this batch may normalize the frontend call only if the command is invocation-compatible, but it must not claim the command is fully PMS-safety-compliant. Any missing backend command-boundary work is a follow-up outside #140 Batch 1.
 
 ## Invocation Categories
 
@@ -58,6 +68,22 @@ Batch 1 candidates:
 - `update_housekeeping` in `mhm/src/stores/useHotelStore.ts`.
 
 These calls currently use raw `invoke` and are direct writes. The implementation must keep their existing business payload fields intact.
+
+Before converting any candidate, implementation must record compatibility evidence in the implementation notes or final summary:
+
+| Candidate | Business fields that must remain unchanged | Compatibility check | If incompatible |
+| --- | --- | --- | --- |
+| `save_pricing_rule` | `roomType`, `hourlyRate`, `overnightRate`, `dailyRate`, `earlyPct`, `latePct`, `weekendPct` | Inspect the Rust `#[tauri::command]` signature and run focused frontend tests proving the converted call routes those fields through `invokeWriteCommand`. The existing wrapper tests prove wrapper metadata is added before the low-level Tauri invoke. | Leave raw, keep the test/guard documenting why, and create a follow-up note for backend command-boundary support. |
+| `save_settings` for `checkin_rules` | `key`, `value` | Inspect the Rust `save_settings` signature and run focused settings tests proving both fields route through `invokeWriteCommand`. The existing wrapper tests prove wrapper metadata is added before the low-level Tauri invoke. | Leave raw for this key and record why. |
+| `save_settings` for `hotel_info` | `key`, `value` | Inspect the Rust `save_settings` signature and run focused settings tests proving both fields route through `invokeWriteCommand`. The existing wrapper tests prove wrapper metadata is added before the low-level Tauri invoke. | Leave raw for this key and record why. |
+| `update_housekeeping` | `taskId`, `newStatus`, `note` | Inspect the Rust `update_housekeeping` signature and run focused store tests proving those fields route through `invokeWriteCommand`. The existing wrapper tests prove wrapper metadata is added before the low-level Tauri invoke. | Leave raw and record why. |
+
+The compatibility check has two levels:
+
+- Invocation compatibility: the call still succeeds with wrapper metadata in the command argument object.
+- PMS safety completeness: the backend consumes and persists the metadata as part of an explicit command boundary.
+
+Batch 1 requires invocation compatibility for conversion. It does not require PMS safety completeness for legacy commands, but it must identify when that completeness is missing.
 
 ### Read calls
 
@@ -79,7 +105,14 @@ Allowed examples include:
 - backup and CSV export commands,
 - update/runtime support commands.
 
-This batch should make the reason for these remaining raw invokes clear through focused tests, a small classification helper used by tests, or concise local documentation. It should not force these calls through `invokeWriteCommand`.
+This batch must add one required validation mechanism: a static guardrail test at `mhm/tests/frontend-invoke-wrapper-guardrails.test.ts`.
+
+The test should scan frontend source files for raw Tauri `invoke` calls and enforce two explicit lists:
+
+- `PMS_WRITE_COMMANDS_REQUIRING_WRAPPER`: Batch 1 commands that must not appear as raw `invoke`.
+- `RAW_INVOKE_ALLOWED_COMMANDS`: read/system/runtime/export/diagnostics/gateway/bootstrap commands allowed to remain raw, each with an inline reason string in the test data.
+
+It should not force allowed calls through `invokeWriteCommand`.
 
 ## Architecture
 
@@ -112,6 +145,8 @@ For converted writes, the data flow is:
 7. Errors are normalized through `normalizeAppError` and thrown as `AppError` exceptions.
 
 No caller should manually create an idempotency key for the converted Batch 1 calls. Manual `createIdempotencyKey` usage should be left alone unless it is part of an explicitly converted call.
+
+For legacy backend commands, wrapper metadata may be accepted by the invocation layer without being consumed by backend safety tables. The implementation summary must distinguish those two cases.
 
 ## Error Handling
 
@@ -149,6 +184,16 @@ Focused test updates should verify the converted write paths at the wrapper boun
 - existing success refresh/toast behavior remains intact,
 - normalized errors are displayed through existing UI error paths where tests cover them.
 
+Per-candidate evidence:
+
+- `save_pricing_rule`: add or update a `PricingSection` test that performs a successful save and expects `invokeWriteCommand("save_pricing_rule", { ...business fields... })`; also assert raw `invoke` is not called with `save_pricing_rule`.
+- `save_settings` for `hotel_info`: add or update a settings component test that clicks the hotel-info save path and expects `invokeWriteCommand("save_settings", { key: "hotel_info", value: ... })`.
+- `save_settings` for `checkin_rules`: add or update a settings component test that clicks the check-in-rules save path and expects `invokeWriteCommand("save_settings", { key: "checkin_rules", value: ... })`.
+- `update_housekeeping`: add or update a store test that expects `invokeWriteCommand("update_housekeeping", { taskId, newStatus, note })` and confirms raw `invoke` is not used for that write.
+- Raw invoke guardrail: add `mhm/tests/frontend-invoke-wrapper-guardrails.test.ts` with explicit allow/deny command lists and reasons.
+
+Wrapper metadata evidence remains in `mhm/src/lib/invokeCommand.test.ts`; call-site tests should not duplicate the wrapper unit test by asserting the generated random idempotency value.
+
 Validation commands:
 
 ```bash
@@ -165,9 +210,15 @@ Expected raw invoke scan result:
 
 ## Acceptance Criteria
 
-- `save_pricing_rule`, settings saves for hotel info and check-in rules, and housekeeping updates no longer use raw frontend `invoke` if backend argument handling is compatible.
+- Each Batch 1 candidate has recorded compatibility evidence before conversion.
+- If compatible, `save_pricing_rule` no longer uses raw frontend `invoke`, preserves `roomType`, `hourlyRate`, `overnightRate`, `dailyRate`, `earlyPct`, `latePct`, and `weekendPct`, and has focused test evidence for wrapper usage.
+- If compatible, `save_settings` for `hotel_info` no longer uses raw frontend `invoke`, preserves `key` and `value`, and has focused test evidence for wrapper usage.
+- If compatible, `save_settings` for `checkin_rules` no longer uses raw frontend `invoke`, preserves `key` and `value`, and has focused test evidence for wrapper usage.
+- If compatible, `update_housekeeping` no longer uses raw frontend `invoke`, preserves `taskId`, `newStatus`, and `note`, and has focused test evidence for wrapper usage.
+- Any incompatible candidate remains raw with a documented reason and follow-up; no backend command change is introduced to force compatibility.
 - Converted write payloads preserve their existing business fields.
-- Raw `invoke` remains only where it is read-only or intentionally system/runtime/export/diagnostics/gateway/bootstrap oriented.
+- `mhm/tests/frontend-invoke-wrapper-guardrails.test.ts` enforces forbidden raw PMS write commands and allowed raw read/system/runtime/export/diagnostics/gateway/bootstrap commands with reason strings.
+- Raw `invoke` remains only where it is read-only or intentionally system/runtime/export/diagnostics/gateway/bootstrap oriented according to the guardrail test.
 - No backend command names, backend payload semantics, response shapes, or Zustand architecture are changed.
 - Tests and build pass.
 - The final `rg` scan is reviewed and remaining raw invoke usage is explainable.
