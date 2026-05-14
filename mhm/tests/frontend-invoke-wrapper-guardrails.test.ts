@@ -4,7 +4,7 @@ import * as ts from "typescript";
 import { describe, expect, it } from "vitest";
 
 type RawInvokeOccurrence = {
-  command: string;
+  command: string | undefined;
   file: string;
   line: number;
 };
@@ -55,6 +55,10 @@ const RAW_INVOKE_ALLOWED_COMMANDS: Record<string, string> = {
   record_js_crash: "diagnostics crash recording path",
   search_guest_by_phone: "read-only guest search lookup",
   set_crash_reporting_preference: "diagnostics preference action excluded from PMS wrapper scope",
+};
+
+const RAW_INVOKE_ALLOWED_NON_LITERAL_SITES: Record<string, string> = {
+  "src/lib/invokeCommand.ts": "central invoke wrapper dispatch boundary",
 };
 
 let rawInvokeOccurrencesCache: RawInvokeOccurrence[] | undefined;
@@ -171,13 +175,11 @@ function findRawInvokeOccurrencesInSource(
         ? stringCommandFromExpression(node.arguments[0])
         : undefined;
 
-      if (command) {
-        occurrences.push({
-          command,
-          file: relative(process.cwd(), file),
-          line: sourceFile.getLineAndCharacterOfPosition(node.getStart(sourceFile)).line + 1,
-        });
-      }
+      occurrences.push({
+        command,
+        file: relative(process.cwd(), file),
+        line: sourceFile.getLineAndCharacterOfPosition(node.getStart(sourceFile)).line + 1,
+      });
     }
 
     ts.forEachChild(node, visit);
@@ -201,7 +203,10 @@ function getRawInvokeOccurrences(): RawInvokeOccurrence[] {
 
 function formatOccurrences(occurrences: RawInvokeOccurrence[]): string {
   return occurrences
-    .map(({ command, file, line }) => `${command} at ${file}:${line}`)
+    .map(
+      ({ command, file, line }) =>
+        `${command ?? "<non-literal command>"} at ${file}:${line}`,
+    )
     .join("\n");
 }
 
@@ -227,9 +232,24 @@ describe("frontend invoke wrapper guardrails", () => {
     ]);
   });
 
+  it("flags raw Tauri invoke calls without literal command names", () => {
+    const source = `
+      import { invoke } from "@tauri-apps/api/core";
+
+      const command = "save_settings";
+      invoke(command);
+    `;
+
+    expect(
+      findRawInvokeOccurrencesInSource("src/example.ts", source).map(
+        ({ command }) => command ?? "<non-literal command>",
+      ),
+    ).toEqual(["<non-literal command>"]);
+  });
+
   it("keeps Batch 1 PMS writes out of raw Tauri invoke calls", () => {
     const forbidden = getRawInvokeOccurrences().filter(({ command }) =>
-      PMS_WRITE_COMMANDS_REQUIRING_WRAPPER.has(command),
+      command ? PMS_WRITE_COMMANDS_REQUIRING_WRAPPER.has(command) : false,
     );
 
     expect(formatOccurrences(forbidden)).toBe("");
@@ -237,7 +257,9 @@ describe("frontend invoke wrapper guardrails", () => {
 
   it("keeps every remaining raw Tauri invoke explicitly categorized", () => {
     const rawCommands = new Set(
-      getRawInvokeOccurrences().map(({ command }) => command),
+      getRawInvokeOccurrences()
+        .map(({ command }) => command)
+        .filter((command): command is string => command !== undefined),
     );
 
     for (const [command, reason] of Object.entries(RAW_INVOKE_ALLOWED_COMMANDS)) {
@@ -245,10 +267,23 @@ describe("frontend invoke wrapper guardrails", () => {
       expect(rawCommands.has(command), `${command} is not a remaining raw invoke`).toBe(true);
     }
 
-    const unknown = getRawInvokeOccurrences().filter(
-      ({ command }) =>
-        !PMS_WRITE_COMMANDS_REQUIRING_WRAPPER.has(command) &&
-        !(command in RAW_INVOKE_ALLOWED_COMMANDS),
+    const nonLiteralSites = new Set(
+      getRawInvokeOccurrences()
+        .filter(({ command }) => command === undefined)
+        .map(({ file }) => file),
+    );
+    for (const [file, reason] of Object.entries(RAW_INVOKE_ALLOWED_NON_LITERAL_SITES)) {
+      expect(reason, `${file} needs an allowlist reason`).toMatch(/\S.{10,}/);
+      expect(nonLiteralSites.has(file), `${file} is not a remaining non-literal raw invoke`).toBe(
+        true,
+      );
+    }
+
+    const unknown = getRawInvokeOccurrences().filter(({ command, file }) =>
+      command === undefined
+        ? !(file in RAW_INVOKE_ALLOWED_NON_LITERAL_SITES)
+        : !PMS_WRITE_COMMANDS_REQUIRING_WRAPPER.has(command) &&
+          !(command in RAW_INVOKE_ALLOWED_COMMANDS),
     );
 
     expect(formatOccurrences(unknown)).toBe("");
