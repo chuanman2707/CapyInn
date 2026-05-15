@@ -234,9 +234,7 @@ pub fn run() {
             };
 
             let agent_supervisor = agent::supervisor::AgentSupervisor::new(pool.clone());
-            if runtime_config::env_flag("CAPYINN_DISABLE_CEO_TELEGRAM") {
-                info!("CEO Telegram runtime disabled by CAPYINN_DISABLE_CEO_TELEGRAM");
-            } else if let Err(error) = rt.block_on(agent::supervisor::reconcile_managed_supervisor(
+            if let Err(error) = rt.block_on(agent::supervisor::reconcile_managed_supervisor(
                 &pool,
                 Some(&agent_supervisor),
             )) {
