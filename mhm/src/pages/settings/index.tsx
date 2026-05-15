@@ -48,6 +48,7 @@ export default function SettingsPage() {
   const { isAdmin } = useAuthStore();
   const [activeSection, setActiveSection] = useState<SettingsSectionKey>("hotel");
   const experimentalRuntime = useExperimentalRuntimeStatus(true);
+  const isCurrentAdmin = isAdmin();
 
   const sections = [
     { key: "hotel" as const, label: "Hotel Info", icon: Building2 },
@@ -61,10 +62,10 @@ export default function SettingsPage() {
       ? [{ key: "gateway" as const, label: "MCP Gateway", icon: Wifi }]
       : []),
     { key: "updates" as const, label: "Software Update", icon: RefreshCcw },
-    ...(isAdmin() && experimentalRuntime.agentRuntimeEnabled
+    ...(isCurrentAdmin && experimentalRuntime.agentRuntimeEnabled
       ? [{ key: "ceo-agent" as const, label: "CEO Agent", icon: Bot }]
       : []),
-    ...(isAdmin()
+    ...(isCurrentAdmin
       ? [
         { key: "pricing" as const, label: "Pricing", icon: DollarSign },
         { key: "users" as const, label: "Users", icon: Users },
@@ -77,7 +78,7 @@ export default function SettingsPage() {
       (activeSection === "gateway" && !experimentalRuntime.gatewayRuntimeEnabled) ||
       (
         activeSection === "ceo-agent" &&
-        (!isAdmin() || !experimentalRuntime.agentRuntimeEnabled)
+        (!isCurrentAdmin || !experimentalRuntime.agentRuntimeEnabled)
       )
     ) {
       setActiveSection("hotel");
@@ -86,7 +87,7 @@ export default function SettingsPage() {
     activeSection,
     experimentalRuntime.agentRuntimeEnabled,
     experimentalRuntime.gatewayRuntimeEnabled,
-    isAdmin,
+    isCurrentAdmin,
   ]);
 
   return (
@@ -123,11 +124,13 @@ export default function SettingsPage() {
           <GatewaySection />
         )}
         {activeSection === "updates" && <SoftwareUpdateSection />}
-        {activeSection === "ceo-agent" && isAdmin() && experimentalRuntime.agentRuntimeEnabled && (
-          <CeoAgentSection />
-        )}
-        {activeSection === "pricing" && isAdmin() && <PricingSection />}
-        {activeSection === "users" && isAdmin() && <UserManagement />}
+        {activeSection === "ceo-agent" &&
+          isCurrentAdmin &&
+          experimentalRuntime.agentRuntimeEnabled && (
+            <CeoAgentSection />
+          )}
+        {activeSection === "pricing" && isCurrentAdmin && <PricingSection />}
+        {activeSection === "users" && isCurrentAdmin && <UserManagement />}
       </Card>
     </div>
   );

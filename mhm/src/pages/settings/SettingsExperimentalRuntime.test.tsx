@@ -1,7 +1,7 @@
 import { render, screen, waitFor } from "@testing-library/react";
 import { beforeEach, describe, expect, it } from "vitest";
 
-import { clearMockResponses, setMockResponse } from "@/__mocks__/tauri-core";
+import { clearMockResponses, invoke, setMockResponse } from "@/__mocks__/tauri-core";
 import { useAuthStore } from "@/stores/useAuthStore";
 import SettingsPage from "./index";
 
@@ -27,6 +27,7 @@ function setRuntimeStatus(gateway: boolean, agent: boolean) {
 describe("SettingsPage experimental runtime gates", () => {
   beforeEach(() => {
     clearMockResponses();
+    invoke.mockClear();
     setAdmin();
   });
 
@@ -35,6 +36,11 @@ describe("SettingsPage experimental runtime gates", () => {
 
     render(<SettingsPage />);
 
+    await waitFor(() => {
+      expect(
+        invoke.mock.calls.some(([command]) => command === "get_experimental_runtime_status"),
+      ).toBe(true);
+    });
     await waitFor(() => {
       expect(screen.queryByRole("button", { name: "MCP Gateway" })).not.toBeInTheDocument();
     });

@@ -1,4 +1,4 @@
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -786,16 +786,54 @@ describe("SettingsPage CEO Agent nav", () => {
     });
   });
 
-  it("does not show CEO Agent in settings nav for receptionist users", () => {
+  it("resets CEO Agent section to Hotel Info when admin access is lost", async () => {
+    const user = userEvent.setup();
+    useAuthStore.setState({
+      user: { id: "u1", name: "Admin", role: "admin", active: true, created_at: "" },
+      isAuthenticated: true,
+      loading: false,
+      error: null,
+    });
+    mockInitialState();
+
+    render(<SettingsPage />);
+
+    await user.click(await screen.findByRole("button", { name: "CEO Agent" }));
+    expect(await screen.findByText("CEO Telegram Chat")).toBeInTheDocument();
+
+    await act(async () => {
+      useAuthStore.setState({
+        user: { id: "u2", name: "Reception", role: "receptionist", active: true, created_at: "" },
+        isAuthenticated: true,
+        loading: false,
+        error: null,
+      });
+    });
+
+    await waitFor(() => {
+      expect(screen.getByRole("heading", { name: "Thông tin khách sạn" })).toBeInTheDocument();
+    });
+    expect(screen.queryByRole("button", { name: "CEO Agent" })).not.toBeInTheDocument();
+  });
+
+  it("does not show CEO Agent in settings nav for receptionist users", async () => {
     useAuthStore.setState({
       user: { id: "u2", name: "Reception", role: "receptionist", active: true, created_at: "" },
       isAuthenticated: true,
       loading: false,
       error: null,
     });
+    setMockResponse("get_experimental_runtime_status", () => ({
+      experimental_runtime_enabled: true,
+      gateway_runtime_enabled: true,
+      agent_runtime_enabled: true,
+      gateway_disabled_by_override: false,
+      agent_disabled_by_override: false,
+    }));
 
     render(<SettingsPage />);
 
+    expect(await screen.findByRole("button", { name: "MCP Gateway" })).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "CEO Agent" })).not.toBeInTheDocument();
   });
 });
