@@ -310,11 +310,18 @@ describe("08 — Settings", () => {
 
     it("disables API key generation for non-admin users", async () => {
         setAuthenticatedUser("receptionist");
+        setMockResponse("get_experimental_runtime_status", () => ({
+            experimental_runtime_enabled: true,
+            gateway_runtime_enabled: true,
+            agent_runtime_enabled: false,
+            gateway_disabled_by_override: false,
+            agent_disabled_by_override: false,
+        }));
 
         const user = userEvent.setup();
         render(<Settings />);
 
-        await user.click(screen.getByText("MCP Gateway"));
+        await user.click(await screen.findByText("MCP Gateway"));
 
         await waitFor(() => {
             expect(screen.getByRole("button", { name: "Tạo API Key" })).toBeDisabled();
