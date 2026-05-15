@@ -40,13 +40,13 @@ vi.mock("./pages/Housekeeping", () => ({ default: () => <div>Housekeeping page</
 vi.mock("./pages/Analytics", () => ({ default: () => <div>Analytics page</div> }));
 vi.mock("./pages/settings", () => ({ default: () => <div>Settings page</div> }));
 vi.mock("./pages/NightAudit", () => ({ default: () => <div>Night Audit page</div> }));
-vi.mock("./pages/LoginScreen", () => ({ default: () => <div>Login page</div> }));
-vi.mock("./pages/onboarding", () => ({ default: () => <div>Onboarding page</div> }));
+vi.mock("@/pages/LoginScreen", () => ({ default: () => <div>Login page</div> }));
+vi.mock("@/pages/onboarding", () => ({ default: () => <div>Onboarding page</div> }));
 vi.mock("./components/CheckinSheet", () => ({ default: () => null }));
 vi.mock("./components/GroupCheckinSheet", () => ({ default: () => null }));
 vi.mock("./pages/GroupManagement", () => ({ default: () => <div>Group page</div> }));
 vi.mock("./components/AppLogo", () => ({ default: () => <div>Logo</div> }));
-vi.mock("./hooks/useAppUpdateController", () => ({
+vi.mock("@/hooks/useAppUpdateController", () => ({
   useAppUpdateController: ({
     enabled,
     currentVersion,

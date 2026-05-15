@@ -3,6 +3,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { render, screen, waitFor } from "../helpers/render-app";
 import userEvent from "@testing-library/user-event";
 import App from "@/App";
+import * as runtimeProfile from "@/app/runtimeProfile";
 import Settings from "@/pages/settings";
 import { setMockResponse, clearMockResponses, invoke } from "@test-mocks/tauri-core";
 import { useAuthStore } from "@/stores/useAuthStore";
@@ -28,6 +29,10 @@ function resetMockUpdateController(
         nextAvailableVersion: "0.2.0",
         ...overrides,
     };
+}
+
+function mockExperimentalGatewayUi(enabled: boolean) {
+    vi.spyOn(runtimeProfile, "isExperimentalGatewayUiEnabled").mockReturnValue(enabled);
 }
 
 vi.mock("@/hooks/useAppUpdateController", () => ({
@@ -127,6 +132,8 @@ describe("08 — Settings", () => {
     };
 
     beforeEach(() => {
+        vi.restoreAllMocks();
+        mockExperimentalGatewayUi(false);
         clearMockResponses();
         invoke.mockClear();
         resetMockUpdateController();
@@ -159,6 +166,13 @@ describe("08 — Settings", () => {
         await waitFor(() => {
             expect(invoke).toHaveBeenCalled();
         });
+    });
+
+    it("hides the MCP Gateway settings section in the normal profile", () => {
+        render(<Settings />);
+
+        expect(screen.queryByText("MCP Gateway")).not.toBeInTheDocument();
+        expect(invoke.mock.calls.some(([command]) => command === "gateway_get_status")).toBe(false);
     });
 
     it("loads hotel info from settings", async () => {
@@ -308,7 +322,8 @@ describe("08 — Settings", () => {
         ).toBeInTheDocument();
     });
 
-    it("disables API key generation for non-admin users", async () => {
+    it("disables API key generation for non-admin users when experimental gateway UI is enabled", async () => {
+        mockExperimentalGatewayUi(true);
         setAuthenticatedUser("receptionist");
         setMockResponse("get_experimental_runtime_status", () => ({
             experimental_runtime_enabled: true,

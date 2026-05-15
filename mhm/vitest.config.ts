@@ -13,6 +13,7 @@ export default defineConfig({
   define: {
     __APP_VERSION__: JSON.stringify(appVersion),
     __UPDATER_ENABLED__: JSON.stringify(false),
+    __EXPERIMENTAL_GATEWAY_UI__: JSON.stringify(false),
     __SENTRY_DSN__: JSON.stringify(""),
     __SENTRY_RELEASE__: JSON.stringify(`capyinn@${appVersion}`),
     __SENTRY_ENVIRONMENT__: JSON.stringify("development"),

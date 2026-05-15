@@ -2,6 +2,7 @@
 
 declare const __APP_VERSION__: string;
 declare const __UPDATER_ENABLED__: boolean;
+declare const __EXPERIMENTAL_GATEWAY_UI__: boolean;
 declare const __SENTRY_DSN__: string;
 declare const __SENTRY_RELEASE__: string;
 declare const __SENTRY_ENVIRONMENT__: "development" | "production";
