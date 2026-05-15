@@ -78,6 +78,13 @@ export const invoke = vi.fn(async (command: string, args?: Record<string, unknow
         clear_ceo_openai_api_key: undefined,
         get_ceo_telegram_gate_status: { ready: false, missing: ["runtime_enabled"] },
         get_ceo_digest_gate_status: { ready: false, missing: ["digest_enabled"] },
+        get_experimental_runtime_status: {
+            experimental_runtime_enabled: false,
+            gateway_runtime_enabled: false,
+            agent_runtime_enabled: false,
+            gateway_disabled_by_override: false,
+            agent_disabled_by_override: false,
+        },
         local_receptionist_chat: {
             answer: "Local Gemma can answer with hotel pricing context.",
             provider: "local",
