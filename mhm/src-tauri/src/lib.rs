@@ -128,6 +128,36 @@ fn updater_enabled() -> bool {
     )
 }
 
+fn gateway_runtime_effective_enabled() -> bool {
+    runtime_config::effective_experimental_gateway_runtime_enabled()
+}
+
+fn agent_runtime_effective_enabled() -> bool {
+    runtime_config::effective_experimental_agent_runtime_enabled()
+}
+
+fn experimental_runtime_status_value() -> serde_json::Value {
+    serde_json::json!({
+        "experimental_runtime_enabled": runtime_config::experimental_runtime_enabled(),
+        "gateway_runtime_enabled": gateway_runtime_effective_enabled(),
+        "agent_runtime_enabled": agent_runtime_effective_enabled(),
+        "gateway_disabled_by_override": runtime_config::gateway_runtime_disabled_by_override(),
+        "agent_disabled_by_override": runtime_config::agent_runtime_disabled_by_override(),
+    })
+}
+
+fn gateway_management_disabled_error() -> String {
+    "MCP Gateway experimental runtime is disabled. Set CAPYINN_EXPERIMENTAL_GATEWAY_RUNTIME=true or CAPYINN_EXPERIMENTAL_RUNTIME=true to enable gateway management.".to_string()
+}
+
+fn ensure_gateway_management_enabled() -> Result<(), String> {
+    if gateway_runtime_effective_enabled() {
+        Ok(())
+    } else {
+        Err(gateway_management_disabled_error())
+    }
+}
+
 fn spawn_crash_index_rebuild() {
     std::thread::spawn(|| {
         if let Err(error) = crash_index::rebuild_current_runtime_root() {
@@ -182,7 +212,10 @@ pub fn run() {
             // axum server task gets cancelled when the runtime drops.
             let gateway_pool = pool.clone();
             let gateway_handle = app.handle().clone();
-            let gateway_runtime = if runtime_config::env_flag("CAPYINN_DISABLE_GATEWAY") {
+            let gateway_runtime = if !runtime_config::experimental_gateway_runtime_enabled() {
+                info!("MCP Gateway experimental runtime disabled by default");
+                None
+            } else if runtime_config::gateway_runtime_disabled_by_override() {
                 info!("MCP Gateway disabled by CAPYINN_DISABLE_GATEWAY");
                 None
             } else {
@@ -341,6 +374,7 @@ pub fn run() {
             // MCP Gateway
             gateway_generate_key,
             gateway_get_status,
+            get_experimental_runtime_status,
             // Invoice PDF
             commands::invoices::generate_invoice,
             commands::invoices::get_invoice,
@@ -400,11 +434,17 @@ pub fn run_proxy() {
 // ─── MCP Gateway Tauri Commands ───
 
 #[tauri::command]
+fn get_experimental_runtime_status() -> serde_json::Value {
+    experimental_runtime_status_value()
+}
+
+#[tauri::command]
 async fn gateway_generate_key(
     state: tauri::State<'_, AppState>,
     label: Option<String>,
 ) -> Result<String, String> {
     commands::require_admin(&state)?;
+    ensure_gateway_management_enabled()?;
 
     let (key, hash) = gateway::auth::generate_api_key();
     gateway::auth::store_api_key(&state.db, &hash, label.as_deref().unwrap_or("default")).await?;
@@ -415,11 +455,17 @@ async fn gateway_generate_key(
 async fn gateway_get_status(
     state: tauri::State<'_, AppState>,
 ) -> Result<serde_json::Value, String> {
+    let experimental_enabled = gateway_runtime_effective_enabled();
     let has_keys = gateway::auth::has_api_keys(&state.db).await;
-    let port = gateway::live_port_from_lockfile();
+    let port = if experimental_enabled {
+        gateway::live_port_from_lockfile()
+    } else {
+        None
+    };
 
     Ok(serde_json::json!({
-        "running": port.is_some(),
+        "experimental_enabled": experimental_enabled,
+        "running": experimental_enabled && port.is_some(),
         "port": port,
         "has_api_keys": has_keys,
     }))
@@ -427,7 +473,10 @@ async fn gateway_get_status(
 
 #[cfg(test)]
 mod tests {
-    use super::updater_enabled_from_env;
+    use super::{
+        experimental_runtime_status_value, gateway_management_disabled_error,
+        gateway_runtime_effective_enabled, updater_enabled_from_env,
+    };
 
     #[test]
     fn updater_stays_disabled_for_plain_dev_runs() {
@@ -442,5 +491,52 @@ mod tests {
     #[test]
     fn updater_stays_enabled_outside_dev_even_without_env_flag() {
         assert!(updater_enabled_from_env(false, false));
+    }
+
+    #[test]
+    fn experimental_runtime_status_reports_effective_runtime_gates() {
+        let _guard = crate::runtime_config::env_lock().lock().unwrap();
+
+        for name in [
+            "CAPYINN_EXPERIMENTAL_RUNTIME",
+            "CAPYINN_EXPERIMENTAL_GATEWAY_RUNTIME",
+            "CAPYINN_EXPERIMENTAL_AGENT_RUNTIME",
+            "CAPYINN_DISABLE_GATEWAY",
+            "CAPYINN_DISABLE_CEO_TELEGRAM",
+        ] {
+            std::env::remove_var(name);
+        }
+
+        let disabled = experimental_runtime_status_value();
+        assert_eq!(disabled["experimental_runtime_enabled"], false);
+        assert_eq!(disabled["gateway_runtime_enabled"], false);
+        assert_eq!(disabled["agent_runtime_enabled"], false);
+
+        std::env::set_var("CAPYINN_EXPERIMENTAL_RUNTIME", "true");
+        std::env::set_var("CAPYINN_DISABLE_GATEWAY", "true");
+
+        let gateway_disabled = experimental_runtime_status_value();
+        assert_eq!(gateway_disabled["experimental_runtime_enabled"], true);
+        assert_eq!(gateway_disabled["gateway_runtime_enabled"], false);
+        assert_eq!(gateway_disabled["gateway_disabled_by_override"], true);
+        assert_eq!(gateway_disabled["agent_runtime_enabled"], true);
+
+        std::env::remove_var("CAPYINN_EXPERIMENTAL_RUNTIME");
+        std::env::remove_var("CAPYINN_DISABLE_GATEWAY");
+    }
+
+    #[test]
+    fn gateway_management_error_is_returned_when_effective_gateway_runtime_is_disabled() {
+        let _guard = crate::runtime_config::env_lock().lock().unwrap();
+
+        std::env::remove_var("CAPYINN_EXPERIMENTAL_RUNTIME");
+        std::env::remove_var("CAPYINN_EXPERIMENTAL_GATEWAY_RUNTIME");
+        std::env::remove_var("CAPYINN_DISABLE_GATEWAY");
+
+        assert!(!gateway_runtime_effective_enabled());
+        assert_eq!(
+            gateway_management_disabled_error(),
+            "MCP Gateway experimental runtime is disabled. Set CAPYINN_EXPERIMENTAL_GATEWAY_RUNTIME=true or CAPYINN_EXPERIMENTAL_RUNTIME=true to enable gateway management."
+        );
     }
 }
