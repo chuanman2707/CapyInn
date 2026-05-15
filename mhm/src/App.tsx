@@ -32,6 +32,7 @@ import { APP_NAME } from "@/lib/appIdentity";
 import { hasRemoteCrashReporting, submitCrashBundle } from "@/lib/crashReporting/sentry";
 import type { CrashReportSummary } from "@/lib/crashReporting/types";
 import { createDeferredCleanup } from "@/lib/deferredCleanup";
+import { useExperimentalRuntimeStatus } from "@/lib/experimentalProfile";
 import { useAppUpdateController } from "@/hooks/useAppUpdateController";
 import { Toaster, toast } from "sonner";
 import { invoke } from "@tauri-apps/api/core";
@@ -105,6 +106,8 @@ export default function App() {
     !bootstrapLoading &&
     Boolean(bootstrap?.setup_completed) &&
     (!bootstrap?.app_lock_enabled || isAuthenticated);
+  const experimentalRuntime = useExperimentalRuntimeStatus(isAuthenticated);
+  const gatewayRuntimeEnabled = experimentalRuntime.gatewayRuntimeEnabled;
   const appUpdate = useAppUpdateController({
     enabled: shellReady,
     supported: __UPDATER_ENABLED__,
@@ -142,15 +145,18 @@ export default function App() {
 
   // Gateway status check
   useEffect(() => {
-    if (!isAuthenticated) return;
+    if (!isAuthenticated || !gatewayRuntimeEnabled) {
+      setGatewayRunning(false);
+      return;
+    }
     invoke<{ running: boolean }>("gateway_get_status")
       .then((s) => setGatewayRunning(s.running))
       .catch(() => setGatewayRunning(false));
-  }, [isAuthenticated]);
+  }, [gatewayRuntimeEnabled, isAuthenticated]);
 
   // MCP Gateway events: AI agent reservation notifications
   useEffect(() => {
-    if (!isAuthenticated) return;
+    if (!isAuthenticated || !gatewayRuntimeEnabled) return;
     const cleanup = createDeferredCleanup(listen<{ booking_id: string; room_id: string }>("mcp_reservation_created", (e) => {
       toast("🤖 AI Agent vừa tạo booking mới", {
         description: `Phòng ${e.payload.room_id} — ID: ${e.payload.booking_id}`,
@@ -159,7 +165,7 @@ export default function App() {
       fetchStats();
     }));
     return cleanup;
-  }, [isAuthenticated]);
+  }, [fetchRooms, fetchStats, gatewayRuntimeEnabled, isAuthenticated]);
 
   useEffect(() => {
     const cleanup = createDeferredCleanup(
@@ -551,9 +557,11 @@ export default function App() {
                 {user.role === 'admin' ? '👑 Admin' : '🏨 Lễ tân'}
               </Badge>
             )}
-            <Badge className={`${gatewayRunning ? 'bg-emerald-50 text-emerald-700' : 'bg-red-50 text-red-500'} border-0 rounded-full py-1.5 px-3 uppercase tracking-wider text-[10px] font-bold cursor-pointer`} onClick={() => setTab('settings' as any)}>
-              {gatewayRunning ? '● MCP Gateway' : '○ Gateway Off'}
-            </Badge>
+            {gatewayRuntimeEnabled && (
+              <Badge className={`${gatewayRunning ? 'bg-emerald-50 text-emerald-700' : 'bg-red-50 text-red-500'} border-0 rounded-full py-1.5 px-3 uppercase tracking-wider text-[10px] font-bold cursor-pointer`} onClick={() => setTab('settings' as any)}>
+                {gatewayRunning ? '● MCP Gateway' : '○ Gateway Off'}
+              </Badge>
+            )}
             <Badge className="bg-green-50 text-green-700 border-0 rounded-full py-1.5 px-3 uppercase tracking-wider text-[10px] font-bold">
               ● Scanner Ready
             </Badge>
