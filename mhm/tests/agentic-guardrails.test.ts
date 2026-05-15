@@ -71,6 +71,58 @@ describe("agentic integration guardrails", () => {
         );
     });
 
+    it("documents experimental observer and outbox runtime boundaries", () => {
+        const spec = readWorkspaceFile(
+            "../docs/superpowers/specs/2026-05-15-experimental-runtime-batch-2-gating-design.md",
+        );
+        const lib = readWorkspaceFile("src-tauri/src/lib.rs");
+        const gateway = readWorkspaceFile("src-tauri/src/gateway/mod.rs");
+
+        expect(spec).toContain(
+            "Transactional `outbox_events` writes are core PMS safety",
+        );
+        expect(spec).toContain(
+            "`CAPYINN_EXPERIMENTAL_PERIPHERAL_RUNTIME=true` by itself does not start gateway, observer, agent, digest, Telegram, or outbox subscribers",
+        );
+        expect(lib).toContain("outbox_subscribers_for_runtime_profile()");
+        expect(lib).toMatch(
+            /outbox::start_outbox_dispatcher\(\s*pool\.clone\(\),\s*outbox_subscribers_for_runtime_profile\(\),\s*\)/,
+        );
+
+        const testModuleStart = gateway.indexOf("#[cfg(test)]");
+        expect(testModuleStart).toBeGreaterThanOrEqual(0);
+
+        const productionGateway = gateway.slice(0, testModuleStart);
+        const startGatewayMatch = productionGateway.match(
+            /pub async fn start_gateway\([\s\S]*?\n\}/,
+        );
+        expect(startGatewayMatch).not.toBeNull();
+
+        const startGatewayBody = startGatewayMatch?.[0] ?? "";
+        const gateCheck = startGatewayBody.indexOf(
+            "ensure_gateway_runtime_enabled()?",
+        );
+        const serverStart = startGatewayBody.indexOf("server::start_server");
+        expect(gateCheck).toBeGreaterThanOrEqual(0);
+        expect(serverStart).toBeGreaterThanOrEqual(0);
+        expect(gateCheck).toBeLessThan(serverStart);
+    });
+
+    it("keeps the stdio MCP proxy from starting gateway runtime", () => {
+        const lib = readWorkspaceFile("src-tauri/src/lib.rs");
+        const proxy = readWorkspaceFile("src-tauri/src/gateway/proxy.rs");
+        const runProxyMatch = lib.match(/pub fn run_proxy\(\) \{[\s\S]*?\n\}/);
+        expect(runProxyMatch).not.toBeNull();
+
+        const runProxyBody = runProxyMatch?.[0] ?? "";
+        expect(runProxyBody).toContain("gateway::proxy::run_proxy()");
+        expect(runProxyBody).not.toContain("start_gateway");
+        expect(runProxyBody).not.toContain("start_server");
+        expect(proxy).toContain("super::live_port_from_lockfile()");
+        expect(proxy).not.toContain("start_gateway");
+        expect(proxy).not.toContain("start_server");
+    });
+
     it("documents CEO agent data sensitivity and cloud opt-in boundaries", () => {
         const skill = readWorkspaceFile("skills/hotel-manager.skill.md");
         const openapi = readWorkspaceFile("skills/openapi.yaml");
