@@ -1,10 +1,12 @@
 import type { ButtonHTMLAttributes, HTMLAttributes } from "react";
-import { render, screen, waitFor } from "@testing-library/react";
+import { act, render, screen, waitFor } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import App from "./App";
 import { clearMockResponses, invoke, setMockResponses } from "./__mocks__/tauri-core";
 import { listen, resetEventMocks } from "./__mocks__/tauri-event";
+import * as experimentalProfile from "@/lib/experimentalProfile";
+import type { ExperimentalRuntimeStatus } from "@/lib/experimentalProfile";
 import { useAuthStore } from "./stores/useAuthStore";
 import { useHotelStore } from "./stores/useHotelStore";
 
@@ -144,5 +146,73 @@ describe("App experimental runtime gates", () => {
 
     expect(invoke.mock.calls.some(([command]) => command === "gateway_get_status")).toBe(true);
     expect(listen).toHaveBeenCalledWith("mcp_reservation_created", expect.any(Function));
+  });
+
+  it("ignores gateway status responses from a disabled profile generation", async () => {
+    setupAuthenticatedShell();
+
+    let runtimeStatus: ExperimentalRuntimeStatus = {
+      experimentalRuntimeEnabled: false,
+      gatewayRuntimeEnabled: true,
+      agentRuntimeEnabled: false,
+      gatewayDisabledByOverride: false,
+      agentDisabledByOverride: false,
+    };
+    const runtimeSpy = vi
+      .spyOn(experimentalProfile, "useExperimentalRuntimeStatus")
+      .mockImplementation(() => runtimeStatus);
+
+    let resolveFirstGatewayStatus: (status: { running: boolean }) => void = () => {};
+    const firstGatewayStatus = new Promise<{ running: boolean }>((resolve) => {
+      resolveFirstGatewayStatus = resolve;
+    });
+    const secondGatewayStatus = new Promise<{ running: boolean }>(() => {});
+    let gatewayStatusCalls = 0;
+
+    setMockResponses({
+      gateway_get_status: () => {
+        gatewayStatusCalls += 1;
+        return gatewayStatusCalls === 1 ? firstGatewayStatus : secondGatewayStatus;
+      },
+    });
+
+    const { rerender } = render(<App />);
+
+    await waitFor(() => {
+      expect(gatewayStatusCalls).toBe(1);
+    });
+
+    await act(async () => {
+      runtimeStatus = {
+        ...runtimeStatus,
+        gatewayRuntimeEnabled: false,
+      };
+      rerender(<App />);
+    });
+
+    await waitFor(() => {
+      expect(screen.queryByText(/Gateway/i)).not.toBeInTheDocument();
+    });
+
+    await act(async () => {
+      resolveFirstGatewayStatus({ running: true });
+      await Promise.resolve();
+    });
+
+    await act(async () => {
+      runtimeStatus = {
+        ...runtimeStatus,
+        gatewayRuntimeEnabled: true,
+      };
+      rerender(<App />);
+    });
+
+    await waitFor(() => {
+      expect(gatewayStatusCalls).toBe(2);
+    });
+
+    expect(screen.getByText("○ Gateway Off")).toBeInTheDocument();
+    expect(screen.queryByText("● MCP Gateway")).not.toBeInTheDocument();
+    runtimeSpy.mockRestore();
   });
 });

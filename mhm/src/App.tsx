@@ -145,13 +145,26 @@ export default function App() {
 
   // Gateway status check
   useEffect(() => {
+    let cancelled = false;
+
     if (!isAuthenticated || !gatewayRuntimeEnabled) {
       setGatewayRunning(false);
-      return;
+      return () => {
+        cancelled = true;
+      };
     }
+
     invoke<{ running: boolean }>("gateway_get_status")
-      .then((s) => setGatewayRunning(s.running))
-      .catch(() => setGatewayRunning(false));
+      .then((s) => {
+        if (!cancelled) setGatewayRunning(s.running);
+      })
+      .catch(() => {
+        if (!cancelled) setGatewayRunning(false);
+      });
+
+    return () => {
+      cancelled = true;
+    };
   }, [gatewayRuntimeEnabled, isAuthenticated]);
 
   // MCP Gateway events: AI agent reservation notifications
