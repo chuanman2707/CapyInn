@@ -25,6 +25,7 @@ pub fn experimental_agent_runtime_enabled() -> bool {
     experimental_runtime_enabled() || env_flag("CAPYINN_EXPERIMENTAL_AGENT_RUNTIME")
 }
 
+#[allow(dead_code)]
 pub fn experimental_peripheral_runtime_enabled() -> bool {
     experimental_runtime_enabled() || env_flag("CAPYINN_EXPERIMENTAL_PERIPHERAL_RUNTIME")
 }

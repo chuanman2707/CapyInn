@@ -652,6 +652,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
     async fn managed_supervisor_shuts_down_without_experimental_agent_runtime() {
         use sqlx::sqlite::SqlitePoolOptions;
 
@@ -682,6 +683,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
     async fn managed_supervisor_shuts_down_when_agent_runtime_is_force_disabled() {
         use sqlx::sqlite::SqlitePoolOptions;
 
