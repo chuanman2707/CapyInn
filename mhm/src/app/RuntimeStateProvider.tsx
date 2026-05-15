@@ -17,6 +17,7 @@ import { useBootstrapState } from "@/app/BootstrapState";
 import { hasRemoteCrashReporting, submitCrashBundle } from "@/lib/crashReporting/sentry";
 import type { CrashReportSummary } from "@/lib/crashReporting/types";
 import { createDeferredCleanup } from "@/lib/deferredCleanup";
+import { useExperimentalRuntimeStatus } from "@/lib/experimentalProfile";
 import { useAuthStore } from "@/stores/useAuthStore";
 import { useHotelStore } from "@/stores/useHotelStore";
 import type { BackupIndicatorPhase, BackupStatusPayload } from "@/types";
@@ -46,18 +47,13 @@ type RuntimeStateValue = {
   onDismissCrashReport: () => Promise<void>;
   onExportCrashReport: () => Promise<void>;
   gatewayRunning: boolean;
+  gatewayRuntimeEnabled: boolean;
   remoteCrashReportingEnabled: boolean;
 };
 
 const RuntimeStateContext = createContext<RuntimeStateValue | null>(null);
 
-export function RuntimeStateProvider({
-  experimentalGatewayUi,
-  children,
-}: {
-  experimentalGatewayUi: boolean;
-  children: ReactNode;
-}) {
+export function RuntimeStateProvider({ children }: { children: ReactNode }) {
   const { shellReady } = useBootstrapState();
   const isAuthenticated = useAuthStore((state) => state.isAuthenticated);
   const fetchRooms = useHotelStore((state) => state.fetchRooms);
@@ -74,6 +70,8 @@ export function RuntimeStateProvider({
   const didCrashRecoveryCheckRef = useRef(false);
   const hideBackupRef = useRef<number | null>(null);
   const remoteCrashReportingEnabled = hasRemoteCrashReporting();
+  const experimentalRuntime = useExperimentalRuntimeStatus(isAuthenticated);
+  const gatewayRuntimeEnabled = experimentalRuntime.gatewayRuntimeEnabled;
 
   useEffect(() => {
     if (!isAuthenticated) return;
@@ -89,7 +87,7 @@ export function RuntimeStateProvider({
   }, [fetchRooms, fetchStats, isAuthenticated]);
 
   useEffect(() => {
-    if (!isAuthenticated || !experimentalGatewayUi) {
+    if (!isAuthenticated || !gatewayRuntimeEnabled) {
       setGatewayRunning(false);
       return;
     }
@@ -111,10 +109,10 @@ export function RuntimeStateProvider({
     return () => {
       cancelled = true;
     };
-  }, [experimentalGatewayUi, isAuthenticated]);
+  }, [gatewayRuntimeEnabled, isAuthenticated]);
 
   useEffect(() => {
-    if (!isAuthenticated || !experimentalGatewayUi) return;
+    if (!isAuthenticated || !gatewayRuntimeEnabled) return;
 
     const cleanup = createDeferredCleanup(
       listen<{ booking_id: string; room_id: string }>("mcp_reservation_created", (event) => {
@@ -127,7 +125,7 @@ export function RuntimeStateProvider({
     );
 
     return cleanup;
-  }, [experimentalGatewayUi, fetchRooms, fetchStats, isAuthenticated]);
+  }, [fetchRooms, fetchStats, gatewayRuntimeEnabled, isAuthenticated]);
 
   useEffect(() => {
     const cleanup = createDeferredCleanup(
@@ -333,6 +331,7 @@ export function RuntimeStateProvider({
       onDismissCrashReport,
       onExportCrashReport,
       gatewayRunning,
+      gatewayRuntimeEnabled,
       remoteCrashReportingEnabled,
     }),
     [
@@ -346,6 +345,7 @@ export function RuntimeStateProvider({
       onDismissCrashReport,
       onExportCrashReport,
       gatewayRunning,
+      gatewayRuntimeEnabled,
       remoteCrashReportingEnabled,
     ],
   );

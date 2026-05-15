@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import {
   BedDouble,
   Bot,
@@ -13,8 +13,8 @@ import {
   Wifi,
 } from "lucide-react";
 
-import { isExperimentalGatewayUiEnabled } from "@/app/runtimeProfile";
 import { Card } from "@/components/ui/card";
+import { useExperimentalRuntimeStatus } from "@/lib/experimentalProfile";
 import { useAuthStore } from "@/stores/useAuthStore";
 
 import AppearanceSection from "./AppearanceSection";
@@ -47,7 +47,8 @@ type SettingsSectionKey =
 export default function SettingsPage() {
   const { isAdmin } = useAuthStore();
   const [activeSection, setActiveSection] = useState<SettingsSectionKey>("hotel");
-  const experimentalGatewayUi = isExperimentalGatewayUiEnabled();
+  const experimentalRuntime = useExperimentalRuntimeStatus(true);
+  const isCurrentAdmin = isAdmin();
 
   const sections = [
     { key: "hotel" as const, label: "Hotel Info", icon: Building2 },
@@ -57,18 +58,37 @@ export default function SettingsPage() {
     { key: "appearance" as const, label: "Appearance", icon: Palette },
     { key: "diagnostics" as const, label: "Diagnostics", icon: Database },
     { key: "data" as const, label: "Data & Backup", icon: Database },
-    ...(experimentalGatewayUi
+    ...(experimentalRuntime.gatewayRuntimeEnabled
       ? [{ key: "gateway" as const, label: "MCP Gateway", icon: Wifi }]
       : []),
     { key: "updates" as const, label: "Software Update", icon: RefreshCcw },
-    ...(isAdmin()
+    ...(isCurrentAdmin && experimentalRuntime.agentRuntimeEnabled
+      ? [{ key: "ceo-agent" as const, label: "CEO Agent", icon: Bot }]
+      : []),
+    ...(isCurrentAdmin
       ? [
-        { key: "ceo-agent" as const, label: "CEO Agent", icon: Bot },
         { key: "pricing" as const, label: "Pricing", icon: DollarSign },
         { key: "users" as const, label: "Users", icon: Users },
       ]
       : []),
   ];
+
+  useEffect(() => {
+    if (
+      (activeSection === "gateway" && !experimentalRuntime.gatewayRuntimeEnabled) ||
+      (
+        activeSection === "ceo-agent" &&
+        (!isCurrentAdmin || !experimentalRuntime.agentRuntimeEnabled)
+      )
+    ) {
+      setActiveSection("hotel");
+    }
+  }, [
+    activeSection,
+    experimentalRuntime.agentRuntimeEnabled,
+    experimentalRuntime.gatewayRuntimeEnabled,
+    isCurrentAdmin,
+  ]);
 
   return (
     <div className="flex gap-6 h-full">
@@ -100,11 +120,17 @@ export default function SettingsPage() {
         {activeSection === "appearance" && <AppearanceSection />}
         {activeSection === "diagnostics" && <DiagnosticsSection />}
         {activeSection === "data" && <DataSection />}
-        {activeSection === "gateway" && experimentalGatewayUi && <GatewaySection />}
+        {activeSection === "gateway" && experimentalRuntime.gatewayRuntimeEnabled && (
+          <GatewaySection />
+        )}
         {activeSection === "updates" && <SoftwareUpdateSection />}
-        {activeSection === "ceo-agent" && isAdmin() && <CeoAgentSection />}
-        {activeSection === "pricing" && isAdmin() && <PricingSection />}
-        {activeSection === "users" && isAdmin() && <UserManagement />}
+        {activeSection === "ceo-agent" &&
+          isCurrentAdmin &&
+          experimentalRuntime.agentRuntimeEnabled && (
+            <CeoAgentSection />
+          )}
+        {activeSection === "pricing" && isCurrentAdmin && <PricingSection />}
+        {activeSection === "users" && isCurrentAdmin && <UserManagement />}
       </Card>
     </div>
   );

@@ -69,7 +69,7 @@ const PAGE_TITLES: Record<string, string> = {
   audit: "Night Audit",
 };
 
-export function MainShell({ experimentalGatewayUi }: { experimentalGatewayUi: boolean }) {
+export function MainShell() {
   const { activeTab, setTab, setCheckinOpen, setGroupCheckinOpen, checkinRoomId } = useHotelStore();
   const { user, logout } = useAuthStore();
   const { collapsed, toggleCollapse } = useSidebarCollapse();
@@ -85,6 +85,7 @@ export function MainShell({ experimentalGatewayUi }: { experimentalGatewayUi: bo
     onDismissCrashReport,
     onExportCrashReport,
     gatewayRunning,
+    gatewayRuntimeEnabled,
     remoteCrashReportingEnabled,
   } = useRuntimeState();
 
@@ -269,7 +270,7 @@ export function MainShell({ experimentalGatewayUi }: { experimentalGatewayUi: bo
                 {user.role === "admin" ? "👑 Admin" : "🏨 Lễ tân"}
               </Badge>
             )}
-            {experimentalGatewayUi && (
+            {gatewayRuntimeEnabled && (
               <Badge
                 className={`${
                   gatewayRunning ? "bg-emerald-50 text-emerald-700" : "bg-red-50 text-red-500"

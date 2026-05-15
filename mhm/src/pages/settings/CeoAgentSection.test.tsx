@@ -1,8 +1,13 @@
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-import { clearMockResponses, invoke, setMockResponses } from "@/__mocks__/tauri-core";
+import {
+  clearMockResponses,
+  invoke,
+  setMockResponse,
+  setMockResponses,
+} from "@/__mocks__/tauri-core";
 import { useAuthStore } from "@/stores/useAuthStore";
 import CeoAgentSection from "./CeoAgentSection";
 import SettingsPage from "./index";
@@ -97,6 +102,13 @@ function mockInitialState(
   },
 ) {
   setMockResponses({
+    get_experimental_runtime_status: () => ({
+      experimental_runtime_enabled: true,
+      gateway_runtime_enabled: false,
+      agent_runtime_enabled: true,
+      gateway_disabled_by_override: false,
+      agent_disabled_by_override: false,
+    }),
     get_ceo_cloud_data_opt_in: () => true,
     get_ceo_telegram_config: () => config,
     get_ceo_telegram_gate_status: () => gate,
@@ -758,7 +770,7 @@ describe("SettingsPage CEO Agent nav", () => {
     invoke.mockClear();
   });
 
-  it("shows CEO Agent in settings nav for admins and renders the section", async () => {
+  it("shows CEO Agent in settings nav for admins when agent runtime is experimental-enabled", async () => {
     const user = userEvent.setup();
     useAuthStore.setState({
       user: { id: "u1", name: "Admin", role: "admin", active: true, created_at: "" },
@@ -771,22 +783,82 @@ describe("SettingsPage CEO Agent nav", () => {
 
     render(<SettingsPage />);
 
-    const navButton = screen.getByRole("button", { name: "CEO Agent" });
+    const navButton = await screen.findByRole("button", { name: "CEO Agent" });
     await user.click(navButton);
 
     expect(await screen.findByText("CEO Telegram Chat")).toBeInTheDocument();
   });
 
-  it("does not show CEO Agent in settings nav for receptionist users", () => {
+  it("hides CEO Agent in settings nav for admins when agent runtime is disabled", async () => {
+    useAuthStore.setState({
+      user: { id: "u1", name: "Admin", role: "admin", active: true, created_at: "" },
+      isAuthenticated: true,
+      loading: false,
+      error: null,
+    });
+    setMockResponse("get_experimental_runtime_status", () => ({
+      experimental_runtime_enabled: false,
+      gateway_runtime_enabled: false,
+      agent_runtime_enabled: false,
+      gateway_disabled_by_override: false,
+      agent_disabled_by_override: false,
+    }));
+
+    render(<SettingsPage />);
+
+    await waitFor(() => {
+      expect(screen.queryByRole("button", { name: "CEO Agent" })).not.toBeInTheDocument();
+    });
+  });
+
+  it("resets CEO Agent section to Hotel Info when admin access is lost", async () => {
+    const user = userEvent.setup();
+    useAuthStore.setState({
+      user: { id: "u1", name: "Admin", role: "admin", active: true, created_at: "" },
+      isAuthenticated: true,
+      loading: false,
+      error: null,
+    });
+    mockInitialState();
+
+    render(<SettingsPage />);
+
+    await user.click(await screen.findByRole("button", { name: "CEO Agent" }));
+    expect(await screen.findByText("CEO Telegram Chat")).toBeInTheDocument();
+
+    await act(async () => {
+      useAuthStore.setState({
+        user: { id: "u2", name: "Reception", role: "receptionist", active: true, created_at: "" },
+        isAuthenticated: true,
+        loading: false,
+        error: null,
+      });
+    });
+
+    await waitFor(() => {
+      expect(screen.getByRole("heading", { name: "Thông tin khách sạn" })).toBeInTheDocument();
+    });
+    expect(screen.queryByRole("button", { name: "CEO Agent" })).not.toBeInTheDocument();
+  });
+
+  it("does not show CEO Agent in settings nav for receptionist users", async () => {
     useAuthStore.setState({
       user: { id: "u2", name: "Reception", role: "receptionist", active: true, created_at: "" },
       isAuthenticated: true,
       loading: false,
       error: null,
     });
+    setMockResponse("get_experimental_runtime_status", () => ({
+      experimental_runtime_enabled: true,
+      gateway_runtime_enabled: true,
+      agent_runtime_enabled: true,
+      gateway_disabled_by_override: false,
+      agent_disabled_by_override: false,
+    }));
 
     render(<SettingsPage />);
 
+    expect(await screen.findByRole("button", { name: "MCP Gateway" })).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "CEO Agent" })).not.toBeInTheDocument();
   });
 });

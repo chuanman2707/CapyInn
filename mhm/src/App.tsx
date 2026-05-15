@@ -4,19 +4,16 @@ import { BootstrapGate } from "@/app/BootstrapGate";
 import { BootstrapStateProvider } from "@/app/BootstrapState";
 import { MainShell } from "@/app/MainShell";
 import { RuntimeStateProvider } from "@/app/RuntimeStateProvider";
-import { isExperimentalGatewayUiEnabled } from "@/app/runtimeProfile";
 
 export default function App() {
-  const experimentalGatewayUi = isExperimentalGatewayUiEnabled();
-
   return (
     <BootstrapStateProvider>
       <AppUpdateRuntime>
-        <RuntimeStateProvider experimentalGatewayUi={experimentalGatewayUi}>
+        <RuntimeStateProvider>
           <BootstrapGate>
             {({ bootstrap }) => (
               <AuthGate bootstrap={bootstrap}>
-                <MainShell experimentalGatewayUi={experimentalGatewayUi} />
+                <MainShell />
               </AuthGate>
             )}
           </BootstrapGate>

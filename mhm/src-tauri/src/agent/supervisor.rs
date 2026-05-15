@@ -356,7 +356,12 @@ pub async fn reconcile_managed_supervisor(
         return Ok(());
     };
 
-    if crate::runtime_config::env_flag("CAPYINN_DISABLE_CEO_TELEGRAM") {
+    if !crate::runtime_config::experimental_agent_runtime_enabled() {
+        supervisor.shutdown().await;
+        return Ok(());
+    }
+
+    if crate::runtime_config::agent_runtime_disabled_by_override() {
         supervisor.shutdown().await;
         return Ok(());
     }
@@ -644,6 +649,69 @@ mod tests {
             assert!(!supervisor.is_digest_running_for_test());
             assert!(supervisor.workflow_states_empty_for_test());
         }
+    }
+
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn managed_supervisor_shuts_down_without_experimental_agent_runtime() {
+        use sqlx::sqlite::SqlitePoolOptions;
+
+        let _guard = crate::runtime_config::env_lock().lock().unwrap();
+        std::env::remove_var("CAPYINN_EXPERIMENTAL_RUNTIME");
+        std::env::remove_var("CAPYINN_EXPERIMENTAL_AGENT_RUNTIME");
+        std::env::remove_var("CAPYINN_DISABLE_CEO_TELEGRAM");
+
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .expect("connect sqlite");
+        let supervisor = AgentSupervisor::new_for_test();
+        supervisor
+            .reconcile_for_test(true, true)
+            .await
+            .expect("precondition starts workflows");
+        assert!(supervisor.is_chat_running_for_test());
+        assert!(supervisor.is_digest_running_for_test());
+
+        reconcile_managed_supervisor(&pool, Some(&supervisor))
+            .await
+            .expect("disabled experimental runtime reconciles");
+
+        assert!(!supervisor.is_chat_running_for_test());
+        assert!(!supervisor.is_digest_running_for_test());
+    }
+
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn managed_supervisor_shuts_down_when_agent_runtime_is_force_disabled() {
+        use sqlx::sqlite::SqlitePoolOptions;
+
+        let _guard = crate::runtime_config::env_lock().lock().unwrap();
+        std::env::set_var("CAPYINN_EXPERIMENTAL_AGENT_RUNTIME", "true");
+        std::env::set_var("CAPYINN_DISABLE_CEO_TELEGRAM", "true");
+        std::env::remove_var("CAPYINN_EXPERIMENTAL_RUNTIME");
+
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .expect("connect sqlite");
+        let supervisor = AgentSupervisor::new_for_test();
+        supervisor
+            .reconcile_for_test(true, true)
+            .await
+            .expect("precondition starts workflows");
+
+        reconcile_managed_supervisor(&pool, Some(&supervisor))
+            .await
+            .expect("force-disabled experimental runtime reconciles");
+
+        assert!(!supervisor.is_chat_running_for_test());
+        assert!(!supervisor.is_digest_running_for_test());
+
+        std::env::remove_var("CAPYINN_EXPERIMENTAL_AGENT_RUNTIME");
+        std::env::remove_var("CAPYINN_DISABLE_CEO_TELEGRAM");
     }
 
     #[tokio::test]

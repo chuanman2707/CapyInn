@@ -9,13 +9,8 @@ import { resetEventMocks } from "./__mocks__/tauri-event";
 import { useAuthStore } from "./stores/useAuthStore";
 import { useHotelStore } from "./stores/useHotelStore";
 
-const gatewayUi = vi.hoisted(() => ({ enabled: false }));
 const wasEventListenerRegistered = (eventName: string) =>
   vi.mocked(listen).mock.calls.some(([registeredEventName]) => registeredEventName === eventName);
-
-vi.mock("@/app/runtimeProfile", () => ({
-  isExperimentalGatewayUiEnabled: () => gatewayUi.enabled,
-}));
 
 vi.mock("@/pages/Dashboard", () => ({ default: () => <div>Dashboard page</div> }));
 vi.mock("@/pages/Rooms", () => ({ default: () => <div>Rooms page</div> }));
@@ -76,13 +71,19 @@ function mockUnlockedShell() {
         created_at: "2026-05-13T00:00:00.000Z",
       },
     }),
+    get_experimental_runtime_status: () => ({
+      experimental_runtime_enabled: false,
+      gateway_runtime_enabled: false,
+      agent_runtime_enabled: false,
+      gateway_disabled_by_override: false,
+      agent_disabled_by_override: false,
+    }),
     gateway_get_status: () => ({ running: true }),
   });
 }
 
 describe("App gateway profile", () => {
   beforeEach(() => {
-    gatewayUi.enabled = false;
     clearMockResponses();
     resetEventMocks();
     vi.clearAllMocks();
@@ -108,7 +109,15 @@ describe("App gateway profile", () => {
   });
 
   it("enables gateway status and MCP listener in the experimental profile", async () => {
-    gatewayUi.enabled = true;
+    setMockResponses({
+      get_experimental_runtime_status: () => ({
+        experimental_runtime_enabled: true,
+        gateway_runtime_enabled: true,
+        agent_runtime_enabled: false,
+        gateway_disabled_by_override: false,
+        agent_disabled_by_override: false,
+      }),
+    });
 
     render(<App />);
 
