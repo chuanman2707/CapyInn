@@ -8,7 +8,7 @@ Planned PR title: `refactor: gate experimental gateway and agent runtime`
 
 ## Goal
 
-Make gateway, MCP, agent, digest, Telegram, CEO, and OpenAI runtime surfaces disabled by default in the normal PMS profile. Normal PMS startup must not start experimental background tasks, require external runtime credentials, or expose gateway UI by accident.
+Make gateway, MCP, agent, digest, Telegram, CEO, and OpenAI runtime surfaces disabled by default in the normal PMS profile. For this slice, normal PMS startup must not start gateway or agent/digest/Telegram background tasks, require external gateway/agent credentials, or expose gateway/agent UI by accident.
 
 The implementation should combine #141 and #142 because both issues share the same runtime quarantine goal and the relevant startup paths are clear. The high-risk portion is agent supervisor reconciliation, so changes there must stay narrow and be verified carefully.
 
@@ -19,7 +19,7 @@ In scope:
 - Add explicit experimental runtime opt-in helpers in `mhm/src-tauri/src/runtime_config.rs`.
 - Gate gateway startup in `mhm/src-tauri/src/lib.rs`.
 - Gate agent supervisor reconciliation in `mhm/src-tauri/src/agent/supervisor.rs`.
-- Hide gateway/MCP UI in the normal frontend profile.
+- Hide gateway/MCP/CEO Agent UI in the normal frontend profile.
 - Preserve existing gateway and agent code; do not delete experimental features.
 - Audit direct SQL writes in `mhm/src-tauri/src/agent` and `mhm/src-tauri/src/gateway`.
 - Refactor any production direct write from agent modules into PMS business tables if such a write bypasses the command/service boundary.
@@ -31,14 +31,14 @@ Out of scope:
 - PMS command semantics changes.
 - Replacing the command executor architecture.
 - Removing existing gateway or agent modules.
-- Gating unrelated runtime surfaces such as outbox dispatchers unless a tiny helper is required for naming consistency.
+- Gating unrelated runtime surfaces such as outbox dispatchers unless a tiny helper is required for naming consistency. Outbox dispatchers remain a documented residual risk for the separate F5 issue.
 - Renaming `mhm/` or reorganizing unrelated docs.
 
 ## Current State
 
 `mhm/src-tauri/src/lib.rs` currently starts the MCP gateway during app setup unless `CAPYINN_DISABLE_GATEWAY` is set. It also creates an `AgentSupervisor` and calls `agent::supervisor::reconcile_managed_supervisor` unless `CAPYINN_DISABLE_CEO_TELEGRAM` is set.
 
-`mhm/src/App.tsx` checks `gateway_get_status` after authentication and always renders a gateway badge that says either `MCP Gateway` or `Gateway Off`. `mhm/src/pages/settings/index.tsx` always includes the `MCP Gateway` settings section.
+`mhm/src/App.tsx` checks `gateway_get_status` after authentication and always renders a gateway badge that says either `MCP Gateway` or `Gateway Off`. It also listens for `mcp_reservation_created` and shows an AI-agent toast. `mhm/src/pages/settings/index.tsx` always includes the `MCP Gateway` settings section and shows `CEO Agent` settings to admins.
 
 The working tree already contains draft runtime flag helpers in `runtime_config.rs` and a supervisor test that expects agent workflows to stop when experimental agent runtime is absent. Implementation must preserve and complete those existing local changes rather than replacing them wholesale.
 
@@ -59,6 +59,22 @@ Existing disable flags remain safety overrides:
 - `CAPYINN_DISABLE_CEO_TELEGRAM=true` disables agent supervisor workflows even if agent experimental runtime is enabled.
 
 The effective rule is positive opt-in first, disable override second.
+
+## Runtime Status Source Of Truth
+
+Backend runtime config is the source of truth for frontend profile decisions. Do not use build-time `VITE_*` flags for this slice because packaged app UI could drift from backend process environment.
+
+Add a narrow Tauri command named `get_experimental_runtime_status` that reads backend runtime config and returns the effective frontend gates:
+
+- `experimental_runtime_enabled`
+- `gateway_runtime_enabled`
+- `agent_runtime_enabled`
+- `gateway_disabled_by_override`
+- `agent_disabled_by_override`
+
+`gateway_runtime_enabled` should be true only when the gateway experimental flag is enabled and `CAPYINN_DISABLE_GATEWAY` is false. `agent_runtime_enabled` should be true only when the agent experimental flag is enabled and `CAPYINN_DISABLE_CEO_TELEGRAM` is false.
+
+Frontend code should call this profile command once after authentication and use the returned booleans to decide whether to render gateway/MCP/CEO Agent surfaces. Calling this profile command in the normal profile is allowed because it does not start or expose an experimental runtime; it only reports whether the current process opted into one.
 
 ## Runtime Gate Design
 
@@ -85,17 +101,20 @@ This preserves existing admin config commands. Changing CEO Telegram settings ma
 
 ## Frontend UI Gate
 
-Normal PMS profile must not display gateway/MCP as an ordinary product surface.
+Normal PMS profile must not display gateway/MCP/CEO Agent as ordinary product surfaces.
 
 Frontend behavior:
 
 - `App.tsx` must not call `gateway_get_status` in the normal profile.
 - `App.tsx` must not render a red `Gateway Off` badge in the normal profile.
+- `App.tsx` must not subscribe to `mcp_reservation_created` or show AI-agent reservation toasts in the normal profile.
 - `mhm/src/pages/settings/index.tsx` must not render the `MCP Gateway` sidebar item in the normal profile.
-- `GatewaySection` can keep its current behavior when rendered in an experimental profile.
+- `mhm/src/pages/settings/index.tsx` must not render the `CEO Agent` sidebar item in the normal profile.
+- `GatewaySection` can keep its current behavior when rendered in an experimental gateway profile.
+- `CeoAgentSection` can keep its current behavior when rendered in an experimental agent profile.
 - `gateway_get_status` should expose `experimental_enabled` for the experimental settings panel, while returning `running: false` and `port: null` when the gateway runtime is not enabled.
 
-The frontend should use one small profile helper, for example `mhm/src/lib/experimentalProfile.ts`, that parses `VITE_CAPYINN_EXPERIMENTAL_RUNTIME` and `VITE_CAPYINN_EXPERIMENTAL_GATEWAY_RUNTIME` with the same truthy values as the backend helper. Components should import that helper rather than scattering environment checks.
+The frontend should use one small profile helper or hook, for example `mhm/src/lib/experimentalProfile.ts`, that consumes `get_experimental_runtime_status` and exposes typed booleans to components. Components should import that helper rather than scattering command calls or environment checks.
 
 ## Agent And Gateway Write Audit
 
@@ -122,6 +141,12 @@ Command-boundary writes:
 
 These should keep using `WriteCommandExecutor`, `WriteCommandContext`, lock keys, idempotency, and audit where already present.
 
+Gateway management writes:
+
+- `gateway_generate_key` should reject with a controlled error when effective gateway runtime is disabled.
+- When effective gateway runtime is enabled, `gateway_generate_key` may continue writing `gateway_api_keys` as gateway-owned experimental state.
+- `gateway_get_status` remains read-only and may return disabled status without error.
+
 Forbidden production direct writes:
 
 - Any production write from `agent/` into PMS business tables such as `rooms`, `bookings`, `guests`, `transactions`, `folio_lines`, `invoices`, `room_calendar`, housekeeping tables, or other PMS truth tables.
@@ -143,6 +168,8 @@ Runtime disabled states should be quiet and normal:
 
 - Startup should log that an experimental runtime is disabled by default, not emit an error.
 - `gateway_get_status` should return a normal status object, not fail, when the runtime is disabled.
+- `gateway_generate_key` should fail closed with a controlled user-facing error when effective gateway runtime is disabled.
+- `get_experimental_runtime_status` should always return a status object and should not require gateway, Telegram, OpenAI, or agent config.
 - Agent settings commands should still return their normal command results after config updates; reconcile should be a no-op shutdown when experimental agent runtime is disabled.
 - If an experimental runtime is enabled but missing its existing readiness prerequisites, preserve the current gate behavior and errors.
 
@@ -174,7 +201,9 @@ Rust tests:
 - `runtime_config.rs` verifies all experimental flags are disabled by default.
 - `runtime_config.rs` verifies the master experimental flag enables gateway, agent, and peripheral helpers.
 - `runtime_config.rs` verifies individual gateway and agent flags only enable their matching surfaces.
+- The experimental runtime status command reports effective gateway and agent gates, including disable overrides.
 - Gateway startup logic is covered either through extracted helper tests or focused status/startup-adjacent tests.
+- `gateway_generate_key` fails closed when effective gateway runtime is disabled.
 - `agent::supervisor` verifies disabled experimental agent runtime shuts down chat and digest workflows.
 - `agent::supervisor` verifies `CAPYINN_DISABLE_CEO_TELEGRAM` still force-disables workflows when experimental agent runtime is enabled.
 
@@ -182,8 +211,11 @@ Frontend tests:
 
 - Normal profile does not call `gateway_get_status`.
 - Normal profile does not render the gateway badge.
+- Normal profile does not subscribe to `mcp_reservation_created` or show the AI-agent reservation toast.
 - Normal profile does not render the `MCP Gateway` settings section.
+- Normal profile does not render the `CEO Agent` settings section.
 - Experimental gateway profile renders the `MCP Gateway` settings section and preserves `GatewaySection` behavior.
+- Experimental agent profile renders the `CEO Agent` settings section and preserves `CeoAgentSection` behavior.
 
 SQL audit validation:
 
@@ -208,9 +240,12 @@ gitnexus_detect_changes()
 
 - Gateway runtime does not start unless `CAPYINN_EXPERIMENTAL_RUNTIME` or `CAPYINN_EXPERIMENTAL_GATEWAY_RUNTIME` is explicitly enabled.
 - `CAPYINN_DISABLE_GATEWAY` still disables gateway even when experimental gateway runtime is enabled.
-- Normal app profile does not call gateway status, show a gateway badge, or show the `MCP Gateway` settings entry.
+- `gateway_generate_key` rejects when effective gateway runtime is disabled.
+- Frontend profile gates come from backend runtime status, not build-time `VITE_*` flags.
+- Normal app profile does not call gateway status, show a gateway badge, subscribe to MCP reservation events, or show the `MCP Gateway` settings entry.
 - Agent chat and digest workflows do not start unless `CAPYINN_EXPERIMENTAL_RUNTIME` or `CAPYINN_EXPERIMENTAL_AGENT_RUNTIME` is explicitly enabled.
 - `CAPYINN_DISABLE_CEO_TELEGRAM` still disables agent workflows even when experimental agent runtime is enabled.
+- Normal app profile does not show the `CEO Agent` settings entry.
 - Normal PMS operation requires no gateway, MCP, OpenAI, Telegram, CEO-agent, or digest config.
 - Agent-owned runtime tables are documented as allowed experimental state.
 - No production agent module directly mutates PMS business tables outside the validated command/service boundary.
