@@ -168,6 +168,32 @@ mod tests {
     }
 
     #[test]
+    fn peripheral_runtime_flag_does_not_enable_agent_or_gateway_runtime() {
+        let _guard = env_lock().lock().unwrap();
+
+        for name in [
+            "CAPYINN_EXPERIMENTAL_RUNTIME",
+            "CAPYINN_EXPERIMENTAL_GATEWAY_RUNTIME",
+            "CAPYINN_EXPERIMENTAL_AGENT_RUNTIME",
+            "CAPYINN_EXPERIMENTAL_PERIPHERAL_RUNTIME",
+            "CAPYINN_DISABLE_GATEWAY",
+            "CAPYINN_DISABLE_CEO_TELEGRAM",
+        ] {
+            std::env::remove_var(name);
+        }
+
+        std::env::set_var("CAPYINN_EXPERIMENTAL_PERIPHERAL_RUNTIME", "true");
+
+        assert!(experimental_peripheral_runtime_enabled());
+        assert!(!experimental_gateway_runtime_enabled());
+        assert!(!experimental_agent_runtime_enabled());
+        assert!(!effective_experimental_gateway_runtime_enabled());
+        assert!(!effective_experimental_agent_runtime_enabled());
+
+        std::env::remove_var("CAPYINN_EXPERIMENTAL_PERIPHERAL_RUNTIME");
+    }
+
+    #[test]
     fn disable_flags_override_effective_experimental_runtime_flags() {
         let _guard = env_lock().lock().unwrap();
 
