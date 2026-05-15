@@ -158,6 +158,10 @@ fn ensure_gateway_management_enabled() -> Result<(), String> {
     }
 }
 
+fn outbox_subscribers_for_runtime_profile() -> Vec<Arc<dyn outbox::OutboxSubscriber>> {
+    Vec::new()
+}
+
 fn spawn_crash_index_rebuild() {
     std::thread::spawn(|| {
         if let Err(error) = crash_index::rebuild_current_runtime_root() {
@@ -250,7 +254,10 @@ pub fn run() {
             });
             app.manage(backup::BackupCoordinator::new());
             app.manage(backup::start_backup_scheduler(app.handle().clone()));
-            app.manage(outbox::start_outbox_dispatcher(pool.clone(), Vec::new()));
+            app.manage(outbox::start_outbox_dispatcher(
+                pool.clone(),
+                outbox_subscribers_for_runtime_profile(),
+            ));
             app.manage(agent_supervisor);
             app.manage(GatewayRuntimeState::new(rt, gateway_runtime));
 
@@ -473,8 +480,22 @@ async fn gateway_get_status(
 mod tests {
     use super::{
         experimental_runtime_status_value, gateway_management_disabled_error,
-        gateway_runtime_effective_enabled, updater_enabled_from_env,
+        gateway_runtime_effective_enabled, outbox_subscribers_for_runtime_profile,
+        updater_enabled_from_env,
     };
+
+    fn clear_experimental_runtime_env() {
+        for name in [
+            "CAPYINN_EXPERIMENTAL_RUNTIME",
+            "CAPYINN_EXPERIMENTAL_GATEWAY_RUNTIME",
+            "CAPYINN_EXPERIMENTAL_AGENT_RUNTIME",
+            "CAPYINN_EXPERIMENTAL_PERIPHERAL_RUNTIME",
+            "CAPYINN_DISABLE_GATEWAY",
+            "CAPYINN_DISABLE_CEO_TELEGRAM",
+        ] {
+            std::env::remove_var(name);
+        }
+    }
 
     #[test]
     fn updater_stays_disabled_for_plain_dev_runs() {
@@ -536,5 +557,46 @@ mod tests {
             gateway_management_disabled_error(),
             "MCP Gateway experimental runtime is disabled. Set CAPYINN_EXPERIMENTAL_GATEWAY_RUNTIME=true or CAPYINN_EXPERIMENTAL_RUNTIME=true to enable gateway management."
         );
+    }
+
+    #[test]
+    fn outbox_runtime_profile_has_no_subscribers_without_experimental_flags() {
+        let _guard = crate::runtime_config::env_lock().lock().unwrap();
+        clear_experimental_runtime_env();
+
+        assert_eq!(outbox_subscribers_for_runtime_profile().len(), 0);
+    }
+
+    #[test]
+    fn peripheral_runtime_flag_does_not_register_outbox_subscribers() {
+        let _guard = crate::runtime_config::env_lock().lock().unwrap();
+        clear_experimental_runtime_env();
+        std::env::set_var("CAPYINN_EXPERIMENTAL_PERIPHERAL_RUNTIME", "true");
+
+        assert_eq!(outbox_subscribers_for_runtime_profile().len(), 0);
+
+        std::env::remove_var("CAPYINN_EXPERIMENTAL_PERIPHERAL_RUNTIME");
+    }
+
+    #[test]
+    fn batch_2_runtime_flags_do_not_register_outbox_subscribers() {
+        let _guard = crate::runtime_config::env_lock().lock().unwrap();
+
+        for flag in [
+            "CAPYINN_EXPERIMENTAL_GATEWAY_RUNTIME",
+            "CAPYINN_EXPERIMENTAL_AGENT_RUNTIME",
+            "CAPYINN_EXPERIMENTAL_RUNTIME",
+        ] {
+            clear_experimental_runtime_env();
+            std::env::set_var(flag, "true");
+
+            assert_eq!(
+                outbox_subscribers_for_runtime_profile().len(),
+                0,
+                "{flag} should not register outbox subscribers in #143"
+            );
+        }
+
+        clear_experimental_runtime_env();
     }
 }
