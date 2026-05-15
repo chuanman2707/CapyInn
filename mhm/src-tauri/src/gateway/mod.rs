@@ -17,12 +17,27 @@ use crate::app_identity;
 
 pub use server::RunningGatewayServer as RunningGateway;
 
+const GATEWAY_RUNTIME_DISABLED_MESSAGE: &str = "MCP Gateway experimental runtime is disabled. Set CAPYINN_EXPERIMENTAL_GATEWAY_RUNTIME=true or CAPYINN_EXPERIMENTAL_RUNTIME=true to enable gateway management.";
+
+pub(crate) fn gateway_runtime_disabled_error() -> String {
+    GATEWAY_RUNTIME_DISABLED_MESSAGE.to_string()
+}
+
+fn ensure_gateway_runtime_enabled() -> Result<(), String> {
+    if crate::runtime_config::effective_experimental_gateway_runtime_enabled() {
+        Ok(())
+    } else {
+        Err(gateway_runtime_disabled_error())
+    }
+}
+
 /// Start the MCP Gateway SSE server on a background Tokio task.
 /// Returns the port number the server is listening on.
 pub async fn start_gateway(
     pool: Pool<Sqlite>,
     app_handle: AppHandle,
 ) -> Result<RunningGateway, String> {
+    ensure_gateway_runtime_enabled()?;
     cleanup_stale_lockfile();
     let running_gateway = server::start_server(pool, app_handle).await?;
 
@@ -86,7 +101,10 @@ fn is_port_live(port: u16) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{cleanup_lockfile_path, live_port_from_lockfile_path, write_lockfile};
+    use super::{
+        cleanup_lockfile_path, ensure_gateway_runtime_enabled, gateway_runtime_disabled_error,
+        live_port_from_lockfile_path, write_lockfile,
+    };
     use std::path::PathBuf;
 
     fn temp_lockfile_path(label: &str) -> PathBuf {
@@ -115,5 +133,68 @@ mod tests {
 
         assert_eq!(live_port_from_lockfile_path(&lockfile), None);
         assert!(!lockfile.exists());
+    }
+
+    #[test]
+    fn gateway_runtime_gate_rejects_startup_when_experimental_gateway_is_disabled() {
+        let _guard = crate::runtime_config::env_lock().lock().unwrap();
+
+        for name in [
+            "CAPYINN_EXPERIMENTAL_RUNTIME",
+            "CAPYINN_EXPERIMENTAL_GATEWAY_RUNTIME",
+            "CAPYINN_DISABLE_GATEWAY",
+        ] {
+            std::env::remove_var(name);
+        }
+
+        let error = ensure_gateway_runtime_enabled()
+            .expect_err("gateway startup should fail closed without experimental gateway runtime");
+
+        assert_eq!(error, gateway_runtime_disabled_error());
+    }
+
+    #[test]
+    fn gateway_runtime_gate_allows_startup_when_effective_gateway_is_enabled() {
+        let _guard = crate::runtime_config::env_lock().lock().unwrap();
+
+        std::env::remove_var("CAPYINN_EXPERIMENTAL_RUNTIME");
+        std::env::set_var("CAPYINN_EXPERIMENTAL_GATEWAY_RUNTIME", "true");
+        std::env::remove_var("CAPYINN_DISABLE_GATEWAY");
+
+        ensure_gateway_runtime_enabled().expect("gateway runtime is enabled");
+
+        std::env::remove_var("CAPYINN_EXPERIMENTAL_GATEWAY_RUNTIME");
+    }
+
+    #[test]
+    fn gateway_runtime_gate_respects_disable_override() {
+        let _guard = crate::runtime_config::env_lock().lock().unwrap();
+
+        std::env::set_var("CAPYINN_EXPERIMENTAL_GATEWAY_RUNTIME", "true");
+        std::env::set_var("CAPYINN_DISABLE_GATEWAY", "true");
+
+        let error = ensure_gateway_runtime_enabled()
+            .expect_err("disable override should force gateway startup closed");
+
+        assert_eq!(error, gateway_runtime_disabled_error());
+
+        std::env::remove_var("CAPYINN_EXPERIMENTAL_GATEWAY_RUNTIME");
+        std::env::remove_var("CAPYINN_DISABLE_GATEWAY");
+    }
+
+    #[test]
+    fn start_gateway_checks_runtime_gate_before_starting_server() {
+        let source = include_str!("mod.rs");
+        let gate_check = source
+            .find("ensure_gateway_runtime_enabled()?")
+            .expect("start_gateway calls the runtime gate");
+        let server_start = source
+            .find("server::start_server")
+            .expect("start_gateway starts the server");
+
+        assert!(
+            gate_check < server_start,
+            "start_gateway must check runtime gate before server startup"
+        );
     }
 }

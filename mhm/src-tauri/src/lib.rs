@@ -147,7 +147,7 @@ fn experimental_runtime_status_value() -> serde_json::Value {
 }
 
 fn gateway_management_disabled_error() -> String {
-    "MCP Gateway experimental runtime is disabled. Set CAPYINN_EXPERIMENTAL_GATEWAY_RUNTIME=true or CAPYINN_EXPERIMENTAL_RUNTIME=true to enable gateway management.".to_string()
+    gateway::gateway_runtime_disabled_error()
 }
 
 fn ensure_gateway_management_enabled() -> Result<(), String> {
