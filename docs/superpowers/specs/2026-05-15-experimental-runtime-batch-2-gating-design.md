@@ -36,6 +36,7 @@ The remaining issue #143 risk is not the core outbox write. The risk is accident
 - CEO Telegram polling.
 - CEO digest scheduler.
 - OpenAI-backed agent runtime work.
+- MCP stdio proxy behavior when the gateway is not running.
 - Observer stream exposure at `/observer/events`.
 - Outbox dispatcher loops when real subscribers are registered.
 
@@ -45,9 +46,9 @@ In scope:
 
 - Verify digest and Telegram startup remain controlled by `CAPYINN_EXPERIMENTAL_AGENT_RUNTIME`.
 - Verify observer exposure remains controlled by `CAPYINN_EXPERIMENTAL_GATEWAY_RUNTIME` through gateway startup.
-- Add guardrails so observer is not exposed in a future standalone route without an experimental gateway gate.
+- Add guardrails so observer is not exposed through gateway internals or any future standalone route without an experimental gateway gate.
 - Clarify outbox boundaries: transactional outbox writes are core; dispatcher subscribers and observer streaming are experimental consumers.
-- Add focused tests for inactive outbox dispatcher behavior when no subscribers are registered.
+- Add focused tests for inactive outbox dispatcher behavior when no subscribers are registered and for profile-based subscriber selection.
 - Document that `CAPYINN_EXPERIMENTAL_PERIPHERAL_RUNTIME` is not consumed by this issue.
 
 Out of scope:
@@ -100,12 +101,15 @@ CEO Agent config commands may still persist admin configuration while runtime is
 
 Observer belongs to the gateway runtime for this slice because `/observer/events` is mounted inside the gateway server. If gateway startup is disabled, observer is not exposed.
 
+The production gateway start boundary must enforce the effective gateway runtime gate itself, not rely only on the caller in `lib.rs`. `gateway::start_gateway` should return `Err` with the existing gateway-management-disabled message when `effective_experimental_gateway_runtime_enabled()` is false. `lib.rs` may still check the gate first for logging and to avoid unnecessary work, but the gateway module should remain safe if another production caller is added in the future.
+
 When `CAPYINN_EXPERIMENTAL_GATEWAY_RUNTIME` and `CAPYINN_EXPERIMENTAL_RUNTIME` are both absent:
 
 - gateway server does not start;
 - `/mcp` is unavailable;
 - `/observer/events` is unavailable;
 - gateway API key management stays disabled.
+- `gateway::start_gateway` itself refuses production startup.
 
 When gateway experimental runtime is enabled:
 
@@ -113,17 +117,36 @@ When gateway experimental runtime is enabled:
 - `/observer/events` remains behind the same protected gateway router;
 - `CAPYINN_DISABLE_GATEWAY=true` force-disables both gateway and observer exposure.
 
-Add a lightweight guardrail test so future contributors do not mount `observe_events` outside the protected gateway router without adding an explicit experimental gate.
+Add a lightweight guardrail test so future contributors do not mount `observe_events` outside the protected gateway router without adding an explicit experimental gate. Also add a focused runtime test that absent gateway and master flags prevent production gateway startup, which also prevents production observer exposure.
+
+The `--mcp-stdio` proxy path does not start the gateway server. Document this in the implementation notes and add a guardrail assertion that `run_proxy` delegates only to the stdio proxy instead of starting `gateway::start_gateway`.
 
 ### Outbox Dispatcher
 
 Transactional `outbox_events` writes are core PMS safety. The dispatcher is a runtime consumer.
 
-The current app starts `start_outbox_dispatcher(pool, Vec::new())`, which is inactive because there are no subscribers. Preserve this behavior and cover it with focused tests:
+The current app starts `start_outbox_dispatcher(pool, Vec::new())`, which is inactive because there are no subscribers. Preserve this behavior and make subscriber selection explicit through a small private helper in `lib.rs` named `outbox_subscribers_for_runtime_profile()`.
+
+For #143, there are no production outbox subscribers. The helper should therefore return an empty subscriber list in every profile, including:
+
+- no experimental flags;
+- `CAPYINN_EXPERIMENTAL_PERIPHERAL_RUNTIME=true` by itself;
+- gateway experimental runtime only;
+- agent experimental runtime only;
+- master experimental runtime.
+
+This sounds redundant, but it prevents the vague `PERIPHERAL_RUNTIME` flag from becoming an accidental subscriber plug. When a future issue adds a real production subscriber, that issue must map it to an explicit existing gate or introduce a new clearly named gate:
+
+- gateway or observer delivery subscribers must require effective gateway runtime;
+- agent or CEO delivery subscribers must require effective agent runtime;
+- unrelated external delivery workers must not use `CAPYINN_EXPERIMENTAL_PERIPHERAL_RUNTIME` unless that flag is renamed or redesigned in its own approved spec.
+
+Cover the dispatcher boundary with focused tests:
 
 - no subscribers means inactive handle;
 - inactive handle has no running task and can be shut down safely;
-- future subscribers must be started only from an explicit experimental runtime path.
+- all flags absent means app startup passes zero subscribers and receives an inactive handle;
+- `CAPYINN_EXPERIMENTAL_PERIPHERAL_RUNTIME=true` by itself still means zero subscribers and an inactive handle.
 
 Do not gate or remove `insert_outbox_event_tx`.
 
@@ -136,6 +159,7 @@ Experimental runtime disabled states are normal and quiet:
 - missing Telegram/OpenAI/gateway configuration must not be required in the normal profile;
 - observer being unavailable in the normal profile is expected because gateway is not started;
 - outbox dispatcher with no subscribers should report inactive, not failed.
+- `CAPYINN_EXPERIMENTAL_PERIPHERAL_RUNTIME=true` by itself should not change gateway, agent, observer, or outbox subscriber runtime behavior.
 
 If a runtime is explicitly enabled but readiness dependencies are missing, preserve the current readiness gate behavior and user-facing errors.
 
@@ -160,8 +184,11 @@ Rust tests:
 - `runtime_config` confirms `CAPYINN_EXPERIMENTAL_PERIPHERAL_RUNTIME` does not enable gateway or agent runtime.
 - `agent::supervisor` confirms disabled agent runtime shuts down chat and digest workflows.
 - `agent::supervisor` confirms `CAPYINN_DISABLE_CEO_TELEGRAM` force-disables workflows even when agent runtime is enabled.
+- `gateway` confirms `gateway::start_gateway` refuses production startup when effective gateway runtime is disabled.
 - `gateway::server` confirms `/observer/events` stays inside the protected gateway router.
 - `outbox` confirms `start_outbox_dispatcher(pool, Vec::new())` returns an inactive handle and does not spawn a loop.
+- `lib.rs` confirms the runtime-profile subscriber helper returns zero subscribers with all flags absent.
+- `lib.rs` confirms `CAPYINN_EXPERIMENTAL_PERIPHERAL_RUNTIME=true` by itself still returns zero subscribers.
 - `lib.rs` confirms runtime status reports disabled agent and gateway gates by default.
 
 Frontend and guardrail tests:
@@ -189,6 +216,9 @@ Before committing implementation changes, run GitNexus change detection and conf
 - Digest and Telegram workflows require `CAPYINN_EXPERIMENTAL_AGENT_RUNTIME=true` or `CAPYINN_EXPERIMENTAL_RUNTIME=true`.
 - Gateway and observer exposure require `CAPYINN_EXPERIMENTAL_GATEWAY_RUNTIME=true` or `CAPYINN_EXPERIMENTAL_RUNTIME=true`.
 - `CAPYINN_EXPERIMENTAL_PERIPHERAL_RUNTIME` is not used as a universal plug for #143.
+- `CAPYINN_EXPERIMENTAL_PERIPHERAL_RUNTIME=true` by itself does not start gateway, observer, agent, digest, Telegram, or outbox subscribers.
+- `gateway::start_gateway` refuses production startup when the effective gateway runtime gate is disabled.
 - `CAPYINN_DISABLE_CEO_TELEGRAM` and `CAPYINN_DISABLE_GATEWAY` remain force-disable overrides.
 - Outbox dispatcher with no subscribers is explicitly inactive and safe in the normal profile.
+- Outbox production subscribers are selected only by explicit agent or gateway runtime gates; #143 registers none.
 - Core PMS tests pass with experimental runtime flags absent.
