@@ -57,11 +57,11 @@ The main runner should continue to read the current schema version once and eval
 
 ```rust
 if current < 1 {
-    migrations::core::migrate_v1_base_schema(pool).await?;
+    migrations::migrate_v1_base_schema(pool).await?;
 }
 
 if current < 2 {
-    migrations::core::migrate_v2_foundation_rbac(pool).await?;
+    migrations::migrate_v2_foundation_rbac(pool).await?;
 }
 ```
 
@@ -150,6 +150,8 @@ gitnexus_detect_changes
 ```
 
 The expected affected scope should be limited to `db.rs`, the new migration module files, and migration execution flows.
+
+Before editing implementation symbols, run GitNexus impact analysis for each edited function or helper. At minimum, run impact analysis for `run_migrations`, `set_schema_version`, and `execute_compat_alter` if those symbols are modified or their visibility changes. `run_migrations` is already known to be CRITICAL risk; implementation should report that blast radius before editing and continue only with the approved mechanical extraction scope.
 
 ## Review Guardrails
 
