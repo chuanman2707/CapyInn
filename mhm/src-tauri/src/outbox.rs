@@ -967,6 +967,16 @@ mod tests {
         assert!(!handle.is_active());
     }
 
+    #[tokio::test]
+    async fn start_dispatcher_with_empty_subscribers_is_inactive() {
+        let pool = test_pool().await;
+
+        let handle = start_outbox_dispatcher(pool, Vec::new());
+
+        assert!(!handle.is_active());
+        handle.shutdown();
+    }
+
     #[test]
     fn outbox_spec_builds_canonical_minimal_payload() {
         let spec = OutboxEventSpec::new(
