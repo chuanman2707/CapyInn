@@ -5,11 +5,13 @@ Issue: #146 ARCH-13 Batch 3: Move command-safety and experimental migrations in 
 Parent roadmap: #133 Core PMS Architecture Stabilization V2.1
 
 Date: 2026-05-17
-Status: User-approved design; written spec pending review
+Status: User-approved design; subagent review findings addressed
 
 ## Purpose
 
 Move the remaining inline migration bodies `V7` through `V19` out of `mhm/src-tauri/src/db.rs` without changing database behavior.
+
+Although issue #146 is framed around command-safety, outbox, gateway, and agent-related migrations, this approved follow-up intentionally includes `V8` invoice and `V9` group-booking migrations as well. Those versions are included so the follow-up completes the migration extraction after #144/#145 and leaves `db.rs` as a runner/bootstrap module rather than leaving isolated inline migration bodies behind.
 
 This is a no-behavior-change extraction. It must make `db.rs` a migration runner and database bootstrap module instead of a migration monolith, while preserving schema semantics, migration order, compatibility behavior, command safety behavior, money migration behavior, outbox behavior, gateway runtime behavior, agent runtime behavior, and frontend behavior.
 
@@ -31,7 +33,7 @@ This is a no-behavior-change extraction. It must make `db.rs` a migration runner
 - `V11`: command terminal error replay payload
 - `V12`: operator-ready command ledger metadata
 - `V13`: origin idempotency on ledger and folio rows
-- `V14`: integer VND money foundation
+- `V14`: integer VND money foundation, including the existing command ledger legacy hash compatibility column
 - `V15`: command recovery queue and audit actions
 - `V16`: durable outbox events
 - `V17`: outbox per-aggregate open-row FIFO support
@@ -73,6 +75,7 @@ mhm/src-tauri/src/db/
   migrations.rs
   core_extensions.rs
   command_safety.rs
+  money.rs
   outbox.rs
   agent.rs
 ```
@@ -81,7 +84,8 @@ Module ownership:
 
 - `migrations.rs` keeps the existing `V1` through `V6` early PMS migrations.
 - `core_extensions.rs` owns `V7` through `V9`.
-- `command_safety.rs` owns `V10` through `V15`.
+- `command_safety.rs` owns `V10` through `V13` and `V15`.
+- `money.rs` owns the `V14` integer VND money migration special case.
 - `outbox.rs` owns `V16` and `V17`.
 - `agent.rs` owns `V18` and `V19`.
 
@@ -110,8 +114,13 @@ pub(super) async fn migrate_v10_command_idempotency(pool: &Pool<Sqlite>) -> Resu
 pub(super) async fn migrate_v11_command_terminal_error_replay(pool: &Pool<Sqlite>) -> Result<(), sqlx::Error>;
 pub(super) async fn migrate_v12_command_ledger_metadata(pool: &Pool<Sqlite>) -> Result<(), sqlx::Error>;
 pub(super) async fn migrate_v13_origin_idempotency(pool: &Pool<Sqlite>) -> Result<(), sqlx::Error>;
-pub(super) async fn migrate_v14_integer_vnd_money(pool: &Pool<Sqlite>) -> Result<(), sqlx::Error>;
 pub(super) async fn migrate_v15_command_recovery(pool: &Pool<Sqlite>) -> Result<(), sqlx::Error>;
+```
+
+`money.rs`:
+
+```rust
+pub(super) async fn migrate_v14_integer_vnd_money(pool: &Pool<Sqlite>) -> Result<(), sqlx::Error>;
 ```
 
 `outbox.rs`:
@@ -178,7 +187,7 @@ Expected coverage:
 
 - fresh database migration still reaches schema version `19`;
 - required PMS, core extension, command safety, outbox, and agent tables still exist;
-- existing database upgrade tests for `V10` through `V19` still pass;
+- fresh migration tests and existing database upgrade tests for `V10` through `V19` still pass where those tests currently exist;
 - V14 money conversion and rollback tests still pass;
 - V16 and V17 outbox schema, index, and insert contract tests still pass;
 - V18 and V19 agent and digest schema tests still pass;
@@ -201,4 +210,4 @@ Implementation should be a mechanical move:
 - do not edit command idempotency, outbox, gateway, agent, digest, frontend, or service behavior;
 - do not edit the unrelated dirty file `mhm/src/stores/useHotelStore.test.ts`.
 
-Before editing implementation symbols, run GitNexus impact analysis for each edited function or helper. At minimum, run impact analysis for `run_migrations`, `set_schema_version`, `execute_compat_alter`, and `restore_foreign_keys_after_v14_migration` if their bodies or visibility are modified. `run_migrations`, `set_schema_version`, and `execute_compat_alter` are already known CRITICAL risk; implementation should report that blast radius before editing and continue only with the approved mechanical extraction scope.
+Before editing implementation symbols, run GitNexus impact analysis for each edited function or helper. If GitNexus reports that the index is stale, run `npx gitnexus analyze` before relying on impact output. At minimum, run impact analysis for `run_migrations`, `set_schema_version`, `execute_compat_alter`, and `restore_foreign_keys_after_v14_migration` if their bodies or visibility are modified. `run_migrations`, `set_schema_version`, and `execute_compat_alter` are already known CRITICAL risk; implementation should report that blast radius before editing and continue only with the approved mechanical extraction scope.
