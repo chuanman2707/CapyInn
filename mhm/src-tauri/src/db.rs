@@ -4,11 +4,16 @@ use sqlx::{
         SqliteConnectOptions, SqliteConnection, SqliteJournalMode, SqlitePoolOptions,
         SqliteSynchronous,
     },
-    Connection, Pool, Row, Sqlite, Transaction,
+    Pool, Row, Sqlite, Transaction,
 };
 use std::{str::FromStr, time::Duration};
 
+mod agent;
+mod command_safety;
+mod core_extensions;
 mod migrations;
+mod money;
+mod outbox;
 
 use crate::app_identity;
 
@@ -229,583 +234,69 @@ pub(crate) async fn run_migrations(pool: &Pool<Sqlite>) -> Result<(), sqlx::Erro
         migrations::migrate_v6_reservation_calendar(pool).await?;
     }
 
-    // ── V7: MCP Gateway — API Key Storage ──
+    // -- V7: MCP Gateway - API Key Storage --
     if current < 7 {
-        let mut tx = pool.begin().await?;
-
-        sqlx::query(
-            "CREATE TABLE IF NOT EXISTS gateway_api_keys (
-                id TEXT PRIMARY KEY,
-                key_hash TEXT NOT NULL,
-                label TEXT DEFAULT 'default',
-                created_at TEXT NOT NULL DEFAULT (datetime('now')),
-                last_used_at TEXT
-            )",
-        )
-        .execute(&mut *tx)
-        .await?;
-
-        set_schema_version(&mut tx, 7).await?;
-        tx.commit().await?;
+        core_extensions::migrate_v7_gateway_api_keys(pool).await?;
     }
 
-    // ── V8: Invoice PDF System ──
+    // -- V8: Invoice PDF System --
     if current < 8 {
-        let mut tx = pool.begin().await?;
-
-        sqlx::query(
-            "CREATE TABLE IF NOT EXISTS invoices (
-                id                TEXT PRIMARY KEY,
-                invoice_number    TEXT NOT NULL UNIQUE,
-                booking_id        TEXT NOT NULL REFERENCES bookings(id),
-                hotel_name        TEXT NOT NULL,
-                hotel_address     TEXT NOT NULL,
-                hotel_phone       TEXT NOT NULL,
-                guest_name        TEXT NOT NULL,
-                guest_phone       TEXT,
-                room_name         TEXT NOT NULL,
-                room_type         TEXT NOT NULL,
-                check_in          TEXT NOT NULL,
-                check_out         TEXT NOT NULL,
-                nights            INTEGER NOT NULL,
-                pricing_breakdown TEXT NOT NULL,
-                subtotal          INTEGER NOT NULL,
-                deposit_amount    INTEGER NOT NULL DEFAULT 0,
-                total             INTEGER NOT NULL,
-                balance_due       INTEGER NOT NULL,
-                policy_text       TEXT,
-                notes             TEXT,
-                status            TEXT NOT NULL DEFAULT 'issued',
-                created_at        TEXT NOT NULL
-            )",
-        )
-        .execute(&mut *tx)
-        .await?;
-
-        sqlx::query("CREATE INDEX IF NOT EXISTS idx_invoices_booking ON invoices(booking_id)")
-            .execute(&mut *tx)
-            .await?;
-
-        set_schema_version(&mut tx, 8).await?;
-        tx.commit().await?;
+        core_extensions::migrate_v8_invoice_pdf_system(pool).await?;
     }
 
-    // ── V9: Group Booking System ──
+    // -- V9: Group Booking System --
     if current < 9 {
-        let mut tx = pool.begin().await?;
-
-        // booking_groups: group metadata
-        sqlx::query(
-            "CREATE TABLE IF NOT EXISTS booking_groups (
-                id                TEXT PRIMARY KEY,
-                group_name        TEXT NOT NULL,
-                master_booking_id TEXT,
-                organizer_name    TEXT NOT NULL,
-                organizer_phone   TEXT,
-                total_rooms       INTEGER NOT NULL,
-                status            TEXT NOT NULL DEFAULT 'active',
-                notes             TEXT,
-                created_by        TEXT,
-                created_at        TEXT NOT NULL
-            )",
-        )
-        .execute(&mut *tx)
-        .await?;
-
-        // group_services: per-group add-on charges
-        sqlx::query(
-            "CREATE TABLE IF NOT EXISTS group_services (
-                id          TEXT PRIMARY KEY,
-                group_id    TEXT NOT NULL REFERENCES booking_groups(id),
-                booking_id  TEXT REFERENCES bookings(id),
-                name        TEXT NOT NULL,
-                quantity    INTEGER NOT NULL DEFAULT 1,
-                unit_price  INTEGER NOT NULL,
-                total_price INTEGER NOT NULL,
-                note        TEXT,
-                created_by  TEXT,
-                created_at  TEXT NOT NULL
-            )",
-        )
-        .execute(&mut *tx)
-        .await?;
-
-        // Add group columns to bookings
-        execute_compat_alter(
-            &mut tx,
-            "ALTER TABLE bookings ADD COLUMN group_id TEXT REFERENCES booking_groups(id)",
-        )
-        .await?;
-        execute_compat_alter(
-            &mut tx,
-            "ALTER TABLE bookings ADD COLUMN is_master_room INTEGER DEFAULT 0",
-        )
-        .await?;
-
-        // Indexes
-        sqlx::query("CREATE INDEX IF NOT EXISTS idx_bookings_group ON bookings(group_id)")
-            .execute(&mut *tx)
-            .await?;
-        sqlx::query(
-            "CREATE INDEX IF NOT EXISTS idx_group_services_group ON group_services(group_id)",
-        )
-        .execute(&mut *tx)
-        .await?;
-
-        set_schema_version(&mut tx, 9).await?;
-        tx.commit().await?;
+        core_extensions::migrate_v9_group_booking_system(pool).await?;
     }
 
     // ── V10: Command Idempotency ──
     if current < 10 {
-        let mut tx = pool.begin().await?;
-
-        sqlx::query(
-            "CREATE TABLE IF NOT EXISTS command_idempotency (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                idempotency_key TEXT NOT NULL,
-                command_name TEXT NOT NULL,
-                request_hash TEXT NOT NULL,
-                intent_json TEXT NOT NULL,
-                primary_aggregate_key TEXT,
-                lock_keys_json TEXT NOT NULL,
-                status TEXT NOT NULL,
-                claim_token TEXT NOT NULL,
-                response_json TEXT,
-                error_code TEXT,
-                retryable INTEGER NOT NULL DEFAULT 0,
-                lease_expires_at TEXT,
-                created_at TEXT NOT NULL,
-                updated_at TEXT NOT NULL,
-                completed_at TEXT,
-                last_attempt_at TEXT,
-                UNIQUE(command_name, idempotency_key)
-            )",
-        )
-        .execute(&mut *tx)
-        .await?;
-
-        sqlx::query(
-            "CREATE INDEX IF NOT EXISTS command_idempotency_lease_idx
-             ON command_idempotency(lease_expires_at)
-             WHERE status = 'in_progress'",
-        )
-        .execute(&mut *tx)
-        .await?;
-
-        sqlx::query(
-            "CREATE INDEX IF NOT EXISTS command_idempotency_completed_idx
-             ON command_idempotency(completed_at)
-             WHERE status IN ('completed', 'failed_terminal')",
-        )
-        .execute(&mut *tx)
-        .await?;
-
-        set_schema_version(&mut tx, 10).await?;
-        tx.commit().await?;
+        command_safety::migrate_v10_command_idempotency(pool).await?;
     }
 
     // ── V11: Command terminal error replay payload ──
     if current < 11 {
-        let mut tx = pool.begin().await?;
-
-        execute_compat_alter(
-            &mut tx,
-            "ALTER TABLE command_idempotency ADD COLUMN error_json TEXT",
-        )
-        .await?;
-
-        set_schema_version(&mut tx, 11).await?;
-        tx.commit().await?;
+        command_safety::migrate_v11_command_terminal_error_replay(pool).await?;
     }
 
     // ── V12: Operator-ready command ledger metadata ──
     if current < 12 {
-        let mut tx = pool.begin().await?;
-
-        for alter in [
-            "ALTER TABLE command_idempotency ADD COLUMN request_id TEXT",
-            "ALTER TABLE command_idempotency ADD COLUMN actor_type TEXT NOT NULL DEFAULT 'system'",
-            "ALTER TABLE command_idempotency ADD COLUMN actor_id TEXT",
-            "ALTER TABLE command_idempotency ADD COLUMN client_id TEXT",
-            "ALTER TABLE command_idempotency ADD COLUMN session_id TEXT",
-            "ALTER TABLE command_idempotency ADD COLUMN channel_id TEXT",
-            "ALTER TABLE command_idempotency ADD COLUMN issued_at TEXT",
-            "ALTER TABLE command_idempotency ADD COLUMN summary_json TEXT NOT NULL DEFAULT '{}'",
-            "ALTER TABLE command_idempotency ADD COLUMN result_summary_json TEXT",
-            "ALTER TABLE command_idempotency ADD COLUMN error_summary_json TEXT",
-        ] {
-            execute_compat_alter(&mut tx, alter).await?;
-        }
-
-        sqlx::query(
-            "CREATE INDEX IF NOT EXISTS command_idempotency_attention_status_idx
-             ON command_idempotency(status, updated_at)
-             WHERE status IN ('failed_retryable', 'failed_terminal')",
-        )
-        .execute(&mut *tx)
-        .await?;
-
-        sqlx::query(
-            "CREATE INDEX IF NOT EXISTS command_idempotency_primary_aggregate_idx
-             ON command_idempotency(primary_aggregate_key, updated_at)
-             WHERE primary_aggregate_key IS NOT NULL",
-        )
-        .execute(&mut *tx)
-        .await?;
-
-        set_schema_version(&mut tx, 12).await?;
-        tx.commit().await?;
+        command_safety::migrate_v12_command_ledger_metadata(pool).await?;
     }
 
     // ── V13: Origin idempotency on ledger and folio rows ──
     if current < 13 {
-        let mut tx = pool.begin().await?;
-
-        for alter in [
-            "ALTER TABLE transactions ADD COLUMN origin_idempotency_key TEXT",
-            "ALTER TABLE transactions ADD COLUMN origin_transaction_ordinal INTEGER NOT NULL DEFAULT 0",
-            "ALTER TABLE folio_lines ADD COLUMN origin_idempotency_key TEXT",
-            "ALTER TABLE folio_lines ADD COLUMN origin_line_ordinal INTEGER NOT NULL DEFAULT 0",
-        ] {
-            execute_compat_alter(&mut tx, alter).await?;
-        }
-
-        sqlx::query(
-            "CREATE UNIQUE INDEX IF NOT EXISTS transactions_origin_idem_uq
-             ON transactions (booking_id, origin_idempotency_key, origin_transaction_ordinal)
-             WHERE origin_idempotency_key IS NOT NULL AND origin_idempotency_key != ''",
-        )
-        .execute(&mut *tx)
-        .await?;
-
-        sqlx::query(
-            "CREATE UNIQUE INDEX IF NOT EXISTS folio_lines_origin_idem_uq
-             ON folio_lines (booking_id, origin_idempotency_key, origin_line_ordinal)
-             WHERE origin_idempotency_key IS NOT NULL AND origin_idempotency_key != ''",
-        )
-        .execute(&mut *tx)
-        .await?;
-
-        sqlx::query(
-            "CREATE UNIQUE INDEX IF NOT EXISTS transactions_origin_command_uq
-             ON transactions (origin_idempotency_key, origin_transaction_ordinal)
-             WHERE origin_idempotency_key IS NOT NULL AND origin_idempotency_key != ''",
-        )
-        .execute(&mut *tx)
-        .await?;
-
-        sqlx::query(
-            "CREATE UNIQUE INDEX IF NOT EXISTS folio_lines_origin_command_uq
-             ON folio_lines (origin_idempotency_key, origin_line_ordinal)
-             WHERE origin_idempotency_key IS NOT NULL AND origin_idempotency_key != ''",
-        )
-        .execute(&mut *tx)
-        .await?;
-
-        set_schema_version(&mut tx, 13).await?;
-        tx.commit().await?;
+        command_safety::migrate_v13_origin_idempotency(pool).await?;
     }
 
     // ── V14: Integer VND money foundation ──
     if current < 14 {
-        let mut conn = pool.acquire().await?;
-        sqlx::query("PRAGMA foreign_keys=OFF")
-            .execute(&mut *conn)
-            .await?;
-
-        let migration_result = (*conn)
-            .transaction(|tx| {
-                Box::pin(async move {
-                    execute_compat_alter(
-                        tx,
-                        "ALTER TABLE command_idempotency ADD COLUMN legacy_request_hash TEXT",
-                    )
-                    .await?;
-                    crate::money_migration::migrate_integer_vnd_money(tx).await?;
-                    set_schema_version(tx, 14).await?;
-                    Ok::<(), sqlx::Error>(())
-                })
-            })
-            .await;
-
-        restore_foreign_keys_after_v14_migration(&mut conn, migration_result).await?;
+        money::migrate_v14_integer_vnd_money(pool).await?;
     }
 
     // ── V15: Command recovery queue and audit actions ──
     if current < 15 {
-        let mut tx = pool.begin().await?;
-
-        for alter in [
-            "ALTER TABLE command_idempotency ADD COLUMN recovery_dismissed_at TEXT",
-            "ALTER TABLE command_idempotency ADD COLUMN recovery_dismissed_by TEXT",
-        ] {
-            execute_compat_alter(&mut tx, alter).await?;
-        }
-
-        sqlx::query(
-            "CREATE TABLE IF NOT EXISTS command_recovery_actions (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                command_idempotency_id INTEGER NOT NULL,
-                action TEXT NOT NULL,
-                operator_id TEXT,
-                operator_role TEXT,
-                reason TEXT,
-                confirmed INTEGER NOT NULL DEFAULT 0,
-                created_at TEXT NOT NULL,
-                FOREIGN KEY(command_idempotency_id) REFERENCES command_idempotency(id)
-            )",
-        )
-        .execute(&mut *tx)
-        .await?;
-
-        sqlx::query(
-            "CREATE INDEX IF NOT EXISTS command_recovery_actions_command_idx
-             ON command_recovery_actions(command_idempotency_id, created_at)",
-        )
-        .execute(&mut *tx)
-        .await?;
-
-        sqlx::query(
-            "CREATE INDEX IF NOT EXISTS command_idempotency_recovery_queue_idx
-             ON command_idempotency(status, lease_expires_at, updated_at)
-             WHERE status IN ('in_progress', 'failed_retryable')
-               AND recovery_dismissed_at IS NULL",
-        )
-        .execute(&mut *tx)
-        .await?;
-
-        set_schema_version(&mut tx, 15).await?;
-        tx.commit().await?;
+        command_safety::migrate_v15_command_recovery(pool).await?;
     }
 
     // ── V16: Durable outbox events ──
     if current < 16 {
-        let mut tx = pool.begin().await?;
-
-        sqlx::query(
-            "CREATE TABLE IF NOT EXISTS outbox_events (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                event_type TEXT NOT NULL,
-                aggregate_key TEXT NOT NULL,
-                payload_json TEXT NOT NULL,
-                origin_request_id TEXT NOT NULL,
-                origin_idempotency_key TEXT NOT NULL,
-                origin_command_name TEXT NOT NULL,
-                origin_request_hash TEXT NOT NULL,
-                status TEXT NOT NULL,
-                worker_token TEXT,
-                attempts INTEGER NOT NULL DEFAULT 0,
-                next_attempt_at TEXT,
-                processing_started_at TEXT,
-                processing_expires_at TEXT,
-                last_error TEXT,
-                created_at TEXT NOT NULL,
-                dispatched_at TEXT
-            )",
-        )
-        .execute(&mut *tx)
-        .await?;
-
-        sqlx::query(
-            "CREATE INDEX IF NOT EXISTS outbox_events_pending_idx
-             ON outbox_events(next_attempt_at, aggregate_key, id)
-             WHERE status = 'pending'",
-        )
-        .execute(&mut *tx)
-        .await?;
-
-        sqlx::query(
-            "CREATE INDEX IF NOT EXISTS outbox_events_processing_idx
-             ON outbox_events(processing_expires_at)
-             WHERE status = 'processing'",
-        )
-        .execute(&mut *tx)
-        .await?;
-
-        sqlx::query(
-            "CREATE UNIQUE INDEX IF NOT EXISTS outbox_events_origin_command_uq
-             ON outbox_events(origin_command_name, origin_idempotency_key)",
-        )
-        .execute(&mut *tx)
-        .await?;
-
-        set_schema_version(&mut tx, 16).await?;
-        tx.commit().await?;
+        outbox::migrate_v16_durable_outbox_events(pool).await?;
     }
 
     // -- V17: Outbox per-aggregate open-row FIFO support --
     if current < 17 {
-        let mut tx = pool.begin().await?;
-
-        sqlx::query(
-            "CREATE INDEX IF NOT EXISTS outbox_events_aggregate_open_idx
-             ON outbox_events(aggregate_key, id)
-             WHERE status IN ('pending', 'processing')",
-        )
-        .execute(&mut *tx)
-        .await?;
-
-        set_schema_version(&mut tx, 17).await?;
-        tx.commit().await?;
+        outbox::migrate_v17_outbox_fifo_support(pool).await?;
     }
 
     // -- V18: Agent safety session, audit, and memory schema --
     if current < 18 {
-        let mut tx = pool.begin().await?;
-
-        sqlx::query(
-            "CREATE TABLE IF NOT EXISTS agent_sessions (
-                id TEXT PRIMARY KEY,
-                role TEXT NOT NULL,
-                channel TEXT NOT NULL,
-                channel_actor_id TEXT,
-                status TEXT NOT NULL,
-                uses_memory INTEGER NOT NULL DEFAULT 0,
-                retention_policy TEXT NOT NULL,
-                metadata_json TEXT NOT NULL DEFAULT '{}',
-                started_at TEXT NOT NULL,
-                last_seen_at TEXT,
-                ended_at TEXT
-            )",
-        )
-        .execute(&mut *tx)
-        .await?;
-
-        sqlx::query(
-            "CREATE INDEX IF NOT EXISTS agent_sessions_actor_idx
-             ON agent_sessions(role, channel, channel_actor_id, last_seen_at)",
-        )
-        .execute(&mut *tx)
-        .await?;
-
-        sqlx::query(
-            "CREATE INDEX IF NOT EXISTS agent_sessions_status_idx
-             ON agent_sessions(status, started_at)",
-        )
-        .execute(&mut *tx)
-        .await?;
-
-        sqlx::query(
-            "CREATE TABLE IF NOT EXISTS agent_audit_events (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                session_id TEXT REFERENCES agent_sessions(id),
-                event_type TEXT NOT NULL,
-                actor_id TEXT,
-                role TEXT,
-                channel TEXT,
-                tool_name TEXT,
-                provider TEXT,
-                policy_outcome TEXT NOT NULL,
-                mutation_risk TEXT,
-                data_sensitivity TEXT,
-                summary_json TEXT NOT NULL DEFAULT '{}',
-                created_at TEXT NOT NULL
-            )",
-        )
-        .execute(&mut *tx)
-        .await?;
-
-        sqlx::query(
-            "CREATE INDEX IF NOT EXISTS agent_audit_events_type_idx
-             ON agent_audit_events(event_type, created_at)",
-        )
-        .execute(&mut *tx)
-        .await?;
-
-        sqlx::query(
-            "CREATE INDEX IF NOT EXISTS agent_audit_events_session_idx
-             ON agent_audit_events(session_id, created_at)",
-        )
-        .execute(&mut *tx)
-        .await?;
-
-        sqlx::query(
-            "CREATE INDEX IF NOT EXISTS agent_audit_events_role_channel_idx
-             ON agent_audit_events(role, channel, created_at)",
-        )
-        .execute(&mut *tx)
-        .await?;
-
-        sqlx::query(
-            "CREATE TABLE IF NOT EXISTS agent_memory_items (
-                id TEXT PRIMARY KEY,
-                role TEXT NOT NULL,
-                scope TEXT NOT NULL,
-                key TEXT NOT NULL,
-                value_json TEXT NOT NULL,
-                created_at TEXT NOT NULL,
-                updated_at TEXT NOT NULL,
-                UNIQUE(role, scope, key)
-            )",
-        )
-        .execute(&mut *tx)
-        .await?;
-
-        set_schema_version(&mut tx, 18).await?;
-        tx.commit().await?;
+        agent::migrate_v18_agent_safety_tables(pool).await?;
     }
 
     // -- V19: CEO hourly digest run state --
     if current < 19 {
-        let mut tx = pool.begin().await?;
-
-        sqlx::query(
-            "CREATE TABLE IF NOT EXISTS agent_digest_runs (
-                id TEXT PRIMARY KEY,
-                role TEXT NOT NULL,
-                channel TEXT NOT NULL,
-                channel_actor_id TEXT,
-                delivery_chat_id TEXT,
-                due_at TEXT NOT NULL,
-                status TEXT NOT NULL,
-                attempt_count INTEGER NOT NULL DEFAULT 0,
-                max_attempts INTEGER NOT NULL,
-                next_retry_at TEXT,
-                claimed_at TEXT,
-                claim_token TEXT,
-                delivered_at TEXT,
-                last_error_code TEXT,
-                last_error_summary_json TEXT NOT NULL DEFAULT '{}',
-                delivery_summary_json TEXT NOT NULL DEFAULT '{}',
-                created_at TEXT NOT NULL,
-                updated_at TEXT NOT NULL
-            )",
-        )
-        .execute(&mut *tx)
-        .await?;
-
-        sqlx::query(
-            "CREATE INDEX IF NOT EXISTS agent_digest_runs_status_due_idx
-             ON agent_digest_runs(status, due_at)",
-        )
-        .execute(&mut *tx)
-        .await?;
-
-        sqlx::query(
-            "CREATE INDEX IF NOT EXISTS agent_digest_runs_retry_idx
-             ON agent_digest_runs(status, next_retry_at)
-             WHERE status = 'retry_waiting'",
-        )
-        .execute(&mut *tx)
-        .await?;
-
-        sqlx::query(
-            "CREATE INDEX IF NOT EXISTS agent_digest_runs_delivered_idx
-             ON agent_digest_runs(delivered_at)",
-        )
-        .execute(&mut *tx)
-        .await?;
-
-        sqlx::query(
-            "CREATE INDEX IF NOT EXISTS agent_digest_runs_actor_due_idx
-             ON agent_digest_runs(channel_actor_id, delivery_chat_id, due_at)",
-        )
-        .execute(&mut *tx)
-        .await?;
-
-        set_schema_version(&mut tx, 19).await?;
-        tx.commit().await?;
+        agent::migrate_v19_agent_digest_runs(pool).await?;
     }
     Ok(())
 }
@@ -1144,11 +635,7 @@ mod tests {
             "agent_digest_runs_delivered_idx",
             "agent_digest_runs_actor_due_idx",
         ] {
-            assert_eq!(
-                sqlite_index_count(pool, index).await,
-                1,
-                "{index} exists"
-            );
+            assert_eq!(sqlite_index_count(pool, index).await, 1, "{index} exists");
         }
     }
 
@@ -1356,12 +843,7 @@ mod tests {
 
         assert_table_group_exists(&pool, "PMS core", PMS_CORE_TABLES).await;
         assert_table_group_exists(&pool, "command safety", COMMAND_SAFETY_TABLES).await;
-        assert_table_group_exists(
-            &pool,
-            "experimental gateway",
-            EXPERIMENTAL_GATEWAY_TABLES,
-        )
-        .await;
+        assert_table_group_exists(&pool, "experimental gateway", EXPERIMENTAL_GATEWAY_TABLES).await;
         assert_table_group_exists(&pool, "experimental agent", EXPERIMENTAL_AGENT_TABLES).await;
     }
 
