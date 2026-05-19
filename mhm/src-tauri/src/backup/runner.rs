@@ -1,6 +1,6 @@
 use crate::backup::{
-    storage::{prune_old_backups, sqlite_string_literal, sync_directory, BackupReservation},
     BackupError, BackupOutcome, BackupReason,
+    storage::{BackupReservation, prune_old_backups, sqlite_string_literal, sync_directory},
 };
 use chrono::{NaiveDateTime, Utc};
 use std::{fs, path::Path, time::Duration};
@@ -72,9 +72,9 @@ mod tests {
     use super::*;
     use crate::backup::{
         build_backup_filename, is_managed_backup_file,
-        test_support::{backup_file_name, BackupFixture},
+        test_support::{BackupFixture, backup_file_name},
     };
-    use chrono::{Duration as ChronoDuration, NaiveDate};
+    use chrono::Duration as ChronoDuration;
     use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
     use std::fs;
 
@@ -129,10 +129,11 @@ mod tests {
         let fixture = BackupFixture::new().await;
         fixture.insert_demo_row("guest-001").await;
 
-        let timestamp = NaiveDate::from_ymd_opt(2026, 4, 18)
+        let timestamp = retention_timestamp_now();
+        let expected_stem = build_backup_filename(BackupReason::Manual, timestamp)
+            .strip_suffix(".db")
             .unwrap()
-            .and_hms_opt(23, 15, 0)
-            .unwrap();
+            .to_owned();
 
         let first = run_backup_once_at(
             &fixture.db_path,
@@ -171,8 +172,8 @@ mod tests {
             backup_file_name(&first.path),
             backup_file_name(&second.path)
         );
-        assert!(backup_file_name(&first.path).starts_with("capyinn_backup_manual_20260418_231500"));
-        assert!(backup_file_name(&second.path).starts_with("capyinn_backup_manual_20260418_231500"));
+        assert!(backup_file_name(&first.path).starts_with(&expected_stem));
+        assert!(backup_file_name(&second.path).starts_with(&expected_stem));
     }
 
     #[tokio::test]
