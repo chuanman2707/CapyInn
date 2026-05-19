@@ -1,3 +1,4 @@
+mod lock_keys;
 mod types;
 
 pub use types::{
@@ -209,16 +210,7 @@ impl WriteCommandExecutor {
         I: IntoIterator<Item = S>,
         S: Into<String>,
     {
-        let mut lock_keys = lock_keys
-            .into_iter()
-            .map(Into::into)
-            .collect::<Vec<String>>();
-        lock_keys.sort();
-        lock_keys.dedup();
-        if lock_keys.is_empty() {
-            return Err(system_error("Resolved idempotency lock keys are required"));
-        }
-        let lock_keys_json = stable_json_string(&serde_json::json!(lock_keys))?;
+        let lock_keys_json = lock_keys::required_lock_keys_json(lock_keys)?;
         let now = Utc::now().to_rfc3339();
         let result = sqlx::query(
             "UPDATE command_idempotency
@@ -843,11 +835,8 @@ fn stable_request_hash_from_json(intent_json: &str) -> CommandResult<String> {
 fn prepare_write_command_request(
     request: WriteCommandRequest,
 ) -> CommandResult<PreparedWriteCommandRequest> {
-    let mut lock_keys = (request.lock_key_deriver)(&request.hash_payload)?;
-    lock_keys.sort();
-    lock_keys.dedup();
-
-    let lock_keys_json = stable_json_string(&serde_json::json!(lock_keys))?;
+    let lock_keys_json =
+        lock_keys::optional_lock_keys_json((request.lock_key_deriver)(&request.hash_payload)?)?;
     let hash_payload_json = stable_json_string(&request.hash_payload)?;
     let request_hash = stable_request_hash_from_json(&hash_payload_json)?;
     let intent_json = stable_json_string(&request.ledger_intent.to_value()?)?;
@@ -1556,6 +1545,16 @@ mod tests {
         Ok(vec!["booking:999".to_string()])
     }
 
+    fn unsorted_duplicate_test_lock_keys(
+        _intent: &serde_json::Value,
+    ) -> CommandResult<Vec<String>> {
+        Ok(vec![
+            "room:R1".to_string(),
+            "booking:B1".to_string(),
+            "room:R1".to_string(),
+        ])
+    }
+
     #[tokio::test]
     async fn write_command_executor_persists_operator_safe_metadata() {
         let pool = test_pool().await;
@@ -2082,6 +2081,7 @@ mod tests {
             .expect_err("empty resolved lock keys should fail after claim");
 
         assert_eq!(error.code, codes::SYSTEM_INTERNAL_ERROR);
+        assert_eq!(error.message, "Resolved idempotency lock keys are required");
 
         let status: String = sqlx::query_scalar(
             "SELECT status FROM command_idempotency
@@ -2169,6 +2169,33 @@ mod tests {
             stable_request_hash(&payload).expect("payload hashes"),
             prepared.request_hash
         );
+    }
+
+    #[test]
+    fn prepare_write_command_request_serializes_initial_lock_keys_sorted_and_deduplicated() {
+        let request = WriteCommandRequest::new_low_risk(
+            serde_json::json!({ "schema": "test.lock_keys.v1" }),
+            "Initial lock keys",
+        )
+        .expect("request builds")
+        .with_lock_key_deriver(unsorted_duplicate_test_lock_keys);
+
+        let prepared = prepare_write_command_request(request).expect("request prepares");
+
+        assert_eq!(prepared.lock_keys_json, "[\"booking:B1\",\"room:R1\"]");
+    }
+
+    #[test]
+    fn prepare_write_command_request_serializes_empty_initial_lock_keys_as_empty_array() {
+        let request = WriteCommandRequest::new_low_risk(
+            serde_json::json!({ "schema": "test.empty_lock_keys.v1" }),
+            "Empty initial lock keys",
+        )
+        .expect("request builds");
+
+        let prepared = prepare_write_command_request(request).expect("request prepares");
+
+        assert_eq!(prepared.lock_keys_json, "[]");
     }
 
     #[tokio::test]
