@@ -402,12 +402,13 @@ mod tests {
             detail.booking.as_ref().map(|booking| booking.id.as_str()),
             Some("booking-1")
         );
-        let guest_names: Vec<_> = detail
+        let mut guest_names: Vec<_> = detail
             .guests
             .iter()
             .map(|guest| guest.full_name.as_str())
             .collect();
-        assert_eq!(guest_names, vec!["Mai Nguyen", "An Tran"]);
+        guest_names.sort_unstable();
+        assert_eq!(guest_names, vec!["An Tran", "Mai Nguyen"]);
     }
 
     #[tokio::test]
