@@ -247,6 +247,7 @@ CapyInn/
 
 - [PRD](PRD.md)
 - [Contributing guide](CONTRIBUTING.md)
+- [Release checklist](docs/release-checklist.md)
 - [Security policy](SECURITY.md)
 - [Changelog](CHANGELOG.md)
 
