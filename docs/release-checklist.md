@@ -6,7 +6,7 @@ Use this checklist before pushing a `vX.Y.Z` release tag. The tag release workfl
 
 - `mhm/package.json`, `mhm/src-tauri/tauri.conf.json`, and `mhm/src-tauri/Cargo.toml` use the same version.
 - The planned tag is `vX.Y.Z`, matching that shared version exactly.
-- The release branch includes the intended changelog, docs, test, and release-signing updates.
+- The release branch includes the intended changelog, docs, test, and release-signing updates when signing or release mechanics changed.
 - No unrelated local changes are staged with the release prep.
 
 ## 2. Baseline validation
