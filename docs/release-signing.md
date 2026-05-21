@@ -7,7 +7,7 @@ Before pushing a release tag, run the [release checklist](release-checklist.md).
 The workflow now runs in four stages:
 
 1. `verify-version` checks that the tag matches the version in `mhm/package.json`, `mhm/src-tauri/tauri.conf.json`, and `mhm/src-tauri/Cargo.toml`.
-2. `verify-app` runs the release-build gate commands (`npm test`, `npm run build`, and `cargo check --manifest-path src-tauri/Cargo.toml`) before any release artifacts are built.
+2. `verify-app` runs the release-build gate commands (from `mhm/`: `npm test`, `npm run build`; from repo root: `cargo check --manifest-path mhm/src-tauri/Cargo.toml`) before any release artifacts are built.
    Human release preflight (including `npm run verify:full`) belongs in [release-checklist.md](release-checklist.md).
 3. `build-linux-x86_64`, `build-windows`, and `build-macos-aarch64` each build one production platform and emit per-platform metadata with the asset name and embedded updater signature.
 4. `publish-release` downloads every build artifact, generates the canonical `latest.json`, verifies the full release payload exists, and only then creates the GitHub Release.
@@ -119,7 +119,7 @@ Local `tauri dev` and ad-hoc `tauri build` runs intentionally keep the updater p
 ## What the workflow does
 
 1. Verifies version alignment across package, Tauri, Cargo, and tag metadata.
-2. Runs the release-build gate (`npm test`, `npm run build`, and `cargo check --manifest-path src-tauri/Cargo.toml`) before any release build starts.
+2. Runs the release-build gate from the expected workflow paths (`mhm/`: `npm test`, `npm run build`; repo root: `cargo check --manifest-path mhm/src-tauri/Cargo.toml`) before any release build starts.
 3. Builds Linux, Windows, and macOS Apple Silicon artifacts in isolated jobs.
 4. Collects per-platform metadata so the final publish job can assemble immutable manifest URLs.
 5. Generates `latest.json` with `mhm/scripts/generate-latest-json.mjs`.
