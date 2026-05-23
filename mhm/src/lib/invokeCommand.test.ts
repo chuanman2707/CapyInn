@@ -11,12 +11,21 @@ vi.mock("./crashReporting/commandFailure", () => ({
   captureCommandFailure,
 }));
 
-import { invokeWriteCommand } from "./invokeCommand";
+import { invokeCommand, invokeWriteCommand } from "./invokeCommand";
 
 describe("invokeWriteCommand", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     invoke.mockResolvedValue("ok");
+  });
+
+  it("passes through the original args object when no correlation id is provided", async () => {
+    const args = { req: { pin: "0000" } };
+
+    await invokeCommand("login", args);
+
+    expect(invoke).toHaveBeenCalledWith("login", args);
+    expect(invoke.mock.calls[0]?.[1]).toBe(args);
   });
 
   it("adds a command-scoped idempotency key", async () => {
