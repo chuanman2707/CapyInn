@@ -414,3 +414,30 @@ pub async fn seed_expense(
 
     Ok(())
 }
+
+pub async fn seed_rooms(pool: &Pool<Sqlite>, room_ids: &[&str]) -> BookingResult<()> {
+    for room_id in room_ids {
+        seed_room(pool, room_id).await?;
+    }
+    Ok(())
+}
+
+pub async fn seed_room_with_price(
+    pool: &Pool<Sqlite>,
+    room_id: &str,
+    daily_rate: MoneyVnd,
+) -> BookingResult<()> {
+    seed_room(pool, room_id).await?;
+    seed_pricing_rule(pool, "standard", daily_rate).await?;
+    Ok(())
+}
+
+pub async fn seed_rooms_with_price(
+    pool: &Pool<Sqlite>,
+    room_ids: &[&str],
+    daily_rate: MoneyVnd,
+) -> BookingResult<()> {
+    seed_rooms(pool, room_ids).await?;
+    seed_pricing_rule(pool, "standard", daily_rate).await?;
+    Ok(())
+}

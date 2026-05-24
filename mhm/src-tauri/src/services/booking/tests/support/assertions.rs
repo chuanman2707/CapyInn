@@ -59,3 +59,83 @@ pub async fn assert_single_outbox_event(
         .is_some());
     payload
 }
+
+pub fn assert_replayed_pair<T>(
+    first: &crate::command_idempotency::IdempotentCommandResult<T>,
+    second: &crate::command_idempotency::IdempotentCommandResult<T>,
+) where
+    T: PartialEq + std::fmt::Debug,
+{
+    assert!(!first.replayed);
+    assert!(second.replayed);
+    assert_eq!(first.response, second.response);
+}
+
+pub async fn assert_room_status(pool: &Pool<Sqlite>, room_id: &str, expected_status: &str) {
+    let status: String = sqlx::query_scalar("SELECT status FROM rooms WHERE id = ?")
+        .bind(room_id)
+        .fetch_one(pool)
+        .await
+        .expect("read room status");
+    assert_eq!(status, expected_status);
+}
+
+pub async fn assert_booking_status(pool: &Pool<Sqlite>, booking_id: &str, expected_status: &str) {
+    let status: String = sqlx::query_scalar("SELECT status FROM bookings WHERE id = ?")
+        .bind(booking_id)
+        .fetch_one(pool)
+        .await
+        .expect("read booking status");
+    assert_eq!(status, expected_status);
+}
+
+pub async fn assert_calendar_rows(
+    pool: &Pool<Sqlite>,
+    booking_id: &str,
+    status: &str,
+    expected_count: i64,
+) {
+    let count: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM room_calendar WHERE booking_id = ? AND status = ?",
+    )
+    .bind(booking_id)
+    .bind(status)
+    .fetch_one(pool)
+    .await
+    .expect("count calendar rows");
+    assert_eq!(count, expected_count);
+}
+
+pub async fn assert_housekeeping_rows(pool: &Pool<Sqlite>, room_id: &str, expected_count: i64) {
+    let count: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM housekeeping WHERE room_id = ? AND status = 'needs_cleaning'",
+    )
+    .bind(room_id)
+    .fetch_one(pool)
+    .await
+    .expect("count housekeeping rows");
+    assert_eq!(count, expected_count);
+}
+
+pub async fn transaction_sum(
+    pool: &Pool<Sqlite>,
+    booking_id: &str,
+    txn_type: &str,
+    note: Option<&str>,
+) -> i64 {
+    let sql = match note {
+        Some(_) => {
+            "SELECT COALESCE(SUM(amount), 0) FROM transactions WHERE booking_id = ? AND type = ? AND note = ?"
+        }
+        None => {
+            "SELECT COALESCE(SUM(amount), 0) FROM transactions WHERE booking_id = ? AND type = ?"
+        }
+    };
+    let mut query = sqlx::query_scalar::<_, i64>(sql)
+        .bind(booking_id)
+        .bind(txn_type);
+    if let Some(note) = note {
+        query = query.bind(note);
+    }
+    query.fetch_one(pool).await.expect("sum transactions")
+}
