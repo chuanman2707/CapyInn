@@ -915,7 +915,11 @@ async fn group_checkin_idempotent_retry_does_not_duplicate_groups_bookings_or_pa
     seed_rooms_with_price(&pool, &["GI620", "GI621"], 250_000)
         .await
         .unwrap();
-    let ctx = cmd("group_checkin", "idem-group-checkin-no-dup");
+    let ctx = cmd_with_request(
+        "group_checkin",
+        "req-group-idem-no-dup",
+        "idem-group-checkin-no-dup",
+    );
 
     let first = group_lifecycle::group_checkin_idempotent(
         &pool,
@@ -1230,7 +1234,11 @@ async fn group_checkin_idempotent_same_key_changed_guest_name_conflicts() {
 async fn add_group_service_idempotent_retry_replays_without_duplicate_row() {
     let pool = test_pool().await;
     seed_booking_group(&pool, "G-SVC-IDEM").await;
-    let ctx = cmd("add_group_service", "idem-group-svc-1");
+    let ctx = cmd_with_request(
+        "add_group_service",
+        "req-group-svc-idem",
+        "idem-group-svc-1",
+    );
     let first_req = crate::models::AddGroupServiceRequest {
         group_id: "G-SVC-IDEM".to_string(),
         booking_id: None,
