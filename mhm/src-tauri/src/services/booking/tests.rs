@@ -2557,7 +2557,9 @@ async fn create_reservation_idempotent_retry_does_not_duplicate_deposit() {
     .await
     .expect("retry replays");
 
-    assert_replayed_pair(&first, &second);
+    assert_eq!(first.response["id"], second.response["id"]);
+    assert!(!first.replayed);
+    assert!(second.replayed);
     assert_single_outbox_event(&pool, &ctx, "booking.reservation_created").await;
 
     let count: i64 =
