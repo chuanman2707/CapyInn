@@ -204,6 +204,16 @@ pub async fn seed_active_booking(
     Ok(())
 }
 
+pub async fn seed_active_booking_with_room(
+    pool: &Pool<Sqlite>,
+    booking_id: &str,
+    room_id: &str,
+) -> BookingResult<()> {
+    seed_room(pool, room_id).await?;
+    seed_active_booking(pool, booking_id, room_id).await?;
+    Ok(())
+}
+
 #[allow(clippy::too_many_arguments)]
 pub async fn seed_active_booking_with_terms(
     pool: &Pool<Sqlite>,

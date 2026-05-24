@@ -126,6 +126,32 @@ pub async fn assert_housekeeping_rows(
     assert_eq!(count, expected_count);
 }
 
+pub async fn assert_transaction_origin(
+    pool: &Pool<Sqlite>,
+    origin_key: &str,
+    expected_ordinal: i64,
+    expected_count: i64,
+) {
+    let count: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM transactions
+         WHERE origin_idempotency_key = ? AND origin_transaction_ordinal = ?",
+    )
+    .bind(origin_key)
+    .bind(expected_ordinal)
+    .fetch_one(pool)
+    .await
+    .expect("count transactions by origin");
+    assert_eq!(count, expected_count);
+}
+
+pub async fn transaction_count_for_booking(pool: &Pool<Sqlite>, booking_id: &str) -> i64 {
+    sqlx::query_scalar("SELECT COUNT(*) FROM transactions WHERE booking_id = ?")
+        .bind(booking_id)
+        .fetch_one(pool)
+        .await
+        .expect("count booking transactions")
+}
+
 #[allow(dead_code)]
 pub async fn transaction_sum(
     pool: &Pool<Sqlite>,

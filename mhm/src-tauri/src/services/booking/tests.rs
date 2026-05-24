@@ -1876,8 +1876,9 @@ fn group_checkout_locked_room_map_rejects_changed_room_mapping() {
 #[tokio::test]
 async fn record_payment_updates_paid_amount_cache() {
     let pool = test_pool().await;
-    seed_room(&pool, "R101").await.unwrap();
-    seed_active_booking(&pool, "B101", "R101").await.unwrap();
+    seed_active_booking_with_room(&pool, "B101", "R101")
+        .await
+        .unwrap();
 
     record_payment(&pool, "B101", 25_000, "deposit")
         .await
@@ -1904,8 +1905,7 @@ async fn record_payment_updates_paid_amount_cache() {
 #[tokio::test]
 async fn record_payment_returning_id_tx_returns_inserted_transaction_id() {
     let pool = test_pool().await;
-    seed_room(&pool, "R-PAY-ID").await.unwrap();
-    seed_active_booking(&pool, "B-PAY-ID", "R-PAY-ID")
+    seed_active_booking_with_room(&pool, "B-PAY-ID", "R-PAY-ID")
         .await
         .unwrap();
 
@@ -1949,15 +1949,10 @@ async fn record_payment_returning_id_tx_returns_inserted_transaction_id() {
 #[tokio::test]
 async fn record_payment_idempotent_retry_replays_and_does_not_double_post() {
     let pool = test_pool().await;
-    seed_room(&pool, "R-PAY-IDEM").await.unwrap();
-    seed_active_booking(&pool, "B-PAY-IDEM", "R-PAY-IDEM")
+    seed_active_booking_with_room(&pool, "B-PAY-IDEM", "R-PAY-IDEM")
         .await
         .unwrap();
-    let ctx = crate::command_idempotency::WriteCommandContext::for_internal_test(
-        "req-payment-idem",
-        "idem-payment-1",
-        "record_payment",
-    );
+    let ctx = cmd_with_request("record_payment", "req-payment-idem", "idem-payment-1");
 
     let first = record_payment_idempotent(&pool, &ctx, "B-PAY-IDEM", 125_000, "Payment retry test")
         .await
@@ -1967,18 +1962,9 @@ async fn record_payment_idempotent_retry_replays_and_does_not_double_post() {
             .await
             .unwrap();
 
-    assert!(!first.replayed);
-    assert!(second.replayed);
-    assert_eq!(first.response, second.response);
+    assert_replayed_pair(&first, &second);
 
-    let payment_count: (i64,) = sqlx::query_as(
-        "SELECT COUNT(*) FROM transactions WHERE booking_id = ? AND type = 'payment'",
-    )
-    .bind("B-PAY-IDEM")
-    .fetch_one(&pool)
-    .await
-    .unwrap();
-    assert_eq!(payment_count.0, 1);
+    assert_eq!(transaction_count_for_booking(&pool, "B-PAY-IDEM").await, 1);
 
     let paid_amount: i64 = sqlx::query_scalar("SELECT paid_amount FROM bookings WHERE id = ?")
         .bind("B-PAY-IDEM")
@@ -1996,15 +1982,10 @@ async fn record_payment_idempotent_retry_replays_and_does_not_double_post() {
 #[tokio::test]
 async fn record_payment_idempotent_same_key_different_amount_conflicts() {
     let pool = test_pool().await;
-    seed_room(&pool, "R-PAY-HASH").await.unwrap();
-    seed_active_booking(&pool, "B-PAY-HASH", "R-PAY-HASH")
+    seed_active_booking_with_room(&pool, "B-PAY-HASH", "R-PAY-HASH")
         .await
         .unwrap();
-    let ctx = crate::command_idempotency::WriteCommandContext::for_internal_test(
-        "req-payment-hash",
-        "idem-payment-hash",
-        "record_payment",
-    );
+    let ctx = cmd("record_payment", "idem-payment-hash");
 
     record_payment_idempotent(&pool, &ctx, "B-PAY-HASH", 50_000, "first")
         .await
@@ -2022,20 +2003,11 @@ async fn record_payment_idempotent_same_key_different_amount_conflicts() {
 #[tokio::test]
 async fn record_payment_idempotent_distinct_keys_sum_paid_amount() {
     let pool = test_pool().await;
-    seed_room(&pool, "R-PAY-SUM").await.unwrap();
-    seed_active_booking(&pool, "B-PAY-SUM", "R-PAY-SUM")
+    seed_active_booking_with_room(&pool, "B-PAY-SUM", "R-PAY-SUM")
         .await
         .unwrap();
-    let first_ctx = crate::command_idempotency::WriteCommandContext::for_internal_test(
-        "req-payment-sum-1",
-        "idem-payment-sum-1",
-        "record_payment",
-    );
-    let second_ctx = crate::command_idempotency::WriteCommandContext::for_internal_test(
-        "req-payment-sum-2",
-        "idem-payment-sum-2",
-        "record_payment",
-    );
+    let first_ctx = cmd("record_payment", "idem-payment-sum-1");
+    let second_ctx = cmd("record_payment", "idem-payment-sum-2");
 
     record_payment_idempotent(&pool, &first_ctx, "B-PAY-SUM", 40_000, "first")
         .await
@@ -2055,40 +2027,17 @@ async fn record_payment_idempotent_distinct_keys_sum_paid_amount() {
 #[tokio::test]
 async fn record_payment_idempotent_duplicate_in_flight_returns_conflict() {
     let pool = test_pool().await;
-    seed_room(&pool, "R-PAY-LIVE").await.unwrap();
-    seed_active_booking(&pool, "B-PAY-LIVE", "R-PAY-LIVE")
+    seed_active_booking_with_room(&pool, "B-PAY-LIVE", "R-PAY-LIVE")
         .await
         .unwrap();
-    let ctx = crate::command_idempotency::WriteCommandContext::for_internal_test(
-        "req-payment-live",
-        "idem-payment-live",
-        "record_payment",
-    );
+    let ctx = cmd("record_payment", "idem-payment-live");
     let payload = serde_json::json!({
         "schema": "payment.record.v1",
         "booking_id": "B-PAY-LIVE",
         "amount": 75_000,
         "note": "live payment",
     });
-    let now = chrono::Utc::now().to_rfc3339();
-    let lease_expires_at = (chrono::Utc::now() + chrono::Duration::seconds(30)).to_rfc3339();
-
-    sqlx::query(
-        "INSERT INTO command_idempotency (
-            idempotency_key, command_name, request_hash, intent_json, lock_keys_json,
-            status, claim_token, retryable, lease_expires_at, created_at, updated_at, last_attempt_at
-        ) VALUES (?, ?, ?, '{}', '[]', 'in_progress', 'other-claim', 0, ?, ?, ?, ?)",
-    )
-    .bind(&ctx.idempotency_key)
-    .bind(&ctx.command_name)
-    .bind(crate::command_idempotency::stable_request_hash(&payload).expect("payload hashes"))
-    .bind(&lease_expires_at)
-    .bind(&now)
-    .bind(&now)
-    .bind(&now)
-    .execute(&pool)
-    .await
-    .expect("seeds in-flight row");
+    seed_live_in_progress_command(&pool, &ctx.command_name, &ctx.idempotency_key, &payload).await;
 
     let error = record_payment_idempotent(&pool, &ctx, "B-PAY-LIVE", 75_000, "live payment")
         .await
@@ -2103,8 +2052,9 @@ async fn record_payment_idempotent_duplicate_in_flight_returns_conflict() {
 #[tokio::test]
 async fn record_payment_tx_can_compose_inside_outer_transaction() {
     let pool = test_pool().await;
-    seed_room(&pool, "R102").await.unwrap();
-    seed_active_booking(&pool, "B102", "R102").await.unwrap();
+    seed_active_booking_with_room(&pool, "B102", "R102")
+        .await
+        .unwrap();
 
     let mut tx = pool.begin().await.unwrap();
     record_payment_tx(&mut tx, "B102", 12_500, "deposit")
@@ -2171,22 +2121,7 @@ async fn record_deposit_with_origin_writes_origin_key_and_ordinal() {
         .unwrap();
     tx.commit().await.unwrap();
 
-    let row = sqlx::query(
-        "SELECT origin_idempotency_key, origin_transaction_ordinal
-         FROM transactions
-         WHERE booking_id = ? AND note = ?",
-    )
-    .bind(&booking_id)
-    .bind("origin deposit")
-    .fetch_one(&pool)
-    .await
-    .unwrap();
-
-    assert_eq!(
-        row.get::<String, _>("origin_idempotency_key"),
-        "idem-deposit-1"
-    );
-    assert_eq!(row.get::<i64, _>("origin_transaction_ordinal"), 0);
+    assert_transaction_origin(&pool, "idem-deposit-1", 0, 1).await;
 }
 
 #[tokio::test]
@@ -2200,19 +2135,13 @@ async fn record_deposit_with_origin_rejects_blank_key_before_write() {
         .to_string()
         .contains("Origin idempotency key is required"));
 
-    let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM transactions WHERE booking_id = ?")
-        .bind(&booking_id)
-        .fetch_one(&pool)
-        .await
-        .unwrap();
-    assert_eq!(count, 0);
+    assert_eq!(transaction_count_for_booking(&pool, &booking_id).await, 0);
 }
 
 #[tokio::test]
 async fn duplicate_transaction_origin_is_blocked_by_unique_origin_ordinal() {
     let pool = test_pool().await;
-    seed_room(&pool, "R-TXN-ORIGIN-DUP").await.unwrap();
-    seed_active_booking(&pool, "B-TXN-ORIGIN-DUP", "R-TXN-ORIGIN-DUP")
+    seed_active_booking_with_room(&pool, "B-TXN-ORIGIN-DUP", "R-TXN-ORIGIN-DUP")
         .await
         .unwrap();
     let origin = OriginSideEffect::new("origin-duplicate-transaction", 0).unwrap();
@@ -2245,15 +2174,7 @@ async fn duplicate_transaction_origin_is_blocked_by_unique_origin_ordinal() {
     assert!(duplicate.is_err(), "duplicate transaction origin must fail");
     second_tx.rollback().await.unwrap();
 
-    let count: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM transactions
-         WHERE origin_idempotency_key = ? AND origin_transaction_ordinal = 0",
-    )
-    .bind("origin-duplicate-transaction")
-    .fetch_one(&pool)
-    .await
-    .unwrap();
-    assert_eq!(count, 1);
+    assert_transaction_origin(&pool, "origin-duplicate-transaction", 0, 1).await;
 }
 
 #[tokio::test]
