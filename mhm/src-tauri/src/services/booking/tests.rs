@@ -5567,8 +5567,9 @@ async fn extend_stay_fails_when_second_pool_checked_out_booking_first() {
 #[tokio::test]
 async fn revenue_queries_use_recognized_room_revenue_and_ignore_payments() {
     let pool = test_pool().await;
-    seed_room(&pool, "R301").await.unwrap();
-    seed_active_booking(&pool, "B301", "R301").await.unwrap();
+    seed_active_booking_with_room(&pool, "B301", "R301")
+        .await
+        .unwrap();
     seed_transaction(
         &pool,
         "B301",
@@ -5615,8 +5616,9 @@ async fn revenue_queries_use_recognized_room_revenue_and_ignore_payments() {
 #[tokio::test]
 async fn analytics_breakdowns_reconcile_to_total_revenue() {
     let pool = test_pool().await;
-    seed_room(&pool, "R302").await.unwrap();
-    seed_active_booking(&pool, "B302", "R302").await.unwrap();
+    seed_active_booking_with_room(&pool, "B302", "R302")
+        .await
+        .unwrap();
     seed_transaction(
         &pool,
         "B302",
@@ -6185,8 +6187,9 @@ async fn booking_export_includes_local_rfc3339_cancellation_fee_date() {
 #[tokio::test]
 async fn run_night_audit_uses_canonical_room_and_folio_revenue() {
     let pool = test_pool().await;
-    seed_room(&pool, "R303").await.unwrap();
-    seed_active_booking(&pool, "B303", "R303").await.unwrap();
+    seed_active_booking_with_room(&pool, "B303", "R303")
+        .await
+        .unwrap();
     sqlx::query(
         "UPDATE bookings
          SET nights = 2, total_price = 500000, expected_checkout = '2026-04-17T10:00:00+07:00'
@@ -6251,8 +6254,9 @@ async fn run_night_audit_uses_canonical_room_and_folio_revenue() {
 #[tokio::test]
 async fn billing_and_export_queries_preserve_canonical_revenue_columns() {
     let pool = test_pool().await;
-    seed_room(&pool, "R304").await.unwrap();
-    seed_active_booking(&pool, "B304", "R304").await.unwrap();
+    seed_active_booking_with_room(&pool, "B304", "R304")
+        .await
+        .unwrap();
     seed_transaction(
         &pool,
         "B304",
