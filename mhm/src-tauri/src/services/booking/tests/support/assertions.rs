@@ -60,7 +60,6 @@ pub async fn assert_single_outbox_event(
     payload
 }
 
-#[allow(dead_code)]
 pub fn assert_replayed_pair<T>(
     first: &crate::command_idempotency::IdempotentCommandResult<T>,
     second: &crate::command_idempotency::IdempotentCommandResult<T>,

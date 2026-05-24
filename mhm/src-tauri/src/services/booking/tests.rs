@@ -124,9 +124,9 @@ async fn group_checkout_rejects_negative_final_paid() {
 #[tokio::test]
 async fn group_checkout_idempotent_retry_replays_without_duplicate_effects() {
     let pool = test_pool().await;
-    seed_room(&pool, "R-GCO-1").await.unwrap();
-    seed_room(&pool, "R-GCO-2").await.unwrap();
-    seed_pricing_rule(&pool, "standard", 250_000).await.unwrap();
+    seed_rooms_with_price(&pool, &["R-GCO-1", "R-GCO-2"], 250_000)
+        .await
+        .unwrap();
 
     let group = group_lifecycle::group_checkin(
         &pool,
@@ -141,11 +141,7 @@ async fn group_checkout_idempotent_retry_replays_without_duplicate_effects() {
         .await
         .unwrap();
     let booking_id: String = rows[0].get("id");
-    let ctx = crate::command_idempotency::WriteCommandContext::for_internal_test(
-        "req-group-checkout-idem",
-        "idem-group-checkout-1",
-        "group_checkout",
-    );
+    let ctx = cmd("group_checkout", "idem-group-checkout-1");
 
     let first = group_lifecycle::group_checkout_idempotent(
         &pool,
@@ -170,9 +166,7 @@ async fn group_checkout_idempotent_retry_replays_without_duplicate_effects() {
     .await
     .unwrap();
 
-    assert!(!first.replayed);
-    assert!(second.replayed);
-    assert_eq!(first.response, second.response);
+    assert_replayed_pair(&first, &second);
 
     let payment_count: i64 = sqlx::query_scalar(
         "SELECT COUNT(*) FROM transactions WHERE note = 'Thanh toán group checkout'",
@@ -194,9 +188,9 @@ async fn group_checkout_idempotent_retry_replays_without_duplicate_effects() {
 #[tokio::test]
 async fn group_checkout_idempotent_duplicate_in_flight_returns_conflict() {
     let pool = test_pool().await;
-    seed_room(&pool, "R-GCO-LIVE-1").await.unwrap();
-    seed_room(&pool, "R-GCO-LIVE-2").await.unwrap();
-    seed_pricing_rule(&pool, "standard", 250_000).await.unwrap();
+    seed_rooms_with_price(&pool, &["R-GCO-LIVE-1", "R-GCO-LIVE-2"], 250_000)
+        .await
+        .unwrap();
 
     let group = group_lifecycle::group_checkin(
         &pool,
@@ -211,11 +205,7 @@ async fn group_checkout_idempotent_duplicate_in_flight_returns_conflict() {
             .fetch_one(&pool)
             .await
             .unwrap();
-    let ctx = crate::command_idempotency::WriteCommandContext::for_internal_test(
-        "req-group-checkout-live",
-        "idem-group-checkout-live",
-        "group_checkout",
-    );
+    let ctx = cmd("group_checkout", "idem-group-checkout-live");
     let payload = serde_json::json!({
         "schema": "group.checkout.v1",
         "group_id": group.id,
@@ -263,10 +253,13 @@ async fn group_checkout_idempotent_duplicate_in_flight_returns_conflict() {
 #[tokio::test]
 async fn group_checkout_idempotent_final_payment_locks_group_and_candidate_folios() {
     let pool = test_pool().await;
-    seed_room(&pool, "R-GCO-LOCK-1").await.unwrap();
-    seed_room(&pool, "R-GCO-LOCK-2").await.unwrap();
-    seed_room(&pool, "R-GCO-LOCK-3").await.unwrap();
-    seed_pricing_rule(&pool, "standard", 250_000).await.unwrap();
+    seed_rooms_with_price(
+        &pool,
+        &["R-GCO-LOCK-1", "R-GCO-LOCK-2", "R-GCO-LOCK-3"],
+        250_000,
+    )
+    .await
+    .unwrap();
 
     let group = group_lifecycle::group_checkin(
         &pool,
@@ -282,11 +275,7 @@ async fn group_checkout_idempotent_final_payment_locks_group_and_candidate_folio
             .await
             .unwrap();
     let selected_booking_id = booking_ids[0].clone();
-    let ctx = crate::command_idempotency::WriteCommandContext::for_internal_test(
-        "req-group-checkout-locks",
-        "idem-group-checkout-locks",
-        "group_checkout",
-    );
+    let ctx = cmd("group_checkout", "idem-group-checkout-locks");
 
     group_lifecycle::group_checkout_idempotent(
         &pool,
@@ -337,9 +326,9 @@ async fn group_checkout_idempotent_final_payment_locks_group_and_candidate_folio
 #[tokio::test]
 async fn group_checkout_tx_posts_final_payment_only_to_locked_candidate_set() {
     let pool = test_pool().await;
-    seed_room(&pool, "R-GCO-CAND-1").await.unwrap();
-    seed_room(&pool, "R-GCO-CAND-2").await.unwrap();
-    seed_pricing_rule(&pool, "standard", 250_000).await.unwrap();
+    seed_rooms_with_price(&pool, &["R-GCO-CAND-1", "R-GCO-CAND-2"], 250_000)
+        .await
+        .unwrap();
 
     let group = group_lifecycle::group_checkin(
         &pool,
@@ -509,9 +498,9 @@ async fn create_reservation_guest_manifest_defaults_blank_doc_number() {
 #[tokio::test]
 async fn group_checkin_creates_active_group_and_placeholder_guest_manifest() {
     let pool = test_pool().await;
-    seed_room(&pool, "G101").await.unwrap();
-    seed_room(&pool, "G102").await.unwrap();
-    seed_pricing_rule(&pool, "standard", 250_000).await.unwrap();
+    seed_rooms_with_price(&pool, &["G101", "G102"], 250_000)
+        .await
+        .unwrap();
 
     let group = group_lifecycle::group_checkin(
         &pool,
@@ -581,9 +570,9 @@ async fn group_checkin_creates_active_group_and_placeholder_guest_manifest() {
 #[tokio::test]
 async fn group_checkin_reservation_blocks_calendar_and_tracks_deposit() {
     let pool = test_pool().await;
-    seed_room(&pool, "G201").await.unwrap();
-    seed_room(&pool, "G202").await.unwrap();
-    seed_pricing_rule(&pool, "standard", 300_000).await.unwrap();
+    seed_rooms_with_price(&pool, &["G201", "G202"], 300_000)
+        .await
+        .unwrap();
 
     let mut req = minimal_group_checkin_request(&["G201", "G202"]);
     req.check_in_date = Some(
@@ -636,8 +625,9 @@ async fn group_checkin_reservation_blocks_calendar_and_tracks_deposit() {
 #[tokio::test]
 async fn group_checkin_rejects_duplicate_room_ids() {
     let pool = test_pool().await;
-    seed_room(&pool, "G250").await.unwrap();
-    seed_pricing_rule(&pool, "standard", 250_000).await.unwrap();
+    seed_rooms_with_price(&pool, &["G250"], 250_000)
+        .await
+        .unwrap();
 
     let error = group_lifecycle::group_checkin(
         &pool,
@@ -672,14 +662,10 @@ async fn group_checkin_lock_keys_are_stable_for_room_order() {
 #[tokio::test]
 async fn group_checkin_idempotent_normalizes_room_order_and_assigns_payment_ordinals() {
     let pool = test_pool().await;
-    seed_room(&pool, "GI601").await.unwrap();
-    seed_room(&pool, "GI602").await.unwrap();
-    seed_pricing_rule(&pool, "standard", 250_000).await.unwrap();
-    let ctx = crate::command_idempotency::WriteCommandContext::for_internal_test(
-        "req-group-idem-1",
-        "idem-group-checkin-1",
-        "group_checkin",
-    );
+    seed_rooms_with_price(&pool, &["GI601", "GI602"], 250_000)
+        .await
+        .unwrap();
+    let ctx = cmd("group_checkin", "idem-group-checkin-1");
 
     let first = group_lifecycle::group_checkin_idempotent(
         &pool,
@@ -736,14 +722,10 @@ async fn group_checkin_idempotent_normalizes_room_order_and_assigns_payment_ordi
 #[tokio::test]
 async fn group_checkin_idempotent_materializes_omitted_checkin_date_in_hash() {
     let pool = test_pool().await;
-    seed_room(&pool, "GI603").await.unwrap();
-    seed_room(&pool, "GI604").await.unwrap();
-    seed_pricing_rule(&pool, "standard", 250_000).await.unwrap();
-    let ctx = crate::command_idempotency::WriteCommandContext::for_internal_test(
-        "req-group-idem-materialized-date",
-        "idem-group-checkin-materialized-date",
-        "group_checkin",
-    );
+    seed_rooms_with_price(&pool, &["GI603", "GI604"], 250_000)
+        .await
+        .unwrap();
+    let ctx = cmd("group_checkin", "idem-group-checkin-materialized-date");
 
     let req = rich_group_checkin_request(&["GI603", "GI604"], "GI603", Some(100_000));
     assert!(req.check_in_date.is_none());
@@ -781,14 +763,10 @@ async fn group_checkin_idempotent_materializes_omitted_checkin_date_in_hash() {
 #[tokio::test]
 async fn group_checkin_idempotent_omitted_date_replays_after_issued_at_rollover() {
     let pool = test_pool().await;
-    seed_room(&pool, "GI605").await.unwrap();
-    seed_room(&pool, "GI606").await.unwrap();
-    seed_pricing_rule(&pool, "standard", 250_000).await.unwrap();
-    let first_ctx = crate::command_idempotency::WriteCommandContext::for_internal_test(
-        "req-group-idem-rollover-first",
-        "idem-group-checkin-rollover",
-        "group_checkin",
-    );
+    seed_rooms_with_price(&pool, &["GI605", "GI606"], 250_000)
+        .await
+        .unwrap();
+    let first_ctx = cmd("group_checkin", "idem-group-checkin-rollover");
 
     let first = group_lifecycle::group_checkin_idempotent(
         &pool,
@@ -799,13 +777,11 @@ async fn group_checkin_idempotent_omitted_date_replays_after_issued_at_rollover(
     .await
     .expect("first group checkin succeeds");
 
-    let mut retry_ctx = crate::command_idempotency::WriteCommandContext::for_internal_test(
-        "req-group-idem-rollover-retry",
-        "idem-group-checkin-rollover",
+    let retry_ctx = cmd_at(
         "group_checkin",
+        "idem-group-checkin-rollover",
+        "2026-04-25T01:00:00+07:00",
     );
-    retry_ctx.issued_at = chrono::DateTime::parse_from_rfc3339("2026-04-25T01:00:00+07:00")
-        .expect("retry timestamp parses");
 
     let retry = group_lifecycle::group_checkin_idempotent(
         &pool,
@@ -824,17 +800,15 @@ async fn group_checkin_idempotent_omitted_date_replays_after_issued_at_rollover(
 #[tokio::test]
 async fn group_checkin_idempotent_reclaimed_omitted_date_uses_original_command_time() {
     let pool = test_pool().await;
-    seed_room(&pool, "GI607").await.unwrap();
-    seed_room(&pool, "GI608").await.unwrap();
-    seed_pricing_rule(&pool, "standard", 250_000).await.unwrap();
+    seed_rooms_with_price(&pool, &["GI607", "GI608"], 250_000)
+        .await
+        .unwrap();
 
-    let mut original_ctx = crate::command_idempotency::WriteCommandContext::for_internal_test(
-        "req-group-idem-reclaim-original",
-        "idem-group-checkin-reclaim-rollover",
+    let original_ctx = cmd_at(
         "group_checkin",
+        "idem-group-checkin-reclaim-rollover",
+        "2026-04-24T10:00:00+07:00",
     );
-    original_ctx.issued_at = chrono::DateTime::parse_from_rfc3339("2026-04-24T10:00:00+07:00")
-        .expect("original timestamp parses");
     let mut materialized = rich_group_checkin_request(&["GI607", "GI608"], "GI607", Some(100_000));
     materialized.check_in_date = Some("2026-04-24".to_string());
     let payload = group_checkin_hash_payload_for_test(&materialized);
@@ -880,13 +854,11 @@ async fn group_checkin_idempotent_reclaimed_omitted_date_uses_original_command_t
     .await
     .expect("seed expired in-progress command");
 
-    let mut retry_ctx = crate::command_idempotency::WriteCommandContext::for_internal_test(
-        "req-group-idem-reclaim-retry",
-        "idem-group-checkin-reclaim-rollover",
+    let retry_ctx = cmd_at(
         "group_checkin",
+        "idem-group-checkin-reclaim-rollover",
+        "2026-04-25T01:00:00+07:00",
     );
-    retry_ctx.issued_at = chrono::DateTime::parse_from_rfc3339("2026-04-25T01:00:00+07:00")
-        .expect("retry timestamp parses");
 
     let result = group_lifecycle::group_checkin_idempotent(
         &pool,
@@ -940,14 +912,10 @@ async fn group_checkin_idempotent_reclaimed_omitted_date_uses_original_command_t
 #[tokio::test]
 async fn group_checkin_idempotent_retry_does_not_duplicate_groups_bookings_or_payments() {
     let pool = test_pool().await;
-    seed_room(&pool, "GI620").await.unwrap();
-    seed_room(&pool, "GI621").await.unwrap();
-    seed_pricing_rule(&pool, "standard", 250_000).await.unwrap();
-    let ctx = crate::command_idempotency::WriteCommandContext::for_internal_test(
-        "req-group-idem-no-dup",
-        "idem-group-checkin-no-dup",
-        "group_checkin",
-    );
+    seed_rooms_with_price(&pool, &["GI620", "GI621"], 250_000)
+        .await
+        .unwrap();
+    let ctx = cmd("group_checkin", "idem-group-checkin-no-dup");
 
     let first = group_lifecycle::group_checkin_idempotent(
         &pool,
@@ -993,14 +961,10 @@ async fn group_checkin_idempotent_retry_does_not_duplicate_groups_bookings_or_pa
 #[tokio::test]
 async fn group_checkin_duplicate_in_flight_does_not_wait_for_room_lock() {
     let pool = test_pool().await;
-    seed_room(&pool, "GI650").await.unwrap();
-    seed_room(&pool, "GI651").await.unwrap();
-    seed_pricing_rule(&pool, "standard", 250_000).await.unwrap();
-    let ctx = crate::command_idempotency::WriteCommandContext::for_internal_test(
-        "req-group-idem-inflight",
-        "idem-group-checkin-inflight",
-        "group_checkin",
-    );
+    seed_rooms_with_price(&pool, &["GI650", "GI651"], 250_000)
+        .await
+        .unwrap();
+    let ctx = cmd("group_checkin", "idem-group-checkin-inflight");
     let held_room_lock = crate::aggregate_locks::global_manager()
         .acquire([crate::aggregate_locks::room_key("GI650").unwrap()])
         .await
@@ -1065,14 +1029,10 @@ async fn group_checkin_duplicate_in_flight_does_not_wait_for_room_lock() {
 #[tokio::test]
 async fn group_checkin_idempotent_duplicate_seeded_live_in_flight_returns_conflict() {
     let pool = test_pool().await;
-    seed_room(&pool, "GI655").await.unwrap();
-    seed_room(&pool, "GI656").await.unwrap();
-    seed_pricing_rule(&pool, "standard", 250_000).await.unwrap();
-    let ctx = crate::command_idempotency::WriteCommandContext::for_internal_test(
-        "req-group-idem-seeded-inflight",
-        "idem-group-checkin-seeded-inflight",
-        "group_checkin",
-    );
+    seed_rooms_with_price(&pool, &["GI655", "GI656"], 250_000)
+        .await
+        .unwrap();
+    let ctx = cmd("group_checkin", "idem-group-checkin-seeded-inflight");
     let mut req = rich_group_checkin_request(&["GI655", "GI656"], "GI655", Some(100_000));
     req.check_in_date = Some(ctx.issued_at.format("%Y-%m-%d").to_string());
     seed_live_in_progress_command(
@@ -1097,15 +1057,11 @@ async fn group_checkin_idempotent_duplicate_seeded_live_in_flight_returns_confli
 #[tokio::test]
 async fn group_checkin_idempotent_zero_paid_amount_writes_no_payment_origin_rows() {
     let pool = test_pool().await;
-    seed_room(&pool, "GI610").await.unwrap();
-    seed_room(&pool, "GI611").await.unwrap();
-    seed_pricing_rule(&pool, "standard", 250_000).await.unwrap();
+    seed_rooms_with_price(&pool, &["GI610", "GI611"], 250_000)
+        .await
+        .unwrap();
 
-    let zero_ctx = crate::command_idempotency::WriteCommandContext::for_internal_test(
-        "req-group-idem-2-zero",
-        "idem-group-checkin-2-zero",
-        "group_checkin",
-    );
+    let zero_ctx = cmd("group_checkin", "idem-group-checkin-2-zero");
     let zero_paid = group_lifecycle::group_checkin_idempotent(
         &pool,
         Some("seed-user".to_string()),
@@ -1129,9 +1085,9 @@ async fn group_checkin_idempotent_zero_paid_amount_writes_no_payment_origin_rows
 #[tokio::test]
 async fn group_checkin_idempotent_blank_key_rejected_before_writes() {
     let pool = test_pool().await;
-    seed_room(&pool, "GI620").await.unwrap();
-    seed_room(&pool, "GI621").await.unwrap();
-    seed_pricing_rule(&pool, "standard", 250_000).await.unwrap();
+    seed_rooms_with_price(&pool, &["GI620", "GI621"], 250_000)
+        .await
+        .unwrap();
 
     let error = crate::command_idempotency::WriteCommandContext::for_scoped_command(
         "req-group-idem-blank",
@@ -1162,14 +1118,10 @@ async fn group_checkin_idempotent_blank_key_rejected_before_writes() {
 #[tokio::test]
 async fn group_checkin_idempotent_replay_returns_stored_snapshot_after_db_mutation() {
     let pool = test_pool().await;
-    seed_room(&pool, "GI630").await.unwrap();
-    seed_room(&pool, "GI631").await.unwrap();
-    seed_pricing_rule(&pool, "standard", 250_000).await.unwrap();
-    let ctx = crate::command_idempotency::WriteCommandContext::for_internal_test(
-        "req-group-idem-3",
-        "idem-group-checkin-3",
-        "group_checkin",
-    );
+    seed_rooms_with_price(&pool, &["GI630", "GI631"], 250_000)
+        .await
+        .unwrap();
+    let ctx = cmd("group_checkin", "idem-group-checkin-3");
 
     let first = group_lifecycle::group_checkin_idempotent(
         &pool,
@@ -1208,14 +1160,10 @@ async fn group_checkin_idempotent_replay_returns_stored_snapshot_after_db_mutati
 #[tokio::test]
 async fn group_checkin_idempotent_same_key_different_payload_conflicts() {
     let pool = test_pool().await;
-    seed_room(&pool, "GI640").await.unwrap();
-    seed_room(&pool, "GI641").await.unwrap();
-    seed_pricing_rule(&pool, "standard", 250_000).await.unwrap();
-    let ctx = crate::command_idempotency::WriteCommandContext::for_internal_test(
-        "req-group-idem-4",
-        "idem-group-checkin-4",
-        "group_checkin",
-    );
+    seed_rooms_with_price(&pool, &["GI640", "GI641"], 250_000)
+        .await
+        .unwrap();
+    let ctx = cmd("group_checkin", "idem-group-checkin-4");
 
     group_lifecycle::group_checkin_idempotent(
         &pool,
@@ -1246,14 +1194,10 @@ async fn group_checkin_idempotent_same_key_different_payload_conflicts() {
 #[tokio::test]
 async fn group_checkin_idempotent_same_key_changed_guest_name_conflicts() {
     let pool = test_pool().await;
-    seed_room(&pool, "GI642").await.unwrap();
-    seed_room(&pool, "GI643").await.unwrap();
-    seed_pricing_rule(&pool, "standard", 250_000).await.unwrap();
-    let ctx = crate::command_idempotency::WriteCommandContext::for_internal_test(
-        "req-group-idem-guest-change",
-        "idem-group-checkin-guest-change",
-        "group_checkin",
-    );
+    seed_rooms_with_price(&pool, &["GI642", "GI643"], 250_000)
+        .await
+        .unwrap();
+    let ctx = cmd("group_checkin", "idem-group-checkin-guest-change");
 
     group_lifecycle::group_checkin_idempotent(
         &pool,
@@ -1286,11 +1230,7 @@ async fn group_checkin_idempotent_same_key_changed_guest_name_conflicts() {
 async fn add_group_service_idempotent_retry_replays_without_duplicate_row() {
     let pool = test_pool().await;
     seed_booking_group(&pool, "G-SVC-IDEM").await;
-    let ctx = crate::command_idempotency::WriteCommandContext::for_internal_test(
-        "req-group-svc-idem",
-        "idem-group-svc-1",
-        "add_group_service",
-    );
+    let ctx = cmd("add_group_service", "idem-group-svc-1");
     let first_req = crate::models::AddGroupServiceRequest {
         group_id: "G-SVC-IDEM".to_string(),
         booking_id: None,
@@ -1339,11 +1279,7 @@ async fn add_group_service_idempotent_retry_replays_without_duplicate_row() {
 async fn add_group_service_idempotent_same_key_different_payload_conflicts() {
     let pool = test_pool().await;
     seed_booking_group(&pool, "G-SVC-HASH").await;
-    let ctx = crate::command_idempotency::WriteCommandContext::for_internal_test(
-        "req-group-svc-hash",
-        "idem-group-svc-hash",
-        "add_group_service",
-    );
+    let ctx = cmd("add_group_service", "idem-group-svc-hash");
     let first_req = crate::models::AddGroupServiceRequest {
         group_id: "G-SVC-HASH".to_string(),
         booking_id: None,
@@ -1386,11 +1322,7 @@ async fn add_group_service_idempotent_same_key_different_payload_conflicts() {
 async fn add_group_service_idempotent_rejects_negative_unit_price_without_writing() {
     let pool = test_pool().await;
     seed_booking_group(&pool, "G-SVC-NEGATIVE-PRICE").await;
-    let ctx = crate::command_idempotency::WriteCommandContext::for_internal_test(
-        "req-group-svc-negative-price",
-        "idem-group-svc-negative-price",
-        "add_group_service",
-    );
+    let ctx = cmd("add_group_service", "idem-group-svc-negative-price");
     let req = crate::models::AddGroupServiceRequest {
         group_id: "G-SVC-NEGATIVE-PRICE".to_string(),
         booking_id: None,
@@ -1427,11 +1359,7 @@ async fn remove_group_service_idempotent_retry_replays_without_extra_delete() {
     .execute(&pool)
     .await
     .unwrap();
-    let ctx = crate::command_idempotency::WriteCommandContext::for_internal_test(
-        "req-group-svc-remove",
-        "idem-group-svc-remove",
-        "remove_group_service",
-    );
+    let ctx = cmd("remove_group_service", "idem-group-svc-remove");
 
     let first =
         group_service_management::remove_group_service_idempotent(&pool, &ctx, "SVC-REMOVE-1")
@@ -1442,9 +1370,7 @@ async fn remove_group_service_idempotent_retry_replays_without_extra_delete() {
             .await
             .expect("retry replays");
 
-    assert!(!first.replayed);
-    assert!(second.replayed);
-    assert_eq!(first.response, second.response);
+    assert_replayed_pair(&first, &second);
     assert_eq!(first.response["service_id"], "SVC-REMOVE-1");
 
     let count: i64 =
@@ -1471,11 +1397,7 @@ async fn remove_group_service_idempotent_same_key_different_service_conflicts() 
         .await
         .unwrap();
     }
-    let ctx = crate::command_idempotency::WriteCommandContext::for_internal_test(
-        "req-group-svc-remove-hash",
-        "idem-group-svc-remove-hash",
-        "remove_group_service",
-    );
+    let ctx = cmd("remove_group_service", "idem-group-svc-remove-hash");
 
     group_service_management::remove_group_service_idempotent(&pool, &ctx, "SVC-REMOVE-A")
         .await
@@ -1501,9 +1423,9 @@ async fn remove_group_service_idempotent_same_key_different_service_conflicts() 
 #[tokio::test]
 async fn group_checkout_reassigns_master_and_updates_group_payment() {
     let pool = test_pool().await;
-    seed_room(&pool, "G301").await.unwrap();
-    seed_room(&pool, "G302").await.unwrap();
-    seed_pricing_rule(&pool, "standard", 250_000).await.unwrap();
+    seed_rooms_with_price(&pool, &["G301", "G302"], 250_000)
+        .await
+        .unwrap();
 
     let group = group_lifecycle::group_checkin(
         &pool,
@@ -1564,8 +1486,9 @@ async fn group_checkout_reassigns_master_and_updates_group_payment() {
 #[tokio::test]
 async fn group_checkout_clears_master_flag_when_group_completes() {
     let pool = test_pool().await;
-    seed_room(&pool, "G401").await.unwrap();
-    seed_pricing_rule(&pool, "standard", 250_000).await.unwrap();
+    seed_rooms_with_price(&pool, &["G401"], 250_000)
+        .await
+        .unwrap();
 
     let group = group_lifecycle::group_checkin(
         &pool,
@@ -1610,9 +1533,9 @@ async fn group_checkout_clears_master_flag_when_group_completes() {
 #[tokio::test]
 async fn group_booking_lifecycle_smoke_covers_partial_and_final_checkout() {
     let pool = test_pool().await;
-    seed_room(&pool, "G-SMOKE-1").await.unwrap();
-    seed_room(&pool, "G-SMOKE-2").await.unwrap();
-    seed_pricing_rule(&pool, "standard", 250_000).await.unwrap();
+    seed_rooms_with_price(&pool, &["G-SMOKE-1", "G-SMOKE-2"], 250_000)
+        .await
+        .unwrap();
 
     let group = group_lifecycle::group_checkin(
         &pool,
@@ -1683,21 +1606,17 @@ async fn group_booking_lifecycle_smoke_covers_partial_and_final_checkout() {
             .fetch_one(&pool)
             .await
             .unwrap();
-    assert_eq!(
-        partial_group.get::<String, _>("status"),
-        "partial_checkout"
-    );
+    assert_eq!(partial_group.get::<String, _>("status"), "partial_checkout");
     let second_master_booking_id = partial_group
         .get::<Option<String>, _>("master_booking_id")
         .expect("partial checkout should reassign a master booking");
     assert_ne!(second_master_booking_id, first_master_booking_id);
 
-    let checked_out_status: String =
-        sqlx::query_scalar("SELECT status FROM bookings WHERE id = ?")
-            .bind(&first_master_booking_id)
-            .fetch_one(&pool)
-            .await
-            .unwrap();
+    let checked_out_status: String = sqlx::query_scalar("SELECT status FROM bookings WHERE id = ?")
+        .bind(&first_master_booking_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
     assert_eq!(checked_out_status, "checked_out");
 
     let remaining_master = sqlx::query(
@@ -1754,7 +1673,10 @@ async fn group_booking_lifecycle_smoke_covers_partial_and_final_checkout() {
             .await
             .unwrap();
     assert_eq!(final_group.get::<String, _>("status"), "completed");
-    assert_eq!(final_group.get::<Option<String>, _>("master_booking_id"), None);
+    assert_eq!(
+        final_group.get::<Option<String>, _>("master_booking_id"),
+        None
+    );
 
     let active_booking_count: (i64,) =
         sqlx::query_as("SELECT COUNT(*) FROM bookings WHERE group_id = ? AND status = 'active'")
@@ -1811,9 +1733,9 @@ async fn group_booking_lifecycle_smoke_covers_partial_and_final_checkout() {
 #[tokio::test]
 async fn group_checkout_rejects_stale_selected_booking() {
     let pool = test_pool().await;
-    seed_room(&pool, "G501").await.unwrap();
-    seed_room(&pool, "G502").await.unwrap();
-    seed_pricing_rule(&pool, "standard", 250_000).await.unwrap();
+    seed_rooms_with_price(&pool, &["G501", "G502"], 250_000)
+        .await
+        .unwrap();
 
     let group = group_lifecycle::group_checkin(
         &pool,

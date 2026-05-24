@@ -436,7 +436,6 @@ pub async fn seed_room_with_price(
     Ok(())
 }
 
-#[allow(dead_code)]
 pub async fn seed_rooms_with_price(
     pool: &Pool<Sqlite>,
     room_ids: &[&str],
