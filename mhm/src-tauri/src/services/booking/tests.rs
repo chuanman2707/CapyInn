@@ -1362,12 +1362,52 @@ async fn add_group_service_idempotent_rejects_negative_unit_price_without_writin
 
     assert_eq!(error.code, crate::app_error::codes::BOOKING_INVALID_STATE);
 
-    let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM group_services WHERE group_id = ?")
-        .bind(&group.id)
-        .fetch_one(&pool)
-        .await
-        .unwrap();
-    assert_eq!(count, 0);
+    let claim_count: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM command_idempotency
+         WHERE command_name = ? AND idempotency_key = ?",
+    )
+    .bind(&ctx.command_name)
+    .bind(&ctx.idempotency_key)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(claim_count, 0);
+
+    let service_count: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM group_services WHERE group_id = ?")
+            .bind(&group.id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(service_count, 0);
+
+    let origin_key = format!("{}:{}", ctx.command_name, ctx.idempotency_key);
+    let transaction_count: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM transactions WHERE origin_idempotency_key = ?")
+            .bind(&origin_key)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(transaction_count, 0);
+
+    let folio_line_count: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM folio_lines WHERE origin_idempotency_key = ?")
+            .bind(&origin_key)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(folio_line_count, 0);
+
+    let outbox_count: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM outbox_events
+         WHERE origin_command_name = ? AND origin_idempotency_key = ?",
+    )
+    .bind(&ctx.command_name)
+    .bind(&ctx.idempotency_key)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(outbox_count, 0);
 }
 
 #[tokio::test]
