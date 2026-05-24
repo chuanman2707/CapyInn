@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 
-use crate::{
-    models::{CheckInRequest, CreateGuestRequest, CreateReservationRequest, GroupCheckinRequest},
+use crate::models::{
+    CheckInRequest, CreateGuestRequest, CreateReservationRequest, GroupCheckinRequest,
 };
 
 pub fn minimal_checkin_request(room_id: &str) -> CheckInRequest {

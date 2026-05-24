@@ -1,9 +1,6 @@
 use sqlx::{Pool, Sqlite, Transaction};
 
-use crate::{
-    domain::booking::BookingResult,
-    money::MoneyVnd,
-};
+use crate::{domain::booking::BookingResult, money::MoneyVnd};
 
 pub async fn seed_room(pool: &Pool<Sqlite>, room_id: &str) -> BookingResult<()> {
     sqlx::query(
