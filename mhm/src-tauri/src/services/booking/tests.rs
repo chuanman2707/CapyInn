@@ -2262,8 +2262,7 @@ async fn calculate_stay_price_tx_reads_uncommitted_pricing_rule() {
 #[tokio::test]
 async fn calculate_stay_price_matches_tx_path_and_applies_special_date_uplift() {
     let pool = test_pool().await;
-    seed_room(&pool, "R149").await.unwrap();
-    seed_pricing_rule(&pool, "standard", 600_000).await.unwrap();
+    seed_room_with_price(&pool, "R149", 600_000).await.unwrap();
     seed_special_date(&pool, "2026-04-20", 10.0).await.unwrap();
 
     let pool_pricing = calculate_stay_price(
@@ -2386,8 +2385,7 @@ async fn calculate_stay_price_tx_reads_uncommitted_room_base_price() {
 #[tokio::test]
 async fn calculate_stay_price_tx_reads_uncommitted_special_date() {
     let pool = test_pool().await;
-    seed_room(&pool, "R152").await.unwrap();
-    seed_pricing_rule(&pool, "standard", 600_000).await.unwrap();
+    seed_room_with_price(&pool, "R152", 600_000).await.unwrap();
 
     let mut tx = pool.begin().await.unwrap();
     seed_special_date_tx(&mut tx, "2026-04-20", 10.0)

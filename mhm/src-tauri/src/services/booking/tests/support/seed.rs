@@ -418,7 +418,6 @@ pub async fn seed_rooms(pool: &Pool<Sqlite>, room_ids: &[&str]) -> BookingResult
 
 /// Inserts one room and the default `standard` pricing rule; use `seed_rooms_with_price`
 /// when seeding multiple standard rooms in the same pool.
-#[allow(dead_code)]
 pub async fn seed_room_with_price(
     pool: &Pool<Sqlite>,
     room_id: &str,
