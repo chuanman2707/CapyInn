@@ -43,6 +43,20 @@ pub fn minimal_reservation_request(room_id: &str) -> CreateReservationRequest {
     }
 }
 
+pub fn reservation_modify_request(
+    booking_id: &str,
+    check_in: &str,
+    check_out: &str,
+    nights: i32,
+) -> crate::models::ModifyReservationRequest {
+    crate::models::ModifyReservationRequest {
+        booking_id: booking_id.to_string(),
+        new_check_in_date: check_in.to_string(),
+        new_check_out_date: check_out.to_string(),
+        new_nights: nights,
+    }
+}
+
 pub fn minimal_group_checkin_request(room_ids: &[&str]) -> GroupCheckinRequest {
     let mut guests_per_room = HashMap::new();
     if let Some(first_room) = room_ids.first() {
