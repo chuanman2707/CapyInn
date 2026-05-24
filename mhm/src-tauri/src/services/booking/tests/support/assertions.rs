@@ -71,7 +71,6 @@ pub fn assert_replayed_pair<T>(
     assert_eq!(first.response, second.response);
 }
 
-#[allow(dead_code)]
 pub async fn assert_room_status(pool: &Pool<Sqlite>, room_id: &str, expected_status: &str) {
     let status: String = sqlx::query_scalar("SELECT status FROM rooms WHERE id = ?")
         .bind(room_id)
@@ -81,7 +80,6 @@ pub async fn assert_room_status(pool: &Pool<Sqlite>, room_id: &str, expected_sta
     assert_eq!(status, expected_status);
 }
 
-#[allow(dead_code)]
 pub async fn assert_booking_status(pool: &Pool<Sqlite>, booking_id: &str, expected_status: &str) {
     let status: String = sqlx::query_scalar("SELECT status FROM bookings WHERE id = ?")
         .bind(booking_id)
@@ -91,7 +89,6 @@ pub async fn assert_booking_status(pool: &Pool<Sqlite>, booking_id: &str, expect
     assert_eq!(status, expected_status);
 }
 
-#[allow(dead_code)]
 pub async fn assert_calendar_rows(
     pool: &Pool<Sqlite>,
     booking_id: &str,
@@ -109,7 +106,6 @@ pub async fn assert_calendar_rows(
     assert_eq!(count, expected_count);
 }
 
-#[allow(dead_code)]
 pub async fn assert_housekeeping_rows(
     pool: &Pool<Sqlite>,
     room_id: &str,
@@ -152,7 +148,6 @@ pub async fn transaction_count_for_booking(pool: &Pool<Sqlite>, booking_id: &str
         .expect("count booking transactions")
 }
 
-#[allow(dead_code)]
 pub async fn transaction_sum(
     pool: &Pool<Sqlite>,
     booking_id: &str,

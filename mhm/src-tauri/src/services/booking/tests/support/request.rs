@@ -1,7 +1,8 @@
 use std::collections::HashMap;
 
 use crate::models::{
-    CheckInRequest, CreateGuestRequest, CreateReservationRequest, GroupCheckinRequest,
+    CheckInRequest, CheckOutRequest, CheckoutSettlementMode, CreateGuestRequest,
+    CreateReservationRequest, GroupCheckinRequest,
 };
 use crate::money::MoneyVnd;
 
@@ -137,7 +138,6 @@ pub fn rich_group_checkin_request(
     }
 }
 
-#[allow(dead_code)]
 pub struct CheckInRequestBuilder {
     req: CheckInRequest,
 }
@@ -177,9 +177,20 @@ impl CheckInRequestBuilder {
     }
 }
 
-#[allow(dead_code)]
 pub fn checkin_req(room_id: &str) -> CheckInRequestBuilder {
     CheckInRequestBuilder::new(room_id)
+}
+
+pub fn checkout_req(
+    booking_id: &str,
+    settlement_mode: CheckoutSettlementMode,
+    final_total: MoneyVnd,
+) -> CheckOutRequest {
+    CheckOutRequest {
+        booking_id: booking_id.to_string(),
+        settlement_mode,
+        final_total,
+    }
 }
 
 #[allow(dead_code)]

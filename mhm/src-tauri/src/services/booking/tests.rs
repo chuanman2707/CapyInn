@@ -4154,12 +4154,7 @@ async fn check_in_posts_charge_and_marks_room_occupied() {
     .await
     .unwrap();
 
-    let room = sqlx::query("SELECT status FROM rooms WHERE id = ?")
-        .bind("R201")
-        .fetch_one(&pool)
-        .await
-        .unwrap();
-    assert_eq!(room.get::<String, _>("status"), "occupied");
+    assert_room_status(&pool, "R201", "occupied").await;
 
     let charge = sqlx::query(
         "SELECT type, amount FROM transactions WHERE booking_id = ? AND type = 'charge' LIMIT 1",
@@ -4171,14 +4166,7 @@ async fn check_in_posts_charge_and_marks_room_occupied() {
     assert_eq!(charge.get::<String, _>("type"), "charge");
     assert_eq!(charge.get::<i64, _>("amount"), booking.total_price);
 
-    let calendar_days: (i64,) = sqlx::query_as(
-        "SELECT COUNT(*) FROM room_calendar WHERE booking_id = ? AND status = 'occupied'",
-    )
-    .bind(&booking.id)
-    .fetch_one(&pool)
-    .await
-    .unwrap();
-    assert_eq!(calendar_days.0, 2);
+    assert_calendar_rows(&pool, &booking.id, "occupied", 2).await;
 }
 
 #[tokio::test]
@@ -4191,13 +4179,12 @@ async fn stay_lifecycle_smoke_covers_checkin_extend_and_checkout() {
         .await
         .expect("seed stay pricing");
 
-    let check_in_ctx = crate::command_idempotency::WriteCommandContext::for_internal_test(
+    let check_in_ctx = cmd_with_request(
+        "check_in",
         "req-smoke-stay-checkin",
         "idem-smoke-stay-checkin",
-        "check_in",
     );
-    let mut check_in_req = minimal_checkin_request("R-SMOKE-STAY");
-    check_in_req.paid_amount = Some(50_000);
+    let check_in_req = checkin_req("R-SMOKE-STAY").paid(50_000).build();
 
     let checked_in = stay_lifecycle::check_in_idempotent(
         &pool,
@@ -4217,58 +4204,29 @@ async fn stay_lifecycle_smoke_covers_checkin_extend_and_checkout() {
         .to_string();
 
     assert_eq!(checked_in.response["status"], serde_json::json!("active"));
+    assert_booking_status(&pool, &booking_id, "active").await;
+    assert_room_status(&pool, "R-SMOKE-STAY", "occupied").await;
+    assert_calendar_rows(&pool, &booking_id, "occupied", 2).await;
     assert_eq!(
-        sqlx::query_scalar::<_, String>("SELECT status FROM bookings WHERE id = ?")
-            .bind(&booking_id)
-            .fetch_one(&pool)
-            .await
-            .expect("active booking status"),
-        "active"
-    );
-    assert_eq!(
-        sqlx::query_scalar::<_, String>("SELECT status FROM rooms WHERE id = ?")
-            .bind("R-SMOKE-STAY")
-            .fetch_one(&pool)
-            .await
-            .expect("occupied stay room"),
-        "occupied"
-    );
-    assert_eq!(
-        sqlx::query_scalar::<_, i64>(
-            "SELECT COUNT(*) FROM room_calendar WHERE booking_id = ? AND status = 'occupied'",
-        )
-        .bind(&booking_id)
-        .fetch_one(&pool)
-        .await
-        .expect("occupied calendar rows after check-in"),
-        2
-    );
-    assert_eq!(
-        sqlx::query_scalar::<_, i64>(
-            "SELECT COALESCE(SUM(amount), 0) FROM transactions WHERE booking_id = ? AND type = 'charge'",
-        )
-        .bind(&booking_id)
-        .fetch_one(&pool)
-        .await
-        .expect("check-in charge total"),
+        transaction_sum(&pool, &booking_id, "charge", None).await,
         500_000
     );
     assert_eq!(
-        sqlx::query_scalar::<_, i64>(
-            "SELECT COALESCE(SUM(amount), 0) FROM transactions WHERE booking_id = ? AND type = 'payment' AND note = 'Thanh toán khi check-in'",
+        transaction_sum(
+            &pool,
+            &booking_id,
+            "payment",
+            Some("Thanh toán khi check-in")
         )
-        .bind(&booking_id)
-        .fetch_one(&pool)
-        .await
-        .expect("check-in payment total"),
+        .await,
         50_000
     );
     assert_single_outbox_event(&pool, &check_in_ctx, "booking.checked_in").await;
 
-    let extend_ctx = crate::command_idempotency::WriteCommandContext::for_internal_test(
+    let extend_ctx = cmd_with_request(
+        "extend_stay",
         "req-smoke-stay-extend",
         "idem-smoke-stay-extend",
-        "extend_stay",
     );
     let extended = stay_lifecycle::extend_stay_idempotent(&pool, &extend_ctx, &booking_id)
         .await
@@ -4284,72 +4242,30 @@ async fn stay_lifecycle_smoke_covers_checkin_extend_and_checkout() {
     assert_eq!(extended.response["nights"], serde_json::json!(3));
     assert_eq!(extended.response["total_price"], serde_json::json!(750_000));
     assert_eq!(extended_checkout, initial_checkout + Duration::days(1));
+    assert_calendar_rows(&pool, &booking_id, "occupied", 3).await;
     assert_eq!(
-        sqlx::query_scalar::<_, i64>(
-            "SELECT COUNT(*) FROM room_calendar WHERE booking_id = ? AND status = 'occupied'",
-        )
-        .bind(&booking_id)
-        .fetch_one(&pool)
-        .await
-        .expect("occupied calendar rows after extend"),
-        3
-    );
-    assert_eq!(
-        sqlx::query_scalar::<_, i64>(
-            "SELECT COALESCE(SUM(amount), 0) FROM transactions WHERE booking_id = ? AND type = 'charge' AND note = 'Extended stay +1 night'",
-        )
-        .bind(&booking_id)
-        .fetch_one(&pool)
-        .await
-        .expect("extension charge total"),
+        transaction_sum(&pool, &booking_id, "charge", Some("Extended stay +1 night")).await,
         250_000
     );
     assert_single_outbox_event(&pool, &extend_ctx, "booking.stay_extended").await;
 
-    let check_out_ctx = crate::command_idempotency::WriteCommandContext::for_internal_test(
+    let check_out_ctx = cmd_with_request(
+        "check_out",
         "req-smoke-stay-checkout",
         "idem-smoke-stay-checkout",
-        "check_out",
     );
     let checked_out = stay_lifecycle::check_out_idempotent(
         &pool,
         &check_out_ctx,
-        CheckOutRequest {
-            booking_id: booking_id.clone(),
-            settlement_mode: CheckoutSettlementMode::BookedNights,
-            final_total: 750_000,
-        },
+        checkout_req(&booking_id, CheckoutSettlementMode::BookedNights, 750_000),
     )
     .await
     .expect("stay checkout succeeds");
 
     assert_eq!(checked_out.response["ok"], serde_json::json!(true));
-    assert_eq!(
-        sqlx::query_scalar::<_, String>("SELECT status FROM bookings WHERE id = ?")
-            .bind(&booking_id)
-            .fetch_one(&pool)
-            .await
-            .expect("checked-out booking status"),
-        "checked_out"
-    );
-    assert_eq!(
-        sqlx::query_scalar::<_, String>("SELECT status FROM rooms WHERE id = ?")
-            .bind("R-SMOKE-STAY")
-            .fetch_one(&pool)
-            .await
-            .expect("room status after checkout"),
-        "cleaning"
-    );
-    assert_eq!(
-        sqlx::query_scalar::<_, i64>(
-            "SELECT COUNT(*) FROM housekeeping WHERE room_id = ? AND status = 'needs_cleaning'",
-        )
-        .bind("R-SMOKE-STAY")
-        .fetch_one(&pool)
-        .await
-        .expect("checkout housekeeping task"),
-        1
-    );
+    assert_booking_status(&pool, &booking_id, "checked_out").await;
+    assert_room_status(&pool, "R-SMOKE-STAY", "cleaning").await;
+    assert_housekeeping_rows(&pool, "R-SMOKE-STAY", "needs_cleaning", 1).await;
     assert_eq!(
         sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM room_calendar WHERE booking_id = ?")
             .bind(&booking_id)
@@ -4359,13 +4275,13 @@ async fn stay_lifecycle_smoke_covers_checkin_extend_and_checkout() {
         0
     );
     assert_eq!(
-        sqlx::query_scalar::<_, i64>(
-            "SELECT COALESCE(SUM(amount), 0) FROM transactions WHERE booking_id = ? AND type = 'payment' AND note = 'Thanh toán khi check-out'",
+        transaction_sum(
+            &pool,
+            &booking_id,
+            "payment",
+            Some("Thanh toán khi check-out")
         )
-        .bind(&booking_id)
-        .fetch_one(&pool)
-        .await
-        .expect("checkout payment delta"),
+        .await,
         700_000
     );
     assert_eq!(
@@ -4384,15 +4300,9 @@ async fn check_in_idempotent_retry_replays_and_does_not_duplicate_rows() {
     let pool = test_pool().await;
     seed_room(&pool, "R-CHECKIN-IDEM").await.unwrap();
     seed_pricing_rule(&pool, "standard", 250_000).await.unwrap();
-    let ctx = crate::command_idempotency::WriteCommandContext::for_internal_test(
-        "req-checkin-idem",
-        "idem-checkin-1",
-        "check_in",
-    );
-    let mut first_req = minimal_checkin_request("R-CHECKIN-IDEM");
-    first_req.paid_amount = Some(50_000);
-    let mut second_req = minimal_checkin_request("R-CHECKIN-IDEM");
-    second_req.paid_amount = Some(50_000);
+    let ctx = cmd_with_request("check_in", "req-checkin-idem", "idem-checkin-1");
+    let first_req = checkin_req("R-CHECKIN-IDEM").paid(50_000).build();
+    let second_req = checkin_req("R-CHECKIN-IDEM").paid(50_000).build();
 
     let first =
         stay_lifecycle::check_in_idempotent(&pool, &ctx, first_req, Some("user-1".to_string()))
@@ -4403,9 +4313,7 @@ async fn check_in_idempotent_retry_replays_and_does_not_duplicate_rows() {
             .await
             .unwrap();
 
-    assert!(!first.replayed);
-    assert!(second.replayed);
-    assert_eq!(first.response, second.response);
+    assert_replayed_pair(&first, &second);
 
     let booking_id = first.response["id"].as_str().unwrap();
     let booking_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM bookings WHERE room_id = ?")
@@ -4453,16 +4361,8 @@ async fn two_check_in_commands_for_same_room_leave_one_booking_and_consistent_ca
     let pool = test_pool().await;
     seed_room(&pool, "R-CHECKIN-RACE").await.unwrap();
     seed_pricing_rule(&pool, "standard", 250_000).await.unwrap();
-    let first_ctx = crate::command_idempotency::WriteCommandContext::for_internal_test(
-        "req-checkin-race-1",
-        "idem-checkin-race-1",
-        "check_in",
-    );
-    let second_ctx = crate::command_idempotency::WriteCommandContext::for_internal_test(
-        "req-checkin-race-2",
-        "idem-checkin-race-2",
-        "check_in",
-    );
+    let first_ctx = cmd_with_request("check_in", "req-checkin-race-1", "idem-checkin-race-1");
+    let second_ctx = cmd_with_request("check_in", "req-checkin-race-2", "idem-checkin-race-2");
 
     let (first, second) = tokio::join!(
         stay_lifecycle::check_in_idempotent(
@@ -4497,12 +4397,7 @@ async fn two_check_in_commands_for_same_room_leave_one_booking_and_consistent_ca
         .unwrap();
     assert_eq!(booking_count, 1);
 
-    let room_status: String = sqlx::query_scalar("SELECT status FROM rooms WHERE id = ?")
-        .bind("R-CHECKIN-RACE")
-        .fetch_one(&pool)
-        .await
-        .unwrap();
-    assert_eq!(room_status, "occupied");
+    assert_room_status(&pool, "R-CHECKIN-RACE", "occupied").await;
 
     let occupied_calendar_count: i64 = sqlx::query_scalar(
         "SELECT COUNT(*) FROM room_calendar WHERE room_id = ? AND status = 'occupied'",
@@ -4519,11 +4414,7 @@ async fn check_in_idempotent_same_key_changed_guest_conflicts() {
     let pool = test_pool().await;
     seed_room(&pool, "R-CHECKIN-HASH").await.unwrap();
     seed_pricing_rule(&pool, "standard", 250_000).await.unwrap();
-    let ctx = crate::command_idempotency::WriteCommandContext::for_internal_test(
-        "req-checkin-hash",
-        "idem-checkin-hash",
-        "check_in",
-    );
+    let ctx = cmd_with_request("check_in", "req-checkin-hash", "idem-checkin-hash");
 
     stay_lifecycle::check_in_idempotent(
         &pool,
@@ -4552,11 +4443,7 @@ async fn check_in_idempotent_duplicate_in_flight_returns_conflict() {
     let pool = test_pool().await;
     seed_room(&pool, "R-CHECKIN-LIVE").await.unwrap();
     seed_pricing_rule(&pool, "standard", 250_000).await.unwrap();
-    let ctx = crate::command_idempotency::WriteCommandContext::for_internal_test(
-        "req-checkin-live",
-        "idem-checkin-live",
-        "check_in",
-    );
+    let ctx = cmd_with_request("check_in", "req-checkin-live", "idem-checkin-live");
     let payload = serde_json::json!({
         "schema": "stay.check_in.v1",
         "room_id": "R-CHECKIN-LIVE",
@@ -4631,10 +4518,10 @@ async fn check_in_fails_when_second_pool_blocks_room_calendar_first() {
     .await
     .unwrap();
 
-    let ctx = crate::command_idempotency::WriteCommandContext::for_internal_test(
+    let ctx = cmd_with_request(
+        "check_in",
         "req-checkin-2pool-calendar",
         "idem-checkin-2pool-calendar",
-        "check_in",
     );
     let error = stay_lifecycle::check_in_idempotent(
         &pool_a,
@@ -4669,21 +4556,17 @@ async fn check_out_idempotent_retry_replays_without_duplicate_money_or_housekeep
     seed_active_booking(&pool, "B-CHECKOUT-IDEM", "R-CHECKOUT-IDEM")
         .await
         .unwrap();
-    let first_req = CheckOutRequest {
-        booking_id: "B-CHECKOUT-IDEM".to_string(),
-        settlement_mode: CheckoutSettlementMode::BookedNights,
-        final_total: 1_000_000,
-    };
-    let second_req = CheckOutRequest {
-        booking_id: "B-CHECKOUT-IDEM".to_string(),
-        settlement_mode: CheckoutSettlementMode::BookedNights,
-        final_total: 1_000_000,
-    };
-    let ctx = crate::command_idempotency::WriteCommandContext::for_internal_test(
-        "req-checkout-idem",
-        "idem-checkout-1",
-        "check_out",
+    let first_req = checkout_req(
+        "B-CHECKOUT-IDEM",
+        CheckoutSettlementMode::BookedNights,
+        1_000_000,
     );
+    let second_req = checkout_req(
+        "B-CHECKOUT-IDEM",
+        CheckoutSettlementMode::BookedNights,
+        1_000_000,
+    );
+    let ctx = cmd_with_request("check_out", "req-checkout-idem", "idem-checkout-1");
 
     let first = stay_lifecycle::check_out_idempotent(&pool, &ctx, first_req)
         .await
@@ -4692,9 +4575,7 @@ async fn check_out_idempotent_retry_replays_without_duplicate_money_or_housekeep
         .await
         .unwrap();
 
-    assert!(!first.replayed);
-    assert!(second.replayed);
-    assert_eq!(first.response, second.response);
+    assert_replayed_pair(&first, &second);
 
     let housekeeping_count: i64 =
         sqlx::query_scalar("SELECT COUNT(*) FROM housekeeping WHERE room_id = ?")
@@ -4727,11 +4608,7 @@ async fn check_out_idempotent_same_key_changed_total_conflicts() {
     seed_active_booking(&pool, "B-CHECKOUT-HASH", "R-CHECKOUT-HASH")
         .await
         .unwrap();
-    let ctx = crate::command_idempotency::WriteCommandContext::for_internal_test(
-        "req-checkout-hash",
-        "idem-checkout-hash",
-        "check_out",
-    );
+    let ctx = cmd_with_request("check_out", "req-checkout-hash", "idem-checkout-hash");
     let first_req = CheckOutRequest {
         booking_id: "B-CHECKOUT-HASH".to_string(),
         settlement_mode: CheckoutSettlementMode::BookedNights,
@@ -4763,11 +4640,7 @@ async fn check_out_idempotent_duplicate_in_flight_returns_conflict() {
     seed_active_booking(&pool, "B-CHECKOUT-LIVE", "R-CHECKOUT-LIVE")
         .await
         .unwrap();
-    let ctx = crate::command_idempotency::WriteCommandContext::for_internal_test(
-        "req-checkout-live",
-        "idem-checkout-live",
-        "check_out",
-    );
+    let ctx = cmd_with_request("check_out", "req-checkout-live", "idem-checkout-live");
     let payload = serde_json::json!({
         "schema": "stay.check_out.v1",
         "booking_id": "B-CHECKOUT-LIVE",
@@ -4797,11 +4670,11 @@ async fn check_out_idempotent_duplicate_in_flight_returns_conflict() {
     let error = stay_lifecycle::check_out_idempotent(
         &pool,
         &ctx,
-        CheckOutRequest {
-            booking_id: "B-CHECKOUT-LIVE".to_string(),
-            settlement_mode: CheckoutSettlementMode::BookedNights,
-            final_total: 1_000_000,
-        },
+        checkout_req(
+            "B-CHECKOUT-LIVE",
+            CheckoutSettlementMode::BookedNights,
+            1_000_000,
+        ),
     )
     .await
     .expect_err("duplicate in-flight conflicts");
@@ -4862,11 +4735,7 @@ async fn checkout_fails_when_second_pool_checked_out_booking_first() {
 
     let error = stay_lifecycle::check_out(
         &pool_a,
-        CheckOutRequest {
-            booking_id: "B-2POOL".to_string(),
-            settlement_mode: CheckoutSettlementMode::BookedNights,
-            final_total: 100_000,
-        },
+        checkout_req("B-2POOL", CheckoutSettlementMode::BookedNights, 100_000),
     )
     .await
     .expect_err("checkout should reject stale booking state");
@@ -4917,11 +4786,11 @@ async fn check_out_settles_same_day_actual_nights_to_minimum_one_night() {
 
     stay_lifecycle::check_out_at(
         &pool,
-        CheckOutRequest {
-            booking_id: "B410".to_string(),
-            settlement_mode: CheckoutSettlementMode::ActualNights,
-            final_total: preview.recommended_total,
-        },
+        checkout_req(
+            "B410",
+            CheckoutSettlementMode::ActualNights,
+            preview.recommended_total,
+        ),
         chrono::Local
             .with_ymd_and_hms(2026, 4, 20, 18, 0, 0)
             .single()
@@ -4987,11 +4856,11 @@ async fn check_out_keeps_active_booking_values_for_booked_nights_mode() {
 
     stay_lifecycle::check_out_at(
         &pool,
-        CheckOutRequest {
-            booking_id: "B411".to_string(),
-            settlement_mode: CheckoutSettlementMode::BookedNights,
-            final_total: preview.recommended_total,
-        },
+        checkout_req(
+            "B411",
+            CheckoutSettlementMode::BookedNights,
+            preview.recommended_total,
+        ),
         chrono::Local
             .with_ymd_and_hms(2026, 4, 22, 9, 0, 0)
             .single()
@@ -5046,11 +4915,7 @@ async fn check_out_booked_nights_enforces_minimum_one_night_for_corrupted_bookin
 
     stay_lifecycle::check_out_at(
         &pool,
-        CheckOutRequest {
-            booking_id: "B413".to_string(),
-            settlement_mode: CheckoutSettlementMode::BookedNights,
-            final_total: 0,
-        },
+        checkout_req("B413", CheckoutSettlementMode::BookedNights, 0),
         chrono::Local
             .with_ymd_and_hms(2026, 4, 20, 12, 0, 0)
             .single()
@@ -5105,11 +4970,11 @@ async fn check_out_actual_nights_uses_early_checkout_nights() {
 
     stay_lifecycle::check_out_at(
         &pool,
-        CheckOutRequest {
-            booking_id: "B414".to_string(),
-            settlement_mode: CheckoutSettlementMode::ActualNights,
-            final_total: preview.recommended_total,
-        },
+        checkout_req(
+            "B414",
+            CheckoutSettlementMode::ActualNights,
+            preview.recommended_total,
+        ),
         chrono::Local
             .with_ymd_and_hms(2026, 4, 22, 9, 0, 0)
             .single()
@@ -5147,11 +5012,7 @@ async fn check_out_hourly_persists_manual_settlement() {
 
     stay_lifecycle::check_out_at(
         &pool,
-        CheckOutRequest {
-            booking_id: "B415".to_string(),
-            settlement_mode: CheckoutSettlementMode::Hourly,
-            final_total: 500_000,
-        },
+        checkout_req("B415", CheckoutSettlementMode::Hourly, 500_000),
         chrono::Local
             .with_ymd_and_hms(2026, 4, 20, 10, 0, 0)
             .single()
@@ -5206,11 +5067,7 @@ async fn check_out_hourly_multi_day_stay_still_persists_one_night() {
 
     stay_lifecycle::check_out_at(
         &pool,
-        CheckOutRequest {
-            booking_id: "B419".to_string(),
-            settlement_mode: CheckoutSettlementMode::Hourly,
-            final_total: 500_000,
-        },
+        checkout_req("B419", CheckoutSettlementMode::Hourly, 500_000),
         chrono::Local
             .with_ymd_and_hms(2026, 4, 22, 9, 0, 0)
             .single()
@@ -5268,11 +5125,7 @@ async fn check_out_persists_manual_override_when_final_total_differs_from_recomm
 
     stay_lifecycle::check_out_at(
         &pool,
-        CheckOutRequest {
-            booking_id: "B416".to_string(),
-            settlement_mode: CheckoutSettlementMode::ActualNights,
-            final_total: 800_000,
-        },
+        checkout_req("B416", CheckoutSettlementMode::ActualNights, 800_000),
         chrono::Local
             .with_ymd_and_hms(2026, 4, 22, 9, 0, 0)
             .single()
@@ -5330,11 +5183,7 @@ async fn check_out_writes_charge_adjustment_ledger_when_settled_total_drops() {
 
     stay_lifecycle::check_out_at(
         &pool,
-        CheckOutRequest {
-            booking_id: "B417".to_string(),
-            settlement_mode: CheckoutSettlementMode::ActualNights,
-            final_total: 800_000,
-        },
+        checkout_req("B417", CheckoutSettlementMode::ActualNights, 800_000),
         chrono::Local
             .with_ymd_and_hms(2026, 4, 22, 9, 0, 0)
             .single()
@@ -5392,11 +5241,7 @@ async fn check_out_writes_payment_delta_ledger_when_collecting_extra_payment() {
 
     stay_lifecycle::check_out_at(
         &pool,
-        CheckOutRequest {
-            booking_id: "B418".to_string(),
-            settlement_mode: CheckoutSettlementMode::BookedNights,
-            final_total: 2_500_000,
-        },
+        checkout_req("B418", CheckoutSettlementMode::BookedNights, 2_500_000),
         chrono::Local
             .with_ymd_and_hms(2026, 4, 22, 9, 0, 0)
             .single()
@@ -5469,11 +5314,7 @@ async fn checkout_paid_amount_is_ledger_projection_not_direct_overwrite() {
 
     stay_lifecycle::check_out_at(
         &pool,
-        CheckOutRequest {
-            booking_id: "B420".to_string(),
-            settlement_mode: CheckoutSettlementMode::ActualNights,
-            final_total: 75_000,
-        },
+        checkout_req("B420", CheckoutSettlementMode::ActualNights, 75_000),
         chrono::Local
             .with_ymd_and_hms(2026, 4, 21, 9, 0, 0)
             .single()
@@ -5585,11 +5426,7 @@ async fn extend_stay_idempotent_retry_replays_without_extra_night_or_charge() {
     )
     .await
     .unwrap();
-    let ctx = crate::command_idempotency::WriteCommandContext::for_internal_test(
-        "req-extend-idem",
-        "idem-extend-1",
-        "extend_stay",
-    );
+    let ctx = cmd_with_request("extend_stay", "req-extend-idem", "idem-extend-1");
 
     let first = stay_lifecycle::extend_stay_idempotent(&pool, &ctx, "B-EXT-IDEM")
         .await
@@ -5598,9 +5435,7 @@ async fn extend_stay_idempotent_retry_replays_without_extra_night_or_charge() {
         .await
         .unwrap();
 
-    assert!(!first.replayed);
-    assert!(second.replayed);
-    assert_eq!(first.response, second.response);
+    assert_replayed_pair(&first, &second);
 
     let nights: i32 = sqlx::query_scalar("SELECT nights FROM bookings WHERE id = ?")
         .bind("B-EXT-IDEM")
@@ -5631,11 +5466,7 @@ async fn extend_stay_idempotent_same_key_different_booking_conflicts() {
     seed_active_booking(&pool, "B-EXT-HASH-B", "R-EXT-HASH-B")
         .await
         .unwrap();
-    let ctx = crate::command_idempotency::WriteCommandContext::for_internal_test(
-        "req-extend-hash",
-        "idem-extend-hash",
-        "extend_stay",
-    );
+    let ctx = cmd_with_request("extend_stay", "req-extend-hash", "idem-extend-hash");
 
     stay_lifecycle::extend_stay_idempotent(&pool, &ctx, "B-EXT-HASH-A")
         .await
@@ -5657,11 +5488,7 @@ async fn extend_stay_idempotent_duplicate_in_flight_returns_conflict() {
     seed_active_booking(&pool, "B-EXT-LIVE", "R-EXT-LIVE")
         .await
         .unwrap();
-    let ctx = crate::command_idempotency::WriteCommandContext::for_internal_test(
-        "req-extend-live",
-        "idem-extend-live",
-        "extend_stay",
-    );
+    let ctx = cmd_with_request("extend_stay", "req-extend-live", "idem-extend-live");
     let payload = serde_json::json!({
         "schema": "stay.extend.v1",
         "booking_id": "B-EXT-LIVE",
@@ -5712,10 +5539,10 @@ async fn extend_stay_fails_when_second_pool_checked_out_booking_first() {
         .await
         .unwrap();
 
-    let ctx = crate::command_idempotency::WriteCommandContext::for_internal_test(
+    let ctx = cmd_with_request(
+        "extend_stay",
         "req-extend-2pool-checkout",
         "idem-extend-2pool-checkout",
-        "extend_stay",
     );
     let error = stay_lifecycle::extend_stay_idempotent(&pool_a, &ctx, "B-2POOL-EXTEND")
         .await
