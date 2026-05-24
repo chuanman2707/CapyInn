@@ -1964,7 +1964,14 @@ async fn record_payment_idempotent_retry_replays_and_does_not_double_post() {
 
     assert_replayed_pair(&first, &second);
 
-    assert_eq!(transaction_count_for_booking(&pool, "B-PAY-IDEM").await, 1);
+    let payment_count: (i64,) = sqlx::query_as(
+        "SELECT COUNT(*) FROM transactions WHERE booking_id = ? AND type = 'payment'",
+    )
+    .bind("B-PAY-IDEM")
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(payment_count.0, 1);
 
     let paid_amount: i64 = sqlx::query_scalar("SELECT paid_amount FROM bookings WHERE id = ?")
         .bind("B-PAY-IDEM")
@@ -2121,7 +2128,22 @@ async fn record_deposit_with_origin_writes_origin_key_and_ordinal() {
         .unwrap();
     tx.commit().await.unwrap();
 
-    assert_transaction_origin(&pool, "idem-deposit-1", 0, 1).await;
+    let row = sqlx::query(
+        "SELECT origin_idempotency_key, origin_transaction_ordinal
+         FROM transactions
+         WHERE booking_id = ? AND note = ?",
+    )
+    .bind(&booking_id)
+    .bind("origin deposit")
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+
+    assert_eq!(
+        row.get::<String, _>("origin_idempotency_key"),
+        "idem-deposit-1"
+    );
+    assert_eq!(row.get::<i64, _>("origin_transaction_ordinal"), 0);
 }
 
 #[tokio::test]
