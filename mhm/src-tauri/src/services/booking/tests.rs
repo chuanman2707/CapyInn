@@ -6301,7 +6301,7 @@ async fn add_folio_line_idempotent_retry_replays_and_does_not_duplicate_row() {
     seed_active_booking_with_room(&pool, "B-FOLIO-IDEM-1", "FOLIO-IDEM-1")
         .await
         .unwrap();
-    let ctx = cmd("add_folio_line", "idem-folio-line-1");
+    let ctx = cmd_with_request("add_folio_line", "req-folio-idem-1", "idem-folio-line-1");
 
     let first = add_folio_line_idempotent(
         &pool,
@@ -6344,7 +6344,11 @@ async fn add_folio_line_idempotent_accepts_uuid_booking_id_in_safe_ledger_metada
     seed_active_booking(&pool, &booking_id, "FOLIO-IDEM-UUID")
         .await
         .unwrap();
-    let ctx = cmd("add_folio_line", "idem-folio-line-uuid");
+    let ctx = cmd_with_request(
+        "add_folio_line",
+        "req-folio-idem-uuid",
+        "idem-folio-line-uuid",
+    );
 
     let result = add_folio_line_idempotent(
         &pool,
@@ -6385,7 +6389,11 @@ async fn add_folio_line_idempotent_metadata_is_sanitized_and_contains_lock_keys(
     seed_active_booking_with_room(&pool, "B-FOLIO-IDEM-META", "FOLIO-IDEM-META")
         .await
         .unwrap();
-    let ctx = cmd("add_folio_line", "idem-folio-line-meta");
+    let ctx = cmd_with_request(
+        "add_folio_line",
+        "req-folio-idem-meta",
+        "idem-folio-line-meta",
+    );
 
     add_folio_line_idempotent(
         &pool,
