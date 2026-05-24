@@ -6683,7 +6683,20 @@ async fn add_folio_line_idempotent_invalid_amount_does_not_consume_claim_or_ordi
     .expect("valid amount succeeds");
     assert!(!success.replayed);
 
-    assert_folio_origin(&pool, "add_folio_line:idem-folio-line-5", 0, 1).await;
+    let row = sqlx::query(
+        "SELECT origin_idempotency_key, origin_line_ordinal
+         FROM folio_lines
+         WHERE booking_id = ?",
+    )
+    .bind("B-FOLIO-IDEM-5")
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        row.get::<String, _>("origin_idempotency_key"),
+        "add_folio_line:idem-folio-line-5"
+    );
+    assert_eq!(row.get::<i64, _>("origin_line_ordinal"), 0);
 }
 
 #[tokio::test]
@@ -6783,7 +6796,22 @@ async fn insert_folio_line_with_origin_writes_origin_key_and_ordinal() {
     .unwrap();
     tx.commit().await.unwrap();
 
-    assert_folio_origin(&pool, "idem-folio-1", 0, 1).await;
+    let row = sqlx::query(
+        "SELECT origin_idempotency_key, origin_line_ordinal
+         FROM folio_lines
+         WHERE booking_id = ? AND description = ?",
+    )
+    .bind(&booking_id)
+    .bind("Laundry with origin")
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+
+    assert_eq!(
+        row.get::<String, _>("origin_idempotency_key"),
+        "idem-folio-1"
+    );
+    assert_eq!(row.get::<i64, _>("origin_line_ordinal"), 0);
 }
 
 #[tokio::test]
