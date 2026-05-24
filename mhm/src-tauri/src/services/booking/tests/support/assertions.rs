@@ -170,3 +170,29 @@ pub async fn transaction_sum(
     }
     query.fetch_one(pool).await.expect("sum transactions")
 }
+
+pub async fn assert_folio_origin(
+    pool: &Pool<Sqlite>,
+    origin_key: &str,
+    expected_ordinal: i64,
+    expected_count: i64,
+) {
+    let count: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM folio_lines
+         WHERE origin_idempotency_key = ? AND origin_line_ordinal = ?",
+    )
+    .bind(origin_key)
+    .bind(expected_ordinal)
+    .fetch_one(pool)
+    .await
+    .expect("count folio lines by origin");
+    assert_eq!(count, expected_count);
+}
+
+pub async fn folio_line_count_for_key(pool: &Pool<Sqlite>, origin_key: &str) -> i64 {
+    sqlx::query_scalar("SELECT COUNT(*) FROM folio_lines WHERE origin_idempotency_key = ?")
+        .bind(origin_key)
+        .fetch_one(pool)
+        .await
+        .expect("count folio lines by origin key")
+}

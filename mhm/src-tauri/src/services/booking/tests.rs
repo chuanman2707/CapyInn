@@ -6298,15 +6298,10 @@ async fn billing_and_export_queries_preserve_canonical_revenue_columns() {
 #[tokio::test]
 async fn add_folio_line_idempotent_retry_replays_and_does_not_duplicate_row() {
     let pool = test_pool().await;
-    seed_room(&pool, "FOLIO-IDEM-1").await.unwrap();
-    seed_active_booking(&pool, "B-FOLIO-IDEM-1", "FOLIO-IDEM-1")
+    seed_active_booking_with_room(&pool, "B-FOLIO-IDEM-1", "FOLIO-IDEM-1")
         .await
         .unwrap();
-    let ctx = crate::command_idempotency::WriteCommandContext::for_internal_test(
-        "req-folio-idem-1",
-        "idem-folio-line-1",
-        "add_folio_line",
-    );
+    let ctx = cmd("add_folio_line", "idem-folio-line-1");
 
     let first = add_folio_line_idempotent(
         &pool,
@@ -6331,17 +6326,13 @@ async fn add_folio_line_idempotent_retry_replays_and_does_not_duplicate_row() {
     .await
     .expect("retry replays");
 
-    assert!(!first.replayed);
-    assert!(second.replayed);
+    assert_replayed_pair(&first, &second);
     assert_eq!(first.response["id"], second.response["id"]);
 
-    let count: i64 =
-        sqlx::query_scalar("SELECT COUNT(*) FROM folio_lines WHERE origin_idempotency_key = ?")
-            .bind("add_folio_line:idem-folio-line-1")
-            .fetch_one(&pool)
-            .await
-            .unwrap();
-    assert_eq!(count, 1);
+    assert_eq!(
+        folio_line_count_for_key(&pool, "add_folio_line:idem-folio-line-1").await,
+        1
+    );
     assert_single_outbox_event(&pool, &ctx, "folio.line_added").await;
 }
 
@@ -6353,11 +6344,7 @@ async fn add_folio_line_idempotent_accepts_uuid_booking_id_in_safe_ledger_metada
     seed_active_booking(&pool, &booking_id, "FOLIO-IDEM-UUID")
         .await
         .unwrap();
-    let ctx = crate::command_idempotency::WriteCommandContext::for_internal_test(
-        "req-folio-idem-uuid",
-        "idem-folio-line-uuid",
-        "add_folio_line",
-    );
+    let ctx = cmd("add_folio_line", "idem-folio-line-uuid");
 
     let result = add_folio_line_idempotent(
         &pool,
@@ -6395,15 +6382,10 @@ async fn add_folio_line_idempotent_accepts_uuid_booking_id_in_safe_ledger_metada
 #[tokio::test]
 async fn add_folio_line_idempotent_metadata_is_sanitized_and_contains_lock_keys() {
     let pool = test_pool().await;
-    seed_room(&pool, "FOLIO-IDEM-META").await.unwrap();
-    seed_active_booking(&pool, "B-FOLIO-IDEM-META", "FOLIO-IDEM-META")
+    seed_active_booking_with_room(&pool, "B-FOLIO-IDEM-META", "FOLIO-IDEM-META")
         .await
         .unwrap();
-    let ctx = crate::command_idempotency::WriteCommandContext::for_internal_test(
-        "req-folio-idem-meta",
-        "idem-folio-line-meta",
-        "add_folio_line",
-    );
+    let ctx = cmd("add_folio_line", "idem-folio-line-meta");
 
     add_folio_line_idempotent(
         &pool,
@@ -6448,15 +6430,10 @@ async fn add_folio_line_idempotent_metadata_is_sanitized_and_contains_lock_keys(
 #[tokio::test]
 async fn add_folio_line_idempotent_same_key_different_payload_conflicts() {
     let pool = test_pool().await;
-    seed_room(&pool, "FOLIO-IDEM-2").await.unwrap();
-    seed_active_booking(&pool, "B-FOLIO-IDEM-2", "FOLIO-IDEM-2")
+    seed_active_booking_with_room(&pool, "B-FOLIO-IDEM-2", "FOLIO-IDEM-2")
         .await
         .unwrap();
-    let ctx = crate::command_idempotency::WriteCommandContext::for_internal_test(
-        "req-folio-idem-2",
-        "idem-folio-line-2",
-        "add_folio_line",
-    );
+    let ctx = cmd("add_folio_line", "idem-folio-line-2");
 
     add_folio_line_idempotent(
         &pool,
@@ -6491,15 +6468,10 @@ async fn add_folio_line_idempotent_same_key_different_payload_conflicts() {
 #[tokio::test]
 async fn add_folio_line_idempotent_same_key_changed_amount_conflicts() {
     let pool = test_pool().await;
-    seed_room(&pool, "FOLIO-IDEM-AMOUNT").await.unwrap();
-    seed_active_booking(&pool, "B-FOLIO-IDEM-AMOUNT", "FOLIO-IDEM-AMOUNT")
+    seed_active_booking_with_room(&pool, "B-FOLIO-IDEM-AMOUNT", "FOLIO-IDEM-AMOUNT")
         .await
         .unwrap();
-    let ctx = crate::command_idempotency::WriteCommandContext::for_internal_test(
-        "req-folio-idem-amount",
-        "idem-folio-line-amount",
-        "add_folio_line",
-    );
+    let ctx = cmd("add_folio_line", "idem-folio-line-amount");
 
     add_folio_line_idempotent(
         &pool,
@@ -6534,15 +6506,10 @@ async fn add_folio_line_idempotent_same_key_changed_amount_conflicts() {
 #[tokio::test]
 async fn add_folio_line_idempotent_replay_returns_stored_snapshot() {
     let pool = test_pool().await;
-    seed_room(&pool, "FOLIO-IDEM-3").await.unwrap();
-    seed_active_booking(&pool, "B-FOLIO-IDEM-3", "FOLIO-IDEM-3")
+    seed_active_booking_with_room(&pool, "B-FOLIO-IDEM-3", "FOLIO-IDEM-3")
         .await
         .unwrap();
-    let ctx = crate::command_idempotency::WriteCommandContext::for_internal_test(
-        "req-folio-idem-3",
-        "idem-folio-line-3",
-        "add_folio_line",
-    );
+    let ctx = cmd("add_folio_line", "idem-folio-line-3");
 
     let first = add_folio_line_idempotent(
         &pool,
@@ -6584,15 +6551,10 @@ async fn add_folio_line_idempotent_replay_returns_stored_snapshot() {
 #[tokio::test]
 async fn add_folio_line_idempotent_duplicate_seeded_live_in_flight_returns_conflict() {
     let pool = test_pool().await;
-    seed_room(&pool, "FOLIO-IDEM-INFLIGHT").await.unwrap();
-    seed_active_booking(&pool, "B-FOLIO-IDEM-INFLIGHT", "FOLIO-IDEM-INFLIGHT")
+    seed_active_booking_with_room(&pool, "B-FOLIO-IDEM-INFLIGHT", "FOLIO-IDEM-INFLIGHT")
         .await
         .unwrap();
-    let ctx = crate::command_idempotency::WriteCommandContext::for_internal_test(
-        "req-folio-idem-inflight",
-        "idem-folio-line-inflight",
-        "add_folio_line",
-    );
+    let ctx = cmd("add_folio_line", "idem-folio-line-inflight");
     seed_live_in_progress_command(
         &pool,
         "add_folio_line",
@@ -6628,8 +6590,7 @@ async fn add_folio_line_idempotent_duplicate_seeded_live_in_flight_returns_confl
 #[tokio::test]
 async fn add_folio_line_idempotent_rejects_blank_key_before_any_write() {
     let pool = test_pool().await;
-    seed_room(&pool, "FOLIO-IDEM-4").await.unwrap();
-    seed_active_booking(&pool, "B-FOLIO-IDEM-4", "FOLIO-IDEM-4")
+    seed_active_booking_with_room(&pool, "B-FOLIO-IDEM-4", "FOLIO-IDEM-4")
         .await
         .unwrap();
 
@@ -6665,15 +6626,10 @@ async fn add_folio_line_idempotent_rejects_blank_key_before_any_write() {
 #[tokio::test]
 async fn add_folio_line_idempotent_invalid_amount_does_not_consume_claim_or_ordinal() {
     let pool = test_pool().await;
-    seed_room(&pool, "FOLIO-IDEM-5").await.unwrap();
-    seed_active_booking(&pool, "B-FOLIO-IDEM-5", "FOLIO-IDEM-5")
+    seed_active_booking_with_room(&pool, "B-FOLIO-IDEM-5", "FOLIO-IDEM-5")
         .await
         .unwrap();
-    let ctx = crate::command_idempotency::WriteCommandContext::for_internal_test(
-        "req-folio-idem-5",
-        "idem-folio-line-5",
-        "add_folio_line",
-    );
+    let ctx = cmd("add_folio_line", "idem-folio-line-5");
 
     let error = add_folio_line_idempotent(
         &pool,
@@ -6719,20 +6675,7 @@ async fn add_folio_line_idempotent_invalid_amount_does_not_consume_claim_or_ordi
     .expect("valid amount succeeds");
     assert!(!success.replayed);
 
-    let row = sqlx::query(
-        "SELECT origin_idempotency_key, origin_line_ordinal
-         FROM folio_lines
-         WHERE booking_id = ?",
-    )
-    .bind("B-FOLIO-IDEM-5")
-    .fetch_one(&pool)
-    .await
-    .unwrap();
-    assert_eq!(
-        row.get::<String, _>("origin_idempotency_key"),
-        "add_folio_line:idem-folio-line-5"
-    );
-    assert_eq!(row.get::<i64, _>("origin_line_ordinal"), 0);
+    assert_folio_origin(&pool, "add_folio_line:idem-folio-line-5", 0, 1).await;
 }
 
 #[tokio::test]
@@ -6742,11 +6685,7 @@ async fn add_folio_line_idempotent_unsafe_amount_does_not_consume_claim_or_write
     seed_active_booking(&pool, "B-FOLIO-FRACTION", "B-FOLIO-FRACTION")
         .await
         .unwrap();
-    let ctx = crate::command_idempotency::WriteCommandContext::for_internal_test(
-        "req-folio-unsafe",
-        "idem-folio-unsafe",
-        "add_folio_line",
-    );
+    let ctx = cmd_with_request("add_folio_line", "req-folio-unsafe", "idem-folio-unsafe");
 
     let error = add_folio_line_idempotent(
         &pool,
@@ -6783,8 +6722,7 @@ async fn add_folio_line_idempotent_unsafe_amount_does_not_consume_claim_or_write
 #[tokio::test]
 async fn folio_line_insert_rolls_back_with_parent_transaction() {
     let pool = test_pool().await;
-    seed_room(&pool, "FOLIO-1").await.unwrap();
-    seed_active_booking(&pool, "B-FOLIO-1", "FOLIO-1")
+    seed_active_booking_with_room(&pool, "B-FOLIO-1", "FOLIO-1")
         .await
         .unwrap();
 
@@ -6837,29 +6775,13 @@ async fn insert_folio_line_with_origin_writes_origin_key_and_ordinal() {
     .unwrap();
     tx.commit().await.unwrap();
 
-    let row = sqlx::query(
-        "SELECT origin_idempotency_key, origin_line_ordinal
-         FROM folio_lines
-         WHERE booking_id = ? AND description = ?",
-    )
-    .bind(&booking_id)
-    .bind("Laundry with origin")
-    .fetch_one(&pool)
-    .await
-    .unwrap();
-
-    assert_eq!(
-        row.get::<String, _>("origin_idempotency_key"),
-        "idem-folio-1"
-    );
-    assert_eq!(row.get::<i64, _>("origin_line_ordinal"), 0);
+    assert_folio_origin(&pool, "idem-folio-1", 0, 1).await;
 }
 
 #[tokio::test]
 async fn duplicate_folio_origin_is_blocked_by_unique_origin_ordinal() {
     let pool = test_pool().await;
-    seed_room(&pool, "R-FOLIO-ORIGIN-DUP").await.unwrap();
-    seed_active_booking(&pool, "B-FOLIO-ORIGIN-DUP", "R-FOLIO-ORIGIN-DUP")
+    seed_active_booking_with_room(&pool, "B-FOLIO-ORIGIN-DUP", "R-FOLIO-ORIGIN-DUP")
         .await
         .unwrap();
     let origin = OriginSideEffect::new("origin-duplicate-folio", 0).unwrap();
@@ -6899,13 +6821,5 @@ async fn duplicate_folio_origin_is_blocked_by_unique_origin_ordinal() {
     assert!(duplicate.is_err(), "duplicate folio origin must fail");
     second_tx.rollback().await.unwrap();
 
-    let count: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM folio_lines
-         WHERE origin_idempotency_key = ? AND origin_line_ordinal = 0",
-    )
-    .bind("origin-duplicate-folio")
-    .fetch_one(&pool)
-    .await
-    .unwrap();
-    assert_eq!(count, 1);
+    assert_folio_origin(&pool, "origin-duplicate-folio", 0, 1).await;
 }
