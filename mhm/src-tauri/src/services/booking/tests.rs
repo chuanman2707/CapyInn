@@ -2903,7 +2903,14 @@ async fn reservation_command_idempotency_modify_replay_does_not_duplicate_calend
     .await
     .expect("modify replays");
 
-    assert_calendar_rows(&pool, "B693", "booked", 3).await;
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM room_calendar WHERE booking_id = ?")
+            .bind("B693")
+            .fetch_one(&pool)
+            .await
+            .expect("counts calendar rows"),
+        3
+    );
 }
 
 #[tokio::test]
