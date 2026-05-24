@@ -123,10 +123,12 @@ pub fn rich_group_checkin_request(
     }
 }
 
+#[allow(dead_code)]
 pub struct CheckInRequestBuilder {
     req: CheckInRequest,
 }
 
+#[allow(dead_code)]
 impl CheckInRequestBuilder {
     pub fn new(room_id: &str) -> Self {
         Self {
@@ -161,14 +163,17 @@ impl CheckInRequestBuilder {
     }
 }
 
+#[allow(dead_code)]
 pub fn checkin_req(room_id: &str) -> CheckInRequestBuilder {
     CheckInRequestBuilder::new(room_id)
 }
 
+#[allow(dead_code)]
 pub struct ReservationRequestBuilder {
     req: CreateReservationRequest,
 }
 
+#[allow(dead_code)]
 impl ReservationRequestBuilder {
     pub fn new(room_id: &str) -> Self {
         Self {
@@ -212,14 +217,17 @@ impl ReservationRequestBuilder {
     }
 }
 
+#[allow(dead_code)]
 pub fn reservation_req(room_id: &str) -> ReservationRequestBuilder {
     ReservationRequestBuilder::new(room_id)
 }
 
+#[allow(dead_code)]
 pub struct GroupCheckinRequestBuilder {
     req: GroupCheckinRequest,
 }
 
+#[allow(dead_code)]
 impl GroupCheckinRequestBuilder {
     pub fn new(room_ids: &[&str]) -> Self {
         Self {
@@ -258,10 +266,12 @@ impl GroupCheckinRequestBuilder {
     }
 }
 
+#[allow(dead_code)]
 pub fn group_checkin_req(room_ids: &[&str]) -> GroupCheckinRequestBuilder {
     GroupCheckinRequestBuilder::new(room_ids)
 }
 
+#[allow(dead_code)]
 pub fn rich_group_req(
     room_ids: &[&str],
     master_room_id: &str,

@@ -99,11 +99,13 @@ pub async fn seed_live_in_progress_command(
     .expect("seed in-progress command");
 }
 
+#[allow(dead_code)]
 pub fn cmd(command_name: &str, idempotency_key: &str) -> WriteCommandContext {
     let request_id = format!("req-{command_name}-{idempotency_key}");
     WriteCommandContext::for_internal_test(&request_id, idempotency_key, command_name)
 }
 
+#[allow(dead_code)]
 pub fn cmd_with_request(
     command_name: &str,
     request_id: &str,
@@ -112,13 +114,9 @@ pub fn cmd_with_request(
     WriteCommandContext::for_internal_test(request_id, idempotency_key, command_name)
 }
 
-pub fn cmd_at(
-    command_name: &str,
-    idempotency_key: &str,
-    issued_at: &str,
-) -> WriteCommandContext {
+#[allow(dead_code)]
+pub fn cmd_at(command_name: &str, idempotency_key: &str, issued_at: &str) -> WriteCommandContext {
     let mut ctx = cmd(command_name, idempotency_key);
-    ctx.issued_at = chrono::DateTime::parse_from_rfc3339(issued_at)
-        .expect("test issued_at parses");
+    ctx.issued_at = chrono::DateTime::parse_from_rfc3339(issued_at).expect("test issued_at parses");
     ctx
 }
