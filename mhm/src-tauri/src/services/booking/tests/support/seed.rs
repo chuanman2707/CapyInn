@@ -17,23 +17,6 @@ pub async fn seed_room(pool: &Pool<Sqlite>, room_id: &str) -> BookingResult<()> 
     Ok(())
 }
 
-pub async fn seed_booking_group(pool: &Pool<Sqlite>, group_id: &str) {
-    sqlx::query(
-        "INSERT INTO booking_groups (
-            id, group_name, organizer_name, organizer_phone, total_rooms,
-            status, notes, created_by, created_at
-        ) VALUES (?, ?, ?, NULL, 1, 'active', NULL, ?, ?)",
-    )
-    .bind(group_id)
-    .bind(format!("Group {group_id}"))
-    .bind("Organizer")
-    .bind("seed-user")
-    .bind("2026-05-01T09:00:00+07:00")
-    .execute(pool)
-    .await
-    .expect("seed booking group");
-}
-
 pub async fn seed_booking_for_origin_tests(
     pool: &Pool<Sqlite>,
     room_id: &str,

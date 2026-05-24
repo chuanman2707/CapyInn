@@ -104,7 +104,6 @@ pub fn cmd(command_name: &str, idempotency_key: &str) -> WriteCommandContext {
     WriteCommandContext::for_internal_test(&request_id, idempotency_key, command_name)
 }
 
-#[allow(dead_code)]
 pub fn cmd_with_request(
     command_name: &str,
     request_id: &str,

@@ -8,8 +8,9 @@ use crate::{
         BookingError, OriginSideEffect,
     },
     models::{
-        CheckOutRequest, CheckoutSettlementMode, CheckoutSettlementPreviewRequest,
-        CreateGuestRequest, CreateReservationRequest, GroupCheckoutRequest,
+        AddGroupServiceRequest, CheckOutRequest, CheckoutSettlementMode,
+        CheckoutSettlementPreviewRequest, CreateGuestRequest, CreateReservationRequest,
+        GroupCheckoutRequest,
     },
     money::MAX_TRANSPORT_SAFE_MONEY_VND,
     queries::booking::{audit_queries, billing_queries, revenue_queries},
@@ -1230,25 +1231,30 @@ async fn group_checkin_idempotent_same_key_changed_guest_name_conflicts() {
     );
 }
 
+async fn checked_in_group_for_service_tests(
+    pool: &sqlx::Pool<sqlx::Sqlite>,
+    room_ids: &[&str],
+    daily_rate: crate::money::MoneyVnd,
+) -> crate::models::BookingGroup {
+    seed_rooms_with_price(pool, room_ids, daily_rate)
+        .await
+        .unwrap();
+    group_lifecycle::group_checkin(pool, None, group_checkin_req(room_ids).build())
+        .await
+        .unwrap()
+}
+
 #[tokio::test]
 async fn add_group_service_idempotent_retry_replays_without_duplicate_row() {
     let pool = test_pool().await;
-    seed_booking_group(&pool, "G-SVC-IDEM").await;
+    let group = checked_in_group_for_service_tests(&pool, &["G-SVC-1", "G-SVC-2"], 250_000).await;
     let ctx = cmd_with_request(
         "add_group_service",
         "req-group-svc-idem",
-        "idem-group-svc-1",
+        "idem-add-group-service-1",
     );
-    let first_req = crate::models::AddGroupServiceRequest {
-        group_id: "G-SVC-IDEM".to_string(),
-        booking_id: None,
-        name: "Laundry".to_string(),
-        quantity: 2,
-        unit_price: 25_000,
-        note: Some("same-day".to_string()),
-    };
-    let second_req = crate::models::AddGroupServiceRequest {
-        group_id: "G-SVC-IDEM".to_string(),
+    let service_req = || AddGroupServiceRequest {
+        group_id: group.id.clone(),
         booking_id: None,
         name: "Laundry".to_string(),
         quantity: 2,
@@ -1256,14 +1262,22 @@ async fn add_group_service_idempotent_retry_replays_without_duplicate_row() {
         note: Some("same-day".to_string()),
     };
 
-    let first =
-        group_service_management::add_group_service_idempotent(&pool, &ctx, first_req, "staff-1")
-            .await
-            .expect("first service add succeeds");
-    let second =
-        group_service_management::add_group_service_idempotent(&pool, &ctx, second_req, "staff-1")
-            .await
-            .expect("retry replays");
+    let first = group_service_management::add_group_service_idempotent(
+        &pool,
+        &ctx,
+        service_req(),
+        "staff-1",
+    )
+    .await
+    .expect("first service add succeeds");
+    let second = group_service_management::add_group_service_idempotent(
+        &pool,
+        &ctx,
+        service_req(),
+        "staff-1",
+    )
+    .await
+    .expect("retry replays");
 
     assert!(!first.replayed);
     assert!(second.replayed);
@@ -1276,7 +1290,7 @@ async fn add_group_service_idempotent_retry_replays_without_duplicate_row() {
     assert_single_outbox_event(&pool, &ctx, "group.service_added").await;
 
     let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM group_services WHERE group_id = ?")
-        .bind("G-SVC-IDEM")
+        .bind(&group.id)
         .fetch_one(&pool)
         .await
         .unwrap();
@@ -1286,32 +1300,29 @@ async fn add_group_service_idempotent_retry_replays_without_duplicate_row() {
 #[tokio::test]
 async fn add_group_service_idempotent_same_key_different_payload_conflicts() {
     let pool = test_pool().await;
-    seed_booking_group(&pool, "G-SVC-HASH").await;
-    let ctx = cmd("add_group_service", "idem-group-svc-hash");
-    let first_req = crate::models::AddGroupServiceRequest {
-        group_id: "G-SVC-HASH".to_string(),
+    let group =
+        checked_in_group_for_service_tests(&pool, &["G-SVC-HASH-1", "G-SVC-HASH-2"], 250_000).await;
+    let ctx = cmd("add_group_service", "idem-add-group-service-hash");
+    let service_req = |quantity| AddGroupServiceRequest {
+        group_id: group.id.clone(),
         booking_id: None,
         name: "Laundry".to_string(),
-        quantity: 1,
-        unit_price: 25_000,
-        note: None,
-    };
-    let changed_req = crate::models::AddGroupServiceRequest {
-        group_id: "G-SVC-HASH".to_string(),
-        booking_id: None,
-        name: "Laundry".to_string(),
-        quantity: 2,
+        quantity,
         unit_price: 25_000,
         note: None,
     };
 
-    group_service_management::add_group_service_idempotent(&pool, &ctx, first_req, "staff-1")
+    group_service_management::add_group_service_idempotent(&pool, &ctx, service_req(1), "staff-1")
         .await
         .expect("first service add succeeds");
-    let error =
-        group_service_management::add_group_service_idempotent(&pool, &ctx, changed_req, "staff-1")
-            .await
-            .expect_err("same key with changed quantity conflicts");
+    let error = group_service_management::add_group_service_idempotent(
+        &pool,
+        &ctx,
+        service_req(2),
+        "staff-1",
+    )
+    .await
+    .expect_err("same key with changed quantity conflicts");
 
     assert_eq!(
         error.code,
@@ -1319,7 +1330,7 @@ async fn add_group_service_idempotent_same_key_different_payload_conflicts() {
     );
 
     let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM group_services WHERE group_id = ?")
-        .bind("G-SVC-HASH")
+        .bind(&group.id)
         .fetch_one(&pool)
         .await
         .unwrap();
@@ -1329,10 +1340,15 @@ async fn add_group_service_idempotent_same_key_different_payload_conflicts() {
 #[tokio::test]
 async fn add_group_service_idempotent_rejects_negative_unit_price_without_writing() {
     let pool = test_pool().await;
-    seed_booking_group(&pool, "G-SVC-NEGATIVE-PRICE").await;
-    let ctx = cmd("add_group_service", "idem-group-svc-negative-price");
-    let req = crate::models::AddGroupServiceRequest {
-        group_id: "G-SVC-NEGATIVE-PRICE".to_string(),
+    let group = checked_in_group_for_service_tests(
+        &pool,
+        &["G-SVC-NEG-PRICE-1", "G-SVC-NEG-PRICE-2"],
+        250_000,
+    )
+    .await;
+    let ctx = cmd("add_group_service", "idem-add-group-service-negative-price");
+    let req = AddGroupServiceRequest {
+        group_id: group.id.clone(),
         booking_id: None,
         name: "Laundry".to_string(),
         quantity: 1,
@@ -1347,7 +1363,7 @@ async fn add_group_service_idempotent_rejects_negative_unit_price_without_writin
     assert_eq!(error.code, crate::app_error::codes::BOOKING_INVALID_STATE);
 
     let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM group_services WHERE group_id = ?")
-        .bind("G-SVC-NEGATIVE-PRICE")
+        .bind(&group.id)
         .fetch_one(&pool)
         .await
         .unwrap();
@@ -1357,17 +1373,20 @@ async fn add_group_service_idempotent_rejects_negative_unit_price_without_writin
 #[tokio::test]
 async fn remove_group_service_idempotent_retry_replays_without_extra_delete() {
     let pool = test_pool().await;
-    seed_booking_group(&pool, "G-SVC-REMOVE").await;
+    let group =
+        checked_in_group_for_service_tests(&pool, &["G-SVC-REMOVE-1", "G-SVC-REMOVE-2"], 250_000)
+            .await;
     sqlx::query(
         "INSERT INTO group_services (
             id, group_id, booking_id, name, quantity, unit_price,
             total_price, note, created_by, created_at
-        ) VALUES ('SVC-REMOVE-1', 'G-SVC-REMOVE', NULL, 'Laundry', 1, 25000, 25000, NULL, 'staff-1', '2026-05-01T09:00:00+07:00')",
+        ) VALUES ('SVC-REMOVE-1', ?, NULL, 'Laundry', 1, 25000, 25000, NULL, 'staff-1', '2026-05-01T09:00:00+07:00')",
     )
+    .bind(&group.id)
     .execute(&pool)
     .await
     .unwrap();
-    let ctx = cmd("remove_group_service", "idem-group-svc-remove");
+    let ctx = cmd("remove_group_service", "idem-remove-group-service-1");
 
     let first =
         group_service_management::remove_group_service_idempotent(&pool, &ctx, "SVC-REMOVE-1")
@@ -1392,20 +1411,26 @@ async fn remove_group_service_idempotent_retry_replays_without_extra_delete() {
 #[tokio::test]
 async fn remove_group_service_idempotent_same_key_different_service_conflicts() {
     let pool = test_pool().await;
-    seed_booking_group(&pool, "G-SVC-REMOVE-HASH").await;
+    let group = checked_in_group_for_service_tests(
+        &pool,
+        &["G-SVC-REMOVE-HASH-1", "G-SVC-REMOVE-HASH-2"],
+        250_000,
+    )
+    .await;
     for service_id in ["SVC-REMOVE-A", "SVC-REMOVE-B"] {
         sqlx::query(
             "INSERT INTO group_services (
                 id, group_id, booking_id, name, quantity, unit_price,
                 total_price, note, created_by, created_at
-            ) VALUES (?, 'G-SVC-REMOVE-HASH', NULL, 'Laundry', 1, 25000, 25000, NULL, 'staff-1', '2026-05-01T09:00:00+07:00')",
+            ) VALUES (?, ?, NULL, 'Laundry', 1, 25000, 25000, NULL, 'staff-1', '2026-05-01T09:00:00+07:00')",
         )
         .bind(service_id)
+        .bind(&group.id)
         .execute(&pool)
         .await
         .unwrap();
     }
-    let ctx = cmd("remove_group_service", "idem-group-svc-remove-hash");
+    let ctx = cmd("remove_group_service", "idem-remove-group-service-hash");
 
     group_service_management::remove_group_service_idempotent(&pool, &ctx, "SVC-REMOVE-A")
         .await

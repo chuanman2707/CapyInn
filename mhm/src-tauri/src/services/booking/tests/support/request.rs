@@ -266,7 +266,6 @@ impl GroupCheckinRequestBuilder {
     }
 }
 
-#[allow(dead_code)]
 pub fn group_checkin_req(room_ids: &[&str]) -> GroupCheckinRequestBuilder {
     GroupCheckinRequestBuilder::new(room_ids)
 }
