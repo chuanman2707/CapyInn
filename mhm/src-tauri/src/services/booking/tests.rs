@@ -6187,9 +6187,8 @@ async fn booking_export_includes_local_rfc3339_cancellation_fee_date() {
 #[tokio::test]
 async fn run_night_audit_uses_canonical_room_and_folio_revenue() {
     let pool = test_pool().await;
-    seed_active_booking_with_room(&pool, "B303", "R303")
-        .await
-        .unwrap();
+    seed_room(&pool, "R303").await.unwrap();
+    seed_active_booking(&pool, "B303", "R303").await.unwrap();
     sqlx::query(
         "UPDATE bookings
          SET nights = 2, total_price = 500000, expected_checkout = '2026-04-17T10:00:00+07:00'
