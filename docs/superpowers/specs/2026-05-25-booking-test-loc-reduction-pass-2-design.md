@@ -23,9 +23,21 @@ Current relevant files:
 - `mhm/src-tauri/src/services/booking/tests/support/request.rs`
 - `mhm/src-tauri/src/services/booking/tests/support/seed.rs`
 
+Implementation edit whitelist:
+
+- `mhm/src-tauri/src/services/booking/tests.rs`
+- Existing or newly added Rust files under
+  `mhm/src-tauri/src/services/booking/tests/support/`
+
+No other implementation files may be edited for this LOC-reduction pass.
+Additional support files are allowed only under `tests/support/` and only if
+they reduce net total LOC after their call sites are compacted.
+
 Out of scope:
 
 - Runtime/business files.
+- Other test files, docs/spec files, config files, generated files, and
+  repository metadata during implementation.
 - `mhm/src/stores/useHotelStore.test.ts`, which is an unrelated dirty file and
   must not be edited, staged, or committed.
 - Whole-repository formatting, because `cargo fmt --manifest-path
@@ -41,6 +53,9 @@ Out of scope:
 - Keep behavior-defining literals visible in tests: command names,
   idempotency keys, request ids, booking ids, room ids, dates, money amounts,
   origin keys, origin ordinals, notes, descriptions, and event names.
+- Do not delete or merge away behavior scenarios only to reduce LOC. If two
+  tests are merged, every invariant and assertion from each original scenario
+  must remain covered with equal specificity.
 - Commit each safe implementation batch only after targeted tests pass and the
   diff has been reviewed for assertion weakening.
 - End with full booking tests, full Rust tests, scoped rustfmt check, LOC
@@ -95,26 +110,29 @@ Rejected approaches:
 Add very narrow helpers in `tests/support/assertions.rs` only when they preserve
 the full current SQL predicate. Good candidates:
 
-- Table-specific row-count helpers where the current assertion is exactly the
-  same predicate, such as `booking_guest_count`,
-  `calendar_count_for_booking`, `folio_line_count_for_booking`, and
-  `transaction_count_for_booking`.
+- Table-specific row-count helpers where the helper signature contains every
+  behavior-visible predicate from the current assertion. For example, a
+  calendar helper that currently filters by status must keep status in the
+  signature, and an origin helper that currently filters by booking id and
+  ordinal must keep both values in the signature.
 - `command_claim_count(pool, command_name, idempotency_key)`.
 - `command_claim_count_by_request(pool, command_name, request_id)`.
 - `outbox_count(pool, command_name, idempotency_key)`.
 - `origin_transaction_count(pool, origin_key)`.
 - `origin_folio_line_count(pool, origin_key)`.
-- `transaction_count(pool, booking_id, txn_type, note)` where note is optional
-  only when the current assertion also omits note.
-- `transaction_sum(pool, booking_id, txn_type, note)` for repeated sum
-  assertions that already filter by booking and type.
-- `checkout_money_count(pool, booking_id)` only if it keeps the exact current
-  note set for checkout settlement money rows.
+- `transaction_count(pool, booking_id, txn_type, note)` only for assertions
+  whose current predicate is exactly booking id, type, and optionally note.
+- `transaction_sum(pool, booking_id, txn_type, note)` only for repeated sum
+  assertions with the same booking/type/note predicate.
+- Checkout settlement money counts must either keep the SQL inline or pass the
+  expected note set explicitly at the call site. Do not hide checkout money
+  note literals inside a helper.
 
 Avoid helpers that drop filters. If an existing assertion includes
 `booking_id`, `note`, `description`, `status`, `origin_idempotency_key`,
 `origin_*_ordinal`, or event metadata, the helper must either include the same
-filter or the assertion must stay inline.
+filter or the assertion must stay inline. Do not use optional helper arguments
+to combine meaningfully different predicates into one broad helper.
 
 Expected impact: moderate LOC reduction with low risk, mainly in idempotency
 pre-claim/no-write tests, retry duplicate checks, and simple table count
@@ -136,6 +154,11 @@ candidates:
   for reservation lifecycle tests that always seed room, pricing, and the same
   booked reservation fixture.
 
+These fixtures are only allowed when all behavior-visible values remain either
+explicit at the call site or irrelevant to the assertion under test. Dates,
+status, money amounts, transaction type, origin key/ordinal, notes, and
+descriptions must be parameters when the test depends on them.
+
 Do not use fixtures for tests where setup details are the behavior under test:
 
 - Date-boundary reporting tests.
@@ -156,6 +179,9 @@ Use table-driven loops only for structurally identical negative cases:
 - The setup, service call shape, expected error code, and no-write assertions
   are identical.
 - Each case has a clear label or idempotency key so failures are debuggable.
+- Each table row keeps the invalid amount, command name, idempotency key,
+  request id when relevant, expected error code, and no-write assertion target
+  explicit.
 
 Do not table-drive tests with different side effects, different command
 metadata assertions, different outbox expectations, or different rollback
@@ -196,12 +222,15 @@ Allowed examples:
 
 - A helper to mark a booking checked out with a provided pricing snapshot,
   actual checkout, nights, total, and paid amount when all those values remain
-  explicit at the call site.
+  explicit at the call site. The helper must not seed or modify ledger,
+  folio, outbox, or origin rows.
 - A helper to fetch one booking export row by id after calling
   `load_booking_export_rows`.
 
 Avoid hiding explicit transaction rows in night audit and reporting tests when
 the row date, type, note, or amount documents the expected financial behavior.
+Do not helperize explicit ledger, folio, transaction, or expense rows in night
+audit/reporting tests when those rows define revenue recognition behavior.
 
 Expected impact: limited but safe LOC reduction.
 
@@ -209,8 +238,9 @@ Expected impact: limited but safe LOC reduction.
 
 Before editing any existing function, method, class, or helper symbol, run
 GitNexus impact analysis for that symbol with upstream direction and report the
-blast radius. If GitNexus reports HIGH or CRITICAL risk outside the booking
-test/support scope, stop and report before editing.
+blast radius. If GitNexus reports HIGH or CRITICAL risk, warn the user before
+proceeding. If that HIGH or CRITICAL risk reaches outside the edit whitelist,
+stop and report before editing.
 
 Before each implementation commit:
 
