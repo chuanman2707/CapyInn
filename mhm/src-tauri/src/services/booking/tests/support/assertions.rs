@@ -196,3 +196,151 @@ pub async fn folio_line_count_for_key(pool: &Pool<Sqlite>, origin_key: &str) -> 
         .await
         .expect("count folio lines by origin key")
 }
+
+pub async fn command_claim_count(
+    pool: &Pool<Sqlite>,
+    command_name: &str,
+    idempotency_key: &str,
+) -> i64 {
+    sqlx::query_scalar(
+        "SELECT COUNT(*) FROM command_idempotency
+         WHERE command_name = ? AND idempotency_key = ?",
+    )
+    .bind(command_name)
+    .bind(idempotency_key)
+    .fetch_one(pool)
+    .await
+    .expect("count command claims by key")
+}
+
+pub async fn command_claim_count_by_request(
+    pool: &Pool<Sqlite>,
+    command_name: &str,
+    request_id: &str,
+) -> i64 {
+    sqlx::query_scalar(
+        "SELECT COUNT(*) FROM command_idempotency
+         WHERE command_name = ? AND request_id = ?",
+    )
+    .bind(command_name)
+    .bind(request_id)
+    .fetch_one(pool)
+    .await
+    .expect("count command claims by request")
+}
+
+pub async fn outbox_count_for_command(
+    pool: &Pool<Sqlite>,
+    command_name: &str,
+    idempotency_key: &str,
+) -> i64 {
+    sqlx::query_scalar(
+        "SELECT COUNT(*)
+         FROM outbox_events
+         WHERE origin_command_name = ? AND origin_idempotency_key = ?",
+    )
+    .bind(command_name)
+    .bind(idempotency_key)
+    .fetch_one(pool)
+    .await
+    .expect("count outbox events by command")
+}
+
+pub async fn group_service_count_for_group(pool: &Pool<Sqlite>, group_id: &str) -> i64 {
+    sqlx::query_scalar("SELECT COUNT(*) FROM group_services WHERE group_id = ?")
+        .bind(group_id)
+        .fetch_one(pool)
+        .await
+        .expect("count group services")
+}
+
+pub async fn booking_count_for_room(pool: &Pool<Sqlite>, room_id: &str) -> i64 {
+    sqlx::query_scalar("SELECT COUNT(*) FROM bookings WHERE room_id = ?")
+        .bind(room_id)
+        .fetch_one(pool)
+        .await
+        .expect("count bookings by room")
+}
+
+pub async fn booking_guest_count_for_booking(pool: &Pool<Sqlite>, booking_id: &str) -> i64 {
+    sqlx::query_scalar("SELECT COUNT(*) FROM booking_guests WHERE booking_id = ?")
+        .bind(booking_id)
+        .fetch_one(pool)
+        .await
+        .expect("count booking guests")
+}
+
+pub async fn calendar_count_for_booking(pool: &Pool<Sqlite>, booking_id: &str) -> i64 {
+    sqlx::query_scalar("SELECT COUNT(*) FROM room_calendar WHERE booking_id = ?")
+        .bind(booking_id)
+        .fetch_one(pool)
+        .await
+        .expect("count calendar rows by booking")
+}
+
+pub async fn calendar_count_for_room_status(
+    pool: &Pool<Sqlite>,
+    room_id: &str,
+    status: &str,
+) -> i64 {
+    sqlx::query_scalar("SELECT COUNT(*) FROM room_calendar WHERE room_id = ? AND status = ?")
+        .bind(room_id)
+        .bind(status)
+        .fetch_one(pool)
+        .await
+        .expect("count calendar rows by room status")
+}
+
+pub async fn folio_line_count_for_booking(pool: &Pool<Sqlite>, booking_id: &str) -> i64 {
+    sqlx::query_scalar("SELECT COUNT(*) FROM folio_lines WHERE booking_id = ?")
+        .bind(booking_id)
+        .fetch_one(pool)
+        .await
+        .expect("count folio lines by booking")
+}
+
+pub async fn origin_transaction_count(pool: &Pool<Sqlite>, origin_key: &str) -> i64 {
+    sqlx::query_scalar("SELECT COUNT(*) FROM transactions WHERE origin_idempotency_key = ?")
+        .bind(origin_key)
+        .fetch_one(pool)
+        .await
+        .expect("count transactions by origin key")
+}
+
+pub async fn origin_folio_line_count(pool: &Pool<Sqlite>, origin_key: &str) -> i64 {
+    sqlx::query_scalar("SELECT COUNT(*) FROM folio_lines WHERE origin_idempotency_key = ?")
+        .bind(origin_key)
+        .fetch_one(pool)
+        .await
+        .expect("count folio lines by origin key")
+}
+
+pub async fn transaction_count(
+    pool: &Pool<Sqlite>,
+    booking_id: &str,
+    txn_type: &str,
+    note: Option<&str>,
+) -> i64 {
+    let sql = match note {
+        Some(_) => {
+            "SELECT COUNT(*) FROM transactions WHERE booking_id = ? AND type = ? AND note = ?"
+        }
+        None => "SELECT COUNT(*) FROM transactions WHERE booking_id = ? AND type = ?",
+    };
+    let mut query = sqlx::query_scalar::<_, i64>(sql)
+        .bind(booking_id)
+        .bind(txn_type);
+    if let Some(note) = note {
+        query = query.bind(note);
+    }
+    query.fetch_one(pool).await.expect("count transactions")
+}
+
+pub async fn transaction_count_for_note(pool: &Pool<Sqlite>, booking_id: &str, note: &str) -> i64 {
+    sqlx::query_scalar("SELECT COUNT(*) FROM transactions WHERE booking_id = ? AND note = ?")
+        .bind(booking_id)
+        .bind(note)
+        .fetch_one(pool)
+        .await
+        .expect("count transactions by booking and note")
+}
