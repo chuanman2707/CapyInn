@@ -1111,13 +1111,10 @@ async fn group_checkin_idempotent_blank_key_rejected_before_writes() {
         .unwrap();
     assert_eq!(group_count, 0);
 
-    let claim_count: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM command_idempotency WHERE request_id = 'req-group-idem-blank'",
-    )
-    .fetch_one(&pool)
-    .await
-    .unwrap();
-    assert_eq!(claim_count, 0);
+    assert_eq!(
+        command_claim_count_by_request(&pool, "group_checkin", "req-group-idem-blank").await,
+        0
+    );
 }
 
 #[tokio::test]
@@ -1362,52 +1359,19 @@ async fn add_group_service_idempotent_rejects_negative_unit_price_without_writin
 
     assert_eq!(error.code, crate::app_error::codes::BOOKING_INVALID_STATE);
 
-    let claim_count: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM command_idempotency
-         WHERE command_name = ? AND idempotency_key = ?",
-    )
-    .bind(&ctx.command_name)
-    .bind(&ctx.idempotency_key)
-    .fetch_one(&pool)
-    .await
-    .unwrap();
-    assert_eq!(claim_count, 0);
-
-    let service_count: i64 =
-        sqlx::query_scalar("SELECT COUNT(*) FROM group_services WHERE group_id = ?")
-            .bind(&group.id)
-            .fetch_one(&pool)
-            .await
-            .unwrap();
-    assert_eq!(service_count, 0);
+    assert_eq!(
+        command_claim_count(&pool, &ctx.command_name, &ctx.idempotency_key).await,
+        0
+    );
+    assert_eq!(group_service_count_for_group(&pool, &group.id).await, 0);
 
     let origin_key = format!("{}:{}", ctx.command_name, ctx.idempotency_key);
-    let transaction_count: i64 =
-        sqlx::query_scalar("SELECT COUNT(*) FROM transactions WHERE origin_idempotency_key = ?")
-            .bind(&origin_key)
-            .fetch_one(&pool)
-            .await
-            .unwrap();
-    assert_eq!(transaction_count, 0);
-
-    let folio_line_count: i64 =
-        sqlx::query_scalar("SELECT COUNT(*) FROM folio_lines WHERE origin_idempotency_key = ?")
-            .bind(&origin_key)
-            .fetch_one(&pool)
-            .await
-            .unwrap();
-    assert_eq!(folio_line_count, 0);
-
-    let outbox_count: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM outbox_events
-         WHERE origin_command_name = ? AND origin_idempotency_key = ?",
-    )
-    .bind(&ctx.command_name)
-    .bind(&ctx.idempotency_key)
-    .fetch_one(&pool)
-    .await
-    .unwrap();
-    assert_eq!(outbox_count, 0);
+    assert_eq!(origin_transaction_count(&pool, &origin_key).await, 0);
+    assert_eq!(folio_line_count_for_key(&pool, &origin_key).await, 0);
+    assert_eq!(
+        outbox_count_for_command(&pool, &ctx.command_name, &ctx.idempotency_key).await,
+        0
+    );
 }
 
 #[tokio::test]
@@ -1964,14 +1928,10 @@ async fn record_payment_idempotent_retry_replays_and_does_not_double_post() {
 
     assert_replayed_pair(&first, &second);
 
-    let payment_count: (i64,) = sqlx::query_as(
-        "SELECT COUNT(*) FROM transactions WHERE booking_id = ? AND type = 'payment'",
-    )
-    .bind("B-PAY-IDEM")
-    .fetch_one(&pool)
-    .await
-    .unwrap();
-    assert_eq!(payment_count.0, 1);
+    assert_eq!(
+        transaction_count_for_booking_type(&pool, "B-PAY-IDEM", "payment").await,
+        1
+    );
 
     let paid_amount: i64 = sqlx::query_scalar("SELECT paid_amount FROM bookings WHERE id = ?")
         .bind("B-PAY-IDEM")
@@ -2562,14 +2522,10 @@ async fn create_reservation_idempotent_retry_does_not_duplicate_deposit() {
     assert!(second.replayed);
     assert_single_outbox_event(&pool, &ctx, "booking.reservation_created").await;
 
-    let count: i64 =
-        sqlx::query_scalar("SELECT COUNT(*) FROM transactions WHERE origin_idempotency_key = ?")
-            .bind("create_reservation:idem-reservation-1")
-            .fetch_one(&pool)
-            .await
-            .expect("counts deposit rows");
-
-    assert_eq!(count, 1);
+    assert_eq!(
+        origin_transaction_count(&pool, "create_reservation:idem-reservation-1").await,
+        1
+    );
 }
 
 #[tokio::test]
@@ -2788,16 +2744,10 @@ async fn reservation_command_idempotency_rejects_invalid_deposit_before_claim() 
             "error should name the invalid field: {error:?}"
         );
 
-        let claim_count: i64 = sqlx::query_scalar(
-            "SELECT COUNT(*) FROM command_idempotency
-             WHERE command_name = ? AND idempotency_key = ?",
-        )
-        .bind(&ctx.command_name)
-        .bind(&ctx.idempotency_key)
-        .fetch_one(&pool)
-        .await
-        .unwrap();
-        assert_eq!(claim_count, 0);
+        assert_eq!(
+            command_claim_count(&pool, &ctx.command_name, &ctx.idempotency_key).await,
+            0
+        );
     }
 }
 
@@ -4316,28 +4266,9 @@ async fn check_in_idempotent_retry_replays_and_does_not_duplicate_rows() {
     assert_replayed_pair(&first, &second);
 
     let booking_id = first.response["id"].as_str().unwrap();
-    let booking_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM bookings WHERE room_id = ?")
-        .bind("R-CHECKIN-IDEM")
-        .fetch_one(&pool)
-        .await
-        .unwrap();
-    assert_eq!(booking_count, 1);
-
-    let guest_link_count: i64 =
-        sqlx::query_scalar("SELECT COUNT(*) FROM booking_guests WHERE booking_id = ?")
-            .bind(booking_id)
-            .fetch_one(&pool)
-            .await
-            .unwrap();
-    assert_eq!(guest_link_count, 1);
-
-    let transaction_count: i64 =
-        sqlx::query_scalar("SELECT COUNT(*) FROM transactions WHERE booking_id = ?")
-            .bind(booking_id)
-            .fetch_one(&pool)
-            .await
-            .unwrap();
-    assert_eq!(transaction_count, 2);
+    assert_eq!(booking_count_for_room(&pool, "R-CHECKIN-IDEM").await, 1);
+    assert_eq!(booking_guest_count_for_booking(&pool, booking_id).await, 1);
+    assert_eq!(transaction_count_for_booking(&pool, booking_id).await, 2);
 
     let paid_amount: i64 = sqlx::query_scalar("SELECT paid_amount FROM bookings WHERE id = ?")
         .bind(booking_id)
@@ -4346,13 +4277,7 @@ async fn check_in_idempotent_retry_replays_and_does_not_duplicate_rows() {
         .unwrap();
     assert_eq!(paid_amount, 50_000);
 
-    let calendar_count: i64 =
-        sqlx::query_scalar("SELECT COUNT(*) FROM room_calendar WHERE booking_id = ?")
-            .bind(booking_id)
-            .fetch_one(&pool)
-            .await
-            .unwrap();
-    assert_eq!(calendar_count, 2);
+    assert_eq!(calendar_count_for_booking(&pool, booking_id).await, 2);
     assert_single_outbox_event(&pool, &ctx, "booking.checked_in").await;
 }
 
@@ -6613,22 +6538,14 @@ async fn add_folio_line_idempotent_rejects_blank_key_before_any_write() {
         crate::app_error::codes::IDEMPOTENCY_KEY_REQUIRED
     );
 
-    let folio_count: i64 =
-        sqlx::query_scalar("SELECT COUNT(*) FROM folio_lines WHERE booking_id = ?")
-            .bind("B-FOLIO-IDEM-4")
-            .fetch_one(&pool)
-            .await
-            .unwrap();
-    assert_eq!(folio_count, 0);
-
-    let claim_count: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM command_idempotency
-         WHERE command_name = 'add_folio_line' AND request_id = 'req-folio-idem-4'",
-    )
-    .fetch_one(&pool)
-    .await
-    .unwrap();
-    assert_eq!(claim_count, 0);
+    assert_eq!(
+        folio_line_count_for_booking(&pool, "B-FOLIO-IDEM-4").await,
+        0
+    );
+    assert_eq!(
+        command_claim_count_by_request(&pool, "add_folio_line", "req-folio-idem-4").await,
+        0
+    );
 }
 
 #[tokio::test]
@@ -6652,23 +6569,14 @@ async fn add_folio_line_idempotent_invalid_amount_does_not_consume_claim_or_ordi
     .expect_err("invalid amount rejected");
     assert_eq!(error.code, crate::app_error::codes::BOOKING_INVALID_STATE);
 
-    let folio_count: i64 =
-        sqlx::query_scalar("SELECT COUNT(*) FROM folio_lines WHERE booking_id = ?")
-            .bind("B-FOLIO-IDEM-5")
-            .fetch_one(&pool)
-            .await
-            .unwrap();
-    assert_eq!(folio_count, 0);
-
-    let claim_count: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM command_idempotency
-         WHERE command_name = 'add_folio_line' AND idempotency_key = ?",
-    )
-    .bind("idem-folio-line-5")
-    .fetch_one(&pool)
-    .await
-    .unwrap();
-    assert_eq!(claim_count, 0);
+    assert_eq!(
+        folio_line_count_for_booking(&pool, "B-FOLIO-IDEM-5").await,
+        0
+    );
+    assert_eq!(
+        command_claim_count(&pool, "add_folio_line", "idem-folio-line-5").await,
+        0
+    );
 
     let success = add_folio_line_idempotent(
         &pool,
@@ -6721,23 +6629,14 @@ async fn add_folio_line_idempotent_unsafe_amount_does_not_consume_claim_or_write
     .expect_err("unsafe amount rejected");
     assert_eq!(error.code, crate::app_error::codes::BOOKING_INVALID_STATE);
 
-    let folio_count: i64 =
-        sqlx::query_scalar("SELECT COUNT(*) FROM folio_lines WHERE booking_id = ?")
-            .bind("B-FOLIO-FRACTION")
-            .fetch_one(&pool)
-            .await
-            .unwrap();
-    assert_eq!(folio_count, 0);
-
-    let claim_count: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM command_idempotency
-         WHERE command_name = 'add_folio_line' AND idempotency_key = ?",
-    )
-    .bind("idem-folio-unsafe")
-    .fetch_one(&pool)
-    .await
-    .unwrap();
-    assert_eq!(claim_count, 0);
+    assert_eq!(
+        folio_line_count_for_booking(&pool, "B-FOLIO-FRACTION").await,
+        0
+    );
+    assert_eq!(
+        command_claim_count(&pool, "add_folio_line", "idem-folio-unsafe").await,
+        0
+    );
 }
 
 #[tokio::test]
