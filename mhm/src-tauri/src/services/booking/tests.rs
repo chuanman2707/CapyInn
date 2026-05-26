@@ -2800,9 +2800,7 @@ async fn reservation_command_idempotency_create_replay_does_not_duplicate_bookin
 #[tokio::test]
 async fn reservation_command_idempotency_modify_replay_returns_stored_snapshot() {
     let pool = test_pool().await;
-    seed_room(&pool, "R692").await.unwrap();
-    seed_pricing_rule(&pool, "standard", 600_000).await.unwrap();
-    seed_booked_reservation(&pool, "B692", "R692")
+    seed_booked_reservation_with_price(&pool, "B692", "R692", 600_000)
         .await
         .unwrap();
     let ctx = cmd("reservation.modify", "idem-modify-snapshot");
@@ -2835,9 +2833,7 @@ async fn reservation_command_idempotency_modify_replay_returns_stored_snapshot()
 #[tokio::test]
 async fn reservation_command_idempotency_modify_replay_does_not_duplicate_calendar() {
     let pool = test_pool().await;
-    seed_room(&pool, "R693").await.unwrap();
-    seed_pricing_rule(&pool, "standard", 600_000).await.unwrap();
-    seed_booked_reservation(&pool, "B693", "R693")
+    seed_booked_reservation_with_price(&pool, "B693", "R693", 600_000)
         .await
         .unwrap();
     let ctx = cmd("reservation.modify", "idem-modify-calendar");
@@ -2899,9 +2895,7 @@ async fn reservation_command_idempotency_cancel_replay_does_not_duplicate_cancel
 #[tokio::test]
 async fn reservation_command_idempotency_confirm_replay_does_not_duplicate_room_charge() {
     let pool = test_pool().await;
-    seed_room(&pool, "R695").await.unwrap();
-    seed_pricing_rule(&pool, "standard", 600_000).await.unwrap();
-    seed_booked_reservation(&pool, "B695", "R695")
+    seed_booked_reservation_with_price(&pool, "B695", "R695", 600_000)
         .await
         .unwrap();
     let ctx = cmd("reservation.confirm", "idem-confirm-charge");
@@ -2928,9 +2922,7 @@ async fn reservation_command_idempotency_confirm_replay_does_not_duplicate_room_
 #[tokio::test]
 async fn reservation_command_idempotency_confirm_replay_does_not_requery_or_reprice_later_retry() {
     let pool = test_pool().await;
-    seed_room(&pool, "R696").await.unwrap();
-    seed_pricing_rule(&pool, "standard", 600_000).await.unwrap();
-    seed_booked_reservation(&pool, "B696", "R696")
+    seed_booked_reservation_with_price(&pool, "B696", "R696", 600_000)
         .await
         .unwrap();
     let ctx = cmd("reservation.confirm", "idem-confirm-no-reprice");
@@ -3030,9 +3022,7 @@ async fn reservation_command_idempotency_modify_cancel_confirm_same_key_differen
 #[tokio::test]
 async fn reservation_command_idempotency_modify_conflict_replays_terminal_room_unavailable() {
     let pool = test_pool().await;
-    seed_room(&pool, "R698").await.unwrap();
-    seed_pricing_rule(&pool, "standard", 600_000).await.unwrap();
-    seed_booked_reservation(&pool, "B698", "R698")
+    seed_booked_reservation_with_price(&pool, "B698", "R698", 600_000)
         .await
         .unwrap();
     sqlx::query(
@@ -3295,9 +3285,7 @@ async fn reservation_command_idempotency_retryable_reclaimable_failure_can_be_re
 #[tokio::test]
 async fn reservation_command_idempotency_invalid_modify_nights_replays_terminal_error() {
     let pool = test_pool().await;
-    seed_room(&pool, "R703").await.unwrap();
-    seed_pricing_rule(&pool, "standard", 600_000).await.unwrap();
-    seed_booked_reservation(&pool, "B703", "R703")
+    seed_booked_reservation_with_price(&pool, "B703", "R703", 600_000)
         .await
         .unwrap();
     let ctx = cmd("reservation.modify", "idem-modify-invalid-nights");
@@ -3711,9 +3699,7 @@ async fn do_cancel_reservation_cleans_legacy_booked_room_state() {
 #[tokio::test]
 async fn confirm_reservation_reprices_and_marks_room_occupied() {
     let pool = test_pool().await;
-    seed_room(&pool, "R164").await.unwrap();
-    seed_pricing_rule(&pool, "standard", 600_000).await.unwrap();
-    seed_booked_reservation(&pool, "B164", "R164")
+    seed_booked_reservation_with_price(&pool, "B164", "R164", 600_000)
         .await
         .unwrap();
 
@@ -3811,9 +3797,7 @@ async fn confirm_reservation_reprices_and_marks_room_occupied() {
 #[tokio::test]
 async fn confirm_reservation_rejects_no_show_calendar_rows() {
     let pool = test_pool().await;
-    seed_room(&pool, "R165").await.unwrap();
-    seed_pricing_rule(&pool, "standard", 600_000).await.unwrap();
-    seed_booked_reservation(&pool, "B165", "R165")
+    seed_booked_reservation_with_price(&pool, "B165", "R165", 600_000)
         .await
         .unwrap();
 
@@ -3861,9 +3845,7 @@ async fn confirm_reservation_returns_invalid_state_when_booking_is_not_booked() 
 #[tokio::test]
 async fn confirm_reservation_late_arrival_persists_effective_checkout() {
     let pool = test_pool().await;
-    seed_room(&pool, "R165A").await.unwrap();
-    seed_pricing_rule(&pool, "standard", 600_000).await.unwrap();
-    seed_booked_reservation(&pool, "B165A", "R165A")
+    seed_booked_reservation_with_price(&pool, "B165A", "R165A", 600_000)
         .await
         .unwrap();
 
@@ -3923,9 +3905,7 @@ async fn confirm_reservation_late_arrival_persists_effective_checkout() {
 #[tokio::test]
 async fn confirm_reservation_preserves_extra_precheckin_payment() {
     let pool = test_pool().await;
-    seed_room(&pool, "R165B").await.unwrap();
-    seed_pricing_rule(&pool, "standard", 600_000).await.unwrap();
-    seed_booked_reservation(&pool, "B165B", "R165B")
+    seed_booked_reservation_with_price(&pool, "B165B", "R165B", 600_000)
         .await
         .unwrap();
 
@@ -3959,9 +3939,7 @@ async fn confirm_reservation_preserves_extra_precheckin_payment() {
 #[tokio::test]
 async fn modify_reservation_rewrites_booked_calendar_range() {
     let pool = test_pool().await;
-    seed_room(&pool, "R166").await.unwrap();
-    seed_pricing_rule(&pool, "standard", 600_000).await.unwrap();
-    seed_booked_reservation(&pool, "B166", "R166")
+    seed_booked_reservation_with_price(&pool, "B166", "R166", 600_000)
         .await
         .unwrap();
 
@@ -4016,9 +3994,7 @@ async fn modify_reservation_rewrites_booked_calendar_range() {
 #[tokio::test]
 async fn modify_reservation_rejects_inconsistent_nights_input() {
     let pool = test_pool().await;
-    seed_room(&pool, "R166A").await.unwrap();
-    seed_pricing_rule(&pool, "standard", 600_000).await.unwrap();
-    seed_booked_reservation(&pool, "B166A", "R166A")
+    seed_booked_reservation_with_price(&pool, "B166A", "R166A", 600_000)
         .await
         .unwrap();
 
@@ -4069,9 +4045,7 @@ async fn modify_reservation_returns_invalid_state_when_booking_is_not_booked() {
 #[tokio::test]
 async fn do_modify_reservation_returns_service_booking_without_app_handle() {
     let pool = test_pool().await;
-    seed_room(&pool, "R167").await.unwrap();
-    seed_pricing_rule(&pool, "standard", 600_000).await.unwrap();
-    seed_booked_reservation(&pool, "B167", "R167")
+    seed_booked_reservation_with_price(&pool, "B167", "R167", 600_000)
         .await
         .unwrap();
 

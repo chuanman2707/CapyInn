@@ -437,3 +437,15 @@ pub async fn seed_rooms_with_price(
     seed_pricing_rule(pool, "standard", daily_rate).await?;
     Ok(())
 }
+
+pub async fn seed_booked_reservation_with_price(
+    pool: &Pool<Sqlite>,
+    booking_id: &str,
+    room_id: &str,
+    daily_rate: MoneyVnd,
+) -> BookingResult<()> {
+    seed_room(pool, room_id).await?;
+    seed_pricing_rule(pool, "standard", daily_rate).await?;
+    seed_booked_reservation(pool, booking_id, room_id).await?;
+    Ok(())
+}
