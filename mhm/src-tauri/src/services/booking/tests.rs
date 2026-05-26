@@ -4458,22 +4458,19 @@ async fn check_out_idempotent_retry_replays_without_duplicate_money_or_housekeep
     seed_active_booking(&pool, "B-CHECKOUT-IDEM", "R-CHECKOUT-IDEM")
         .await
         .unwrap();
-    let first_req = checkout_req(
-        "B-CHECKOUT-IDEM",
-        CheckoutSettlementMode::BookedNights,
-        1_000_000,
-    );
-    let second_req = checkout_req(
-        "B-CHECKOUT-IDEM",
-        CheckoutSettlementMode::BookedNights,
-        1_000_000,
-    );
     let ctx = cmd_with_request("check_out", "req-checkout-idem", "idem-checkout-1");
+    let replay_checkout = || {
+        checkout_req(
+            "B-CHECKOUT-IDEM",
+            CheckoutSettlementMode::BookedNights,
+            1_000_000,
+        )
+    };
 
-    let first = stay_lifecycle::check_out_idempotent(&pool, &ctx, first_req)
+    let first = stay_lifecycle::check_out_idempotent(&pool, &ctx, replay_checkout())
         .await
         .unwrap();
-    let second = stay_lifecycle::check_out_idempotent(&pool, &ctx, second_req)
+    let second = stay_lifecycle::check_out_idempotent(&pool, &ctx, replay_checkout())
         .await
         .unwrap();
 
@@ -6204,29 +6201,20 @@ async fn add_folio_line_idempotent_retry_replays_and_does_not_duplicate_row() {
         .await
         .unwrap();
     let ctx = cmd_with_request("add_folio_line", "req-folio-idem-1", "idem-folio-line-1");
+    let add_replay_line = || {
+        add_folio_line_idempotent(
+            &pool,
+            &ctx,
+            "B-FOLIO-IDEM-1",
+            "laundry",
+            "Laundry bundle",
+            25_000,
+            Some("staff-1"),
+        )
+    };
 
-    let first = add_folio_line_idempotent(
-        &pool,
-        &ctx,
-        "B-FOLIO-IDEM-1",
-        "laundry",
-        "Laundry bundle",
-        25_000,
-        Some("staff-1"),
-    )
-    .await
-    .expect("first folio line succeeds");
-    let second = add_folio_line_idempotent(
-        &pool,
-        &ctx,
-        "B-FOLIO-IDEM-1",
-        "laundry",
-        "Laundry bundle",
-        25_000,
-        Some("staff-1"),
-    )
-    .await
-    .expect("retry replays");
+    let first = add_replay_line().await.expect("first folio line succeeds");
+    let second = add_replay_line().await.expect("retry replays");
 
     assert_replayed_pair(&first, &second);
     assert_eq!(first.response["id"], second.response["id"]);
