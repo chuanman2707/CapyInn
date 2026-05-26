@@ -4538,6 +4538,45 @@ async fn checkout_fails_when_second_pool_checked_out_booking_first() {
     let _ = std::fs::remove_file(db_path);
 }
 
+fn checkout_dt(year: i32, month: u32, day: u32, hour: u32, minute: u32) -> chrono::DateTime<Local> {
+    chrono::Local
+        .with_ymd_and_hms(year, month, day, hour, minute, 0)
+        .single()
+        .unwrap()
+}
+
+async fn preview_checkout_at(
+    pool: &sqlx::Pool<sqlx::Sqlite>,
+    booking_id: &str,
+    settlement_mode: CheckoutSettlementMode,
+    now: chrono::DateTime<Local>,
+) -> crate::domain::booking::BookingResult<crate::models::CheckoutSettlementPreview> {
+    stay_lifecycle::preview_checkout_settlement_at(
+        pool,
+        CheckoutSettlementPreviewRequest {
+            booking_id: booking_id.to_string(),
+            settlement_mode,
+        },
+        now,
+    )
+    .await
+}
+
+async fn check_out_booking_at(
+    pool: &sqlx::Pool<sqlx::Sqlite>,
+    booking_id: &str,
+    settlement_mode: CheckoutSettlementMode,
+    final_total: i64,
+    now: chrono::DateTime<Local>,
+) -> crate::domain::booking::BookingResult<()> {
+    stay_lifecycle::check_out_at(
+        pool,
+        checkout_req(booking_id, settlement_mode, final_total),
+        now,
+    )
+    .await
+}
+
 #[tokio::test]
 async fn check_out_settles_same_day_actual_nights_to_minimum_one_night() {
     let pool = test_pool().await;
@@ -4556,16 +4595,11 @@ async fn check_out_settles_same_day_actual_nights_to_minimum_one_night() {
     .await
     .unwrap();
 
-    let preview = stay_lifecycle::preview_checkout_settlement_at(
+    let preview = preview_checkout_at(
         &pool,
-        CheckoutSettlementPreviewRequest {
-            booking_id: "B410".to_string(),
-            settlement_mode: CheckoutSettlementMode::ActualNights,
-        },
-        chrono::Local
-            .with_ymd_and_hms(2026, 4, 20, 18, 0, 0)
-            .single()
-            .unwrap(),
+        "B410",
+        CheckoutSettlementMode::ActualNights,
+        checkout_dt(2026, 4, 20, 18, 0),
     )
     .await
     .unwrap();
@@ -4573,17 +4607,12 @@ async fn check_out_settles_same_day_actual_nights_to_minimum_one_night() {
     assert_eq!(preview.settled_nights, 1);
     assert_eq!(preview.recommended_total, 500_000);
 
-    stay_lifecycle::check_out_at(
+    check_out_booking_at(
         &pool,
-        checkout_req(
-            "B410",
-            CheckoutSettlementMode::ActualNights,
-            preview.recommended_total,
-        ),
-        chrono::Local
-            .with_ymd_and_hms(2026, 4, 20, 18, 0, 0)
-            .single()
-            .unwrap(),
+        "B410",
+        CheckoutSettlementMode::ActualNights,
+        preview.recommended_total,
+        checkout_dt(2026, 4, 20, 18, 0),
     )
     .await
     .unwrap();
@@ -4626,16 +4655,11 @@ async fn check_out_keeps_active_booking_values_for_booked_nights_mode() {
         .await
         .unwrap();
 
-    let preview = stay_lifecycle::preview_checkout_settlement_at(
+    let preview = preview_checkout_at(
         &pool,
-        CheckoutSettlementPreviewRequest {
-            booking_id: "B411".to_string(),
-            settlement_mode: CheckoutSettlementMode::BookedNights,
-        },
-        chrono::Local
-            .with_ymd_and_hms(2026, 4, 22, 9, 0, 0)
-            .single()
-            .unwrap(),
+        "B411",
+        CheckoutSettlementMode::BookedNights,
+        checkout_dt(2026, 4, 22, 9, 0),
     )
     .await
     .unwrap();
@@ -4643,17 +4667,12 @@ async fn check_out_keeps_active_booking_values_for_booked_nights_mode() {
     assert_eq!(preview.settled_nights, 5);
     assert_eq!(preview.recommended_total, 2_500_000);
 
-    stay_lifecycle::check_out_at(
+    check_out_booking_at(
         &pool,
-        checkout_req(
-            "B411",
-            CheckoutSettlementMode::BookedNights,
-            preview.recommended_total,
-        ),
-        chrono::Local
-            .with_ymd_and_hms(2026, 4, 22, 9, 0, 0)
-            .single()
-            .unwrap(),
+        "B411",
+        CheckoutSettlementMode::BookedNights,
+        preview.recommended_total,
+        checkout_dt(2026, 4, 22, 9, 0),
     )
     .await
     .unwrap();
@@ -4686,29 +4705,23 @@ async fn check_out_booked_nights_enforces_minimum_one_night_for_corrupted_bookin
     .await
     .unwrap();
 
-    let preview = stay_lifecycle::preview_checkout_settlement_at(
+    let preview = preview_checkout_at(
         &pool,
-        CheckoutSettlementPreviewRequest {
-            booking_id: "B413".to_string(),
-            settlement_mode: CheckoutSettlementMode::BookedNights,
-        },
-        chrono::Local
-            .with_ymd_and_hms(2026, 4, 20, 12, 0, 0)
-            .single()
-            .unwrap(),
+        "B413",
+        CheckoutSettlementMode::BookedNights,
+        checkout_dt(2026, 4, 20, 12, 0),
     )
     .await
     .unwrap();
 
     assert_eq!(preview.settled_nights, 1);
 
-    stay_lifecycle::check_out_at(
+    check_out_booking_at(
         &pool,
-        checkout_req("B413", CheckoutSettlementMode::BookedNights, 0),
-        chrono::Local
-            .with_ymd_and_hms(2026, 4, 20, 12, 0, 0)
-            .single()
-            .unwrap(),
+        "B413",
+        CheckoutSettlementMode::BookedNights,
+        0,
+        checkout_dt(2026, 4, 20, 12, 0),
     )
     .await
     .unwrap();
@@ -4740,16 +4753,11 @@ async fn check_out_actual_nights_uses_early_checkout_nights() {
     .await
     .unwrap();
 
-    let preview = stay_lifecycle::preview_checkout_settlement_at(
+    let preview = preview_checkout_at(
         &pool,
-        CheckoutSettlementPreviewRequest {
-            booking_id: "B414".to_string(),
-            settlement_mode: CheckoutSettlementMode::ActualNights,
-        },
-        chrono::Local
-            .with_ymd_and_hms(2026, 4, 22, 9, 0, 0)
-            .single()
-            .unwrap(),
+        "B414",
+        CheckoutSettlementMode::ActualNights,
+        checkout_dt(2026, 4, 22, 9, 0),
     )
     .await
     .unwrap();
@@ -4757,17 +4765,12 @@ async fn check_out_actual_nights_uses_early_checkout_nights() {
     assert_eq!(preview.settled_nights, 2);
     assert_eq!(preview.recommended_total, 1_000_000);
 
-    stay_lifecycle::check_out_at(
+    check_out_booking_at(
         &pool,
-        checkout_req(
-            "B414",
-            CheckoutSettlementMode::ActualNights,
-            preview.recommended_total,
-        ),
-        chrono::Local
-            .with_ymd_and_hms(2026, 4, 22, 9, 0, 0)
-            .single()
-            .unwrap(),
+        "B414",
+        CheckoutSettlementMode::ActualNights,
+        preview.recommended_total,
+        checkout_dt(2026, 4, 22, 9, 0),
     )
     .await
     .unwrap();
@@ -4799,13 +4802,12 @@ async fn check_out_hourly_persists_manual_settlement() {
     .await
     .unwrap();
 
-    stay_lifecycle::check_out_at(
+    check_out_booking_at(
         &pool,
-        checkout_req("B415", CheckoutSettlementMode::Hourly, 500_000),
-        chrono::Local
-            .with_ymd_and_hms(2026, 4, 20, 10, 0, 0)
-            .single()
-            .unwrap(),
+        "B415",
+        CheckoutSettlementMode::Hourly,
+        500_000,
+        checkout_dt(2026, 4, 20, 10, 0),
     )
     .await
     .unwrap();
@@ -4854,13 +4856,12 @@ async fn check_out_hourly_multi_day_stay_still_persists_one_night() {
     .await
     .unwrap();
 
-    stay_lifecycle::check_out_at(
+    check_out_booking_at(
         &pool,
-        checkout_req("B419", CheckoutSettlementMode::Hourly, 500_000),
-        chrono::Local
-            .with_ymd_and_hms(2026, 4, 22, 9, 0, 0)
-            .single()
-            .unwrap(),
+        "B419",
+        CheckoutSettlementMode::Hourly,
+        500_000,
+        checkout_dt(2026, 4, 22, 9, 0),
     )
     .await
     .unwrap();
@@ -4896,29 +4897,23 @@ async fn check_out_persists_manual_override_when_final_total_differs_from_recomm
         .await
         .unwrap();
 
-    let preview = stay_lifecycle::preview_checkout_settlement_at(
+    let preview = preview_checkout_at(
         &pool,
-        CheckoutSettlementPreviewRequest {
-            booking_id: "B416".to_string(),
-            settlement_mode: CheckoutSettlementMode::ActualNights,
-        },
-        chrono::Local
-            .with_ymd_and_hms(2026, 4, 22, 9, 0, 0)
-            .single()
-            .unwrap(),
+        "B416",
+        CheckoutSettlementMode::ActualNights,
+        checkout_dt(2026, 4, 22, 9, 0),
     )
     .await
     .unwrap();
 
     assert_eq!(preview.recommended_total, 1_000_000);
 
-    stay_lifecycle::check_out_at(
+    check_out_booking_at(
         &pool,
-        checkout_req("B416", CheckoutSettlementMode::ActualNights, 800_000),
-        chrono::Local
-            .with_ymd_and_hms(2026, 4, 22, 9, 0, 0)
-            .single()
-            .unwrap(),
+        "B416",
+        CheckoutSettlementMode::ActualNights,
+        800_000,
+        checkout_dt(2026, 4, 22, 9, 0),
     )
     .await
     .unwrap();
@@ -4970,13 +4965,12 @@ async fn check_out_writes_charge_adjustment_ledger_when_settled_total_drops() {
         .await
         .unwrap();
 
-    stay_lifecycle::check_out_at(
+    check_out_booking_at(
         &pool,
-        checkout_req("B417", CheckoutSettlementMode::ActualNights, 800_000),
-        chrono::Local
-            .with_ymd_and_hms(2026, 4, 22, 9, 0, 0)
-            .single()
-            .unwrap(),
+        "B417",
+        CheckoutSettlementMode::ActualNights,
+        800_000,
+        checkout_dt(2026, 4, 22, 9, 0),
     )
     .await
     .unwrap();
@@ -5028,13 +5022,12 @@ async fn check_out_writes_payment_delta_ledger_when_collecting_extra_payment() {
         .await
         .unwrap();
 
-    stay_lifecycle::check_out_at(
+    check_out_booking_at(
         &pool,
-        checkout_req("B418", CheckoutSettlementMode::BookedNights, 2_500_000),
-        chrono::Local
-            .with_ymd_and_hms(2026, 4, 22, 9, 0, 0)
-            .single()
-            .unwrap(),
+        "B418",
+        CheckoutSettlementMode::BookedNights,
+        2_500_000,
+        checkout_dt(2026, 4, 22, 9, 0),
     )
     .await
     .unwrap();
@@ -5101,13 +5094,12 @@ async fn checkout_paid_amount_is_ledger_projection_not_direct_overwrite() {
     .await
     .unwrap();
 
-    stay_lifecycle::check_out_at(
+    check_out_booking_at(
         &pool,
-        checkout_req("B420", CheckoutSettlementMode::ActualNights, 75_000),
-        chrono::Local
-            .with_ymd_and_hms(2026, 4, 21, 9, 0, 0)
-            .single()
-            .unwrap(),
+        "B420",
+        CheckoutSettlementMode::ActualNights,
+        75_000,
+        checkout_dt(2026, 4, 21, 9, 0),
     )
     .await
     .unwrap();
@@ -5151,17 +5143,12 @@ async fn check_out_rejects_overpaid_booking_until_refund_flow_exists() {
         .await
         .unwrap();
 
-    let error = stay_lifecycle::check_out_at(
+    let error = check_out_booking_at(
         &pool,
-        CheckOutRequest {
-            booking_id: "B412".to_string(),
-            settlement_mode: CheckoutSettlementMode::Hourly,
-            final_total: 500_000,
-        },
-        chrono::Local
-            .with_ymd_and_hms(2026, 4, 20, 12, 0, 0)
-            .single()
-            .unwrap(),
+        "B412",
+        CheckoutSettlementMode::Hourly,
+        500_000,
+        checkout_dt(2026, 4, 20, 12, 0),
     )
     .await
     .unwrap_err();
