@@ -1208,7 +1208,7 @@ async fn checked_in_group_for_service_tests(
     seed_rooms_with_price(pool, room_ids, daily_rate)
         .await
         .unwrap();
-    group_lifecycle::group_checkin(pool, None, group_checkin_req(room_ids).build())
+    group_lifecycle::group_checkin(pool, None, group_checkin_req(room_ids))
         .await
         .unwrap()
 }

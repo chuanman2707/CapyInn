@@ -247,44 +247,6 @@ pub fn reservation_req(room_id: &str) -> ReservationRequestBuilder {
     ReservationRequestBuilder::new(room_id)
 }
 
-#[allow(dead_code)]
-pub struct GroupCheckinRequestBuilder {
-    req: GroupCheckinRequest,
-}
-
-#[allow(dead_code)]
-impl GroupCheckinRequestBuilder {
-    pub fn new(room_ids: &[&str]) -> Self {
-        Self {
-            req: minimal_group_checkin_request(room_ids),
-        }
-    }
-
-    pub fn master(mut self, master_room_id: &str) -> Self {
-        self.req.master_room_id = master_room_id.to_string();
-        self
-    }
-
-    pub fn paid(mut self, paid_amount: Option<MoneyVnd>) -> Self {
-        self.req.paid_amount = paid_amount;
-        self
-    }
-
-    pub fn check_in_date(mut self, check_in_date: Option<&str>) -> Self {
-        self.req.check_in_date = check_in_date.map(str::to_string);
-        self
-    }
-
-    pub fn nights(mut self, nights: i32) -> Self {
-        self.req.nights = nights;
-        self
-    }
-
-    pub fn build(self) -> GroupCheckinRequest {
-        self.req
-    }
-}
-
-pub fn group_checkin_req(room_ids: &[&str]) -> GroupCheckinRequestBuilder {
-    GroupCheckinRequestBuilder::new(room_ids)
+pub fn group_checkin_req(room_ids: &[&str]) -> GroupCheckinRequest {
+    minimal_group_checkin_request(room_ids)
 }
