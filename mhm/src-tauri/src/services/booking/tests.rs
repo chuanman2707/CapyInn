@@ -2761,14 +2761,7 @@ async fn reservation_command_idempotency_create_replay_does_not_duplicate_bookin
     .expect("create replays");
 
     assert_replayed_pair(&first, &replay);
-    assert_eq!(
-        sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM bookings WHERE room_id = ?")
-            .bind("R691")
-            .fetch_one(&pool)
-            .await
-            .expect("counts bookings"),
-        1
-    );
+    assert_eq!(booking_count_for_room(&pool, "R691").await, 1);
     assert_eq!(
         sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM room_calendar WHERE room_id = ?")
             .bind("R691")
@@ -2834,14 +2827,7 @@ async fn reservation_command_idempotency_modify_replay_does_not_duplicate_calend
     .await
     .expect("modify replays");
 
-    assert_eq!(
-        sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM room_calendar WHERE booking_id = ?")
-            .bind("B693")
-            .fetch_one(&pool)
-            .await
-            .expect("counts calendar rows"),
-        3
-    );
+    assert_eq!(calendar_count_for_booking(&pool, "B693").await, 3);
 }
 
 #[tokio::test]
@@ -3544,13 +3530,7 @@ async fn cancel_reservation_releases_calendar_and_keeps_fee_record() {
     assert_eq!(booking.get::<String, _>("status"), "cancelled");
     assert_eq!(booking.get::<Option<i64>, _>("paid_amount"), Some(50_000));
 
-    let remaining_calendar: (i64,) =
-        sqlx::query_as("SELECT COUNT(*) FROM room_calendar WHERE booking_id = ?")
-            .bind("B161")
-            .fetch_one(&pool)
-            .await
-            .unwrap();
-    assert_eq!(remaining_calendar.0, 0);
+    assert_eq!(calendar_count_for_booking(&pool, "B161").await, 0);
 
     let room = sqlx::query("SELECT status FROM rooms WHERE id = ?")
         .bind("R161")
@@ -3652,13 +3632,7 @@ async fn do_cancel_reservation_cleans_legacy_booked_room_state() {
         .unwrap();
     assert_eq!(room.get::<String, _>("status"), "vacant");
 
-    let remaining_calendar: (i64,) =
-        sqlx::query_as("SELECT COUNT(*) FROM room_calendar WHERE booking_id = ?")
-            .bind("B163")
-            .fetch_one(&pool)
-            .await
-            .unwrap();
-    assert_eq!(remaining_calendar.0, 0);
+    assert_eq!(calendar_count_for_booking(&pool, "B163").await, 0);
 }
 
 #[tokio::test]
@@ -5272,14 +5246,10 @@ async fn extend_stay_idempotent_retry_replays_without_extra_night_or_charge() {
         .unwrap();
     assert_eq!(nights, 3);
 
-    let charge_count: i64 =
-        sqlx::query_scalar("SELECT COUNT(*) FROM transactions WHERE booking_id = ? AND note = ?")
-            .bind("B-EXT-IDEM")
-            .bind("Extended stay +1 night")
-            .fetch_one(&pool)
-            .await
-            .unwrap();
-    assert_eq!(charge_count, 1);
+    assert_eq!(
+        transaction_count_for_note(&pool, "B-EXT-IDEM", "Extended stay +1 night").await,
+        1
+    );
     assert_single_outbox_event(&pool, &ctx, "booking.stay_extended").await;
 }
 
