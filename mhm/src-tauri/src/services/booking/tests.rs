@@ -6080,6 +6080,27 @@ async fn billing_and_export_queries_preserve_canonical_revenue_columns() {
     assert_eq!(export_rows[0].recognized_revenue, 285_000);
 }
 
+async fn add_staff_laundry_line_idempotent(
+    pool: &sqlx::Pool<sqlx::Sqlite>,
+    ctx: &crate::command_idempotency::WriteCommandContext,
+    booking_id: &str,
+    description: &str,
+    amount: i64,
+) -> crate::app_error::CommandResult<
+    crate::command_idempotency::IdempotentCommandResult<serde_json::Value>,
+> {
+    add_folio_line_idempotent(
+        pool,
+        ctx,
+        booking_id,
+        "laundry",
+        description,
+        amount,
+        Some("staff-1"),
+    )
+    .await
+}
+
 #[tokio::test]
 async fn add_folio_line_idempotent_retry_replays_and_does_not_duplicate_row() {
     let pool = test_pool().await;
@@ -6087,20 +6108,15 @@ async fn add_folio_line_idempotent_retry_replays_and_does_not_duplicate_row() {
         .await
         .unwrap();
     let ctx = cmd_with_request("add_folio_line", "req-folio-idem-1", "idem-folio-line-1");
-    let add_replay_line = || {
-        add_folio_line_idempotent(
-            &pool,
-            &ctx,
-            "B-FOLIO-IDEM-1",
-            "laundry",
-            "Laundry bundle",
-            25_000,
-            Some("staff-1"),
-        )
-    };
 
-    let first = add_replay_line().await.expect("first folio line succeeds");
-    let second = add_replay_line().await.expect("retry replays");
+    let first =
+        add_staff_laundry_line_idempotent(&pool, &ctx, "B-FOLIO-IDEM-1", "Laundry bundle", 25_000)
+            .await
+            .expect("first folio line succeeds");
+    let second =
+        add_staff_laundry_line_idempotent(&pool, &ctx, "B-FOLIO-IDEM-1", "Laundry bundle", 25_000)
+            .await
+            .expect("retry replays");
 
     assert_replayed_pair(&first, &second);
     assert_eq!(first.response["id"], second.response["id"]);
@@ -6126,17 +6142,10 @@ async fn add_folio_line_idempotent_accepts_uuid_booking_id_in_safe_ledger_metada
         "idem-folio-line-uuid",
     );
 
-    let result = add_folio_line_idempotent(
-        &pool,
-        &ctx,
-        &booking_id,
-        "laundry",
-        "Laundry bundle",
-        25_000,
-        Some("staff-1"),
-    )
-    .await
-    .expect("uuid booking id should not be rejected by safe ledger metadata");
+    let result =
+        add_staff_laundry_line_idempotent(&pool, &ctx, &booking_id, "Laundry bundle", 25_000)
+            .await
+            .expect("uuid booking id should not be rejected by safe ledger metadata");
 
     assert!(!result.replayed);
     assert_eq!(
@@ -6219,26 +6228,16 @@ async fn add_folio_line_idempotent_same_key_different_payload_conflicts() {
         .unwrap();
     let ctx = cmd("add_folio_line", "idem-folio-line-2");
 
-    add_folio_line_idempotent(
-        &pool,
-        &ctx,
-        "B-FOLIO-IDEM-2",
-        "laundry",
-        "Laundry bundle",
-        25_000,
-        Some("staff-1"),
-    )
-    .await
-    .expect("first folio line succeeds");
+    add_staff_laundry_line_idempotent(&pool, &ctx, "B-FOLIO-IDEM-2", "Laundry bundle", 25_000)
+        .await
+        .expect("first folio line succeeds");
 
-    let error = add_folio_line_idempotent(
+    let error = add_staff_laundry_line_idempotent(
         &pool,
         &ctx,
         "B-FOLIO-IDEM-2",
-        "laundry",
         "Different description",
         25_000,
-        Some("staff-1"),
     )
     .await
     .expect_err("same key with different payload conflicts");
@@ -6257,26 +6256,16 @@ async fn add_folio_line_idempotent_same_key_changed_amount_conflicts() {
         .unwrap();
     let ctx = cmd("add_folio_line", "idem-folio-line-amount");
 
-    add_folio_line_idempotent(
-        &pool,
-        &ctx,
-        "B-FOLIO-IDEM-AMOUNT",
-        "laundry",
-        "Laundry bundle",
-        25_000,
-        Some("staff-1"),
-    )
-    .await
-    .expect("first folio line succeeds");
+    add_staff_laundry_line_idempotent(&pool, &ctx, "B-FOLIO-IDEM-AMOUNT", "Laundry bundle", 25_000)
+        .await
+        .expect("first folio line succeeds");
 
-    let error = add_folio_line_idempotent(
+    let error = add_staff_laundry_line_idempotent(
         &pool,
         &ctx,
         "B-FOLIO-IDEM-AMOUNT",
-        "laundry",
         "Laundry bundle",
         30_000,
-        Some("staff-1"),
     )
     .await
     .expect_err("same key with changed amount conflicts");
@@ -6295,17 +6284,10 @@ async fn add_folio_line_idempotent_replay_returns_stored_snapshot() {
         .unwrap();
     let ctx = cmd("add_folio_line", "idem-folio-line-3");
 
-    let first = add_folio_line_idempotent(
-        &pool,
-        &ctx,
-        "B-FOLIO-IDEM-3",
-        "laundry",
-        "Snapshot line",
-        25_000,
-        Some("staff-1"),
-    )
-    .await
-    .expect("first folio line succeeds");
+    let first =
+        add_staff_laundry_line_idempotent(&pool, &ctx, "B-FOLIO-IDEM-3", "Snapshot line", 25_000)
+            .await
+            .expect("first folio line succeeds");
     let line_id = first.response["id"].as_str().unwrap().to_string();
     let first_amount = first.response["amount"].as_i64().unwrap();
 
@@ -6315,17 +6297,10 @@ async fn add_folio_line_idempotent_replay_returns_stored_snapshot() {
         .await
         .unwrap();
 
-    let replay = add_folio_line_idempotent(
-        &pool,
-        &ctx,
-        "B-FOLIO-IDEM-3",
-        "laundry",
-        "Snapshot line",
-        25_000,
-        Some("staff-1"),
-    )
-    .await
-    .expect("replay succeeds");
+    let replay =
+        add_staff_laundry_line_idempotent(&pool, &ctx, "B-FOLIO-IDEM-3", "Snapshot line", 25_000)
+            .await
+            .expect("replay succeeds");
 
     assert!(replay.replayed);
     assert_eq!(replay.response["amount"].as_i64(), Some(first_amount));
@@ -6353,14 +6328,12 @@ async fn add_folio_line_idempotent_duplicate_seeded_live_in_flight_returns_confl
     )
     .await;
 
-    let error = add_folio_line_idempotent(
+    let error = add_staff_laundry_line_idempotent(
         &pool,
         &ctx,
         "B-FOLIO-IDEM-INFLIGHT",
-        "laundry",
         "Laundry bundle",
         25_000,
-        Some("staff-1"),
     )
     .await
     .expect_err("duplicate live in-flight command should conflict");
@@ -6407,17 +6380,10 @@ async fn add_folio_line_idempotent_invalid_amount_does_not_consume_claim_or_ordi
         .unwrap();
     let ctx = cmd("add_folio_line", "idem-folio-line-5");
 
-    let error = add_folio_line_idempotent(
-        &pool,
-        &ctx,
-        "B-FOLIO-IDEM-5",
-        "laundry",
-        "Invalid amount",
-        0,
-        Some("staff-1"),
-    )
-    .await
-    .expect_err("invalid amount rejected");
+    let error =
+        add_staff_laundry_line_idempotent(&pool, &ctx, "B-FOLIO-IDEM-5", "Invalid amount", 0)
+            .await
+            .expect_err("invalid amount rejected");
     assert_eq!(error.code, crate::app_error::codes::BOOKING_INVALID_STATE);
 
     assert_eq!(
@@ -6429,17 +6395,10 @@ async fn add_folio_line_idempotent_invalid_amount_does_not_consume_claim_or_ordi
         0
     );
 
-    let success = add_folio_line_idempotent(
-        &pool,
-        &ctx,
-        "B-FOLIO-IDEM-5",
-        "laundry",
-        "Valid amount",
-        15_000,
-        Some("staff-1"),
-    )
-    .await
-    .expect("valid amount succeeds");
+    let success =
+        add_staff_laundry_line_idempotent(&pool, &ctx, "B-FOLIO-IDEM-5", "Valid amount", 15_000)
+            .await
+            .expect("valid amount succeeds");
     assert!(!success.replayed);
 
     let row = sqlx::query(
@@ -6467,14 +6426,12 @@ async fn add_folio_line_idempotent_unsafe_amount_does_not_consume_claim_or_write
         .unwrap();
     let ctx = cmd_with_request("add_folio_line", "req-folio-unsafe", "idem-folio-unsafe");
 
-    let error = add_folio_line_idempotent(
+    let error = add_staff_laundry_line_idempotent(
         &pool,
         &ctx,
         "B-FOLIO-FRACTION",
-        "laundry",
         "Unsafe amount",
         MAX_TRANSPORT_SAFE_MONEY_VND + 1,
-        Some("staff-1"),
     )
     .await
     .expect_err("unsafe amount rejected");
@@ -6513,11 +6470,7 @@ async fn folio_line_insert_rolls_back_with_parent_transaction() {
     .unwrap();
     tx.rollback().await.unwrap();
 
-    let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM folio_lines WHERE booking_id = ?")
-        .bind("B-FOLIO-1")
-        .fetch_one(&pool)
-        .await
-        .unwrap();
+    let count = folio_line_count_for_booking(&pool, "B-FOLIO-1").await;
 
     assert_eq!(count, 0);
 }
