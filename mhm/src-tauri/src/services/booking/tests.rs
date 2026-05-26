@@ -5595,14 +5595,20 @@ async fn folio_and_cancellation_revenue_use_local_rfc3339_created_dates() {
     assert_eq!(cancellation_fee_revenue, 50_000);
 }
 
-#[tokio::test]
-async fn same_day_checkout_settlement_counts_one_room_sold_and_full_revenue() {
-    let pool = test_pool().await;
-    seed_room(&pool, "R420").await.unwrap();
+#[allow(clippy::too_many_arguments)]
+async fn seed_checked_out_actual_nights_settlement(
+    pool: &sqlx::Pool<sqlx::Sqlite>,
+    booking_id: &str,
+    room_id: &str,
+    paid_amount: i64,
+    original_charge: i64,
+    adjustment: i64,
+) {
+    seed_room(pool, room_id).await.unwrap();
     seed_active_booking_with_terms(
-        &pool,
-        "B420",
-        "R420",
+        pool,
+        booking_id,
+        room_id,
         "2026-04-20T08:00:00+07:00",
         "2026-04-25T12:00:00+07:00",
         5,
@@ -5618,19 +5624,20 @@ async fn same_day_checkout_settlement_counts_one_room_sold_and_full_revenue() {
              actual_checkout = '2026-04-20T18:00:00+07:00',
              nights = 1,
              total_price = 500000,
-             paid_amount = 500000,
+             paid_amount = ?,
              pricing_snapshot = ?
          WHERE id = ?",
     )
+    .bind(paid_amount)
     .bind(r#"{"checkout_settlement":{"mode":"actual_nights","reporting_checkout":"2026-04-21","settled_nights":1,"settled_total":500000}}"#)
-    .bind("B420")
-    .execute(&pool)
+    .bind(booking_id)
+    .execute(pool)
     .await
     .unwrap();
     seed_transaction(
-        &pool,
-        "B420",
-        250_000,
+        pool,
+        booking_id,
+        original_charge,
         "charge",
         "Room charge",
         "2026-04-20T08:00:00+07:00",
@@ -5638,15 +5645,22 @@ async fn same_day_checkout_settlement_counts_one_room_sold_and_full_revenue() {
     .await
     .unwrap();
     seed_transaction(
-        &pool,
-        "B420",
-        -1_750_000,
+        pool,
+        booking_id,
+        adjustment,
         "charge",
         "Điều chỉnh checkout settlement",
         "2026-04-20T18:00:00+07:00",
     )
     .await
     .unwrap();
+}
+
+#[tokio::test]
+async fn same_day_checkout_settlement_counts_one_room_sold_and_full_revenue() {
+    let pool = test_pool().await;
+    seed_checked_out_actual_nights_settlement(&pool, "B420", "R420", 500_000, 250_000, -1_750_000)
+        .await;
 
     let stats = revenue_queries::load_revenue_stats(&pool, "2026-04-20", "2026-04-20")
         .await
@@ -5701,55 +5715,10 @@ async fn booked_nights_settlement_uses_reporting_checkout_for_financial_revenue(
 #[tokio::test]
 async fn checkout_settlement_updates_booking_export_rows() {
     let pool = test_pool().await;
-    seed_room(&pool, "R422").await.unwrap();
-    seed_active_booking_with_terms(
-        &pool,
-        "B422",
-        "R422",
-        "2026-04-20T08:00:00+07:00",
-        "2026-04-25T12:00:00+07:00",
-        5,
-        2_500_000,
-        Some(0),
+    seed_checked_out_actual_nights_settlement(
+        &pool, "B422", "R422", 500_000, 2_500_000, -2_000_000,
     )
-    .await
-    .unwrap();
-
-    sqlx::query(
-        "UPDATE bookings
-         SET status = 'checked_out',
-             actual_checkout = '2026-04-20T18:00:00+07:00',
-             nights = 1,
-             total_price = 500000,
-             paid_amount = 500000,
-             pricing_snapshot = ?
-         WHERE id = ?",
-    )
-    .bind(r#"{"checkout_settlement":{"mode":"actual_nights","reporting_checkout":"2026-04-21","settled_nights":1,"settled_total":500000}}"#)
-    .bind("B422")
-    .execute(&pool)
-    .await
-    .unwrap();
-    seed_transaction(
-        &pool,
-        "B422",
-        2_500_000,
-        "charge",
-        "Room charge",
-        "2026-04-20T08:00:00+07:00",
-    )
-    .await
-    .unwrap();
-    seed_transaction(
-        &pool,
-        "B422",
-        -2_000_000,
-        "charge",
-        "Điều chỉnh checkout settlement",
-        "2026-04-20T18:00:00+07:00",
-    )
-    .await
-    .unwrap();
+    .await;
 
     let row = booking_export_row(&pool, "2026-04-01", "2026-04-30", "B422").await;
 
@@ -5761,55 +5730,10 @@ async fn checkout_settlement_updates_booking_export_rows() {
 #[tokio::test]
 async fn checkout_settlement_export_rows_follow_reporting_checkout_boundary() {
     let pool = test_pool().await;
-    seed_room(&pool, "R423").await.unwrap();
-    seed_active_booking_with_terms(
-        &pool,
-        "B423",
-        "R423",
-        "2026-04-20T08:00:00+07:00",
-        "2026-04-25T12:00:00+07:00",
-        5,
-        2_500_000,
-        Some(0),
+    seed_checked_out_actual_nights_settlement(
+        &pool, "B423", "R423", 500_000, 2_500_000, -2_000_000,
     )
-    .await
-    .unwrap();
-
-    sqlx::query(
-        "UPDATE bookings
-         SET status = 'checked_out',
-             actual_checkout = '2026-04-20T18:00:00+07:00',
-             nights = 1,
-             total_price = 500000,
-             paid_amount = 500000,
-             pricing_snapshot = ?
-         WHERE id = ?",
-    )
-    .bind(r#"{"checkout_settlement":{"mode":"actual_nights","reporting_checkout":"2026-04-21","settled_nights":1,"settled_total":500000}}"#)
-    .bind("B423")
-    .execute(&pool)
-    .await
-    .unwrap();
-    seed_transaction(
-        &pool,
-        "B423",
-        2_500_000,
-        "charge",
-        "Room charge",
-        "2026-04-20T08:00:00+07:00",
-    )
-    .await
-    .unwrap();
-    seed_transaction(
-        &pool,
-        "B423",
-        -2_000_000,
-        "charge",
-        "Điều chỉnh checkout settlement",
-        "2026-04-20T18:00:00+07:00",
-    )
-    .await
-    .unwrap();
+    .await;
 
     let row = booking_export_row(&pool, "2026-04-21", "2026-04-21", "B423").await;
 
@@ -5820,55 +5744,10 @@ async fn checkout_settlement_export_rows_follow_reporting_checkout_boundary() {
 #[tokio::test]
 async fn checkout_settlement_export_rows_exclude_original_checkin_window_after_shift() {
     let pool = test_pool().await;
-    seed_room(&pool, "R424").await.unwrap();
-    seed_active_booking_with_terms(
-        &pool,
-        "B424",
-        "R424",
-        "2026-04-20T08:00:00+07:00",
-        "2026-04-25T12:00:00+07:00",
-        5,
-        2_500_000,
-        Some(0),
+    seed_checked_out_actual_nights_settlement(
+        &pool, "B424", "R424", 500_000, 2_500_000, -2_000_000,
     )
-    .await
-    .unwrap();
-
-    sqlx::query(
-        "UPDATE bookings
-         SET status = 'checked_out',
-             actual_checkout = '2026-04-20T18:00:00+07:00',
-             nights = 1,
-             total_price = 500000,
-             paid_amount = 500000,
-             pricing_snapshot = ?
-         WHERE id = ?",
-    )
-    .bind(r#"{"checkout_settlement":{"mode":"actual_nights","reporting_checkout":"2026-04-21","settled_nights":1,"settled_total":500000}}"#)
-    .bind("B424")
-    .execute(&pool)
-    .await
-    .unwrap();
-    seed_transaction(
-        &pool,
-        "B424",
-        2_500_000,
-        "charge",
-        "Room charge",
-        "2026-04-20T08:00:00+07:00",
-    )
-    .await
-    .unwrap();
-    seed_transaction(
-        &pool,
-        "B424",
-        -2_000_000,
-        "charge",
-        "Điều chỉnh checkout settlement",
-        "2026-04-20T18:00:00+07:00",
-    )
-    .await
-    .unwrap();
+    .await;
 
     assert!(missing_booking_export_row(&pool, "2026-04-20", "2026-04-20", "B424").await);
 }
