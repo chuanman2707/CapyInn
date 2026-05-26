@@ -213,25 +213,7 @@ async fn group_checkout_idempotent_duplicate_in_flight_returns_conflict() {
         "booking_ids": [booking_id],
         "final_paid_vnd_units": 50_000,
     });
-    let now = chrono::Utc::now().to_rfc3339();
-    let lease_expires_at = (chrono::Utc::now() + chrono::Duration::seconds(30)).to_rfc3339();
-
-    sqlx::query(
-        "INSERT INTO command_idempotency (
-            idempotency_key, command_name, request_hash, intent_json, lock_keys_json,
-            status, claim_token, retryable, lease_expires_at, created_at, updated_at, last_attempt_at
-        ) VALUES (?, ?, ?, '{}', '[]', 'in_progress', 'other-claim', 0, ?, ?, ?, ?)",
-    )
-    .bind(&ctx.idempotency_key)
-    .bind(&ctx.command_name)
-    .bind(crate::command_idempotency::stable_request_hash(&payload).expect("payload hashes"))
-    .bind(&lease_expires_at)
-    .bind(&now)
-    .bind(&now)
-    .bind(&now)
-    .execute(&pool)
-    .await
-    .expect("seeds in-flight row");
+    seed_live_in_progress_command(&pool, &ctx.command_name, &ctx.idempotency_key, &payload).await;
 
     let error = group_lifecycle::group_checkout_idempotent(
         &pool,
@@ -3203,24 +3185,7 @@ async fn reservation_command_idempotency_duplicate_in_flight_returns_conflict() 
         "schema": "reservation.cancel.v1",
         "booking_id": "B701",
     });
-    let now = chrono::Utc::now().to_rfc3339();
-    let lease_expires_at = (chrono::Utc::now() + chrono::Duration::seconds(30)).to_rfc3339();
-    sqlx::query(
-        "INSERT INTO command_idempotency (
-            idempotency_key, command_name, request_hash, intent_json, lock_keys_json,
-            status, claim_token, retryable, lease_expires_at, created_at, updated_at, last_attempt_at
-        ) VALUES (?, ?, ?, '{}', '[]', 'in_progress', 'other-claim', 0, ?, ?, ?, ?)",
-    )
-    .bind(&ctx.idempotency_key)
-    .bind(&ctx.command_name)
-    .bind(crate::command_idempotency::stable_request_hash(&payload).expect("payload hashes"))
-    .bind(&lease_expires_at)
-    .bind(&now)
-    .bind(&now)
-    .bind(&now)
-    .execute(&pool)
-    .await
-    .expect("seeds in-flight row");
+    seed_live_in_progress_command(&pool, &ctx.command_name, &ctx.idempotency_key, &payload).await;
 
     let error = reservation_lifecycle::cancel_reservation_idempotent(&pool, &ctx, "B701")
         .await
@@ -4367,25 +4332,7 @@ async fn check_in_idempotent_duplicate_in_flight_returns_conflict() {
         "paid_amount": 0,
         "pricing_type": "nightly",
     });
-    let now = chrono::Utc::now().to_rfc3339();
-    let lease_expires_at = (chrono::Utc::now() + chrono::Duration::seconds(30)).to_rfc3339();
-
-    sqlx::query(
-        "INSERT INTO command_idempotency (
-            idempotency_key, command_name, request_hash, intent_json, lock_keys_json,
-            status, claim_token, retryable, lease_expires_at, created_at, updated_at, last_attempt_at
-        ) VALUES (?, ?, ?, '{}', '[]', 'in_progress', 'other-claim', 0, ?, ?, ?, ?)",
-    )
-    .bind(&ctx.idempotency_key)
-    .bind(&ctx.command_name)
-    .bind(crate::command_idempotency::stable_request_hash(&payload).expect("payload hashes"))
-    .bind(&lease_expires_at)
-    .bind(&now)
-    .bind(&now)
-    .bind(&now)
-    .execute(&pool)
-    .await
-    .expect("seeds in-flight row");
+    seed_live_in_progress_command(&pool, &ctx.command_name, &ctx.idempotency_key, &payload).await;
 
     let error = stay_lifecycle::check_in_idempotent(
         &pool,
@@ -4546,25 +4493,7 @@ async fn check_out_idempotent_duplicate_in_flight_returns_conflict() {
         "settlement_mode": "booked_nights",
         "final_total": 1_000_000,
     });
-    let now = chrono::Utc::now().to_rfc3339();
-    let lease_expires_at = (chrono::Utc::now() + chrono::Duration::seconds(30)).to_rfc3339();
-
-    sqlx::query(
-        "INSERT INTO command_idempotency (
-            idempotency_key, command_name, request_hash, intent_json, lock_keys_json,
-            status, claim_token, retryable, lease_expires_at, created_at, updated_at, last_attempt_at
-        ) VALUES (?, ?, ?, '{}', '[]', 'in_progress', 'other-claim', 0, ?, ?, ?, ?)",
-    )
-    .bind(&ctx.idempotency_key)
-    .bind(&ctx.command_name)
-    .bind(crate::command_idempotency::stable_request_hash(&payload).expect("payload hashes"))
-    .bind(&lease_expires_at)
-    .bind(&now)
-    .bind(&now)
-    .bind(&now)
-    .execute(&pool)
-    .await
-    .expect("seeds in-flight row");
+    seed_live_in_progress_command(&pool, &ctx.command_name, &ctx.idempotency_key, &payload).await;
 
     let error = stay_lifecycle::check_out_idempotent(
         &pool,
@@ -5393,25 +5322,7 @@ async fn extend_stay_idempotent_duplicate_in_flight_returns_conflict() {
         "booking_id": "B-EXT-LIVE",
         "operation": "add_one_night",
     });
-    let now = chrono::Utc::now().to_rfc3339();
-    let lease_expires_at = (chrono::Utc::now() + chrono::Duration::seconds(30)).to_rfc3339();
-
-    sqlx::query(
-        "INSERT INTO command_idempotency (
-            idempotency_key, command_name, request_hash, intent_json, lock_keys_json,
-            status, claim_token, retryable, lease_expires_at, created_at, updated_at, last_attempt_at
-        ) VALUES (?, ?, ?, '{}', '[]', 'in_progress', 'other-claim', 0, ?, ?, ?, ?)",
-    )
-    .bind(&ctx.idempotency_key)
-    .bind(&ctx.command_name)
-    .bind(crate::command_idempotency::stable_request_hash(&payload).expect("payload hashes"))
-    .bind(&lease_expires_at)
-    .bind(&now)
-    .bind(&now)
-    .bind(&now)
-    .execute(&pool)
-    .await
-    .expect("seeds in-flight row");
+    seed_live_in_progress_command(&pool, &ctx.command_name, &ctx.idempotency_key, &payload).await;
 
     let error = stay_lifecycle::extend_stay_idempotent(&pool, &ctx, "B-EXT-LIVE")
         .await
