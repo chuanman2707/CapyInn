@@ -642,6 +642,16 @@ async fn group_checkin_lock_keys_are_stable_for_room_order() {
     assert_eq!(left, right);
 }
 
+async fn seed_user_group_checkin_idempotent(
+    pool: &sqlx::Pool<sqlx::Sqlite>,
+    ctx: &crate::command_idempotency::WriteCommandContext,
+    req: crate::models::GroupCheckinRequest,
+) -> crate::app_error::CommandResult<
+    crate::command_idempotency::IdempotentCommandResult<serde_json::Value>,
+> {
+    group_lifecycle::group_checkin_idempotent(pool, Some("seed-user".to_string()), ctx, req).await
+}
+
 #[tokio::test]
 async fn group_checkin_idempotent_normalizes_room_order_and_assigns_payment_ordinals() {
     let pool = test_pool().await;
@@ -650,17 +660,15 @@ async fn group_checkin_idempotent_normalizes_room_order_and_assigns_payment_ordi
         .unwrap();
     let ctx = cmd("group_checkin", "idem-group-checkin-1");
 
-    let first = group_lifecycle::group_checkin_idempotent(
+    let first = seed_user_group_checkin_idempotent(
         &pool,
-        Some("seed-user".to_string()),
         &ctx,
         rich_group_checkin_request(&["GI602", "GI601"], "GI602", Some(100_001)),
     )
     .await
     .expect("first group checkin succeeds");
-    let second = group_lifecycle::group_checkin_idempotent(
+    let second = seed_user_group_checkin_idempotent(
         &pool,
-        Some("seed-user".to_string()),
         &ctx,
         rich_group_checkin_request(&["GI601", "GI602"], "GI602", Some(100_001)),
     )
@@ -713,7 +721,7 @@ async fn group_checkin_idempotent_materializes_omitted_checkin_date_in_hash() {
     let req = rich_group_checkin_request(&["GI603", "GI604"], "GI603", Some(100_000));
     assert!(req.check_in_date.is_none());
 
-    group_lifecycle::group_checkin_idempotent(&pool, Some("seed-user".to_string()), &ctx, req)
+    seed_user_group_checkin_idempotent(&pool, &ctx, req)
         .await
         .expect("group checkin succeeds");
 
@@ -751,9 +759,8 @@ async fn group_checkin_idempotent_omitted_date_replays_after_issued_at_rollover(
         .unwrap();
     let first_ctx = cmd("group_checkin", "idem-group-checkin-rollover");
 
-    let first = group_lifecycle::group_checkin_idempotent(
+    let first = seed_user_group_checkin_idempotent(
         &pool,
-        Some("seed-user".to_string()),
         &first_ctx,
         rich_group_checkin_request(&["GI605", "GI606"], "GI605", Some(100_000)),
     )
@@ -766,9 +773,8 @@ async fn group_checkin_idempotent_omitted_date_replays_after_issued_at_rollover(
         "2026-04-25T01:00:00+07:00",
     );
 
-    let retry = group_lifecycle::group_checkin_idempotent(
+    let retry = seed_user_group_checkin_idempotent(
         &pool,
-        Some("seed-user".to_string()),
         &retry_ctx,
         rich_group_checkin_request(&["GI605", "GI606"], "GI605", Some(100_000)),
     )
@@ -843,9 +849,8 @@ async fn group_checkin_idempotent_reclaimed_omitted_date_uses_original_command_t
         "2026-04-25T01:00:00+07:00",
     );
 
-    let result = group_lifecycle::group_checkin_idempotent(
+    let result = seed_user_group_checkin_idempotent(
         &pool,
-        Some("seed-user".to_string()),
         &retry_ctx,
         rich_group_checkin_request(&["GI607", "GI608"], "GI607", Some(100_000)),
     )
@@ -904,17 +909,15 @@ async fn group_checkin_idempotent_retry_does_not_duplicate_groups_bookings_or_pa
         "idem-group-checkin-no-dup",
     );
 
-    let first = group_lifecycle::group_checkin_idempotent(
+    let first = seed_user_group_checkin_idempotent(
         &pool,
-        Some("seed-user".to_string()),
         &ctx,
         rich_group_checkin_request(&["GI620", "GI621"], "GI620", Some(100_000)),
     )
     .await
     .expect("first group checkin succeeds");
-    let replay = group_lifecycle::group_checkin_idempotent(
+    let replay = seed_user_group_checkin_idempotent(
         &pool,
-        Some("seed-user".to_string()),
         &ctx,
         rich_group_checkin_request(&["GI620", "GI621"], "GI620", Some(100_000)),
     )
@@ -1030,10 +1033,9 @@ async fn group_checkin_idempotent_duplicate_seeded_live_in_flight_returns_confli
     )
     .await;
 
-    let error =
-        group_lifecycle::group_checkin_idempotent(&pool, Some("seed-user".to_string()), &ctx, req)
-            .await
-            .expect_err("duplicate live in-flight command should conflict");
+    let error = seed_user_group_checkin_idempotent(&pool, &ctx, req)
+        .await
+        .expect_err("duplicate live in-flight command should conflict");
 
     assert_eq!(
         error.code,
@@ -1049,9 +1051,8 @@ async fn group_checkin_idempotent_zero_paid_amount_writes_no_payment_origin_rows
         .unwrap();
 
     let zero_ctx = cmd("group_checkin", "idem-group-checkin-2-zero");
-    let zero_paid = group_lifecycle::group_checkin_idempotent(
+    let zero_paid = seed_user_group_checkin_idempotent(
         &pool,
-        Some("seed-user".to_string()),
         &zero_ctx,
         rich_group_checkin_request(&["GI610", "GI611"], "GI610", Some(0)),
     )
@@ -1110,9 +1111,8 @@ async fn group_checkin_idempotent_replay_returns_stored_snapshot_after_db_mutati
         .unwrap();
     let ctx = cmd("group_checkin", "idem-group-checkin-3");
 
-    let first = group_lifecycle::group_checkin_idempotent(
+    let first = seed_user_group_checkin_idempotent(
         &pool,
-        Some("seed-user".to_string()),
         &ctx,
         rich_group_checkin_request(&["GI630", "GI631"], "GI630", Some(100_000)),
     )
@@ -1127,9 +1127,8 @@ async fn group_checkin_idempotent_replay_returns_stored_snapshot_after_db_mutati
         .await
         .unwrap();
 
-    let replay = group_lifecycle::group_checkin_idempotent(
+    let replay = seed_user_group_checkin_idempotent(
         &pool,
-        Some("seed-user".to_string()),
         &ctx,
         rich_group_checkin_request(&["GI630", "GI631"], "GI630", Some(100_000)),
     )
@@ -1152,9 +1151,8 @@ async fn group_checkin_idempotent_same_key_different_payload_conflicts() {
         .unwrap();
     let ctx = cmd("group_checkin", "idem-group-checkin-4");
 
-    group_lifecycle::group_checkin_idempotent(
+    seed_user_group_checkin_idempotent(
         &pool,
-        Some("seed-user".to_string()),
         &ctx,
         rich_group_checkin_request(&["GI640", "GI641"], "GI640", Some(100_000)),
     )
@@ -1163,14 +1161,9 @@ async fn group_checkin_idempotent_same_key_different_payload_conflicts() {
 
     let mut changed = rich_group_checkin_request(&["GI640", "GI641"], "GI640", Some(100_000));
     changed.nights = 3;
-    let error = group_lifecycle::group_checkin_idempotent(
-        &pool,
-        Some("seed-user".to_string()),
-        &ctx,
-        changed,
-    )
-    .await
-    .expect_err("same key with different payload conflicts");
+    let error = seed_user_group_checkin_idempotent(&pool, &ctx, changed)
+        .await
+        .expect_err("same key with different payload conflicts");
 
     assert_eq!(
         error.code,
@@ -1186,9 +1179,8 @@ async fn group_checkin_idempotent_same_key_changed_guest_name_conflicts() {
         .unwrap();
     let ctx = cmd("group_checkin", "idem-group-checkin-guest-change");
 
-    group_lifecycle::group_checkin_idempotent(
+    seed_user_group_checkin_idempotent(
         &pool,
-        Some("seed-user".to_string()),
         &ctx,
         rich_group_checkin_request(&["GI642", "GI643"], "GI642", Some(100_000)),
     )
@@ -1198,14 +1190,9 @@ async fn group_checkin_idempotent_same_key_changed_guest_name_conflicts() {
     let mut changed = rich_group_checkin_request(&["GI642", "GI643"], "GI642", Some(100_000));
     changed.guests_per_room.get_mut("GI642").unwrap()[0].full_name =
         "Changed Guest Name".to_string();
-    let error = group_lifecycle::group_checkin_idempotent(
-        &pool,
-        Some("seed-user".to_string()),
-        &ctx,
-        changed,
-    )
-    .await
-    .expect_err("same key with changed guest name conflicts");
+    let error = seed_user_group_checkin_idempotent(&pool, &ctx, changed)
+        .await
+        .expect_err("same key with changed guest name conflicts");
 
     assert_eq!(
         error.code,
