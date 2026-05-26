@@ -1111,10 +1111,13 @@ async fn group_checkin_idempotent_blank_key_rejected_before_writes() {
         .unwrap();
     assert_eq!(group_count, 0);
 
-    assert_eq!(
-        command_claim_count_by_request(&pool, "group_checkin", "req-group-idem-blank").await,
-        0
-    );
+    let claim_count: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM command_idempotency WHERE request_id = 'req-group-idem-blank'",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(claim_count, 0);
 }
 
 #[tokio::test]
