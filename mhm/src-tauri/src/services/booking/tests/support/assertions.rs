@@ -307,19 +307,6 @@ pub async fn calendar_count_for_booking(pool: &Pool<Sqlite>, booking_id: &str) -
         .expect("count calendar rows by booking")
 }
 
-pub async fn calendar_count_for_room_status(
-    pool: &Pool<Sqlite>,
-    room_id: &str,
-    status: &str,
-) -> i64 {
-    sqlx::query_scalar("SELECT COUNT(*) FROM room_calendar WHERE room_id = ? AND status = ?")
-        .bind(room_id)
-        .bind(status)
-        .fetch_one(pool)
-        .await
-        .expect("count calendar rows by room status")
-}
-
 pub async fn folio_line_count_for_booking(pool: &Pool<Sqlite>, booking_id: &str) -> i64 {
     sqlx::query_scalar("SELECT COUNT(*) FROM folio_lines WHERE booking_id = ?")
         .bind(booking_id)
@@ -347,23 +334,6 @@ pub async fn transaction_count_for_booking_type(
         .fetch_one(pool)
         .await
         .expect("count transactions by booking and type")
-}
-
-pub async fn transaction_count_for_booking_type_note(
-    pool: &Pool<Sqlite>,
-    booking_id: &str,
-    txn_type: &str,
-    note: &str,
-) -> i64 {
-    sqlx::query_scalar(
-        "SELECT COUNT(*) FROM transactions WHERE booking_id = ? AND type = ? AND note = ?",
-    )
-    .bind(booking_id)
-    .bind(txn_type)
-    .bind(note)
-    .fetch_one(pool)
-    .await
-    .expect("count transactions by booking, type, and note")
 }
 
 pub async fn transaction_count_for_note(pool: &Pool<Sqlite>, booking_id: &str, note: &str) -> i64 {
