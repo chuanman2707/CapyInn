@@ -92,6 +92,14 @@ pub async fn assert_booking_status(pool: &Pool<Sqlite>, booking_id: &str, expect
     assert_eq!(status, expected_status);
 }
 
+pub async fn booking_paid_amount(pool: &Pool<Sqlite>, booking_id: &str) -> Option<i64> {
+    sqlx::query_scalar("SELECT paid_amount FROM bookings WHERE id = ?")
+        .bind(booking_id)
+        .fetch_one(pool)
+        .await
+        .expect("read booking paid amount")
+}
+
 pub async fn assert_calendar_rows(
     pool: &Pool<Sqlite>,
     booking_id: &str,

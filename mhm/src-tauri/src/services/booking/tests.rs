@@ -1820,12 +1820,7 @@ async fn record_payment_updates_paid_amount_cache() {
         .await
         .unwrap();
 
-    let booking = sqlx::query("SELECT paid_amount FROM bookings WHERE id = ?")
-        .bind("B101")
-        .fetch_one(&pool)
-        .await
-        .unwrap();
-    assert_eq!(booking.get::<Option<i64>, _>("paid_amount"), Some(25_000));
+    assert_eq!(booking_paid_amount(&pool, "B101").await, Some(25_000));
 
     let txn = sqlx::query("SELECT type, amount, note FROM transactions WHERE booking_id = ?")
         .bind("B101")
@@ -1873,13 +1868,7 @@ async fn record_payment_returning_id_tx_returns_inserted_transaction_id() {
     assert_eq!(txn.get::<String, _>("type"), "payment");
     assert_eq!(txn.get::<String, _>("note"), "payment id test");
 
-    let booking = sqlx::query("SELECT paid_amount FROM bookings WHERE id = ?")
-        .bind("B-PAY-ID")
-        .fetch_one(&pool)
-        .await
-        .unwrap();
-
-    assert_eq!(booking.get::<Option<i64>, _>("paid_amount"), Some(25_000));
+    assert_eq!(booking_paid_amount(&pool, "B-PAY-ID").await, Some(25_000));
 }
 
 #[tokio::test]
@@ -1905,12 +1894,10 @@ async fn record_payment_idempotent_retry_replays_and_does_not_double_post() {
         1
     );
 
-    let paid_amount: i64 = sqlx::query_scalar("SELECT paid_amount FROM bookings WHERE id = ?")
-        .bind("B-PAY-IDEM")
-        .fetch_one(&pool)
-        .await
-        .unwrap();
-    assert_eq!(paid_amount, 125_000);
+    assert_eq!(
+        booking_paid_amount(&pool, "B-PAY-IDEM").await,
+        Some(125_000)
+    );
 
     let payload = assert_single_outbox_event(&pool, &ctx, "folio.payment_recorded").await;
     assert_eq!(payload["aggregate"]["type"], "folio");
@@ -1955,12 +1942,7 @@ async fn record_payment_idempotent_distinct_keys_sum_paid_amount() {
         .await
         .unwrap();
 
-    let paid_amount: i64 = sqlx::query_scalar("SELECT paid_amount FROM bookings WHERE id = ?")
-        .bind("B-PAY-SUM")
-        .fetch_one(&pool)
-        .await
-        .unwrap();
-    assert_eq!(paid_amount, 100_000);
+    assert_eq!(booking_paid_amount(&pool, "B-PAY-SUM").await, Some(100_000));
 }
 
 #[tokio::test]
@@ -2025,13 +2007,7 @@ async fn record_deposit_tx_updates_paid_amount_cache() {
         .unwrap();
     tx.commit().await.unwrap();
 
-    let booking = sqlx::query("SELECT paid_amount FROM bookings WHERE id = ?")
-        .bind("B103")
-        .fetch_one(&pool)
-        .await
-        .unwrap();
-
-    assert_eq!(booking.get::<Option<i64>, _>("paid_amount"), Some(75_000));
+    assert_eq!(booking_paid_amount(&pool, "B103").await, Some(75_000));
 
     let txn = sqlx::query(
         "SELECT type, amount, note FROM transactions WHERE booking_id = ? AND note = ?",
@@ -2145,13 +2121,7 @@ async fn record_cancellation_fee_tx_does_not_change_paid_amount() {
         .unwrap();
     tx.commit().await.unwrap();
 
-    let booking = sqlx::query("SELECT paid_amount FROM bookings WHERE id = ?")
-        .bind("B104")
-        .fetch_one(&pool)
-        .await
-        .unwrap();
-
-    assert_eq!(booking.get::<Option<i64>, _>("paid_amount"), Some(50_000));
+    assert_eq!(booking_paid_amount(&pool, "B104").await, Some(50_000));
 
     let txn = sqlx::query(
         "SELECT type, amount, note FROM transactions WHERE booking_id = ? AND note = ?",
@@ -3960,7 +3930,7 @@ async fn stay_lifecycle_smoke_covers_checkin_extend_and_checkout() {
         "req-smoke-stay-checkin",
         "idem-smoke-stay-checkin",
     );
-    let check_in_req = checkin_req("R-SMOKE-STAY").paid(50_000).build();
+    let check_in_req = paid_checkin_req("R-SMOKE-STAY", 50_000);
 
     let checked_in = stay_lifecycle::check_in_idempotent(
         &pool,
@@ -4060,14 +4030,7 @@ async fn stay_lifecycle_smoke_covers_checkin_extend_and_checkout() {
         .await,
         700_000
     );
-    assert_eq!(
-        sqlx::query_scalar::<_, i64>("SELECT paid_amount FROM bookings WHERE id = ?")
-            .bind(&booking_id)
-            .fetch_one(&pool)
-            .await
-            .expect("paid amount after checkout"),
-        750_000
-    );
+    assert_eq!(booking_paid_amount(&pool, &booking_id).await, Some(750_000));
     assert_single_outbox_event(&pool, &check_out_ctx, "booking.checked_out").await;
 }
 
@@ -4078,8 +4041,8 @@ async fn check_in_idempotent_retry_replays_and_does_not_duplicate_rows() {
         .await
         .unwrap();
     let ctx = cmd_with_request("check_in", "req-checkin-idem", "idem-checkin-1");
-    let first_req = checkin_req("R-CHECKIN-IDEM").paid(50_000).build();
-    let second_req = checkin_req("R-CHECKIN-IDEM").paid(50_000).build();
+    let first_req = paid_checkin_req("R-CHECKIN-IDEM", 50_000);
+    let second_req = paid_checkin_req("R-CHECKIN-IDEM", 50_000);
 
     let first =
         stay_lifecycle::check_in_idempotent(&pool, &ctx, first_req, Some("user-1".to_string()))
@@ -4097,12 +4060,7 @@ async fn check_in_idempotent_retry_replays_and_does_not_duplicate_rows() {
     assert_eq!(booking_guest_count_for_booking(&pool, booking_id).await, 1);
     assert_eq!(transaction_count_for_booking(&pool, booking_id).await, 2);
 
-    let paid_amount: i64 = sqlx::query_scalar("SELECT paid_amount FROM bookings WHERE id = ?")
-        .bind(booking_id)
-        .fetch_one(&pool)
-        .await
-        .unwrap();
-    assert_eq!(paid_amount, 50_000);
+    assert_eq!(booking_paid_amount(&pool, booking_id).await, Some(50_000));
 
     assert_eq!(calendar_count_for_booking(&pool, booking_id).await, 2);
     assert_single_outbox_event(&pool, &ctx, "booking.checked_in").await;
@@ -4967,12 +4925,6 @@ async fn check_out_writes_payment_delta_ledger_when_collecting_extra_payment() {
     .await
     .unwrap();
 
-    let booking = sqlx::query("SELECT paid_amount FROM bookings WHERE id = ?")
-        .bind("B418")
-        .fetch_one(&pool)
-        .await
-        .unwrap();
-
     let charge_adjustment_count: (i64,) = sqlx::query_as(
         "SELECT COUNT(*) FROM transactions
          WHERE booking_id = ? AND type = 'charge' AND note LIKE 'Điều chỉnh %'",
@@ -4984,7 +4936,7 @@ async fn check_out_writes_payment_delta_ledger_when_collecting_extra_payment() {
 
     assert_eq!(payment.get::<i64, _>("amount"), 1_500_000);
     assert_eq!(payment.get::<String, _>("note"), "Thanh toán khi check-out");
-    assert_eq!(booking.get::<i64, _>("paid_amount"), 2_500_000);
+    assert_eq!(booking_paid_amount(&pool, "B418").await, Some(2_500_000));
     assert_eq!(charge_adjustment_count.0, 0);
 }
 
@@ -5029,11 +4981,6 @@ async fn checkout_paid_amount_is_ledger_projection_not_direct_overwrite() {
     .await
     .unwrap();
 
-    let booking = sqlx::query("SELECT paid_amount FROM bookings WHERE id = ?")
-        .bind("B420")
-        .fetch_one(&pool)
-        .await
-        .unwrap();
     let ledger_total: i64 = sqlx::query_scalar(
         "SELECT CAST(COALESCE(SUM(amount), 0) AS INTEGER)
          FROM transactions
@@ -5045,7 +4992,7 @@ async fn checkout_paid_amount_is_ledger_projection_not_direct_overwrite() {
     .unwrap();
 
     assert_eq!(ledger_total, 75_000);
-    assert_eq!(booking.get::<i64, _>("paid_amount"), ledger_total);
+    assert_eq!(booking_paid_amount(&pool, "B420").await, Some(ledger_total));
 }
 
 #[tokio::test]

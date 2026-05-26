@@ -138,47 +138,10 @@ pub fn rich_group_checkin_request(
     }
 }
 
-pub struct CheckInRequestBuilder {
-    req: CheckInRequest,
-}
-
-#[allow(dead_code)]
-impl CheckInRequestBuilder {
-    pub fn new(room_id: &str) -> Self {
-        Self {
-            req: minimal_checkin_request(room_id),
-        }
-    }
-
-    pub fn nights(mut self, nights: i32) -> Self {
-        self.req.nights = nights;
-        self
-    }
-
-    pub fn paid(mut self, paid_amount: MoneyVnd) -> Self {
-        self.req.paid_amount = Some(paid_amount);
-        self
-    }
-
-    pub fn pricing_type(mut self, pricing_type: &str) -> Self {
-        self.req.pricing_type = Some(pricing_type.to_string());
-        self
-    }
-
-    pub fn guest_name(mut self, full_name: &str) -> Self {
-        if let Some(guest) = self.req.guests.first_mut() {
-            guest.full_name = full_name.to_string();
-        }
-        self
-    }
-
-    pub fn build(self) -> CheckInRequest {
-        self.req
-    }
-}
-
-pub fn checkin_req(room_id: &str) -> CheckInRequestBuilder {
-    CheckInRequestBuilder::new(room_id)
+pub fn paid_checkin_req(room_id: &str, paid_amount: MoneyVnd) -> CheckInRequest {
+    let mut req = minimal_checkin_request(room_id);
+    req.paid_amount = Some(paid_amount);
+    req
 }
 
 pub fn checkout_req(
