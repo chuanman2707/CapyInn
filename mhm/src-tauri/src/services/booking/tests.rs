@@ -5843,10 +5843,7 @@ async fn checkout_settlement_updates_booking_export_rows() {
     .await
     .unwrap();
 
-    let export_rows = audit_queries::load_booking_export_rows(&pool, "2026-04-01", "2026-04-30")
-        .await
-        .unwrap();
-    let row = export_rows.iter().find(|row| row.id == "B422").unwrap();
+    let row = booking_export_row(&pool, "2026-04-01", "2026-04-30", "B422").await;
 
     assert_eq!(row.room_price, 500_000);
     assert_eq!(row.charge_total, 500_000);
@@ -5906,10 +5903,7 @@ async fn checkout_settlement_export_rows_follow_reporting_checkout_boundary() {
     .await
     .unwrap();
 
-    let export_rows = audit_queries::load_booking_export_rows(&pool, "2026-04-21", "2026-04-21")
-        .await
-        .unwrap();
-    let row = export_rows.iter().find(|row| row.id == "B423").unwrap();
+    let row = booking_export_row(&pool, "2026-04-21", "2026-04-21", "B423").await;
 
     assert_eq!(row.expected_checkout, "2026-04-21");
     assert_eq!(row.actual_checkout, "2026-04-20T18:00:00+07:00");
@@ -5968,12 +5962,7 @@ async fn checkout_settlement_export_rows_exclude_original_checkin_window_after_s
     .await
     .unwrap();
 
-    let export_rows = audit_queries::load_booking_export_rows(&pool, "2026-04-20", "2026-04-20")
-        .await
-        .unwrap();
-    let row = export_rows.iter().find(|row| row.id == "B424");
-
-    assert!(row.is_none());
+    assert!(missing_booking_export_row(&pool, "2026-04-20", "2026-04-20", "B424").await);
 }
 
 #[tokio::test]
@@ -6008,10 +5997,7 @@ async fn cancellation_fee_export_uses_transaction_period_when_checkin_is_future(
     .await
     .unwrap();
 
-    let export_rows = audit_queries::load_booking_export_rows(&pool, "2026-04-15", "2026-04-15")
-        .await
-        .unwrap();
-    let row = export_rows.iter().find(|row| row.id == "B425").unwrap();
+    let row = booking_export_row(&pool, "2026-04-15", "2026-04-15", "B425").await;
 
     assert_eq!(row.cancellation_fee_total, 50_000);
     assert_eq!(row.recognized_revenue, 50_000);
@@ -6034,11 +6020,7 @@ async fn booking_export_includes_local_rfc3339_non_checkout_checkin_date() {
     .await
     .unwrap();
 
-    let export_rows = audit_queries::load_booking_export_rows(&pool, "2026-05-06", "2026-05-06")
-        .await
-        .unwrap();
-
-    let row = export_rows.iter().find(|row| row.id == "B426").unwrap();
+    let row = booking_export_row(&pool, "2026-05-06", "2026-05-06", "B426").await;
     assert_eq!(row.check_in_at, "2026-05-06T00:30:00+07:00");
 }
 
@@ -6074,11 +6056,7 @@ async fn booking_export_includes_local_rfc3339_cancellation_fee_date() {
     .await
     .unwrap();
 
-    let export_rows = audit_queries::load_booking_export_rows(&pool, "2026-05-06", "2026-05-06")
-        .await
-        .unwrap();
-
-    let row = export_rows.iter().find(|row| row.id == "B427").unwrap();
+    let row = booking_export_row(&pool, "2026-05-06", "2026-05-06", "B427").await;
     assert_eq!(row.cancellation_fee_total, 50_000);
     assert_eq!(row.recognized_revenue, 50_000);
 }

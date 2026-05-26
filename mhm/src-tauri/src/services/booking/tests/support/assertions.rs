@@ -1,6 +1,9 @@
 use sqlx::{Pool, Row, Sqlite};
 
-use crate::command_idempotency::WriteCommandContext;
+use crate::{
+    command_idempotency::WriteCommandContext, models::BookingExportRow,
+    queries::booking::audit_queries,
+};
 
 async fn outbox_event_count(pool: &Pool<Sqlite>, command_name: &str, idempotency_key: &str) -> i64 {
     sqlx::query_scalar(
@@ -244,6 +247,32 @@ pub async fn outbox_count_for_command(
     .fetch_one(pool)
     .await
     .expect("count outbox events by command")
+}
+
+pub async fn booking_export_row(
+    pool: &Pool<Sqlite>,
+    from_date: &str,
+    to_date: &str,
+    booking_id: &str,
+) -> BookingExportRow {
+    let rows = audit_queries::load_booking_export_rows(pool, from_date, to_date)
+        .await
+        .expect("load booking export rows");
+    rows.into_iter()
+        .find(|row| row.id == booking_id)
+        .expect("booking export row exists")
+}
+
+pub async fn missing_booking_export_row(
+    pool: &Pool<Sqlite>,
+    from_date: &str,
+    to_date: &str,
+    booking_id: &str,
+) -> bool {
+    let rows = audit_queries::load_booking_export_rows(pool, from_date, to_date)
+        .await
+        .expect("load booking export rows");
+    rows.into_iter().all(|row| row.id != booking_id)
 }
 
 pub async fn group_service_count_for_group(pool: &Pool<Sqlite>, group_id: &str) -> i64 {
