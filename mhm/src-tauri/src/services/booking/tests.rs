@@ -2383,8 +2383,7 @@ async fn calculate_stay_price_returns_datetime_parse_for_invalid_check_in() {
 #[tokio::test]
 async fn create_reservation_blocks_calendar_and_posts_deposit() {
     let pool = test_pool().await;
-    seed_room(&pool, "R160").await.unwrap();
-    seed_pricing_rule(&pool, "standard", 600_000).await.unwrap();
+    seed_room_with_price(&pool, "R160", 600_000).await.unwrap();
 
     let booking =
         reservation_lifecycle::create_reservation(&pool, minimal_reservation_request("R160"))
@@ -2420,8 +2419,7 @@ async fn create_reservation_blocks_calendar_and_posts_deposit() {
 #[tokio::test]
 async fn create_reservation_rejects_inconsistent_nights_input() {
     let pool = test_pool().await;
-    seed_room(&pool, "R160A").await.unwrap();
-    seed_pricing_rule(&pool, "standard", 600_000).await.unwrap();
+    seed_room_with_price(&pool, "R160A", 600_000).await.unwrap();
 
     let error = reservation_lifecycle::create_reservation(
         &pool,
@@ -2450,10 +2448,9 @@ async fn create_reservation_rejects_inconsistent_nights_input() {
 #[tokio::test]
 async fn create_reservation_idempotent_retry_does_not_duplicate_deposit() {
     let pool = test_pool().await;
-    seed_room(&pool, "R601").await.expect("seeds room");
-    seed_pricing_rule(&pool, "standard", 600_000)
+    seed_room_with_price(&pool, "R601", 600_000)
         .await
-        .expect("seeds pricing");
+        .expect("seeds room/pricing");
     let ctx = cmd_with_request(
         "create_reservation",
         "req-reservation-1",
@@ -2503,10 +2500,9 @@ async fn create_reservation_idempotent_retry_does_not_duplicate_deposit() {
 #[tokio::test]
 async fn create_reservation_idempotent_replay_returns_stored_booking_snapshot() {
     let pool = test_pool().await;
-    seed_room(&pool, "R604").await.expect("seeds room");
-    seed_pricing_rule(&pool, "standard", 600_000)
+    seed_room_with_price(&pool, "R604", 600_000)
         .await
-        .expect("seeds pricing");
+        .expect("seeds room/pricing");
     let ctx = cmd("create_reservation", "idem-reservation-snapshot");
     let first = reservation_lifecycle::create_reservation_idempotent(
         &pool,
@@ -2564,11 +2560,9 @@ async fn create_reservation_idempotent_replay_returns_stored_booking_snapshot() 
 #[tokio::test]
 async fn create_reservation_same_key_different_payload_conflicts() {
     let pool = test_pool().await;
-    seed_room(&pool, "R602").await.expect("seeds room");
-    seed_room(&pool, "R603").await.expect("seeds room");
-    seed_pricing_rule(&pool, "standard", 600_000)
+    seed_rooms_with_price(&pool, &["R602", "R603"], 600_000)
         .await
-        .expect("seeds pricing");
+        .expect("seeds rooms/pricing");
     let ctx = cmd("create_reservation", "idem-reservation-conflict");
 
     reservation_lifecycle::create_reservation_idempotent(
@@ -2610,10 +2604,9 @@ async fn create_reservation_same_key_different_payload_conflicts() {
 #[tokio::test]
 async fn reservation_command_idempotency_create_hashes_deposit_as_integer_vnd_units() {
     let pool = test_pool().await;
-    seed_room(&pool, "R690").await.expect("seeds room");
-    seed_pricing_rule(&pool, "standard", 600_000)
+    seed_room_with_price(&pool, "R690", 600_000)
         .await
-        .expect("seeds pricing");
+        .expect("seeds room/pricing");
     let ctx = cmd("create_reservation", "idem-reservation-deposit-vnd");
     let request = CreateReservationRequest {
         room_id: "R690".to_string(),
@@ -2726,10 +2719,9 @@ async fn reservation_command_idempotency_rejects_invalid_deposit_before_claim() 
 #[tokio::test]
 async fn reservation_command_idempotency_create_replay_does_not_duplicate_booking_or_calendar() {
     let pool = test_pool().await;
-    seed_room(&pool, "R691").await.expect("seeds room");
-    seed_pricing_rule(&pool, "standard", 600_000)
+    seed_room_with_price(&pool, "R691", 600_000)
         .await
-        .expect("seeds pricing");
+        .expect("seeds room/pricing");
     let ctx = cmd("reservation.create", "idem-create-replay-no-dup");
 
     let first = reservation_lifecycle::create_reservation_idempotent(
@@ -2907,9 +2899,9 @@ async fn reservation_command_idempotency_confirm_replay_does_not_requery_or_repr
 async fn reservation_command_idempotency_modify_cancel_confirm_same_key_different_payload_conflicts(
 ) {
     let pool = test_pool().await;
-    seed_room(&pool, "R697A").await.unwrap();
-    seed_room(&pool, "R697B").await.unwrap();
-    seed_pricing_rule(&pool, "standard", 600_000).await.unwrap();
+    seed_rooms_with_price(&pool, &["R697A", "R697B"], 600_000)
+        .await
+        .unwrap();
     seed_booked_reservation(&pool, "B697A", "R697A")
         .await
         .unwrap();
@@ -3084,10 +3076,9 @@ async fn reservation_command_idempotency_cancel_confirm_invalid_state_replays_te
 async fn reservation_command_idempotency_missing_booking_for_cancel_modify_confirm_replays_terminal(
 ) {
     let pool = test_pool().await;
-    seed_room(&pool, "R700A").await.unwrap();
-    seed_room(&pool, "R700B").await.unwrap();
-    seed_room(&pool, "R700C").await.unwrap();
-    seed_pricing_rule(&pool, "standard", 600_000).await.unwrap();
+    seed_rooms_with_price(&pool, &["R700A", "R700B", "R700C"], 600_000)
+        .await
+        .unwrap();
 
     let cancel_ctx = cmd("reservation.cancel", "idem-cancel-missing");
     let cancel_first =
@@ -3262,8 +3253,7 @@ async fn reservation_command_idempotency_invalid_modify_nights_replays_terminal_
 #[tokio::test]
 async fn reservation_command_idempotency_same_plain_key_across_commands_scopes_origin_rows() {
     let pool = test_pool().await;
-    seed_room(&pool, "R704").await.unwrap();
-    seed_pricing_rule(&pool, "standard", 600_000).await.unwrap();
+    seed_room_with_price(&pool, "R704", 600_000).await.unwrap();
     let plain_key = "idem-shared-reservation-origin";
     let create_ctx = cmd("reservation.create", plain_key);
     let cancel_ctx = cmd("reservation.cancel", plain_key);
@@ -3504,8 +3494,7 @@ async fn cancel_reservation_returns_invalid_state_when_booking_is_not_booked() {
 #[tokio::test]
 async fn do_create_reservation_returns_service_booking_and_leaves_room_vacant() {
     let pool = test_pool().await;
-    seed_room(&pool, "R162").await.unwrap();
-    seed_pricing_rule(&pool, "standard", 600_000).await.unwrap();
+    seed_room_with_price(&pool, "R162", 600_000).await.unwrap();
 
     let ctx = cmd("create_reservation", "idem-do-create-reservation");
     let booking =
@@ -3962,12 +3951,9 @@ async fn check_in_posts_charge_and_marks_room_occupied() {
 #[tokio::test]
 async fn stay_lifecycle_smoke_covers_checkin_extend_and_checkout() {
     let pool = test_pool().await;
-    seed_room(&pool, "R-SMOKE-STAY")
+    seed_room_with_price(&pool, "R-SMOKE-STAY", 250_000)
         .await
-        .expect("seed stay room");
-    seed_pricing_rule(&pool, "standard", 250_000)
-        .await
-        .expect("seed stay pricing");
+        .expect("seed stay room/pricing");
 
     let check_in_ctx = cmd_with_request(
         "check_in",
@@ -4088,8 +4074,9 @@ async fn stay_lifecycle_smoke_covers_checkin_extend_and_checkout() {
 #[tokio::test]
 async fn check_in_idempotent_retry_replays_and_does_not_duplicate_rows() {
     let pool = test_pool().await;
-    seed_room(&pool, "R-CHECKIN-IDEM").await.unwrap();
-    seed_pricing_rule(&pool, "standard", 250_000).await.unwrap();
+    seed_room_with_price(&pool, "R-CHECKIN-IDEM", 250_000)
+        .await
+        .unwrap();
     let ctx = cmd_with_request("check_in", "req-checkin-idem", "idem-checkin-1");
     let first_req = checkin_req("R-CHECKIN-IDEM").paid(50_000).build();
     let second_req = checkin_req("R-CHECKIN-IDEM").paid(50_000).build();
@@ -4177,8 +4164,9 @@ async fn two_check_in_commands_for_same_room_leave_one_booking_and_consistent_ca
 #[tokio::test]
 async fn check_in_idempotent_same_key_changed_guest_conflicts() {
     let pool = test_pool().await;
-    seed_room(&pool, "R-CHECKIN-HASH").await.unwrap();
-    seed_pricing_rule(&pool, "standard", 250_000).await.unwrap();
+    seed_room_with_price(&pool, "R-CHECKIN-HASH", 250_000)
+        .await
+        .unwrap();
     let ctx = cmd_with_request("check_in", "req-checkin-hash", "idem-checkin-hash");
 
     stay_lifecycle::check_in_idempotent(

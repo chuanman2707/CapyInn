@@ -260,12 +260,6 @@ impl GroupCheckinRequestBuilder {
         }
     }
 
-    pub fn rich(room_ids: &[&str], master_room_id: &str, paid_amount: Option<MoneyVnd>) -> Self {
-        Self {
-            req: rich_group_checkin_request(room_ids, master_room_id, paid_amount),
-        }
-    }
-
     pub fn master(mut self, master_room_id: &str) -> Self {
         self.req.master_room_id = master_room_id.to_string();
         self
@@ -293,13 +287,4 @@ impl GroupCheckinRequestBuilder {
 
 pub fn group_checkin_req(room_ids: &[&str]) -> GroupCheckinRequestBuilder {
     GroupCheckinRequestBuilder::new(room_ids)
-}
-
-#[allow(dead_code)]
-pub fn rich_group_req(
-    room_ids: &[&str],
-    master_room_id: &str,
-    paid_amount: Option<MoneyVnd>,
-) -> GroupCheckinRequestBuilder {
-    GroupCheckinRequestBuilder::rich(room_ids, master_room_id, paid_amount)
 }
