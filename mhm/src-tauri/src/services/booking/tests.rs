@@ -5579,10 +5579,7 @@ async fn revenue_queries_include_cancellation_fees_in_recognized_revenue() {
     )
     .await
     .unwrap();
-    let export_rows = audit_queries::load_booking_export_rows(&pool, "2026-04-01", "2026-04-30")
-        .await
-        .unwrap();
-    let cancelled_row = export_rows.iter().find(|row| row.id == "B305").unwrap();
+    let cancelled_row = booking_export_row(&pool, "2026-04-01", "2026-04-30", "B305").await;
 
     assert_eq!(stats.total_revenue, 50_000);
     assert_eq!(cancelled_row.charge_total, 0);
