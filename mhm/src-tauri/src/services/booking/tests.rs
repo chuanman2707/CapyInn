@@ -3303,15 +3303,9 @@ async fn reservation_command_idempotency_same_plain_key_across_commands_scopes_o
 #[tokio::test]
 async fn reservation_lifecycle_smoke_covers_confirm_and_cancel_paths() {
     let pool = test_pool().await;
-    seed_room(&pool, "R-SMOKE-CONFIRM")
+    seed_rooms_with_price(&pool, &["R-SMOKE-CONFIRM", "R-SMOKE-CANCEL"], 600_000)
         .await
-        .expect("seed confirm room");
-    seed_room(&pool, "R-SMOKE-CANCEL")
-        .await
-        .expect("seed cancel room");
-    seed_pricing_rule(&pool, "standard", 600_000)
-        .await
-        .expect("seed pricing");
+        .expect("seed smoke rooms/pricing");
 
     let today = Local::now().date_naive();
     let reservation_request = |room_id: &str, start_offset_days: i64| {
@@ -3352,23 +3346,10 @@ async fn reservation_lifecycle_smoke_covers_confirm_and_cancel_paths() {
         created_for_confirm.response["status"],
         serde_json::json!("booked")
     );
-    assert_eq!(
-        sqlx::query_scalar::<_, String>("SELECT status FROM rooms WHERE id = ?")
-            .bind("R-SMOKE-CONFIRM")
-            .fetch_one(&pool)
-            .await
-            .expect("confirm room status after create"),
-        "vacant"
-    );
+    assert_room_status(&pool, "R-SMOKE-CONFIRM", "vacant").await;
     assert_calendar_rows(&pool, &confirm_booking_id, "booked", 2).await;
     assert_eq!(
-        sqlx::query_scalar::<_, i64>(
-            "SELECT COALESCE(SUM(amount), 0) FROM transactions WHERE booking_id = ? AND type = 'deposit'",
-        )
-        .bind(&confirm_booking_id)
-        .fetch_one(&pool)
-        .await
-        .expect("reservation deposit total"),
+        transaction_sum(&pool, &confirm_booking_id, "deposit", None).await,
         50_000
     );
     assert_single_outbox_event(&pool, &create_confirm_ctx, "booking.reservation_created").await;
@@ -3393,31 +3374,11 @@ async fn reservation_lifecycle_smoke_covers_confirm_and_cancel_paths() {
         .expect("confirmed reservation total price");
 
     assert_eq!(confirmed.response["status"], serde_json::json!("active"));
-    assert_eq!(
-        sqlx::query_scalar::<_, String>("SELECT status FROM bookings WHERE id = ?")
-            .bind(&confirm_booking_id)
-            .fetch_one(&pool)
-            .await
-            .expect("confirmed booking status"),
-        "active"
-    );
-    assert_eq!(
-        sqlx::query_scalar::<_, String>("SELECT status FROM rooms WHERE id = ?")
-            .bind("R-SMOKE-CONFIRM")
-            .fetch_one(&pool)
-            .await
-            .expect("confirm room status"),
-        "occupied"
-    );
+    assert_booking_status(&pool, &confirm_booking_id, "active").await;
+    assert_room_status(&pool, "R-SMOKE-CONFIRM", "occupied").await;
     assert_calendar_rows(&pool, &confirm_booking_id, "occupied", confirmed_nights).await;
     assert_eq!(
-        sqlx::query_scalar::<_, i64>(
-            "SELECT COALESCE(SUM(amount), 0) FROM transactions WHERE booking_id = ? AND type = 'charge'",
-        )
-        .bind(&confirm_booking_id)
-        .fetch_one(&pool)
-        .await
-        .expect("reservation room charge total"),
+        transaction_sum(&pool, &confirm_booking_id, "charge", None).await,
         confirmed_total_price
     );
     assert_single_outbox_event(&pool, &confirm_ctx, "booking.reservation_confirmed").await;
@@ -3454,38 +3415,14 @@ async fn reservation_lifecycle_smoke_covers_confirm_and_cancel_paths() {
     .expect("reservation cancel succeeds");
 
     assert_eq!(cancelled.response["ok"], serde_json::json!(true));
+    assert_booking_status(&pool, &cancel_booking_id, "cancelled").await;
+    assert_room_status(&pool, "R-SMOKE-CANCEL", "vacant").await;
     assert_eq!(
-        sqlx::query_scalar::<_, String>("SELECT status FROM bookings WHERE id = ?")
-            .bind(&cancel_booking_id)
-            .fetch_one(&pool)
-            .await
-            .expect("cancelled booking status"),
-        "cancelled"
-    );
-    assert_eq!(
-        sqlx::query_scalar::<_, String>("SELECT status FROM rooms WHERE id = ?")
-            .bind("R-SMOKE-CANCEL")
-            .fetch_one(&pool)
-            .await
-            .expect("cancel room status"),
-        "vacant"
-    );
-    assert_eq!(
-        sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM room_calendar WHERE booking_id = ?")
-            .bind(&cancel_booking_id)
-            .fetch_one(&pool)
-            .await
-            .expect("cancelled calendar rows"),
+        calendar_count_for_booking(&pool, &cancel_booking_id).await,
         0
     );
     assert_eq!(
-        sqlx::query_scalar::<_, i64>(
-            "SELECT COALESCE(SUM(amount), 0) FROM transactions WHERE booking_id = ? AND type = 'cancellation_fee'",
-        )
-        .bind(&cancel_booking_id)
-        .fetch_one(&pool)
-        .await
-        .expect("cancellation fee total"),
+        transaction_sum(&pool, &cancel_booking_id, "cancellation_fee", None).await,
         50_000
     );
     assert_single_outbox_event(&pool, &cancel_ctx, "booking.reservation_cancelled").await;
