@@ -40,6 +40,32 @@ vi.mock("sonner", () => {
   };
 });
 
+type BackupStatusPayload = {
+  job_id: string;
+  state: "started" | "completed" | "failed";
+  reason: "checkout" | "app_exit" | "manual" | "settings" | "scheduled";
+  pending_jobs: number;
+  path?: string;
+  message?: string;
+};
+
+async function renderReadyApp() {
+  render(<App />);
+  await act(async () => {
+    await Promise.resolve();
+  });
+}
+
+async function emitBackupStatus(payload: BackupStatusPayload) {
+  await act(async () => {
+    await emitTestEvent("backup-status", payload);
+  });
+}
+
+function getBackupFailureAlert() {
+  return screen.getByRole("alert", { name: "Sao lưu thất bại" });
+}
+
 describe("App backup status integration", () => {
   beforeEach(() => {
     clearMockResponses();
@@ -82,42 +108,32 @@ describe("App backup status integration", () => {
   });
 
   it("keeps the saving indicator visible until pending_jobs reaches zero", async () => {
-    render(<App />);
-
-    await act(async () => {
-      await Promise.resolve();
-    });
+    await renderReadyApp();
     expect(screen.getByText("Overview")).toBeInTheDocument();
 
-    await act(async () => {
-      await emitTestEvent("backup-status", {
-        job_id: "job-1",
-        state: "started",
-        reason: "checkout",
-        pending_jobs: 2,
-      });
+    await emitBackupStatus({
+      job_id: "job-1",
+      state: "started",
+      reason: "checkout",
+      pending_jobs: 2,
     });
     expect(screen.getByText("Đang sao lưu dữ liệu...")).toBeInTheDocument();
 
-    await act(async () => {
-      await emitTestEvent("backup-status", {
-        job_id: "job-1",
-        state: "completed",
-        reason: "checkout",
-        pending_jobs: 1,
-        path: "/tmp/job-1.db",
-      });
+    await emitBackupStatus({
+      job_id: "job-1",
+      state: "completed",
+      reason: "checkout",
+      pending_jobs: 1,
+      path: "/tmp/job-1.db",
     });
     expect(screen.getByText("Đang sao lưu dữ liệu...")).toBeInTheDocument();
 
-    await act(async () => {
-      await emitTestEvent("backup-status", {
-        job_id: "job-2",
-        state: "completed",
-        reason: "app_exit",
-        pending_jobs: 0,
-        path: "/tmp/job-2.db",
-      });
+    await emitBackupStatus({
+      job_id: "job-2",
+      state: "completed",
+      reason: "app_exit",
+      pending_jobs: 0,
+      path: "/tmp/job-2.db",
     });
     expect(screen.getByText("Đã sao lưu")).toBeInTheDocument();
 
@@ -133,46 +149,38 @@ describe("App backup status integration", () => {
   });
 
   it("shows a failure toast and clears the saved hide timer when a new job starts", async () => {
-    render(<App />);
-
-    await act(async () => {
-      await Promise.resolve();
-    });
+    await renderReadyApp();
     expect(screen.getByText("Overview")).toBeInTheDocument();
 
-    await act(async () => {
-      await emitTestEvent("backup-status", {
-        job_id: "job-1",
-        state: "failed",
-        reason: "manual",
-        pending_jobs: 1,
-        message: "Ổ đĩa đầy",
-      });
+    await emitBackupStatus({
+      job_id: "job-1",
+      state: "failed",
+      reason: "manual",
+      pending_jobs: 1,
+      message: "Ổ đĩa đầy",
     });
     const status = screen.getByRole("status");
     expect(status).toHaveAttribute("data-phase", "failed");
     expect(within(status).getByText("Sao lưu thất bại")).toBeInTheDocument();
     expect(toast.error).toHaveBeenCalledWith("Ổ đĩa đầy");
 
-    await act(async () => {
-      await emitTestEvent("backup-status", {
-        job_id: "job-2",
-        state: "completed",
-        reason: "manual",
-        pending_jobs: 0,
-        path: "/tmp/job-2.db",
-      });
+    await emitBackupStatus({
+      job_id: "job-2",
+      state: "completed",
+      reason: "manual",
+      pending_jobs: 0,
+      path: "/tmp/job-2.db",
     });
     expect(screen.getByText("Đã sao lưu")).toBeInTheDocument();
 
     await act(async () => {
       vi.advanceTimersByTime(1000);
-      await emitTestEvent("backup-status", {
-        job_id: "job-3",
-        state: "started",
-        reason: "settings",
-        pending_jobs: 1,
-      });
+    });
+    await emitBackupStatus({
+      job_id: "job-3",
+      state: "started",
+      reason: "settings",
+      pending_jobs: 1,
     });
     expect(screen.getByText("Đang sao lưu dữ liệu...")).toBeInTheDocument();
 
@@ -183,23 +191,17 @@ describe("App backup status integration", () => {
   });
 
   it("shows a persistent alert alongside the failed status indicator", async () => {
-    render(<App />);
+    await renderReadyApp();
 
-    await act(async () => {
-      await Promise.resolve();
+    await emitBackupStatus({
+      job_id: "job-1",
+      state: "failed",
+      reason: "manual",
+      pending_jobs: 1,
+      message: "Ổ đĩa đầy",
     });
 
-    await act(async () => {
-      await emitTestEvent("backup-status", {
-        job_id: "job-1",
-        state: "failed",
-        reason: "manual",
-        pending_jobs: 1,
-        message: "Ổ đĩa đầy",
-      });
-    });
-
-    const alert = screen.getByRole("alert", { name: "Sao lưu thất bại" });
+    const alert = getBackupFailureAlert();
     expect(within(alert).getByText("Ổ đĩa đầy")).toBeInTheDocument();
     expect(within(alert).getByText("Nguồn: Thủ công")).toBeInTheDocument();
 
@@ -209,22 +211,16 @@ describe("App backup status integration", () => {
   });
 
   it("uses fallback copy and source label for scheduled failures without a backend message", async () => {
-    render(<App />);
+    await renderReadyApp();
 
-    await act(async () => {
-      await Promise.resolve();
+    await emitBackupStatus({
+      job_id: "scheduled-1",
+      state: "failed",
+      reason: "scheduled",
+      pending_jobs: 0,
     });
 
-    await act(async () => {
-      await emitTestEvent("backup-status", {
-        job_id: "scheduled-1",
-        state: "failed",
-        reason: "scheduled",
-        pending_jobs: 0,
-      });
-    });
-
-    const alert = screen.getByRole("alert", { name: "Sao lưu thất bại" });
+    const alert = getBackupFailureAlert();
     expect(
       within(alert).getByText(
         "Không thể tạo bản sao lưu. Vui lòng kiểm tra dung lượng ổ đĩa hoặc thử lại.",
@@ -234,128 +230,98 @@ describe("App backup status integration", () => {
   });
 
   it("dismisses only the current failed job and reopens for a later failure", async () => {
-    render(<App />);
+    await renderReadyApp();
 
-    await act(async () => {
-      await Promise.resolve();
-    });
-
-    await act(async () => {
-      await emitTestEvent("backup-status", {
-        job_id: "job-1",
-        state: "failed",
-        reason: "manual",
-        pending_jobs: 1,
-        message: "Ổ đĩa đầy",
-      });
+    await emitBackupStatus({
+      job_id: "job-1",
+      state: "failed",
+      reason: "manual",
+      pending_jobs: 1,
+      message: "Ổ đĩa đầy",
     });
 
     fireEvent.click(screen.getByRole("button", { name: "Đóng cảnh báo sao lưu" }));
     expect(screen.queryByRole("alert", { name: "Sao lưu thất bại" })).not.toBeInTheDocument();
 
-    await act(async () => {
-      await emitTestEvent("backup-status", {
-        job_id: "job-2",
-        state: "started",
-        reason: "scheduled",
-        pending_jobs: 1,
-      });
+    await emitBackupStatus({
+      job_id: "job-2",
+      state: "started",
+      reason: "scheduled",
+      pending_jobs: 1,
     });
     expect(screen.queryByRole("alert", { name: "Sao lưu thất bại" })).not.toBeInTheDocument();
 
-    await act(async () => {
-      await emitTestEvent("backup-status", {
-        job_id: "job-2",
-        state: "completed",
-        reason: "scheduled",
-        pending_jobs: 1,
-        path: "/tmp/job-2.db",
-      });
+    await emitBackupStatus({
+      job_id: "job-2",
+      state: "completed",
+      reason: "scheduled",
+      pending_jobs: 1,
+      path: "/tmp/job-2.db",
     });
     expect(screen.queryByRole("alert", { name: "Sao lưu thất bại" })).not.toBeInTheDocument();
 
-    await act(async () => {
-      await emitTestEvent("backup-status", {
-        job_id: "job-3",
-        state: "failed",
-        reason: "checkout",
-        pending_jobs: 0,
-        message: "Không thể ghi file",
-      });
+    await emitBackupStatus({
+      job_id: "job-3",
+      state: "failed",
+      reason: "checkout",
+      pending_jobs: 0,
+      message: "Không thể ghi file",
     });
 
-    const alert = screen.getByRole("alert", { name: "Sao lưu thất bại" });
+    const alert = getBackupFailureAlert();
     expect(within(alert).getByText("Không thể ghi file")).toBeInTheDocument();
     expect(within(alert).getByText("Nguồn: Trả phòng")).toBeInTheDocument();
   });
 
   it("keeps the alert while queued jobs remain and clears it after the queue drains", async () => {
-    render(<App />);
+    await renderReadyApp();
 
-    await act(async () => {
-      await Promise.resolve();
+    await emitBackupStatus({
+      job_id: "job-1",
+      state: "failed",
+      reason: "manual",
+      pending_jobs: 2,
+      message: "Ổ đĩa đầy",
     });
+    expect(getBackupFailureAlert()).toBeInTheDocument();
 
-    await act(async () => {
-      await emitTestEvent("backup-status", {
-        job_id: "job-1",
-        state: "failed",
-        reason: "manual",
-        pending_jobs: 2,
-        message: "Ổ đĩa đầy",
-      });
+    await emitBackupStatus({
+      job_id: "job-2",
+      state: "completed",
+      reason: "scheduled",
+      pending_jobs: 1,
+      path: "/tmp/job-2.db",
     });
-    expect(screen.getByRole("alert", { name: "Sao lưu thất bại" })).toBeInTheDocument();
+    expect(getBackupFailureAlert()).toBeInTheDocument();
 
-    await act(async () => {
-      await emitTestEvent("backup-status", {
-        job_id: "job-2",
-        state: "completed",
-        reason: "scheduled",
-        pending_jobs: 1,
-        path: "/tmp/job-2.db",
-      });
-    });
-    expect(screen.getByRole("alert", { name: "Sao lưu thất bại" })).toBeInTheDocument();
-
-    await act(async () => {
-      await emitTestEvent("backup-status", {
-        job_id: "job-3",
-        state: "completed",
-        reason: "scheduled",
-        pending_jobs: 0,
-        path: "/tmp/job-3.db",
-      });
+    await emitBackupStatus({
+      job_id: "job-3",
+      state: "completed",
+      reason: "scheduled",
+      pending_jobs: 0,
+      path: "/tmp/job-3.db",
     });
     expect(screen.queryByRole("alert", { name: "Sao lưu thất bại" })).not.toBeInTheDocument();
   });
 
   it("handles scheduled backup status events", async () => {
-    render(<App />);
-
-    await act(async () => {
-      await Promise.resolve();
-    });
+    await renderReadyApp();
     expect(screen.getByText("Overview")).toBeInTheDocument();
 
-    await act(async () => {
-      await emitTestEvent("backup-status", {
-        job_id: "scheduled-1",
-        state: "started",
-        reason: "scheduled",
-        pending_jobs: 1,
-      });
+    await emitBackupStatus({
+      job_id: "scheduled-1",
+      state: "started",
+      reason: "scheduled",
+      pending_jobs: 1,
     });
     expect(screen.getByText("Đang sao lưu dữ liệu...")).toBeInTheDocument();
 
-    await act(async () => {
-      await emitTestEvent("backup-status", {
-        job_id: "scheduled-1",
-        state: "completed",
-        reason: "scheduled",
-        pending_jobs: 0,
-        path: "/tmp/scheduled-1.db",
-      });
+    await emitBackupStatus({
+      job_id: "scheduled-1",
+      state: "completed",
+      reason: "scheduled",
+      pending_jobs: 0,
+      path: "/tmp/scheduled-1.db",
     });
     expect(screen.getByText("Đã sao lưu")).toBeInTheDocument();
   });

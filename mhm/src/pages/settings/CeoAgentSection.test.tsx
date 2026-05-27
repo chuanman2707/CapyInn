@@ -137,6 +137,26 @@ async function waitForEnabled(element: HTMLElement) {
   await waitFor(() => expect(element).toBeEnabled());
 }
 
+function renderCeoAgent(...initialState: Parameters<typeof mockInitialState>) {
+  mockInitialState(...initialState);
+  render(<CeoAgentSection />);
+}
+
+function setAuthenticatedUser(role: "admin" | "receptionist" = "admin") {
+  useAuthStore.setState({
+    user: {
+      id: role === "admin" ? "u1" : "u2",
+      name: role === "admin" ? "Admin" : "Reception",
+      role,
+      active: true,
+      created_at: "",
+    },
+    isAuthenticated: true,
+    loading: false,
+    error: null,
+  });
+}
+
 describe("CeoAgentSection", () => {
   beforeEach(() => {
     clearMockResponses();
@@ -145,18 +165,11 @@ describe("CeoAgentSection", () => {
     toastError.mockReset();
     window.localStorage.clear();
 
-    useAuthStore.setState({
-      user: { id: "u1", name: "Admin", role: "admin", active: true, created_at: "" },
-      isAuthenticated: true,
-      loading: false,
-      error: null,
-    });
+    setAuthenticatedUser();
   });
 
   it("renders CEO Telegram Chat gate status", async () => {
-    mockInitialState();
-
-    render(<CeoAgentSection />);
+    renderCeoAgent();
 
     expect(await screen.findByText("CEO Telegram Chat")).toBeInTheDocument();
     expect(await screen.findByLabelText("Telegram owner binding: missing")).toBeInTheDocument();
@@ -164,8 +177,7 @@ describe("CeoAgentSection", () => {
   });
 
   it("renders separate CEO Hourly Digest gate status", async () => {
-    mockInitialState();
-    render(<CeoAgentSection />);
+    renderCeoAgent();
 
     expect(await screen.findByText("CEO Hourly Digest")).toBeInTheDocument();
     expect(await screen.findByLabelText("Telegram delivery chat ID: missing")).toBeInTheDocument();
@@ -268,9 +280,7 @@ describe("CeoAgentSection", () => {
 
   it("saves owner binding, model, and runtime flag", async () => {
     const user = userEvent.setup();
-    mockInitialState();
-
-    render(<CeoAgentSection />);
+    renderCeoAgent();
 
     const ownerInput = await screen.findByLabelText("Telegram owner ID");
     const runtimeCheckbox = screen.getByRole("checkbox", { name: "Runtime enabled" });
@@ -303,8 +313,7 @@ describe("CeoAgentSection", () => {
 
   it("saves digest toggle and delivery chat id", async () => {
     const user = userEvent.setup();
-    mockInitialState();
-    render(<CeoAgentSection />);
+    renderCeoAgent();
 
     const digestEnabled = await screen.findByRole("checkbox", { name: "CEO Hourly Digest enabled" });
     const deliveryChatInput = screen.getByLabelText("Telegram delivery chat ID");
@@ -331,8 +340,7 @@ describe("CeoAgentSection", () => {
 
   it("saves signed digest delivery chat ids for Telegram groups", async () => {
     const user = userEvent.setup();
-    mockInitialState();
-    render(<CeoAgentSection />);
+    renderCeoAgent();
 
     const deliveryChatInput = await screen.findByLabelText("Telegram delivery chat ID");
     const saveButton = screen.getByRole("button", { name: "Save digest config" });
@@ -397,9 +405,7 @@ describe("CeoAgentSection", () => {
 
   it("saves and clears Telegram and OpenAI secrets", async () => {
     const user = userEvent.setup();
-    mockInitialState(readyConfig, { ready: true, missing: [] });
-
-    render(<CeoAgentSection />);
+    renderCeoAgent(readyConfig, { ready: true, missing: [] });
 
     const telegramTokenInput = await screen.findByLabelText("Telegram bot token");
     await waitForEnabled(telegramTokenInput);
@@ -462,9 +468,7 @@ describe("CeoAgentSection", () => {
 
   it("preserves unsaved owner draft when saving a secret refreshes credentials", async () => {
     const user = userEvent.setup();
-    mockInitialState();
-
-    render(<CeoAgentSection />);
+    renderCeoAgent();
 
     const ownerInput = await screen.findByLabelText("Telegram owner ID");
     await waitForEnabled(ownerInput);
@@ -534,9 +538,7 @@ describe("CeoAgentSection", () => {
 
   it("renders the local receptionist demo and persists endpoint and model", async () => {
     const user = userEvent.setup();
-    mockInitialState();
-
-    render(<CeoAgentSection />);
+    renderCeoAgent();
 
     expect(await screen.findByText("Local Receptionist Demo")).toBeInTheDocument();
     const endpoint = screen.getByLabelText("Local provider endpoint");
@@ -588,18 +590,14 @@ describe("CeoAgentSection", () => {
   });
 
   it("disables local receptionist submit for blank messages", async () => {
-    mockInitialState();
-
-    render(<CeoAgentSection />);
+    renderCeoAgent();
 
     expect(await screen.findByRole("button", { name: "Ask local Gemma" })).toBeDisabled();
   });
 
   it("shows field validation and does not invoke for remote endpoints", async () => {
     const user = userEvent.setup();
-    mockInitialState();
-
-    render(<CeoAgentSection />);
+    renderCeoAgent();
 
     await user.clear(await screen.findByLabelText("Local provider endpoint"));
     await user.type(
@@ -622,9 +620,7 @@ describe("CeoAgentSection", () => {
 
   it("shows endpoint length validation on the endpoint field", async () => {
     const user = userEvent.setup();
-    mockInitialState();
-
-    render(<CeoAgentSection />);
+    renderCeoAgent();
 
     const endpoint = await screen.findByLabelText("Local provider endpoint");
     fireEvent.change(endpoint, {
@@ -641,9 +637,7 @@ describe("CeoAgentSection", () => {
 
   it("shows field validation and does not invoke for blank model names", async () => {
     const user = userEvent.setup();
-    mockInitialState();
-
-    render(<CeoAgentSection />);
+    renderCeoAgent();
 
     await user.clear(await screen.findByLabelText("Local model name"));
     await user.type(await screen.findByLabelText("Receptionist message"), "Hello");
@@ -660,9 +654,7 @@ describe("CeoAgentSection", () => {
 
   it("shows message validation on the message field", async () => {
     const user = userEvent.setup();
-    mockInitialState();
-
-    render(<CeoAgentSection />);
+    renderCeoAgent();
 
     const message = await screen.findByLabelText("Receptionist message");
     fireEvent.change(message, { target: { value: "x".repeat(2001) } });
@@ -772,12 +764,7 @@ describe("SettingsPage CEO Agent nav", () => {
 
   it("shows CEO Agent in settings nav for admins when agent runtime is experimental-enabled", async () => {
     const user = userEvent.setup();
-    useAuthStore.setState({
-      user: { id: "u1", name: "Admin", role: "admin", active: true, created_at: "" },
-      isAuthenticated: true,
-      loading: false,
-      error: null,
-    });
+    setAuthenticatedUser();
 
     mockInitialState();
 
@@ -790,12 +777,7 @@ describe("SettingsPage CEO Agent nav", () => {
   });
 
   it("hides CEO Agent in settings nav for admins when agent runtime is disabled", async () => {
-    useAuthStore.setState({
-      user: { id: "u1", name: "Admin", role: "admin", active: true, created_at: "" },
-      isAuthenticated: true,
-      loading: false,
-      error: null,
-    });
+    setAuthenticatedUser();
     setMockResponse("get_experimental_runtime_status", () => ({
       experimental_runtime_enabled: false,
       gateway_runtime_enabled: false,
@@ -813,12 +795,7 @@ describe("SettingsPage CEO Agent nav", () => {
 
   it("resets CEO Agent section to Hotel Info when admin access is lost", async () => {
     const user = userEvent.setup();
-    useAuthStore.setState({
-      user: { id: "u1", name: "Admin", role: "admin", active: true, created_at: "" },
-      isAuthenticated: true,
-      loading: false,
-      error: null,
-    });
+    setAuthenticatedUser();
     mockInitialState();
 
     render(<SettingsPage />);
@@ -827,12 +804,7 @@ describe("SettingsPage CEO Agent nav", () => {
     expect(await screen.findByText("CEO Telegram Chat")).toBeInTheDocument();
 
     await act(async () => {
-      useAuthStore.setState({
-        user: { id: "u2", name: "Reception", role: "receptionist", active: true, created_at: "" },
-        isAuthenticated: true,
-        loading: false,
-        error: null,
-      });
+      setAuthenticatedUser("receptionist");
     });
 
     await waitFor(() => {
@@ -842,12 +814,7 @@ describe("SettingsPage CEO Agent nav", () => {
   });
 
   it("does not show CEO Agent in settings nav for receptionist users", async () => {
-    useAuthStore.setState({
-      user: { id: "u2", name: "Reception", role: "receptionist", active: true, created_at: "" },
-      isAuthenticated: true,
-      loading: false,
-      error: null,
-    });
+    setAuthenticatedUser("receptionist");
     setMockResponse("get_experimental_runtime_status", () => ({
       experimental_runtime_enabled: true,
       gateway_runtime_enabled: true,

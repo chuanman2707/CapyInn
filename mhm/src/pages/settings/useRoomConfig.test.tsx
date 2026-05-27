@@ -58,6 +58,30 @@ const roomTypeInUseError: AppError = {
   support_id: null,
 };
 
+const baseRoomForm = {
+  id: "R501",
+  name: "Room 501",
+  room_type: "Standard",
+  floor: 5,
+  has_balcony: false,
+  base_price: 500000,
+  max_guests: 2,
+  extra_person_fee: 100000,
+};
+
+function roomForm(overrides: Partial<typeof baseRoomForm> = {}) {
+  return {
+    ...baseRoomForm,
+    ...overrides,
+  };
+}
+
+async function renderLoadedRoomConfig() {
+  const rendered = renderHook(() => useRoomConfig());
+  await waitFor(() => expect(rendered.result.current.roomTypes).toHaveLength(1));
+  return rendered;
+}
+
 describe("useRoomConfig", () => {
   beforeEach(() => {
     vi.clearAllMocks();
@@ -86,9 +110,7 @@ describe("useRoomConfig", () => {
   });
 
   it("uses invokeCommand and shared formatting when adding a room type fails", async () => {
-    const { result } = renderHook(() => useRoomConfig());
-
-    await waitFor(() => expect(result.current.roomTypes).toHaveLength(1));
+    const { result } = await renderLoadedRoomConfig();
 
     await act(async () => {
       result.current.setNewTypeName("Deluxe");
@@ -121,9 +143,7 @@ describe("useRoomConfig", () => {
       }
     });
 
-    const { result } = renderHook(() => useRoomConfig());
-
-    await waitFor(() => expect(result.current.roomTypes).toHaveLength(1));
+    const { result } = await renderLoadedRoomConfig();
 
     await act(async () => {
       result.current.setNewTypeName("  Deluxe  ");
@@ -141,9 +161,7 @@ describe("useRoomConfig", () => {
   });
 
   it("uses invokeCommand and shared formatting when deleting a room type fails", async () => {
-    const { result } = renderHook(() => useRoomConfig());
-
-    await waitFor(() => expect(result.current.roomTypes).toHaveLength(1));
+    const { result } = await renderLoadedRoomConfig();
 
     await act(async () => {
       await result.current.handleDeleteType("standard");
@@ -156,22 +174,11 @@ describe("useRoomConfig", () => {
   });
 
   it("keeps the room form open and formats the error when saving a room fails", async () => {
-    const { result } = renderHook(() => useRoomConfig());
-
-    await waitFor(() => expect(result.current.roomTypes).toHaveLength(1));
+    const { result } = await renderLoadedRoomConfig();
 
     await act(async () => {
       result.current.openAdd();
-      result.current.setForm({
-        id: "R501",
-        name: "Room 501",
-        room_type: "Standard",
-        floor: 5,
-        has_balcony: false,
-        base_price: 500000,
-        max_guests: 2,
-        extra_person_fee: 100000,
-      });
+      result.current.setForm(roomForm());
     });
 
     expect(result.current.showRoomForm).toBe(true);
@@ -198,22 +205,15 @@ describe("useRoomConfig", () => {
   });
 
   it("rejects fractional room money before saving a room", async () => {
-    const { result } = renderHook(() => useRoomConfig());
-
-    await waitFor(() => expect(result.current.roomTypes).toHaveLength(1));
+    const { result } = await renderLoadedRoomConfig();
 
     await act(async () => {
       result.current.openAdd();
-      result.current.setForm({
+      result.current.setForm(roomForm({
         id: "R502",
         name: "Room 502",
-        room_type: "Standard",
-        floor: 5,
-        has_balcony: false,
         base_price: 500000.5,
-        max_guests: 2,
-        extra_person_fee: 100000,
-      });
+      }));
     });
 
     await act(async () => {
@@ -230,9 +230,7 @@ describe("useRoomConfig", () => {
   });
 
   it("keeps the room form open and formats the error when updating a room fails", async () => {
-    const { result } = renderHook(() => useRoomConfig());
-
-    await waitFor(() => expect(result.current.roomTypes).toHaveLength(1));
+    const { result } = await renderLoadedRoomConfig();
 
     await act(async () => {
       result.current.openEdit({
@@ -246,16 +244,15 @@ describe("useRoomConfig", () => {
         extra_person_fee: 150000,
         status: "vacant",
       });
-      result.current.setForm({
+      result.current.setForm(roomForm({
         id: "R701",
         name: "Room 701 Updated",
-        room_type: "Standard",
         floor: 7,
         has_balcony: true,
         base_price: 750000,
         max_guests: 3,
         extra_person_fee: 150000,
-      });
+      }));
     });
 
     expect(result.current.showRoomForm).toBe(true);
@@ -283,9 +280,7 @@ describe("useRoomConfig", () => {
 
   it("uses invokeCommand and shared formatting when deleting a room fails", async () => {
     const confirmSpy = vi.spyOn(window, "confirm").mockReturnValue(true);
-    const { result } = renderHook(() => useRoomConfig());
-
-    await waitFor(() => expect(result.current.roomTypes).toHaveLength(1));
+    const { result } = await renderLoadedRoomConfig();
 
     await act(async () => {
       await result.current.handleDeleteRoom("R601");

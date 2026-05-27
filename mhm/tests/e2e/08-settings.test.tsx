@@ -131,6 +131,35 @@ describe("08 — Settings", () => {
         });
     };
 
+    const openSettingsSection = async (sectionName: string) => {
+        const user = userEvent.setup();
+        render(<Settings />);
+        await user.click(await screen.findByText(sectionName));
+        return user;
+    };
+
+    const mockCompletedBootstrap = () => {
+        setMockResponse("get_bootstrap_status", () => ({
+            setup_completed: true,
+            app_lock_enabled: false,
+            current_user: {
+                id: "u1",
+                name: "Admin",
+                role: "admin",
+                active: true,
+                created_at: new Date().toISOString(),
+            },
+        }));
+    };
+
+    const openAppSettingsSection = async (sectionName: string) => {
+        const user = userEvent.setup();
+        render(<App />);
+        await user.click(await screen.findByTitle("Settings"));
+        await user.click(await screen.findByText(sectionName));
+        return user;
+    };
+
     beforeEach(() => {
         vi.restoreAllMocks();
         mockExperimentalGatewayUi(false);
@@ -184,11 +213,7 @@ describe("08 — Settings", () => {
     });
 
     it("loads checkin rules from settings", async () => {
-        const user = userEvent.setup();
-        render(<Settings />);
-
-        // CheckinRulesSection renders lazily — click the Check-in Rules nav button first
-        await user.click(screen.getByText("Check-in Rules"));
+        await openSettingsSection("Check-in Rules");
 
         await waitFor(() => {
             expect(invoke).toHaveBeenCalledWith("get_settings", { key: "checkin_rules" });
@@ -215,10 +240,7 @@ describe("08 — Settings", () => {
             return null;
         });
 
-        const user = userEvent.setup();
-        render(<Settings />);
-
-        await user.click(screen.getByText("Check-in Rules"));
+        await openSettingsSection("Check-in Rules");
 
         await waitFor(() => {
             expect(invoke).toHaveBeenCalledWith("get_settings", { key: "checkin_rules" });
@@ -231,11 +253,7 @@ describe("08 — Settings", () => {
     });
 
     it("loads pricing rules", async () => {
-        const user = userEvent.setup();
-        render(<Settings />);
-
-        // PricingSection renders lazily — click the nav button first
-        await user.click(screen.getByText("Pricing"));
+        await openSettingsSection("Pricing");
 
         await waitFor(() => {
             expect(invoke).toHaveBeenCalledWith("get_pricing_rules");
@@ -255,11 +273,7 @@ describe("08 — Settings", () => {
     });
 
     it("loads user list", async () => {
-        const user = userEvent.setup();
-        render(<Settings />);
-
-        // UserManagementSection renders lazily — click the Users nav button
-        await user.click(screen.getByText("Users"));
+        await openSettingsSection("Users");
 
         await waitFor(() => {
             expect(invoke).toHaveBeenCalledWith("list_users", undefined);
@@ -278,10 +292,7 @@ describe("08 — Settings", () => {
             throw forbiddenError;
         });
 
-        const user = userEvent.setup();
-        render(<Settings />);
-
-        await user.click(screen.getByText("Users"));
+        await openSettingsSection("Users");
 
         await waitFor(() => {
             expect(invoke).toHaveBeenCalledWith("list_users", undefined);
@@ -293,10 +304,7 @@ describe("08 — Settings", () => {
         setMockResponse("export_bookings_csv", () => "/tmp/bookings.csv");
         setMockResponse("backup_database", () => "/tmp/capyinn-backup.db");
 
-        const user = userEvent.setup();
-        render(<Settings />);
-
-        await user.click(screen.getByText("Data & Backup"));
+        const user = await openSettingsSection("Data & Backup");
         await user.click(screen.getByRole("button", { name: "Export CSV" }));
         await user.click(screen.getByRole("button", { name: "Backup" }));
 
@@ -309,10 +317,7 @@ describe("08 — Settings", () => {
     it("disables sensitive data actions for non-admin users", async () => {
         setAuthenticatedUser("receptionist");
 
-        const user = userEvent.setup();
-        render(<Settings />);
-
-        await user.click(screen.getByText("Data & Backup"));
+        await openSettingsSection("Data & Backup");
 
         expect(screen.getByRole("button", { name: "Export CSV" })).toBeDisabled();
         expect(screen.getByRole("button", { name: "Backup" })).toBeDisabled();
@@ -333,10 +338,7 @@ describe("08 — Settings", () => {
             agent_disabled_by_override: false,
         }));
 
-        const user = userEvent.setup();
-        render(<Settings />);
-
-        await user.click(await screen.findByText("MCP Gateway"));
+        await openSettingsSection("MCP Gateway");
 
         await waitFor(() => {
             expect(screen.getByRole("button", { name: "Tạo API Key" })).toBeDisabled();
@@ -347,24 +349,9 @@ describe("08 — Settings", () => {
     });
 
     it("shows the Software Update section and triggers a manual update check", async () => {
-        const user = userEvent.setup();
         resetMockUpdateController({ nextAvailableVersion: "0.2.0" });
-        setMockResponse("get_bootstrap_status", () => ({
-            setup_completed: true,
-            app_lock_enabled: false,
-            current_user: {
-                id: "u1",
-                name: "Admin",
-                role: "admin",
-                active: true,
-                created_at: new Date().toISOString(),
-            },
-        }));
-
-        render(<App />);
-
-        await user.click(await screen.findByTitle("Settings"));
-        await user.click(screen.getByText("Software Update"));
+        mockCompletedBootstrap();
+        const user = await openAppSettingsSection("Software Update");
 
         expect(screen.getByText(/Current version/i)).toBeInTheDocument();
         expect(screen.getByText("0.2.0")).toBeInTheDocument();
@@ -377,24 +364,9 @@ describe("08 — Settings", () => {
     });
 
     it("shows a confirmation when there is no newer version", async () => {
-        const user = userEvent.setup();
         resetMockUpdateController({ nextAvailableVersion: null });
-        setMockResponse("get_bootstrap_status", () => ({
-            setup_completed: true,
-            app_lock_enabled: false,
-            current_user: {
-                id: "u1",
-                name: "Admin",
-                role: "admin",
-                active: true,
-                created_at: new Date().toISOString(),
-            },
-        }));
-
-        render(<App />);
-
-        await user.click(await screen.findByTitle("Settings"));
-        await user.click(screen.getByText("Software Update"));
+        mockCompletedBootstrap();
+        const user = await openAppSettingsSection("Software Update");
         await user.click(screen.getByRole("button", { name: "Check for updates" }));
 
         await waitFor(() => {

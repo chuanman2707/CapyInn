@@ -1,17 +1,18 @@
 use chrono::{Duration, Local, NaiveDate, TimeZone};
-use sqlx::{sqlite::SqlitePoolOptions, Pool, Row, Sqlite, Transaction};
+use sqlx::Row;
 
 use crate::{
     commands::reservations,
     domain::booking::{
         pricing::{calculate_stay_price, calculate_stay_price_tx},
-        BookingError, BookingResult, OriginSideEffect,
+        BookingError, OriginSideEffect,
     },
     models::{
-        CheckInRequest, CheckOutRequest, CheckoutSettlementMode, CheckoutSettlementPreviewRequest,
-        CreateGuestRequest, CreateReservationRequest, GroupCheckinRequest, GroupCheckoutRequest,
+        AddGroupServiceRequest, CheckOutRequest, CheckoutSettlementMode,
+        CheckoutSettlementPreviewRequest, CreateGuestRequest, CreateReservationRequest,
+        GroupCheckoutRequest,
     },
-    money::{MoneyVnd, MAX_TRANSPORT_SAFE_MONEY_VND},
+    money::MAX_TRANSPORT_SAFE_MONEY_VND,
     queries::booking::{audit_queries, billing_queries, revenue_queries},
 };
 
@@ -26,1085 +27,9 @@ use super::{
     stay_lifecycle,
 };
 
-pub async fn test_pool() -> Pool<Sqlite> {
-    let database_url = format!(
-        "sqlite://file:{}?mode=memory&cache=shared",
-        uuid::Uuid::new_v4()
-    );
+mod support;
 
-    let pool = SqlitePoolOptions::new()
-        .max_connections(5)
-        .connect(&database_url)
-        .await
-        .expect("failed to open sqlite test pool");
-
-    sqlx::query("PRAGMA foreign_keys = ON")
-        .execute(&pool)
-        .await
-        .expect("failed to enable foreign keys");
-
-    sqlx::query(
-        "CREATE TABLE rooms (
-            id TEXT PRIMARY KEY,
-            name TEXT NOT NULL,
-            type TEXT NOT NULL,
-            floor INTEGER NOT NULL,
-            has_balcony INTEGER NOT NULL DEFAULT 0,
-            base_price INTEGER NOT NULL DEFAULT 0,
-            max_guests INTEGER NOT NULL DEFAULT 2,
-            extra_person_fee INTEGER NOT NULL DEFAULT 0,
-            status TEXT NOT NULL DEFAULT 'vacant'
-        )",
-    )
-    .execute(&pool)
-    .await
-    .expect("failed to create rooms table");
-
-    sqlx::query(
-        "CREATE TABLE guests (
-            id TEXT PRIMARY KEY,
-            guest_type TEXT NOT NULL DEFAULT 'domestic',
-            full_name TEXT NOT NULL,
-            doc_number TEXT NOT NULL,
-            dob TEXT,
-            gender TEXT,
-            nationality TEXT,
-            address TEXT,
-            visa_expiry TEXT,
-            scan_path TEXT,
-            phone TEXT,
-            created_at TEXT NOT NULL
-        )",
-    )
-    .execute(&pool)
-    .await
-    .expect("failed to create guests table");
-
-    sqlx::query(
-        "CREATE TABLE bookings (
-            id TEXT PRIMARY KEY,
-            room_id TEXT NOT NULL REFERENCES rooms(id),
-            primary_guest_id TEXT NOT NULL REFERENCES guests(id),
-            check_in_at TEXT NOT NULL,
-            expected_checkout TEXT NOT NULL,
-            actual_checkout TEXT,
-            nights INTEGER NOT NULL,
-            total_price INTEGER NOT NULL,
-            paid_amount INTEGER,
-            status TEXT NOT NULL,
-            source TEXT,
-            notes TEXT,
-            created_by TEXT,
-            booking_type TEXT DEFAULT 'walk-in',
-            pricing_type TEXT DEFAULT 'nightly',
-            deposit_amount INTEGER,
-            guest_phone TEXT,
-            scheduled_checkin TEXT,
-            scheduled_checkout TEXT,
-            group_id TEXT REFERENCES booking_groups(id),
-            is_master_room INTEGER NOT NULL DEFAULT 0,
-            is_audited INTEGER NOT NULL DEFAULT 0,
-            pricing_snapshot TEXT,
-            created_at TEXT NOT NULL
-        )",
-    )
-    .execute(&pool)
-    .await
-    .expect("failed to create bookings table");
-
-    sqlx::query(
-        "CREATE TABLE booking_groups (
-            id TEXT PRIMARY KEY,
-            group_name TEXT NOT NULL,
-            master_booking_id TEXT,
-            organizer_name TEXT NOT NULL,
-            organizer_phone TEXT,
-            total_rooms INTEGER NOT NULL,
-            status TEXT NOT NULL DEFAULT 'active',
-            notes TEXT,
-            created_by TEXT,
-            created_at TEXT NOT NULL
-        )",
-    )
-    .execute(&pool)
-    .await
-    .expect("failed to create booking_groups table");
-
-    sqlx::query(
-        "CREATE TABLE group_services (
-            id TEXT PRIMARY KEY,
-            group_id TEXT NOT NULL REFERENCES booking_groups(id),
-            booking_id TEXT REFERENCES bookings(id),
-            name TEXT NOT NULL,
-            quantity INTEGER NOT NULL DEFAULT 1,
-            unit_price INTEGER NOT NULL,
-            total_price INTEGER NOT NULL,
-            note TEXT,
-            created_by TEXT,
-            created_at TEXT NOT NULL
-        )",
-    )
-    .execute(&pool)
-    .await
-    .expect("failed to create group_services table");
-
-    sqlx::query(
-        "CREATE TABLE booking_guests (
-            booking_id TEXT NOT NULL REFERENCES bookings(id),
-            guest_id TEXT NOT NULL REFERENCES guests(id),
-            PRIMARY KEY (booking_id, guest_id)
-        )",
-    )
-    .execute(&pool)
-    .await
-    .expect("failed to create booking_guests table");
-
-    sqlx::query(
-        "CREATE TABLE transactions (
-            id TEXT PRIMARY KEY,
-            booking_id TEXT NOT NULL REFERENCES bookings(id),
-            amount INTEGER NOT NULL,
-            type TEXT NOT NULL,
-            note TEXT,
-            origin_idempotency_key TEXT,
-            origin_transaction_ordinal INTEGER NOT NULL DEFAULT 0,
-            created_at TEXT NOT NULL
-        )",
-    )
-    .execute(&pool)
-    .await
-    .expect("failed to create transactions table");
-
-    sqlx::query(
-        "CREATE TABLE housekeeping (
-            id TEXT PRIMARY KEY,
-            room_id TEXT NOT NULL REFERENCES rooms(id),
-            status TEXT NOT NULL DEFAULT 'needs_cleaning',
-            note TEXT,
-            triggered_at TEXT NOT NULL,
-            cleaned_at TEXT,
-            created_at TEXT NOT NULL
-        )",
-    )
-    .execute(&pool)
-    .await
-    .expect("failed to create housekeeping table");
-
-    sqlx::query(
-        "CREATE TABLE room_calendar (
-            room_id TEXT NOT NULL REFERENCES rooms(id),
-            date TEXT NOT NULL,
-            booking_id TEXT REFERENCES bookings(id),
-            status TEXT NOT NULL DEFAULT 'booked',
-            PRIMARY KEY (room_id, date)
-        )",
-    )
-    .execute(&pool)
-    .await
-    .expect("failed to create room_calendar table");
-
-    sqlx::query(
-        "CREATE TABLE pricing_rules (
-            id TEXT PRIMARY KEY,
-            room_type TEXT NOT NULL UNIQUE,
-            hourly_rate INTEGER NOT NULL DEFAULT 0,
-            overnight_rate INTEGER NOT NULL DEFAULT 0,
-            daily_rate INTEGER NOT NULL DEFAULT 0,
-            overnight_start TEXT NOT NULL DEFAULT '22:00',
-            overnight_end TEXT NOT NULL DEFAULT '11:00',
-            daily_checkin TEXT NOT NULL DEFAULT '14:00',
-            daily_checkout TEXT NOT NULL DEFAULT '12:00',
-            early_checkin_surcharge_pct REAL NOT NULL DEFAULT 30,
-            late_checkout_surcharge_pct REAL NOT NULL DEFAULT 30,
-            weekend_uplift_pct REAL NOT NULL DEFAULT 0,
-            created_at TEXT NOT NULL,
-            updated_at TEXT NOT NULL
-        )",
-    )
-    .execute(&pool)
-    .await
-    .expect("failed to create pricing_rules table");
-
-    sqlx::query(
-        "CREATE TABLE special_dates (
-            id TEXT PRIMARY KEY,
-            date TEXT NOT NULL UNIQUE,
-            label TEXT NOT NULL DEFAULT '',
-            uplift_pct REAL NOT NULL DEFAULT 0,
-            created_at TEXT NOT NULL
-        )",
-    )
-    .execute(&pool)
-    .await
-    .expect("failed to create special_dates table");
-
-    sqlx::query(
-        "CREATE TABLE expenses (
-            id TEXT PRIMARY KEY,
-            category TEXT NOT NULL,
-            amount INTEGER NOT NULL,
-            note TEXT,
-            expense_date TEXT NOT NULL,
-            created_at TEXT NOT NULL
-        )",
-    )
-    .execute(&pool)
-    .await
-    .expect("failed to create expenses table");
-
-    sqlx::query(
-        "CREATE TABLE folio_lines (
-            id TEXT PRIMARY KEY,
-            booking_id TEXT NOT NULL REFERENCES bookings(id),
-            category TEXT NOT NULL,
-            description TEXT NOT NULL,
-            amount INTEGER NOT NULL,
-            created_by TEXT,
-            origin_idempotency_key TEXT,
-            origin_line_ordinal INTEGER NOT NULL DEFAULT 0,
-            created_at TEXT NOT NULL
-        )",
-    )
-    .execute(&pool)
-    .await
-    .expect("failed to create folio_lines table");
-
-    sqlx::query(
-        "CREATE UNIQUE INDEX transactions_origin_idem_uq
-         ON transactions (booking_id, origin_idempotency_key, origin_transaction_ordinal)
-         WHERE origin_idempotency_key IS NOT NULL AND origin_idempotency_key != ''",
-    )
-    .execute(&pool)
-    .await
-    .expect("failed to create transactions origin index");
-
-    sqlx::query(
-        "CREATE UNIQUE INDEX folio_lines_origin_idem_uq
-         ON folio_lines (booking_id, origin_idempotency_key, origin_line_ordinal)
-         WHERE origin_idempotency_key IS NOT NULL AND origin_idempotency_key != ''",
-    )
-    .execute(&pool)
-    .await
-    .expect("failed to create folio_lines origin index");
-
-    sqlx::query(
-        "CREATE UNIQUE INDEX transactions_origin_command_uq
-         ON transactions (origin_idempotency_key, origin_transaction_ordinal)
-         WHERE origin_idempotency_key IS NOT NULL AND origin_idempotency_key != ''",
-    )
-    .execute(&pool)
-    .await
-    .expect("failed to create transactions origin command index");
-
-    sqlx::query(
-        "CREATE UNIQUE INDEX folio_lines_origin_command_uq
-         ON folio_lines (origin_idempotency_key, origin_line_ordinal)
-         WHERE origin_idempotency_key IS NOT NULL AND origin_idempotency_key != ''",
-    )
-    .execute(&pool)
-    .await
-    .expect("failed to create folio_lines origin command index");
-
-    sqlx::query(
-        "CREATE TABLE night_audit_logs (
-            id TEXT PRIMARY KEY,
-            audit_date TEXT NOT NULL UNIQUE,
-            total_revenue INTEGER NOT NULL DEFAULT 0,
-            room_revenue INTEGER NOT NULL DEFAULT 0,
-            folio_revenue INTEGER NOT NULL DEFAULT 0,
-            total_expenses INTEGER NOT NULL DEFAULT 0,
-            occupancy_pct REAL NOT NULL DEFAULT 0,
-            rooms_sold INTEGER NOT NULL DEFAULT 0,
-            total_rooms INTEGER NOT NULL DEFAULT 0,
-            notes TEXT,
-            created_by TEXT,
-            created_at TEXT NOT NULL
-        )",
-    )
-    .execute(&pool)
-    .await
-    .expect("failed to create night_audit_logs table");
-
-    sqlx::query(
-        "CREATE TABLE command_idempotency (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            idempotency_key TEXT NOT NULL,
-            command_name TEXT NOT NULL,
-            request_id TEXT,
-            actor_type TEXT NOT NULL DEFAULT 'system',
-            actor_id TEXT,
-            client_id TEXT,
-            session_id TEXT,
-            channel_id TEXT,
-            issued_at TEXT,
-            request_hash TEXT NOT NULL,
-            intent_json TEXT NOT NULL,
-            summary_json TEXT NOT NULL DEFAULT '{}',
-            primary_aggregate_key TEXT,
-            lock_keys_json TEXT NOT NULL,
-            status TEXT NOT NULL,
-            claim_token TEXT NOT NULL,
-            response_json TEXT,
-            result_summary_json TEXT,
-            error_code TEXT,
-            error_json TEXT,
-            error_summary_json TEXT,
-            retryable INTEGER NOT NULL DEFAULT 0,
-            lease_expires_at TEXT,
-            recovery_dismissed_at TEXT,
-            recovery_dismissed_by TEXT,
-            created_at TEXT NOT NULL,
-            updated_at TEXT NOT NULL,
-            completed_at TEXT,
-            last_attempt_at TEXT,
-            UNIQUE(command_name, idempotency_key)
-        )",
-    )
-    .execute(&pool)
-    .await
-    .expect("failed to create command_idempotency table");
-
-    sqlx::query(
-        "CREATE TABLE outbox_events (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            event_type TEXT NOT NULL,
-            aggregate_key TEXT NOT NULL,
-            payload_json TEXT NOT NULL,
-            origin_request_id TEXT NOT NULL,
-            origin_idempotency_key TEXT NOT NULL,
-            origin_command_name TEXT NOT NULL,
-            origin_request_hash TEXT NOT NULL,
-            status TEXT NOT NULL,
-            worker_token TEXT,
-            attempts INTEGER NOT NULL DEFAULT 0,
-            next_attempt_at TEXT,
-            processing_started_at TEXT,
-            processing_expires_at TEXT,
-            last_error TEXT,
-            created_at TEXT NOT NULL,
-            dispatched_at TEXT
-        )",
-    )
-    .execute(&pool)
-    .await
-    .expect("failed to create outbox_events table");
-
-    sqlx::query(
-        "CREATE UNIQUE INDEX outbox_events_origin_command_uq
-         ON outbox_events (origin_command_name, origin_idempotency_key)",
-    )
-    .execute(&pool)
-    .await
-    .expect("failed to create outbox origin command index");
-
-    pool
-}
-
-async fn outbox_event_count(pool: &Pool<Sqlite>, command_name: &str, idempotency_key: &str) -> i64 {
-    sqlx::query_scalar(
-        "SELECT COUNT(*)
-         FROM outbox_events
-         WHERE origin_command_name = ? AND origin_idempotency_key = ?",
-    )
-    .bind(command_name)
-    .bind(idempotency_key)
-    .fetch_one(pool)
-    .await
-    .expect("counts outbox events")
-}
-
-async fn assert_single_outbox_event(
-    pool: &Pool<Sqlite>,
-    ctx: &crate::command_idempotency::WriteCommandContext,
-    event_type: &str,
-) -> serde_json::Value {
-    assert_eq!(
-        outbox_event_count(pool, &ctx.command_name, &ctx.idempotency_key).await,
-        1
-    );
-
-    let row = sqlx::query(
-        "SELECT event_type, status, attempts, origin_request_id,
-                origin_request_hash, payload_json
-         FROM outbox_events
-         WHERE origin_command_name = ? AND origin_idempotency_key = ?",
-    )
-    .bind(&ctx.command_name)
-    .bind(&ctx.idempotency_key)
-    .fetch_one(pool)
-    .await
-    .expect("reads outbox event");
-
-    assert_eq!(row.get::<String, _>("event_type"), event_type);
-    assert_eq!(row.get::<String, _>("status"), "pending");
-    assert_eq!(row.get::<i64, _>("attempts"), 0);
-    assert_eq!(
-        row.get::<String, _>("origin_request_id"),
-        ctx.request_id.as_str()
-    );
-    assert!(!row.get::<String, _>("origin_request_hash").is_empty());
-
-    let payload: serde_json::Value =
-        serde_json::from_str(&row.get::<String, _>("payload_json")).expect("payload is JSON");
-    assert_eq!(payload["schema_version"], serde_json::json!(1));
-    assert_eq!(
-        payload["command_name"],
-        serde_json::json!(ctx.command_name.as_str())
-    );
-    assert!(payload
-        .get("refresh")
-        .and_then(|value| value.as_array())
-        .is_some());
-    payload
-}
-
-async fn shared_file_test_pools(label: &str) -> (Pool<Sqlite>, Pool<Sqlite>, std::path::PathBuf) {
-    let db_path =
-        std::env::temp_dir().join(format!("capyinn-{label}-{}.sqlite", uuid::Uuid::new_v4()));
-    let database_url = format!("sqlite://{}?mode=rwc", db_path.display());
-
-    let pool_a = SqlitePoolOptions::new()
-        .max_connections(2)
-        .connect(&database_url)
-        .await
-        .expect("failed to open first sqlite file test pool");
-
-    crate::db::run_migrations(&pool_a)
-        .await
-        .expect("failed to run migrations for shared file test pool");
-
-    let pool_b = SqlitePoolOptions::new()
-        .max_connections(2)
-        .connect(&database_url)
-        .await
-        .expect("failed to open second sqlite file test pool");
-
-    (pool_a, pool_b, db_path)
-}
-
-pub async fn seed_room(pool: &Pool<Sqlite>, room_id: &str) -> BookingResult<()> {
-    sqlx::query(
-        "INSERT INTO rooms (id, name, type, floor, has_balcony, base_price, max_guests, extra_person_fee, status)
-         VALUES (?, ?, ?, ?, 0, 250000, 2, 0, 'vacant')",
-    )
-    .bind(room_id)
-    .bind(format!("Room {}", room_id))
-    .bind("standard")
-    .bind(1_i32)
-    .execute(pool)
-    .await?;
-
-    Ok(())
-}
-
-async fn seed_booking_group(pool: &Pool<Sqlite>, group_id: &str) {
-    sqlx::query(
-        "INSERT INTO booking_groups (
-            id, group_name, organizer_name, organizer_phone, total_rooms,
-            status, notes, created_by, created_at
-        ) VALUES (?, ?, ?, NULL, 1, 'active', NULL, ?, ?)",
-    )
-    .bind(group_id)
-    .bind(format!("Group {group_id}"))
-    .bind("Organizer")
-    .bind("seed-user")
-    .bind("2026-05-01T09:00:00+07:00")
-    .execute(pool)
-    .await
-    .expect("seed booking group");
-}
-
-pub async fn seed_booking_for_origin_tests(
-    pool: &Pool<Sqlite>,
-    room_id: &str,
-) -> BookingResult<String> {
-    let guest_id = uuid::Uuid::new_v4().to_string();
-    let booking_id = uuid::Uuid::new_v4().to_string();
-    sqlx::query(
-        "INSERT INTO guests (id, guest_type, full_name, doc_number, created_at)
-         VALUES (?, 'domestic', 'Test Guest', 'DOC', '2026-04-27T08:00:00+07:00')",
-    )
-    .bind(&guest_id)
-    .execute(pool)
-    .await?;
-    sqlx::query(
-        "INSERT INTO bookings (
-            id, room_id, primary_guest_id, check_in_at, expected_checkout,
-            nights, total_price, paid_amount, status, created_at
-         ) VALUES (?, ?, ?, '2026-04-27', '2026-04-28', 1, 250000, 0, 'active', '2026-04-27T08:00:00+07:00')",
-    )
-    .bind(&booking_id)
-    .bind(room_id)
-    .bind(&guest_id)
-    .execute(pool)
-    .await?;
-    Ok(booking_id)
-}
-
-pub async fn seed_pricing_rule(
-    pool: &Pool<Sqlite>,
-    room_type: &str,
-    daily_rate: MoneyVnd,
-) -> BookingResult<()> {
-    let now = "2026-04-15T10:00:00+07:00";
-
-    sqlx::query(
-        "INSERT INTO pricing_rules (
-            id, room_type, hourly_rate, overnight_rate, daily_rate,
-            overnight_start, overnight_end, daily_checkin, daily_checkout,
-            early_checkin_surcharge_pct, late_checkout_surcharge_pct,
-            weekend_uplift_pct, created_at, updated_at
-        ) VALUES (?, ?, 0, 0, ?, '22:00', '11:00', '14:00', '12:00', 0, 0, 0, ?, ?)",
-    )
-    .bind(format!("rule-{}", room_type))
-    .bind(room_type)
-    .bind(daily_rate)
-    .bind(now)
-    .bind(now)
-    .execute(pool)
-    .await?;
-
-    Ok(())
-}
-
-pub async fn seed_pricing_rule_tx(
-    tx: &mut Transaction<'_, Sqlite>,
-    room_type: &str,
-    daily_rate: MoneyVnd,
-) -> BookingResult<()> {
-    let now = "2026-04-15T10:00:00+07:00";
-
-    sqlx::query(
-        "INSERT INTO pricing_rules (
-            id, room_type, hourly_rate, overnight_rate, daily_rate,
-            overnight_start, overnight_end, daily_checkin, daily_checkout,
-            early_checkin_surcharge_pct, late_checkout_surcharge_pct,
-            weekend_uplift_pct, created_at, updated_at
-        ) VALUES (?, ?, 0, 0, ?, '22:00', '11:00', '14:00', '12:00', 0, 0, 0, ?, ?)",
-    )
-    .bind(format!("rule-{}", room_type))
-    .bind(room_type)
-    .bind(daily_rate)
-    .bind(now)
-    .bind(now)
-    .execute(&mut **tx)
-    .await?;
-
-    Ok(())
-}
-
-pub async fn seed_special_date(
-    pool: &Pool<Sqlite>,
-    date: &str,
-    uplift_pct: f64,
-) -> BookingResult<()> {
-    let now = "2026-04-15T10:00:00+07:00";
-
-    sqlx::query(
-        "INSERT INTO special_dates (id, date, label, uplift_pct, created_at)
-         VALUES (?, ?, ?, ?, ?)",
-    )
-    .bind(format!("special-date-{}", date))
-    .bind(date)
-    .bind("Holiday uplift")
-    .bind(uplift_pct)
-    .bind(now)
-    .execute(pool)
-    .await?;
-
-    Ok(())
-}
-
-pub async fn seed_special_date_tx(
-    tx: &mut Transaction<'_, Sqlite>,
-    date: &str,
-    uplift_pct: f64,
-) -> BookingResult<()> {
-    let now = "2026-04-15T10:00:00+07:00";
-
-    sqlx::query(
-        "INSERT INTO special_dates (id, date, label, uplift_pct, created_at)
-         VALUES (?, ?, ?, ?, ?)",
-    )
-    .bind(format!("special-date-{}", date))
-    .bind(date)
-    .bind("Holiday uplift")
-    .bind(uplift_pct)
-    .bind(now)
-    .execute(&mut **tx)
-    .await?;
-
-    Ok(())
-}
-
-pub async fn seed_active_booking(
-    pool: &Pool<Sqlite>,
-    booking_id: &str,
-    room_id: &str,
-) -> BookingResult<()> {
-    let guest_id = format!("guest-{}", booking_id);
-    let now = "2026-04-15T10:00:00+07:00";
-
-    sqlx::query(
-        "INSERT INTO guests (
-            id, guest_type, full_name, doc_number, dob, gender, nationality,
-            address, visa_expiry, scan_path, phone, created_at
-        ) VALUES (?, 'domestic', ?, ?, NULL, NULL, NULL, NULL, NULL, NULL, NULL, ?)",
-    )
-    .bind(&guest_id)
-    .bind(format!("Guest {}", booking_id))
-    .bind(format!("DOC-{}", booking_id))
-    .bind(now)
-    .execute(pool)
-    .await?;
-
-    sqlx::query(
-        "INSERT INTO bookings (
-            id, room_id, primary_guest_id, check_in_at, expected_checkout,
-            actual_checkout, nights, total_price, paid_amount, status,
-            source, notes, created_by, booking_type, pricing_type, pricing_snapshot, created_at
-        ) VALUES (?, ?, ?, ?, ?, NULL, ?, ?, NULL, 'active', ?, ?, ?, 'walk-in', 'nightly', NULL, ?)",
-    )
-    .bind(booking_id)
-    .bind(room_id)
-    .bind(&guest_id)
-    .bind(now)
-    .bind("2026-04-16T10:00:00+07:00")
-    .bind(1_i64)
-    .bind(250_000)
-    .bind("walk-in")
-    .bind("seed booking")
-    .bind("seed-user")
-    .bind(now)
-    .execute(pool)
-    .await?;
-
-    sqlx::query("INSERT INTO booking_guests (booking_id, guest_id) VALUES (?, ?)")
-        .bind(booking_id)
-        .bind(&guest_id)
-        .execute(pool)
-        .await?;
-
-    sqlx::query("UPDATE rooms SET status = 'occupied' WHERE id = ?")
-        .bind(room_id)
-        .execute(pool)
-        .await?;
-
-    sqlx::query(
-        "INSERT INTO room_calendar (room_id, date, booking_id, status) VALUES (?, '2026-04-15', ?, 'occupied')",
-    )
-    .bind(room_id)
-    .bind(booking_id)
-    .execute(pool)
-    .await?;
-
-    Ok(())
-}
-
-#[allow(clippy::too_many_arguments)]
-pub async fn seed_active_booking_with_terms(
-    pool: &Pool<Sqlite>,
-    booking_id: &str,
-    room_id: &str,
-    check_in_at: &str,
-    expected_checkout: &str,
-    nights: i64,
-    total_price: MoneyVnd,
-    paid_amount: Option<i64>,
-) -> BookingResult<()> {
-    seed_active_booking(pool, booking_id, room_id).await?;
-
-    sqlx::query(
-        "UPDATE bookings
-         SET check_in_at = ?, expected_checkout = ?, nights = ?, total_price = ?, paid_amount = ?
-         WHERE id = ?",
-    )
-    .bind(check_in_at)
-    .bind(expected_checkout)
-    .bind(nights)
-    .bind(total_price)
-    .bind(paid_amount)
-    .bind(booking_id)
-    .execute(pool)
-    .await?;
-
-    Ok(())
-}
-
-pub async fn seed_booked_reservation(
-    pool: &Pool<Sqlite>,
-    booking_id: &str,
-    room_id: &str,
-) -> BookingResult<()> {
-    let guest_id = format!("guest-{}", booking_id);
-    let guest_name = format!("Reserved Guest {}", booking_id);
-    let now = "2026-04-15T10:00:00+07:00";
-    let phone = "0901234567";
-    let check_in = "2026-04-20";
-    let check_out = "2026-04-22";
-    let nights = 2_i64;
-    let deposit = 50_000;
-    let total_price = 500_000;
-
-    let mut tx = pool.begin().await?;
-
-    sqlx::query(
-        "INSERT INTO guests (
-            id, guest_type, full_name, doc_number, dob, gender, nationality,
-            address, visa_expiry, scan_path, phone, created_at
-        ) VALUES (?, 'domestic', ?, ?, NULL, NULL, NULL, NULL, NULL, NULL, ?, ?)",
-    )
-    .bind(&guest_id)
-    .bind(&guest_name)
-    .bind(format!("DOC-{}", booking_id))
-    .bind(phone)
-    .bind(now)
-    .execute(&mut *tx)
-    .await?;
-
-    sqlx::query(
-        "INSERT INTO bookings (
-            id, room_id, primary_guest_id, check_in_at, expected_checkout,
-            actual_checkout, nights, total_price, paid_amount, status,
-            source, notes, created_by, booking_type, pricing_type,
-            deposit_amount, guest_phone, scheduled_checkin, scheduled_checkout,
-            pricing_snapshot, created_at
-        ) VALUES (?, ?, ?, ?, ?, NULL, ?, ?, ?, 'booked', ?, ?, NULL, 'reservation', 'nightly', ?, ?, ?, ?, NULL, ?)",
-    )
-    .bind(booking_id)
-    .bind(room_id)
-    .bind(&guest_id)
-    .bind(check_in)
-    .bind(check_out)
-    .bind(nights)
-    .bind(total_price)
-    .bind(deposit)
-    .bind("phone")
-    .bind("seed reservation")
-    .bind(deposit)
-    .bind(phone)
-    .bind(check_in)
-    .bind(check_out)
-    .bind(now)
-    .execute(&mut *tx)
-    .await?;
-
-    sqlx::query("INSERT INTO booking_guests (booking_id, guest_id) VALUES (?, ?)")
-        .bind(booking_id)
-        .bind(&guest_id)
-        .execute(&mut *tx)
-        .await?;
-
-    sqlx::query(
-        "INSERT INTO room_calendar (room_id, date, booking_id, status) VALUES (?, '2026-04-20', ?, 'booked')",
-    )
-    .bind(room_id)
-    .bind(booking_id)
-    .execute(&mut *tx)
-    .await?;
-
-    sqlx::query(
-        "INSERT INTO room_calendar (room_id, date, booking_id, status) VALUES (?, '2026-04-21', ?, 'booked')",
-    )
-    .bind(room_id)
-    .bind(booking_id)
-    .execute(&mut *tx)
-    .await?;
-
-    if deposit > 0 {
-        sqlx::query(
-            "INSERT INTO transactions (id, booking_id, amount, type, note, created_at)
-             VALUES (?, ?, ?, 'deposit', ?, ?)",
-        )
-        .bind(uuid::Uuid::new_v4().to_string())
-        .bind(booking_id)
-        .bind(deposit)
-        .bind("Reservation deposit")
-        .bind(now)
-        .execute(&mut *tx)
-        .await?;
-    }
-
-    tx.commit().await?;
-
-    Ok(())
-}
-
-pub fn minimal_checkin_request(room_id: &str) -> CheckInRequest {
-    CheckInRequest {
-        room_id: room_id.to_string(),
-        guests: vec![CreateGuestRequest {
-            guest_type: Some("domestic".to_string()),
-            full_name: "Nguyen Van A".to_string(),
-            doc_number: "079123456789".to_string(),
-            dob: None,
-            gender: None,
-            nationality: Some("VN".to_string()),
-            address: None,
-            visa_expiry: None,
-            scan_path: None,
-            phone: Some("0900000000".to_string()),
-        }],
-        nights: 2,
-        source: Some("walk-in".to_string()),
-        notes: Some("test check-in".to_string()),
-        paid_amount: None,
-        pricing_type: Some("nightly".to_string()),
-    }
-}
-
-pub async fn seed_transaction(
-    pool: &Pool<Sqlite>,
-    booking_id: &str,
-    amount: MoneyVnd,
-    txn_type: &str,
-    note: &str,
-    created_at: &str,
-) -> BookingResult<()> {
-    sqlx::query(
-        "INSERT INTO transactions (id, booking_id, amount, type, note, created_at)
-         VALUES (?, ?, ?, ?, ?, ?)",
-    )
-    .bind(uuid::Uuid::new_v4().to_string())
-    .bind(booking_id)
-    .bind(amount)
-    .bind(txn_type)
-    .bind(note)
-    .bind(created_at)
-    .execute(pool)
-    .await?;
-
-    Ok(())
-}
-
-pub async fn seed_folio_line(
-    pool: &Pool<Sqlite>,
-    booking_id: &str,
-    amount: MoneyVnd,
-    created_at: &str,
-) -> BookingResult<()> {
-    sqlx::query(
-        "INSERT INTO folio_lines (id, booking_id, category, description, amount, created_by, created_at)
-         VALUES (?, ?, 'mini-bar', 'Seed folio', ?, 'seed-user', ?)",
-    )
-    .bind(uuid::Uuid::new_v4().to_string())
-    .bind(booking_id)
-    .bind(amount)
-    .bind(created_at)
-    .execute(pool)
-    .await?;
-
-    Ok(())
-}
-
-pub async fn seed_expense(
-    pool: &Pool<Sqlite>,
-    category: &str,
-    amount: MoneyVnd,
-    expense_date: &str,
-) -> BookingResult<()> {
-    sqlx::query(
-        "INSERT INTO expenses (id, category, amount, note, expense_date, created_at)
-         VALUES (?, ?, ?, 'Seed expense', ?, ?)",
-    )
-    .bind(uuid::Uuid::new_v4().to_string())
-    .bind(category)
-    .bind(amount)
-    .bind(expense_date)
-    .bind(format!("{}T22:00:00+07:00", expense_date))
-    .execute(pool)
-    .await?;
-
-    Ok(())
-}
-
-pub fn minimal_reservation_request(room_id: &str) -> CreateReservationRequest {
-    CreateReservationRequest {
-        room_id: room_id.to_string(),
-        guest_name: "Nguyen Van B".to_string(),
-        guest_phone: Some("0900000001".to_string()),
-        guest_doc_number: Some("079000000001".to_string()),
-        check_in_date: "2026-04-20".to_string(),
-        check_out_date: "2026-04-22".to_string(),
-        nights: 2,
-        deposit_amount: Some(50_000),
-        source: Some("phone".to_string()),
-        notes: Some("test reservation".to_string()),
-    }
-}
-
-pub fn minimal_group_checkin_request(room_ids: &[&str]) -> GroupCheckinRequest {
-    let mut guests_per_room = std::collections::HashMap::new();
-    if let Some(first_room) = room_ids.first() {
-        guests_per_room.insert(
-            (*first_room).to_string(),
-            vec![CreateGuestRequest {
-                guest_type: Some("domestic".to_string()),
-                full_name: "Group Guest 1".to_string(),
-                doc_number: "079111111111".to_string(),
-                dob: None,
-                gender: None,
-                nationality: Some("VN".to_string()),
-                address: None,
-                visa_expiry: None,
-                scan_path: None,
-                phone: Some("0901111111".to_string()),
-            }],
-        );
-    }
-
-    GroupCheckinRequest {
-        group_name: "Test Group".to_string(),
-        organizer_name: "Organizer".to_string(),
-        organizer_phone: Some("0902222222".to_string()),
-        check_in_date: None,
-        room_ids: room_ids
-            .iter()
-            .map(|room_id| (*room_id).to_string())
-            .collect(),
-        master_room_id: room_ids[0].to_string(),
-        guests_per_room,
-        nights: 2,
-        source: Some("walk-in".to_string()),
-        notes: Some("group test".to_string()),
-        paid_amount: Some(100_000),
-    }
-}
-
-pub fn rich_group_checkin_request(
-    room_ids: &[&str],
-    master_room_id: &str,
-    paid_amount: Option<i64>,
-) -> GroupCheckinRequest {
-    let mut guests_per_room = std::collections::HashMap::new();
-    for room_id in room_ids {
-        guests_per_room.insert(
-            (*room_id).to_string(),
-            vec![CreateGuestRequest {
-                guest_type: Some("domestic".to_string()),
-                full_name: format!("Group Guest {}", room_id),
-                doc_number: format!("DOC-{}", room_id),
-                dob: None,
-                gender: None,
-                nationality: Some("VN".to_string()),
-                address: None,
-                visa_expiry: None,
-                scan_path: None,
-                phone: Some("0901111111".to_string()),
-            }],
-        );
-    }
-
-    GroupCheckinRequest {
-        group_name: "Idempotent Group".to_string(),
-        organizer_name: "Organizer".to_string(),
-        organizer_phone: Some("0903333333".to_string()),
-        check_in_date: None,
-        room_ids: room_ids
-            .iter()
-            .map(|room_id| (*room_id).to_string())
-            .collect(),
-        master_room_id: master_room_id.to_string(),
-        guests_per_room,
-        nights: 2,
-        source: Some("walk-in".to_string()),
-        notes: Some("group checkin idempotent".to_string()),
-        paid_amount,
-    }
-}
-
-fn group_checkin_hash_payload_for_test(req: &GroupCheckinRequest) -> serde_json::Value {
-    let paid_minor_units = req
-        .paid_amount
-        .map(|amount| serde_json::json!((i128::from(amount) * 100).to_string()))
-        .unwrap_or(serde_json::Value::Null);
-    let mut room_ids = req.room_ids.clone();
-    room_ids.sort();
-    let guests_per_room = req
-        .guests_per_room
-        .iter()
-        .map(|(room_id, guests)| {
-            let guests = guests
-                .iter()
-                .map(|guest| {
-                    serde_json::json!({
-                        "guest_type": guest.guest_type.clone(),
-                        "full_name": guest.full_name.clone(),
-                        "doc_number": guest.doc_number.clone(),
-                        "dob": guest.dob.clone(),
-                        "gender": guest.gender.clone(),
-                        "nationality": guest.nationality.clone(),
-                        "address": guest.address.clone(),
-                        "visa_expiry": guest.visa_expiry.clone(),
-                        "scan_path": guest.scan_path.clone(),
-                        "phone": guest.phone.clone(),
-                    })
-                })
-                .collect::<Vec<_>>();
-            (room_id.clone(), serde_json::json!(guests))
-        })
-        .collect::<serde_json::Map<_, _>>();
-
-    serde_json::json!({
-        "schema": "group.checkin.v1",
-        "group_name": req.group_name.clone(),
-        "organizer_name": req.organizer_name.clone(),
-        "organizer_phone": req.organizer_phone.clone(),
-        "check_in_date": req.check_in_date.clone(),
-        "room_ids": room_ids,
-        "master_room_id": req.master_room_id.clone(),
-        "guests_per_room": guests_per_room,
-        "nights": req.nights,
-        "source": req.source.clone(),
-        "notes": req.notes.clone(),
-        "paid_minor_units": paid_minor_units,
-    })
-}
-
-fn add_folio_line_hash_payload_for_test(
-    booking_id: &str,
-    category: &str,
-    description: &str,
-    amount: MoneyVnd,
-    created_by: Option<&str>,
-) -> serde_json::Value {
-    serde_json::json!({
-        "schema": "folio.add_line.v1",
-        "booking_id": booking_id,
-        "category": category,
-        "description": description,
-        "amount_minor_units": (i128::from(amount) * 100).to_string(),
-        "created_by": created_by,
-    })
-}
-
-async fn seed_live_in_progress_command(
-    pool: &Pool<Sqlite>,
-    command_name: &str,
-    idempotency_key: &str,
-    payload: &serde_json::Value,
-) {
-    let now = chrono::Utc::now().to_rfc3339();
-    let lease_expires_at = (chrono::Utc::now() + chrono::Duration::seconds(30)).to_rfc3339();
-    sqlx::query(
-        "INSERT INTO command_idempotency (
-            idempotency_key, command_name, request_hash, intent_json, lock_keys_json,
-            status, claim_token, retryable, lease_expires_at, issued_at,
-            created_at, updated_at, last_attempt_at
-        ) VALUES (?, ?, ?, '{}', '[]', 'in_progress', 'other-claim', 0, ?, ?, ?, ?, ?)",
-    )
-    .bind(idempotency_key)
-    .bind(command_name)
-    .bind(crate::command_idempotency::stable_request_hash(payload).expect("payload hashes"))
-    .bind(&lease_expires_at)
-    .bind(&now)
-    .bind(&now)
-    .bind(&now)
-    .bind(&now)
-    .execute(pool)
-    .await
-    .expect("seed in-progress command");
-}
+use support::*;
 
 #[tokio::test]
 async fn check_in_rejects_negative_paid_amount() {
@@ -1200,9 +125,9 @@ async fn group_checkout_rejects_negative_final_paid() {
 #[tokio::test]
 async fn group_checkout_idempotent_retry_replays_without_duplicate_effects() {
     let pool = test_pool().await;
-    seed_room(&pool, "R-GCO-1").await.unwrap();
-    seed_room(&pool, "R-GCO-2").await.unwrap();
-    seed_pricing_rule(&pool, "standard", 250_000).await.unwrap();
+    seed_rooms_with_price(&pool, &["R-GCO-1", "R-GCO-2"], 250_000)
+        .await
+        .unwrap();
 
     let group = group_lifecycle::group_checkin(
         &pool,
@@ -1217,11 +142,7 @@ async fn group_checkout_idempotent_retry_replays_without_duplicate_effects() {
         .await
         .unwrap();
     let booking_id: String = rows[0].get("id");
-    let ctx = crate::command_idempotency::WriteCommandContext::for_internal_test(
-        "req-group-checkout-idem",
-        "idem-group-checkout-1",
-        "group_checkout",
-    );
+    let ctx = cmd("group_checkout", "idem-group-checkout-1");
 
     let first = group_lifecycle::group_checkout_idempotent(
         &pool,
@@ -1246,9 +167,7 @@ async fn group_checkout_idempotent_retry_replays_without_duplicate_effects() {
     .await
     .unwrap();
 
-    assert!(!first.replayed);
-    assert!(second.replayed);
-    assert_eq!(first.response, second.response);
+    assert_replayed_pair(&first, &second);
 
     let payment_count: i64 = sqlx::query_scalar(
         "SELECT COUNT(*) FROM transactions WHERE note = 'Thanh toán group checkout'",
@@ -1270,9 +189,9 @@ async fn group_checkout_idempotent_retry_replays_without_duplicate_effects() {
 #[tokio::test]
 async fn group_checkout_idempotent_duplicate_in_flight_returns_conflict() {
     let pool = test_pool().await;
-    seed_room(&pool, "R-GCO-LIVE-1").await.unwrap();
-    seed_room(&pool, "R-GCO-LIVE-2").await.unwrap();
-    seed_pricing_rule(&pool, "standard", 250_000).await.unwrap();
+    seed_rooms_with_price(&pool, &["R-GCO-LIVE-1", "R-GCO-LIVE-2"], 250_000)
+        .await
+        .unwrap();
 
     let group = group_lifecycle::group_checkin(
         &pool,
@@ -1287,36 +206,14 @@ async fn group_checkout_idempotent_duplicate_in_flight_returns_conflict() {
             .fetch_one(&pool)
             .await
             .unwrap();
-    let ctx = crate::command_idempotency::WriteCommandContext::for_internal_test(
-        "req-group-checkout-live",
-        "idem-group-checkout-live",
-        "group_checkout",
-    );
+    let ctx = cmd("group_checkout", "idem-group-checkout-live");
     let payload = serde_json::json!({
         "schema": "group.checkout.v1",
         "group_id": group.id,
         "booking_ids": [booking_id],
         "final_paid_vnd_units": 50_000,
     });
-    let now = chrono::Utc::now().to_rfc3339();
-    let lease_expires_at = (chrono::Utc::now() + chrono::Duration::seconds(30)).to_rfc3339();
-
-    sqlx::query(
-        "INSERT INTO command_idempotency (
-            idempotency_key, command_name, request_hash, intent_json, lock_keys_json,
-            status, claim_token, retryable, lease_expires_at, created_at, updated_at, last_attempt_at
-        ) VALUES (?, ?, ?, '{}', '[]', 'in_progress', 'other-claim', 0, ?, ?, ?, ?)",
-    )
-    .bind(&ctx.idempotency_key)
-    .bind(&ctx.command_name)
-    .bind(crate::command_idempotency::stable_request_hash(&payload).expect("payload hashes"))
-    .bind(&lease_expires_at)
-    .bind(&now)
-    .bind(&now)
-    .bind(&now)
-    .execute(&pool)
-    .await
-    .expect("seeds in-flight row");
+    seed_live_in_progress_command(&pool, &ctx.command_name, &ctx.idempotency_key, &payload).await;
 
     let error = group_lifecycle::group_checkout_idempotent(
         &pool,
@@ -1339,10 +236,13 @@ async fn group_checkout_idempotent_duplicate_in_flight_returns_conflict() {
 #[tokio::test]
 async fn group_checkout_idempotent_final_payment_locks_group_and_candidate_folios() {
     let pool = test_pool().await;
-    seed_room(&pool, "R-GCO-LOCK-1").await.unwrap();
-    seed_room(&pool, "R-GCO-LOCK-2").await.unwrap();
-    seed_room(&pool, "R-GCO-LOCK-3").await.unwrap();
-    seed_pricing_rule(&pool, "standard", 250_000).await.unwrap();
+    seed_rooms_with_price(
+        &pool,
+        &["R-GCO-LOCK-1", "R-GCO-LOCK-2", "R-GCO-LOCK-3"],
+        250_000,
+    )
+    .await
+    .unwrap();
 
     let group = group_lifecycle::group_checkin(
         &pool,
@@ -1358,11 +258,7 @@ async fn group_checkout_idempotent_final_payment_locks_group_and_candidate_folio
             .await
             .unwrap();
     let selected_booking_id = booking_ids[0].clone();
-    let ctx = crate::command_idempotency::WriteCommandContext::for_internal_test(
-        "req-group-checkout-locks",
-        "idem-group-checkout-locks",
-        "group_checkout",
-    );
+    let ctx = cmd("group_checkout", "idem-group-checkout-locks");
 
     group_lifecycle::group_checkout_idempotent(
         &pool,
@@ -1413,9 +309,9 @@ async fn group_checkout_idempotent_final_payment_locks_group_and_candidate_folio
 #[tokio::test]
 async fn group_checkout_tx_posts_final_payment_only_to_locked_candidate_set() {
     let pool = test_pool().await;
-    seed_room(&pool, "R-GCO-CAND-1").await.unwrap();
-    seed_room(&pool, "R-GCO-CAND-2").await.unwrap();
-    seed_pricing_rule(&pool, "standard", 250_000).await.unwrap();
+    seed_rooms_with_price(&pool, &["R-GCO-CAND-1", "R-GCO-CAND-2"], 250_000)
+        .await
+        .unwrap();
 
     let group = group_lifecycle::group_checkin(
         &pool,
@@ -1585,9 +481,9 @@ async fn create_reservation_guest_manifest_defaults_blank_doc_number() {
 #[tokio::test]
 async fn group_checkin_creates_active_group_and_placeholder_guest_manifest() {
     let pool = test_pool().await;
-    seed_room(&pool, "G101").await.unwrap();
-    seed_room(&pool, "G102").await.unwrap();
-    seed_pricing_rule(&pool, "standard", 250_000).await.unwrap();
+    seed_rooms_with_price(&pool, &["G101", "G102"], 250_000)
+        .await
+        .unwrap();
 
     let group = group_lifecycle::group_checkin(
         &pool,
@@ -1657,9 +553,9 @@ async fn group_checkin_creates_active_group_and_placeholder_guest_manifest() {
 #[tokio::test]
 async fn group_checkin_reservation_blocks_calendar_and_tracks_deposit() {
     let pool = test_pool().await;
-    seed_room(&pool, "G201").await.unwrap();
-    seed_room(&pool, "G202").await.unwrap();
-    seed_pricing_rule(&pool, "standard", 300_000).await.unwrap();
+    seed_rooms_with_price(&pool, &["G201", "G202"], 300_000)
+        .await
+        .unwrap();
 
     let mut req = minimal_group_checkin_request(&["G201", "G202"]);
     req.check_in_date = Some(
@@ -1712,8 +608,9 @@ async fn group_checkin_reservation_blocks_calendar_and_tracks_deposit() {
 #[tokio::test]
 async fn group_checkin_rejects_duplicate_room_ids() {
     let pool = test_pool().await;
-    seed_room(&pool, "G250").await.unwrap();
-    seed_pricing_rule(&pool, "standard", 250_000).await.unwrap();
+    seed_rooms_with_price(&pool, &["G250"], 250_000)
+        .await
+        .unwrap();
 
     let error = group_lifecycle::group_checkin(
         &pool,
@@ -1745,29 +642,33 @@ async fn group_checkin_lock_keys_are_stable_for_room_order() {
     assert_eq!(left, right);
 }
 
+async fn seed_user_group_checkin_idempotent(
+    pool: &sqlx::Pool<sqlx::Sqlite>,
+    ctx: &crate::command_idempotency::WriteCommandContext,
+    req: crate::models::GroupCheckinRequest,
+) -> crate::app_error::CommandResult<
+    crate::command_idempotency::IdempotentCommandResult<serde_json::Value>,
+> {
+    group_lifecycle::group_checkin_idempotent(pool, Some("seed-user".to_string()), ctx, req).await
+}
+
 #[tokio::test]
 async fn group_checkin_idempotent_normalizes_room_order_and_assigns_payment_ordinals() {
     let pool = test_pool().await;
-    seed_room(&pool, "GI601").await.unwrap();
-    seed_room(&pool, "GI602").await.unwrap();
-    seed_pricing_rule(&pool, "standard", 250_000).await.unwrap();
-    let ctx = crate::command_idempotency::WriteCommandContext::for_internal_test(
-        "req-group-idem-1",
-        "idem-group-checkin-1",
-        "group_checkin",
-    );
+    seed_rooms_with_price(&pool, &["GI601", "GI602"], 250_000)
+        .await
+        .unwrap();
+    let ctx = cmd("group_checkin", "idem-group-checkin-1");
 
-    let first = group_lifecycle::group_checkin_idempotent(
+    let first = seed_user_group_checkin_idempotent(
         &pool,
-        Some("seed-user".to_string()),
         &ctx,
         rich_group_checkin_request(&["GI602", "GI601"], "GI602", Some(100_001)),
     )
     .await
     .expect("first group checkin succeeds");
-    let second = group_lifecycle::group_checkin_idempotent(
+    let second = seed_user_group_checkin_idempotent(
         &pool,
-        Some("seed-user".to_string()),
         &ctx,
         rich_group_checkin_request(&["GI601", "GI602"], "GI602", Some(100_001)),
     )
@@ -1812,19 +713,15 @@ async fn group_checkin_idempotent_normalizes_room_order_and_assigns_payment_ordi
 #[tokio::test]
 async fn group_checkin_idempotent_materializes_omitted_checkin_date_in_hash() {
     let pool = test_pool().await;
-    seed_room(&pool, "GI603").await.unwrap();
-    seed_room(&pool, "GI604").await.unwrap();
-    seed_pricing_rule(&pool, "standard", 250_000).await.unwrap();
-    let ctx = crate::command_idempotency::WriteCommandContext::for_internal_test(
-        "req-group-idem-materialized-date",
-        "idem-group-checkin-materialized-date",
-        "group_checkin",
-    );
+    seed_rooms_with_price(&pool, &["GI603", "GI604"], 250_000)
+        .await
+        .unwrap();
+    let ctx = cmd("group_checkin", "idem-group-checkin-materialized-date");
 
     let req = rich_group_checkin_request(&["GI603", "GI604"], "GI603", Some(100_000));
     assert!(req.check_in_date.is_none());
 
-    group_lifecycle::group_checkin_idempotent(&pool, Some("seed-user".to_string()), &ctx, req)
+    seed_user_group_checkin_idempotent(&pool, &ctx, req)
         .await
         .expect("group checkin succeeds");
 
@@ -1857,35 +754,27 @@ async fn group_checkin_idempotent_materializes_omitted_checkin_date_in_hash() {
 #[tokio::test]
 async fn group_checkin_idempotent_omitted_date_replays_after_issued_at_rollover() {
     let pool = test_pool().await;
-    seed_room(&pool, "GI605").await.unwrap();
-    seed_room(&pool, "GI606").await.unwrap();
-    seed_pricing_rule(&pool, "standard", 250_000).await.unwrap();
-    let first_ctx = crate::command_idempotency::WriteCommandContext::for_internal_test(
-        "req-group-idem-rollover-first",
-        "idem-group-checkin-rollover",
-        "group_checkin",
-    );
+    seed_rooms_with_price(&pool, &["GI605", "GI606"], 250_000)
+        .await
+        .unwrap();
+    let first_ctx = cmd("group_checkin", "idem-group-checkin-rollover");
 
-    let first = group_lifecycle::group_checkin_idempotent(
+    let first = seed_user_group_checkin_idempotent(
         &pool,
-        Some("seed-user".to_string()),
         &first_ctx,
         rich_group_checkin_request(&["GI605", "GI606"], "GI605", Some(100_000)),
     )
     .await
     .expect("first group checkin succeeds");
 
-    let mut retry_ctx = crate::command_idempotency::WriteCommandContext::for_internal_test(
-        "req-group-idem-rollover-retry",
-        "idem-group-checkin-rollover",
+    let retry_ctx = cmd_at(
         "group_checkin",
+        "idem-group-checkin-rollover",
+        "2026-04-25T01:00:00+07:00",
     );
-    retry_ctx.issued_at = chrono::DateTime::parse_from_rfc3339("2026-04-25T01:00:00+07:00")
-        .expect("retry timestamp parses");
 
-    let retry = group_lifecycle::group_checkin_idempotent(
+    let retry = seed_user_group_checkin_idempotent(
         &pool,
-        Some("seed-user".to_string()),
         &retry_ctx,
         rich_group_checkin_request(&["GI605", "GI606"], "GI605", Some(100_000)),
     )
@@ -1900,17 +789,15 @@ async fn group_checkin_idempotent_omitted_date_replays_after_issued_at_rollover(
 #[tokio::test]
 async fn group_checkin_idempotent_reclaimed_omitted_date_uses_original_command_time() {
     let pool = test_pool().await;
-    seed_room(&pool, "GI607").await.unwrap();
-    seed_room(&pool, "GI608").await.unwrap();
-    seed_pricing_rule(&pool, "standard", 250_000).await.unwrap();
+    seed_rooms_with_price(&pool, &["GI607", "GI608"], 250_000)
+        .await
+        .unwrap();
 
-    let mut original_ctx = crate::command_idempotency::WriteCommandContext::for_internal_test(
-        "req-group-idem-reclaim-original",
-        "idem-group-checkin-reclaim-rollover",
+    let original_ctx = cmd_at(
         "group_checkin",
+        "idem-group-checkin-reclaim-rollover",
+        "2026-04-24T10:00:00+07:00",
     );
-    original_ctx.issued_at = chrono::DateTime::parse_from_rfc3339("2026-04-24T10:00:00+07:00")
-        .expect("original timestamp parses");
     let mut materialized = rich_group_checkin_request(&["GI607", "GI608"], "GI607", Some(100_000));
     materialized.check_in_date = Some("2026-04-24".to_string());
     let payload = group_checkin_hash_payload_for_test(&materialized);
@@ -1956,17 +843,14 @@ async fn group_checkin_idempotent_reclaimed_omitted_date_uses_original_command_t
     .await
     .expect("seed expired in-progress command");
 
-    let mut retry_ctx = crate::command_idempotency::WriteCommandContext::for_internal_test(
-        "req-group-idem-reclaim-retry",
-        "idem-group-checkin-reclaim-rollover",
+    let retry_ctx = cmd_at(
         "group_checkin",
+        "idem-group-checkin-reclaim-rollover",
+        "2026-04-25T01:00:00+07:00",
     );
-    retry_ctx.issued_at = chrono::DateTime::parse_from_rfc3339("2026-04-25T01:00:00+07:00")
-        .expect("retry timestamp parses");
 
-    let result = group_lifecycle::group_checkin_idempotent(
+    let result = seed_user_group_checkin_idempotent(
         &pool,
-        Some("seed-user".to_string()),
         &retry_ctx,
         rich_group_checkin_request(&["GI607", "GI608"], "GI607", Some(100_000)),
     )
@@ -2016,26 +900,24 @@ async fn group_checkin_idempotent_reclaimed_omitted_date_uses_original_command_t
 #[tokio::test]
 async fn group_checkin_idempotent_retry_does_not_duplicate_groups_bookings_or_payments() {
     let pool = test_pool().await;
-    seed_room(&pool, "GI620").await.unwrap();
-    seed_room(&pool, "GI621").await.unwrap();
-    seed_pricing_rule(&pool, "standard", 250_000).await.unwrap();
-    let ctx = crate::command_idempotency::WriteCommandContext::for_internal_test(
+    seed_rooms_with_price(&pool, &["GI620", "GI621"], 250_000)
+        .await
+        .unwrap();
+    let ctx = cmd_with_request(
+        "group_checkin",
         "req-group-idem-no-dup",
         "idem-group-checkin-no-dup",
-        "group_checkin",
     );
 
-    let first = group_lifecycle::group_checkin_idempotent(
+    let first = seed_user_group_checkin_idempotent(
         &pool,
-        Some("seed-user".to_string()),
         &ctx,
         rich_group_checkin_request(&["GI620", "GI621"], "GI620", Some(100_000)),
     )
     .await
     .expect("first group checkin succeeds");
-    let replay = group_lifecycle::group_checkin_idempotent(
+    let replay = seed_user_group_checkin_idempotent(
         &pool,
-        Some("seed-user".to_string()),
         &ctx,
         rich_group_checkin_request(&["GI620", "GI621"], "GI620", Some(100_000)),
     )
@@ -2069,14 +951,10 @@ async fn group_checkin_idempotent_retry_does_not_duplicate_groups_bookings_or_pa
 #[tokio::test]
 async fn group_checkin_duplicate_in_flight_does_not_wait_for_room_lock() {
     let pool = test_pool().await;
-    seed_room(&pool, "GI650").await.unwrap();
-    seed_room(&pool, "GI651").await.unwrap();
-    seed_pricing_rule(&pool, "standard", 250_000).await.unwrap();
-    let ctx = crate::command_idempotency::WriteCommandContext::for_internal_test(
-        "req-group-idem-inflight",
-        "idem-group-checkin-inflight",
-        "group_checkin",
-    );
+    seed_rooms_with_price(&pool, &["GI650", "GI651"], 250_000)
+        .await
+        .unwrap();
+    let ctx = cmd("group_checkin", "idem-group-checkin-inflight");
     let held_room_lock = crate::aggregate_locks::global_manager()
         .acquire([crate::aggregate_locks::room_key("GI650").unwrap()])
         .await
@@ -2141,14 +1019,10 @@ async fn group_checkin_duplicate_in_flight_does_not_wait_for_room_lock() {
 #[tokio::test]
 async fn group_checkin_idempotent_duplicate_seeded_live_in_flight_returns_conflict() {
     let pool = test_pool().await;
-    seed_room(&pool, "GI655").await.unwrap();
-    seed_room(&pool, "GI656").await.unwrap();
-    seed_pricing_rule(&pool, "standard", 250_000).await.unwrap();
-    let ctx = crate::command_idempotency::WriteCommandContext::for_internal_test(
-        "req-group-idem-seeded-inflight",
-        "idem-group-checkin-seeded-inflight",
-        "group_checkin",
-    );
+    seed_rooms_with_price(&pool, &["GI655", "GI656"], 250_000)
+        .await
+        .unwrap();
+    let ctx = cmd("group_checkin", "idem-group-checkin-seeded-inflight");
     let mut req = rich_group_checkin_request(&["GI655", "GI656"], "GI655", Some(100_000));
     req.check_in_date = Some(ctx.issued_at.format("%Y-%m-%d").to_string());
     seed_live_in_progress_command(
@@ -2159,10 +1033,9 @@ async fn group_checkin_idempotent_duplicate_seeded_live_in_flight_returns_confli
     )
     .await;
 
-    let error =
-        group_lifecycle::group_checkin_idempotent(&pool, Some("seed-user".to_string()), &ctx, req)
-            .await
-            .expect_err("duplicate live in-flight command should conflict");
+    let error = seed_user_group_checkin_idempotent(&pool, &ctx, req)
+        .await
+        .expect_err("duplicate live in-flight command should conflict");
 
     assert_eq!(
         error.code,
@@ -2173,18 +1046,13 @@ async fn group_checkin_idempotent_duplicate_seeded_live_in_flight_returns_confli
 #[tokio::test]
 async fn group_checkin_idempotent_zero_paid_amount_writes_no_payment_origin_rows() {
     let pool = test_pool().await;
-    seed_room(&pool, "GI610").await.unwrap();
-    seed_room(&pool, "GI611").await.unwrap();
-    seed_pricing_rule(&pool, "standard", 250_000).await.unwrap();
+    seed_rooms_with_price(&pool, &["GI610", "GI611"], 250_000)
+        .await
+        .unwrap();
 
-    let zero_ctx = crate::command_idempotency::WriteCommandContext::for_internal_test(
-        "req-group-idem-2-zero",
-        "idem-group-checkin-2-zero",
-        "group_checkin",
-    );
-    let zero_paid = group_lifecycle::group_checkin_idempotent(
+    let zero_ctx = cmd("group_checkin", "idem-group-checkin-2-zero");
+    let zero_paid = seed_user_group_checkin_idempotent(
         &pool,
-        Some("seed-user".to_string()),
         &zero_ctx,
         rich_group_checkin_request(&["GI610", "GI611"], "GI610", Some(0)),
     )
@@ -2205,9 +1073,9 @@ async fn group_checkin_idempotent_zero_paid_amount_writes_no_payment_origin_rows
 #[tokio::test]
 async fn group_checkin_idempotent_blank_key_rejected_before_writes() {
     let pool = test_pool().await;
-    seed_room(&pool, "GI620").await.unwrap();
-    seed_room(&pool, "GI621").await.unwrap();
-    seed_pricing_rule(&pool, "standard", 250_000).await.unwrap();
+    seed_rooms_with_price(&pool, &["GI620", "GI621"], 250_000)
+        .await
+        .unwrap();
 
     let error = crate::command_idempotency::WriteCommandContext::for_scoped_command(
         "req-group-idem-blank",
@@ -2238,18 +1106,13 @@ async fn group_checkin_idempotent_blank_key_rejected_before_writes() {
 #[tokio::test]
 async fn group_checkin_idempotent_replay_returns_stored_snapshot_after_db_mutation() {
     let pool = test_pool().await;
-    seed_room(&pool, "GI630").await.unwrap();
-    seed_room(&pool, "GI631").await.unwrap();
-    seed_pricing_rule(&pool, "standard", 250_000).await.unwrap();
-    let ctx = crate::command_idempotency::WriteCommandContext::for_internal_test(
-        "req-group-idem-3",
-        "idem-group-checkin-3",
-        "group_checkin",
-    );
+    seed_rooms_with_price(&pool, &["GI630", "GI631"], 250_000)
+        .await
+        .unwrap();
+    let ctx = cmd("group_checkin", "idem-group-checkin-3");
 
-    let first = group_lifecycle::group_checkin_idempotent(
+    let first = seed_user_group_checkin_idempotent(
         &pool,
-        Some("seed-user".to_string()),
         &ctx,
         rich_group_checkin_request(&["GI630", "GI631"], "GI630", Some(100_000)),
     )
@@ -2264,9 +1127,8 @@ async fn group_checkin_idempotent_replay_returns_stored_snapshot_after_db_mutati
         .await
         .unwrap();
 
-    let replay = group_lifecycle::group_checkin_idempotent(
+    let replay = seed_user_group_checkin_idempotent(
         &pool,
-        Some("seed-user".to_string()),
         &ctx,
         rich_group_checkin_request(&["GI630", "GI631"], "GI630", Some(100_000)),
     )
@@ -2284,18 +1146,13 @@ async fn group_checkin_idempotent_replay_returns_stored_snapshot_after_db_mutati
 #[tokio::test]
 async fn group_checkin_idempotent_same_key_different_payload_conflicts() {
     let pool = test_pool().await;
-    seed_room(&pool, "GI640").await.unwrap();
-    seed_room(&pool, "GI641").await.unwrap();
-    seed_pricing_rule(&pool, "standard", 250_000).await.unwrap();
-    let ctx = crate::command_idempotency::WriteCommandContext::for_internal_test(
-        "req-group-idem-4",
-        "idem-group-checkin-4",
-        "group_checkin",
-    );
+    seed_rooms_with_price(&pool, &["GI640", "GI641"], 250_000)
+        .await
+        .unwrap();
+    let ctx = cmd("group_checkin", "idem-group-checkin-4");
 
-    group_lifecycle::group_checkin_idempotent(
+    seed_user_group_checkin_idempotent(
         &pool,
-        Some("seed-user".to_string()),
         &ctx,
         rich_group_checkin_request(&["GI640", "GI641"], "GI640", Some(100_000)),
     )
@@ -2304,14 +1161,9 @@ async fn group_checkin_idempotent_same_key_different_payload_conflicts() {
 
     let mut changed = rich_group_checkin_request(&["GI640", "GI641"], "GI640", Some(100_000));
     changed.nights = 3;
-    let error = group_lifecycle::group_checkin_idempotent(
-        &pool,
-        Some("seed-user".to_string()),
-        &ctx,
-        changed,
-    )
-    .await
-    .expect_err("same key with different payload conflicts");
+    let error = seed_user_group_checkin_idempotent(&pool, &ctx, changed)
+        .await
+        .expect_err("same key with different payload conflicts");
 
     assert_eq!(
         error.code,
@@ -2322,18 +1174,13 @@ async fn group_checkin_idempotent_same_key_different_payload_conflicts() {
 #[tokio::test]
 async fn group_checkin_idempotent_same_key_changed_guest_name_conflicts() {
     let pool = test_pool().await;
-    seed_room(&pool, "GI642").await.unwrap();
-    seed_room(&pool, "GI643").await.unwrap();
-    seed_pricing_rule(&pool, "standard", 250_000).await.unwrap();
-    let ctx = crate::command_idempotency::WriteCommandContext::for_internal_test(
-        "req-group-idem-guest-change",
-        "idem-group-checkin-guest-change",
-        "group_checkin",
-    );
+    seed_rooms_with_price(&pool, &["GI642", "GI643"], 250_000)
+        .await
+        .unwrap();
+    let ctx = cmd("group_checkin", "idem-group-checkin-guest-change");
 
-    group_lifecycle::group_checkin_idempotent(
+    seed_user_group_checkin_idempotent(
         &pool,
-        Some("seed-user".to_string()),
         &ctx,
         rich_group_checkin_request(&["GI642", "GI643"], "GI642", Some(100_000)),
     )
@@ -2343,14 +1190,9 @@ async fn group_checkin_idempotent_same_key_changed_guest_name_conflicts() {
     let mut changed = rich_group_checkin_request(&["GI642", "GI643"], "GI642", Some(100_000));
     changed.guests_per_room.get_mut("GI642").unwrap()[0].full_name =
         "Changed Guest Name".to_string();
-    let error = group_lifecycle::group_checkin_idempotent(
-        &pool,
-        Some("seed-user".to_string()),
-        &ctx,
-        changed,
-    )
-    .await
-    .expect_err("same key with changed guest name conflicts");
+    let error = seed_user_group_checkin_idempotent(&pool, &ctx, changed)
+        .await
+        .expect_err("same key with changed guest name conflicts");
 
     assert_eq!(
         error.code,
@@ -2358,25 +1200,30 @@ async fn group_checkin_idempotent_same_key_changed_guest_name_conflicts() {
     );
 }
 
+async fn checked_in_group_for_service_tests(
+    pool: &sqlx::Pool<sqlx::Sqlite>,
+    room_ids: &[&str],
+    daily_rate: crate::money::MoneyVnd,
+) -> crate::models::BookingGroup {
+    seed_rooms_with_price(pool, room_ids, daily_rate)
+        .await
+        .unwrap();
+    group_lifecycle::group_checkin(pool, None, group_checkin_req(room_ids))
+        .await
+        .unwrap()
+}
+
 #[tokio::test]
 async fn add_group_service_idempotent_retry_replays_without_duplicate_row() {
     let pool = test_pool().await;
-    seed_booking_group(&pool, "G-SVC-IDEM").await;
-    let ctx = crate::command_idempotency::WriteCommandContext::for_internal_test(
-        "req-group-svc-idem",
-        "idem-group-svc-1",
+    let group = checked_in_group_for_service_tests(&pool, &["G-SVC-1", "G-SVC-2"], 250_000).await;
+    let ctx = cmd_with_request(
         "add_group_service",
+        "req-group-svc-idem",
+        "idem-add-group-service-1",
     );
-    let first_req = crate::models::AddGroupServiceRequest {
-        group_id: "G-SVC-IDEM".to_string(),
-        booking_id: None,
-        name: "Laundry".to_string(),
-        quantity: 2,
-        unit_price: 25_000,
-        note: Some("same-day".to_string()),
-    };
-    let second_req = crate::models::AddGroupServiceRequest {
-        group_id: "G-SVC-IDEM".to_string(),
+    let service_req = || AddGroupServiceRequest {
+        group_id: group.id.clone(),
         booking_id: None,
         name: "Laundry".to_string(),
         quantity: 2,
@@ -2384,14 +1231,22 @@ async fn add_group_service_idempotent_retry_replays_without_duplicate_row() {
         note: Some("same-day".to_string()),
     };
 
-    let first =
-        group_service_management::add_group_service_idempotent(&pool, &ctx, first_req, "staff-1")
-            .await
-            .expect("first service add succeeds");
-    let second =
-        group_service_management::add_group_service_idempotent(&pool, &ctx, second_req, "staff-1")
-            .await
-            .expect("retry replays");
+    let first = group_service_management::add_group_service_idempotent(
+        &pool,
+        &ctx,
+        service_req(),
+        "staff-1",
+    )
+    .await
+    .expect("first service add succeeds");
+    let second = group_service_management::add_group_service_idempotent(
+        &pool,
+        &ctx,
+        service_req(),
+        "staff-1",
+    )
+    .await
+    .expect("retry replays");
 
     assert!(!first.replayed);
     assert!(second.replayed);
@@ -2404,7 +1259,7 @@ async fn add_group_service_idempotent_retry_replays_without_duplicate_row() {
     assert_single_outbox_event(&pool, &ctx, "group.service_added").await;
 
     let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM group_services WHERE group_id = ?")
-        .bind("G-SVC-IDEM")
+        .bind(&group.id)
         .fetch_one(&pool)
         .await
         .unwrap();
@@ -2414,36 +1269,29 @@ async fn add_group_service_idempotent_retry_replays_without_duplicate_row() {
 #[tokio::test]
 async fn add_group_service_idempotent_same_key_different_payload_conflicts() {
     let pool = test_pool().await;
-    seed_booking_group(&pool, "G-SVC-HASH").await;
-    let ctx = crate::command_idempotency::WriteCommandContext::for_internal_test(
-        "req-group-svc-hash",
-        "idem-group-svc-hash",
-        "add_group_service",
-    );
-    let first_req = crate::models::AddGroupServiceRequest {
-        group_id: "G-SVC-HASH".to_string(),
+    let group =
+        checked_in_group_for_service_tests(&pool, &["G-SVC-HASH-1", "G-SVC-HASH-2"], 250_000).await;
+    let ctx = cmd("add_group_service", "idem-add-group-service-hash");
+    let service_req = |quantity| AddGroupServiceRequest {
+        group_id: group.id.clone(),
         booking_id: None,
         name: "Laundry".to_string(),
-        quantity: 1,
-        unit_price: 25_000,
-        note: None,
-    };
-    let changed_req = crate::models::AddGroupServiceRequest {
-        group_id: "G-SVC-HASH".to_string(),
-        booking_id: None,
-        name: "Laundry".to_string(),
-        quantity: 2,
+        quantity,
         unit_price: 25_000,
         note: None,
     };
 
-    group_service_management::add_group_service_idempotent(&pool, &ctx, first_req, "staff-1")
+    group_service_management::add_group_service_idempotent(&pool, &ctx, service_req(1), "staff-1")
         .await
         .expect("first service add succeeds");
-    let error =
-        group_service_management::add_group_service_idempotent(&pool, &ctx, changed_req, "staff-1")
-            .await
-            .expect_err("same key with changed quantity conflicts");
+    let error = group_service_management::add_group_service_idempotent(
+        &pool,
+        &ctx,
+        service_req(2),
+        "staff-1",
+    )
+    .await
+    .expect_err("same key with changed quantity conflicts");
 
     assert_eq!(
         error.code,
@@ -2451,7 +1299,7 @@ async fn add_group_service_idempotent_same_key_different_payload_conflicts() {
     );
 
     let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM group_services WHERE group_id = ?")
-        .bind("G-SVC-HASH")
+        .bind(&group.id)
         .fetch_one(&pool)
         .await
         .unwrap();
@@ -2461,14 +1309,15 @@ async fn add_group_service_idempotent_same_key_different_payload_conflicts() {
 #[tokio::test]
 async fn add_group_service_idempotent_rejects_negative_unit_price_without_writing() {
     let pool = test_pool().await;
-    seed_booking_group(&pool, "G-SVC-NEGATIVE-PRICE").await;
-    let ctx = crate::command_idempotency::WriteCommandContext::for_internal_test(
-        "req-group-svc-negative-price",
-        "idem-group-svc-negative-price",
-        "add_group_service",
-    );
-    let req = crate::models::AddGroupServiceRequest {
-        group_id: "G-SVC-NEGATIVE-PRICE".to_string(),
+    let group = checked_in_group_for_service_tests(
+        &pool,
+        &["G-SVC-NEG-PRICE-1", "G-SVC-NEG-PRICE-2"],
+        250_000,
+    )
+    .await;
+    let ctx = cmd("add_group_service", "idem-add-group-service-negative-price");
+    let req = AddGroupServiceRequest {
+        group_id: group.id.clone(),
         booking_id: None,
         name: "Laundry".to_string(),
         quantity: 1,
@@ -2482,32 +1331,38 @@ async fn add_group_service_idempotent_rejects_negative_unit_price_without_writin
 
     assert_eq!(error.code, crate::app_error::codes::BOOKING_INVALID_STATE);
 
-    let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM group_services WHERE group_id = ?")
-        .bind("G-SVC-NEGATIVE-PRICE")
-        .fetch_one(&pool)
-        .await
-        .unwrap();
-    assert_eq!(count, 0);
+    assert_eq!(
+        command_claim_count(&pool, &ctx.command_name, &ctx.idempotency_key).await,
+        0
+    );
+    assert_eq!(group_service_count_for_group(&pool, &group.id).await, 0);
+
+    let origin_key = format!("{}:{}", ctx.command_name, ctx.idempotency_key);
+    assert_eq!(origin_transaction_count(&pool, &origin_key).await, 0);
+    assert_eq!(folio_line_count_for_key(&pool, &origin_key).await, 0);
+    assert_eq!(
+        outbox_count_for_command(&pool, &ctx.command_name, &ctx.idempotency_key).await,
+        0
+    );
 }
 
 #[tokio::test]
 async fn remove_group_service_idempotent_retry_replays_without_extra_delete() {
     let pool = test_pool().await;
-    seed_booking_group(&pool, "G-SVC-REMOVE").await;
+    let group =
+        checked_in_group_for_service_tests(&pool, &["G-SVC-REMOVE-1", "G-SVC-REMOVE-2"], 250_000)
+            .await;
     sqlx::query(
         "INSERT INTO group_services (
             id, group_id, booking_id, name, quantity, unit_price,
             total_price, note, created_by, created_at
-        ) VALUES ('SVC-REMOVE-1', 'G-SVC-REMOVE', NULL, 'Laundry', 1, 25000, 25000, NULL, 'staff-1', '2026-05-01T09:00:00+07:00')",
+        ) VALUES ('SVC-REMOVE-1', ?, NULL, 'Laundry', 1, 25000, 25000, NULL, 'staff-1', '2026-05-01T09:00:00+07:00')",
     )
+    .bind(&group.id)
     .execute(&pool)
     .await
     .unwrap();
-    let ctx = crate::command_idempotency::WriteCommandContext::for_internal_test(
-        "req-group-svc-remove",
-        "idem-group-svc-remove",
-        "remove_group_service",
-    );
+    let ctx = cmd("remove_group_service", "idem-remove-group-service-1");
 
     let first =
         group_service_management::remove_group_service_idempotent(&pool, &ctx, "SVC-REMOVE-1")
@@ -2518,9 +1373,7 @@ async fn remove_group_service_idempotent_retry_replays_without_extra_delete() {
             .await
             .expect("retry replays");
 
-    assert!(!first.replayed);
-    assert!(second.replayed);
-    assert_eq!(first.response, second.response);
+    assert_replayed_pair(&first, &second);
     assert_eq!(first.response["service_id"], "SVC-REMOVE-1");
 
     let count: i64 =
@@ -2534,24 +1387,26 @@ async fn remove_group_service_idempotent_retry_replays_without_extra_delete() {
 #[tokio::test]
 async fn remove_group_service_idempotent_same_key_different_service_conflicts() {
     let pool = test_pool().await;
-    seed_booking_group(&pool, "G-SVC-REMOVE-HASH").await;
+    let group = checked_in_group_for_service_tests(
+        &pool,
+        &["G-SVC-REMOVE-HASH-1", "G-SVC-REMOVE-HASH-2"],
+        250_000,
+    )
+    .await;
     for service_id in ["SVC-REMOVE-A", "SVC-REMOVE-B"] {
         sqlx::query(
             "INSERT INTO group_services (
                 id, group_id, booking_id, name, quantity, unit_price,
                 total_price, note, created_by, created_at
-            ) VALUES (?, 'G-SVC-REMOVE-HASH', NULL, 'Laundry', 1, 25000, 25000, NULL, 'staff-1', '2026-05-01T09:00:00+07:00')",
+            ) VALUES (?, ?, NULL, 'Laundry', 1, 25000, 25000, NULL, 'staff-1', '2026-05-01T09:00:00+07:00')",
         )
         .bind(service_id)
+        .bind(&group.id)
         .execute(&pool)
         .await
         .unwrap();
     }
-    let ctx = crate::command_idempotency::WriteCommandContext::for_internal_test(
-        "req-group-svc-remove-hash",
-        "idem-group-svc-remove-hash",
-        "remove_group_service",
-    );
+    let ctx = cmd("remove_group_service", "idem-remove-group-service-hash");
 
     group_service_management::remove_group_service_idempotent(&pool, &ctx, "SVC-REMOVE-A")
         .await
@@ -2577,9 +1432,9 @@ async fn remove_group_service_idempotent_same_key_different_service_conflicts() 
 #[tokio::test]
 async fn group_checkout_reassigns_master_and_updates_group_payment() {
     let pool = test_pool().await;
-    seed_room(&pool, "G301").await.unwrap();
-    seed_room(&pool, "G302").await.unwrap();
-    seed_pricing_rule(&pool, "standard", 250_000).await.unwrap();
+    seed_rooms_with_price(&pool, &["G301", "G302"], 250_000)
+        .await
+        .unwrap();
 
     let group = group_lifecycle::group_checkin(
         &pool,
@@ -2640,8 +1495,9 @@ async fn group_checkout_reassigns_master_and_updates_group_payment() {
 #[tokio::test]
 async fn group_checkout_clears_master_flag_when_group_completes() {
     let pool = test_pool().await;
-    seed_room(&pool, "G401").await.unwrap();
-    seed_pricing_rule(&pool, "standard", 250_000).await.unwrap();
+    seed_rooms_with_price(&pool, &["G401"], 250_000)
+        .await
+        .unwrap();
 
     let group = group_lifecycle::group_checkin(
         &pool,
@@ -2686,9 +1542,9 @@ async fn group_checkout_clears_master_flag_when_group_completes() {
 #[tokio::test]
 async fn group_booking_lifecycle_smoke_covers_partial_and_final_checkout() {
     let pool = test_pool().await;
-    seed_room(&pool, "G-SMOKE-1").await.unwrap();
-    seed_room(&pool, "G-SMOKE-2").await.unwrap();
-    seed_pricing_rule(&pool, "standard", 250_000).await.unwrap();
+    seed_rooms_with_price(&pool, &["G-SMOKE-1", "G-SMOKE-2"], 250_000)
+        .await
+        .unwrap();
 
     let group = group_lifecycle::group_checkin(
         &pool,
@@ -2759,21 +1615,17 @@ async fn group_booking_lifecycle_smoke_covers_partial_and_final_checkout() {
             .fetch_one(&pool)
             .await
             .unwrap();
-    assert_eq!(
-        partial_group.get::<String, _>("status"),
-        "partial_checkout"
-    );
+    assert_eq!(partial_group.get::<String, _>("status"), "partial_checkout");
     let second_master_booking_id = partial_group
         .get::<Option<String>, _>("master_booking_id")
         .expect("partial checkout should reassign a master booking");
     assert_ne!(second_master_booking_id, first_master_booking_id);
 
-    let checked_out_status: String =
-        sqlx::query_scalar("SELECT status FROM bookings WHERE id = ?")
-            .bind(&first_master_booking_id)
-            .fetch_one(&pool)
-            .await
-            .unwrap();
+    let checked_out_status: String = sqlx::query_scalar("SELECT status FROM bookings WHERE id = ?")
+        .bind(&first_master_booking_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
     assert_eq!(checked_out_status, "checked_out");
 
     let remaining_master = sqlx::query(
@@ -2830,7 +1682,10 @@ async fn group_booking_lifecycle_smoke_covers_partial_and_final_checkout() {
             .await
             .unwrap();
     assert_eq!(final_group.get::<String, _>("status"), "completed");
-    assert_eq!(final_group.get::<Option<String>, _>("master_booking_id"), None);
+    assert_eq!(
+        final_group.get::<Option<String>, _>("master_booking_id"),
+        None
+    );
 
     let active_booking_count: (i64,) =
         sqlx::query_as("SELECT COUNT(*) FROM bookings WHERE group_id = ? AND status = 'active'")
@@ -2887,9 +1742,9 @@ async fn group_booking_lifecycle_smoke_covers_partial_and_final_checkout() {
 #[tokio::test]
 async fn group_checkout_rejects_stale_selected_booking() {
     let pool = test_pool().await;
-    seed_room(&pool, "G501").await.unwrap();
-    seed_room(&pool, "G502").await.unwrap();
-    seed_pricing_rule(&pool, "standard", 250_000).await.unwrap();
+    seed_rooms_with_price(&pool, &["G501", "G502"], 250_000)
+        .await
+        .unwrap();
 
     let group = group_lifecycle::group_checkin(
         &pool,
@@ -2957,19 +1812,15 @@ fn group_checkout_locked_room_map_rejects_changed_room_mapping() {
 #[tokio::test]
 async fn record_payment_updates_paid_amount_cache() {
     let pool = test_pool().await;
-    seed_room(&pool, "R101").await.unwrap();
-    seed_active_booking(&pool, "B101", "R101").await.unwrap();
+    seed_active_booking_with_room(&pool, "B101", "R101")
+        .await
+        .unwrap();
 
     record_payment(&pool, "B101", 25_000, "deposit")
         .await
         .unwrap();
 
-    let booking = sqlx::query("SELECT paid_amount FROM bookings WHERE id = ?")
-        .bind("B101")
-        .fetch_one(&pool)
-        .await
-        .unwrap();
-    assert_eq!(booking.get::<Option<i64>, _>("paid_amount"), Some(25_000));
+    assert_eq!(booking_paid_amount(&pool, "B101").await, Some(25_000));
 
     let txn = sqlx::query("SELECT type, amount, note FROM transactions WHERE booking_id = ?")
         .bind("B101")
@@ -2985,8 +1836,7 @@ async fn record_payment_updates_paid_amount_cache() {
 #[tokio::test]
 async fn record_payment_returning_id_tx_returns_inserted_transaction_id() {
     let pool = test_pool().await;
-    seed_room(&pool, "R-PAY-ID").await.unwrap();
-    seed_active_booking(&pool, "B-PAY-ID", "R-PAY-ID")
+    seed_active_booking_with_room(&pool, "B-PAY-ID", "R-PAY-ID")
         .await
         .unwrap();
 
@@ -3018,27 +1868,16 @@ async fn record_payment_returning_id_tx_returns_inserted_transaction_id() {
     assert_eq!(txn.get::<String, _>("type"), "payment");
     assert_eq!(txn.get::<String, _>("note"), "payment id test");
 
-    let booking = sqlx::query("SELECT paid_amount FROM bookings WHERE id = ?")
-        .bind("B-PAY-ID")
-        .fetch_one(&pool)
-        .await
-        .unwrap();
-
-    assert_eq!(booking.get::<Option<i64>, _>("paid_amount"), Some(25_000));
+    assert_eq!(booking_paid_amount(&pool, "B-PAY-ID").await, Some(25_000));
 }
 
 #[tokio::test]
 async fn record_payment_idempotent_retry_replays_and_does_not_double_post() {
     let pool = test_pool().await;
-    seed_room(&pool, "R-PAY-IDEM").await.unwrap();
-    seed_active_booking(&pool, "B-PAY-IDEM", "R-PAY-IDEM")
+    seed_active_booking_with_room(&pool, "B-PAY-IDEM", "R-PAY-IDEM")
         .await
         .unwrap();
-    let ctx = crate::command_idempotency::WriteCommandContext::for_internal_test(
-        "req-payment-idem",
-        "idem-payment-1",
-        "record_payment",
-    );
+    let ctx = cmd_with_request("record_payment", "req-payment-idem", "idem-payment-1");
 
     let first = record_payment_idempotent(&pool, &ctx, "B-PAY-IDEM", 125_000, "Payment retry test")
         .await
@@ -3048,25 +1887,17 @@ async fn record_payment_idempotent_retry_replays_and_does_not_double_post() {
             .await
             .unwrap();
 
-    assert!(!first.replayed);
-    assert!(second.replayed);
-    assert_eq!(first.response, second.response);
+    assert_replayed_pair(&first, &second);
 
-    let payment_count: (i64,) = sqlx::query_as(
-        "SELECT COUNT(*) FROM transactions WHERE booking_id = ? AND type = 'payment'",
-    )
-    .bind("B-PAY-IDEM")
-    .fetch_one(&pool)
-    .await
-    .unwrap();
-    assert_eq!(payment_count.0, 1);
+    assert_eq!(
+        transaction_count_for_booking_type(&pool, "B-PAY-IDEM", "payment").await,
+        1
+    );
 
-    let paid_amount: i64 = sqlx::query_scalar("SELECT paid_amount FROM bookings WHERE id = ?")
-        .bind("B-PAY-IDEM")
-        .fetch_one(&pool)
-        .await
-        .unwrap();
-    assert_eq!(paid_amount, 125_000);
+    assert_eq!(
+        booking_paid_amount(&pool, "B-PAY-IDEM").await,
+        Some(125_000)
+    );
 
     let payload = assert_single_outbox_event(&pool, &ctx, "folio.payment_recorded").await;
     assert_eq!(payload["aggregate"]["type"], "folio");
@@ -3077,15 +1908,10 @@ async fn record_payment_idempotent_retry_replays_and_does_not_double_post() {
 #[tokio::test]
 async fn record_payment_idempotent_same_key_different_amount_conflicts() {
     let pool = test_pool().await;
-    seed_room(&pool, "R-PAY-HASH").await.unwrap();
-    seed_active_booking(&pool, "B-PAY-HASH", "R-PAY-HASH")
+    seed_active_booking_with_room(&pool, "B-PAY-HASH", "R-PAY-HASH")
         .await
         .unwrap();
-    let ctx = crate::command_idempotency::WriteCommandContext::for_internal_test(
-        "req-payment-hash",
-        "idem-payment-hash",
-        "record_payment",
-    );
+    let ctx = cmd("record_payment", "idem-payment-hash");
 
     record_payment_idempotent(&pool, &ctx, "B-PAY-HASH", 50_000, "first")
         .await
@@ -3103,20 +1929,11 @@ async fn record_payment_idempotent_same_key_different_amount_conflicts() {
 #[tokio::test]
 async fn record_payment_idempotent_distinct_keys_sum_paid_amount() {
     let pool = test_pool().await;
-    seed_room(&pool, "R-PAY-SUM").await.unwrap();
-    seed_active_booking(&pool, "B-PAY-SUM", "R-PAY-SUM")
+    seed_active_booking_with_room(&pool, "B-PAY-SUM", "R-PAY-SUM")
         .await
         .unwrap();
-    let first_ctx = crate::command_idempotency::WriteCommandContext::for_internal_test(
-        "req-payment-sum-1",
-        "idem-payment-sum-1",
-        "record_payment",
-    );
-    let second_ctx = crate::command_idempotency::WriteCommandContext::for_internal_test(
-        "req-payment-sum-2",
-        "idem-payment-sum-2",
-        "record_payment",
-    );
+    let first_ctx = cmd("record_payment", "idem-payment-sum-1");
+    let second_ctx = cmd("record_payment", "idem-payment-sum-2");
 
     record_payment_idempotent(&pool, &first_ctx, "B-PAY-SUM", 40_000, "first")
         .await
@@ -3125,51 +1942,23 @@ async fn record_payment_idempotent_distinct_keys_sum_paid_amount() {
         .await
         .unwrap();
 
-    let paid_amount: i64 = sqlx::query_scalar("SELECT paid_amount FROM bookings WHERE id = ?")
-        .bind("B-PAY-SUM")
-        .fetch_one(&pool)
-        .await
-        .unwrap();
-    assert_eq!(paid_amount, 100_000);
+    assert_eq!(booking_paid_amount(&pool, "B-PAY-SUM").await, Some(100_000));
 }
 
 #[tokio::test]
 async fn record_payment_idempotent_duplicate_in_flight_returns_conflict() {
     let pool = test_pool().await;
-    seed_room(&pool, "R-PAY-LIVE").await.unwrap();
-    seed_active_booking(&pool, "B-PAY-LIVE", "R-PAY-LIVE")
+    seed_active_booking_with_room(&pool, "B-PAY-LIVE", "R-PAY-LIVE")
         .await
         .unwrap();
-    let ctx = crate::command_idempotency::WriteCommandContext::for_internal_test(
-        "req-payment-live",
-        "idem-payment-live",
-        "record_payment",
-    );
+    let ctx = cmd("record_payment", "idem-payment-live");
     let payload = serde_json::json!({
         "schema": "payment.record.v1",
         "booking_id": "B-PAY-LIVE",
         "amount": 75_000,
         "note": "live payment",
     });
-    let now = chrono::Utc::now().to_rfc3339();
-    let lease_expires_at = (chrono::Utc::now() + chrono::Duration::seconds(30)).to_rfc3339();
-
-    sqlx::query(
-        "INSERT INTO command_idempotency (
-            idempotency_key, command_name, request_hash, intent_json, lock_keys_json,
-            status, claim_token, retryable, lease_expires_at, created_at, updated_at, last_attempt_at
-        ) VALUES (?, ?, ?, '{}', '[]', 'in_progress', 'other-claim', 0, ?, ?, ?, ?)",
-    )
-    .bind(&ctx.idempotency_key)
-    .bind(&ctx.command_name)
-    .bind(crate::command_idempotency::stable_request_hash(&payload).expect("payload hashes"))
-    .bind(&lease_expires_at)
-    .bind(&now)
-    .bind(&now)
-    .bind(&now)
-    .execute(&pool)
-    .await
-    .expect("seeds in-flight row");
+    seed_live_in_progress_command(&pool, &ctx.command_name, &ctx.idempotency_key, &payload).await;
 
     let error = record_payment_idempotent(&pool, &ctx, "B-PAY-LIVE", 75_000, "live payment")
         .await
@@ -3184,8 +1973,9 @@ async fn record_payment_idempotent_duplicate_in_flight_returns_conflict() {
 #[tokio::test]
 async fn record_payment_tx_can_compose_inside_outer_transaction() {
     let pool = test_pool().await;
-    seed_room(&pool, "R102").await.unwrap();
-    seed_active_booking(&pool, "B102", "R102").await.unwrap();
+    seed_active_booking_with_room(&pool, "B102", "R102")
+        .await
+        .unwrap();
 
     let mut tx = pool.begin().await.unwrap();
     record_payment_tx(&mut tx, "B102", 12_500, "deposit")
@@ -3217,13 +2007,7 @@ async fn record_deposit_tx_updates_paid_amount_cache() {
         .unwrap();
     tx.commit().await.unwrap();
 
-    let booking = sqlx::query("SELECT paid_amount FROM bookings WHERE id = ?")
-        .bind("B103")
-        .fetch_one(&pool)
-        .await
-        .unwrap();
-
-    assert_eq!(booking.get::<Option<i64>, _>("paid_amount"), Some(75_000));
+    assert_eq!(booking_paid_amount(&pool, "B103").await, Some(75_000));
 
     let txn = sqlx::query(
         "SELECT type, amount, note FROM transactions WHERE booking_id = ? AND note = ?",
@@ -3281,19 +2065,13 @@ async fn record_deposit_with_origin_rejects_blank_key_before_write() {
         .to_string()
         .contains("Origin idempotency key is required"));
 
-    let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM transactions WHERE booking_id = ?")
-        .bind(&booking_id)
-        .fetch_one(&pool)
-        .await
-        .unwrap();
-    assert_eq!(count, 0);
+    assert_eq!(transaction_count_for_booking(&pool, &booking_id).await, 0);
 }
 
 #[tokio::test]
 async fn duplicate_transaction_origin_is_blocked_by_unique_origin_ordinal() {
     let pool = test_pool().await;
-    seed_room(&pool, "R-TXN-ORIGIN-DUP").await.unwrap();
-    seed_active_booking(&pool, "B-TXN-ORIGIN-DUP", "R-TXN-ORIGIN-DUP")
+    seed_active_booking_with_room(&pool, "B-TXN-ORIGIN-DUP", "R-TXN-ORIGIN-DUP")
         .await
         .unwrap();
     let origin = OriginSideEffect::new("origin-duplicate-transaction", 0).unwrap();
@@ -3326,15 +2104,7 @@ async fn duplicate_transaction_origin_is_blocked_by_unique_origin_ordinal() {
     assert!(duplicate.is_err(), "duplicate transaction origin must fail");
     second_tx.rollback().await.unwrap();
 
-    let count: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM transactions
-         WHERE origin_idempotency_key = ? AND origin_transaction_ordinal = 0",
-    )
-    .bind("origin-duplicate-transaction")
-    .fetch_one(&pool)
-    .await
-    .unwrap();
-    assert_eq!(count, 1);
+    assert_transaction_origin(&pool, "origin-duplicate-transaction", 0, 1).await;
 }
 
 #[tokio::test]
@@ -3351,13 +2121,7 @@ async fn record_cancellation_fee_tx_does_not_change_paid_amount() {
         .unwrap();
     tx.commit().await.unwrap();
 
-    let booking = sqlx::query("SELECT paid_amount FROM bookings WHERE id = ?")
-        .bind("B104")
-        .fetch_one(&pool)
-        .await
-        .unwrap();
-
-    assert_eq!(booking.get::<Option<i64>, _>("paid_amount"), Some(50_000));
+    assert_eq!(booking_paid_amount(&pool, "B104").await, Some(50_000));
 
     let txn = sqlx::query(
         "SELECT type, amount, note FROM transactions WHERE booking_id = ? AND note = ?",
@@ -3400,8 +2164,7 @@ async fn calculate_stay_price_tx_reads_uncommitted_pricing_rule() {
 #[tokio::test]
 async fn calculate_stay_price_matches_tx_path_and_applies_special_date_uplift() {
     let pool = test_pool().await;
-    seed_room(&pool, "R149").await.unwrap();
-    seed_pricing_rule(&pool, "standard", 600_000).await.unwrap();
+    seed_room_with_price(&pool, "R149", 600_000).await.unwrap();
     seed_special_date(&pool, "2026-04-20", 10.0).await.unwrap();
 
     let pool_pricing = calculate_stay_price(
@@ -3524,8 +2287,7 @@ async fn calculate_stay_price_tx_reads_uncommitted_room_base_price() {
 #[tokio::test]
 async fn calculate_stay_price_tx_reads_uncommitted_special_date() {
     let pool = test_pool().await;
-    seed_room(&pool, "R152").await.unwrap();
-    seed_pricing_rule(&pool, "standard", 600_000).await.unwrap();
+    seed_room_with_price(&pool, "R152", 600_000).await.unwrap();
 
     let mut tx = pool.begin().await.unwrap();
     seed_special_date_tx(&mut tx, "2026-04-20", 10.0)
@@ -3591,8 +2353,7 @@ async fn calculate_stay_price_returns_datetime_parse_for_invalid_check_in() {
 #[tokio::test]
 async fn create_reservation_blocks_calendar_and_posts_deposit() {
     let pool = test_pool().await;
-    seed_room(&pool, "R160").await.unwrap();
-    seed_pricing_rule(&pool, "standard", 600_000).await.unwrap();
+    seed_room_with_price(&pool, "R160", 600_000).await.unwrap();
 
     let booking =
         reservation_lifecycle::create_reservation(&pool, minimal_reservation_request("R160"))
@@ -3604,14 +2365,7 @@ async fn create_reservation_blocks_calendar_and_posts_deposit() {
     assert_eq!(booking.total_price, 1_200_000);
     assert_eq!(booking.paid_amount, 50_000);
 
-    let calendar_days: (i64,) = sqlx::query_as(
-        "SELECT COUNT(*) FROM room_calendar WHERE booking_id = ? AND status = 'booked'",
-    )
-    .bind(&booking.id)
-    .fetch_one(&pool)
-    .await
-    .unwrap();
-    assert_eq!(calendar_days.0, 2);
+    assert_calendar_rows(&pool, &booking.id, "booked", 2).await;
 
     let room = sqlx::query("SELECT status FROM rooms WHERE id = ?")
         .bind("R160")
@@ -3635,8 +2389,7 @@ async fn create_reservation_blocks_calendar_and_posts_deposit() {
 #[tokio::test]
 async fn create_reservation_rejects_inconsistent_nights_input() {
     let pool = test_pool().await;
-    seed_room(&pool, "R160A").await.unwrap();
-    seed_pricing_rule(&pool, "standard", 600_000).await.unwrap();
+    seed_room_with_price(&pool, "R160A", 600_000).await.unwrap();
 
     let error = reservation_lifecycle::create_reservation(
         &pool,
@@ -3665,49 +2418,40 @@ async fn create_reservation_rejects_inconsistent_nights_input() {
 #[tokio::test]
 async fn create_reservation_idempotent_retry_does_not_duplicate_deposit() {
     let pool = test_pool().await;
-    seed_room(&pool, "R601").await.expect("seeds room");
-    seed_pricing_rule(&pool, "standard", 600_000)
+    seed_room_with_price(&pool, "R601", 600_000)
         .await
-        .expect("seeds pricing");
-    let ctx = crate::command_idempotency::WriteCommandContext::for_internal_test(
+        .expect("seeds room/pricing");
+    let ctx = cmd_with_request(
+        "create_reservation",
         "req-reservation-1",
         "idem-reservation-1",
-        "create_reservation",
     );
 
     let first = reservation_lifecycle::create_reservation_idempotent(
         &pool,
         &ctx,
-        CreateReservationRequest {
-            room_id: "R601".to_string(),
-            guest_name: "Retry Guest".to_string(),
-            guest_doc_number: Some("DOC601".to_string()),
-            guest_phone: None,
-            check_in_date: "2026-05-01".to_string(),
-            check_out_date: "2026-05-02".to_string(),
-            nights: 1,
-            source: Some("phone".to_string()),
-            notes: None,
-            deposit_amount: Some(50_000),
-        },
+        reservation_req("R601")
+            .guest("Retry Guest")
+            .doc("DOC601")
+            .phone(None)
+            .dates("2026-05-01", "2026-05-02")
+            .nights(1)
+            .deposit(Some(50_000))
+            .build(),
     )
     .await
     .expect("first reservation succeeds");
     let second = reservation_lifecycle::create_reservation_idempotent(
         &pool,
         &ctx,
-        CreateReservationRequest {
-            room_id: "R601".to_string(),
-            guest_name: "Retry Guest".to_string(),
-            guest_doc_number: Some("DOC601".to_string()),
-            guest_phone: None,
-            check_in_date: "2026-05-01".to_string(),
-            check_out_date: "2026-05-02".to_string(),
-            nights: 1,
-            source: Some("phone".to_string()),
-            notes: None,
-            deposit_amount: Some(50_000),
-        },
+        reservation_req("R601")
+            .guest("Retry Guest")
+            .doc("DOC601")
+            .phone(None)
+            .dates("2026-05-01", "2026-05-02")
+            .nights(1)
+            .deposit(Some(50_000))
+            .build(),
     )
     .await
     .expect("retry replays");
@@ -3717,43 +2461,30 @@ async fn create_reservation_idempotent_retry_does_not_duplicate_deposit() {
     assert!(second.replayed);
     assert_single_outbox_event(&pool, &ctx, "booking.reservation_created").await;
 
-    let count: i64 =
-        sqlx::query_scalar("SELECT COUNT(*) FROM transactions WHERE origin_idempotency_key = ?")
-            .bind("create_reservation:idem-reservation-1")
-            .fetch_one(&pool)
-            .await
-            .expect("counts deposit rows");
-
-    assert_eq!(count, 1);
+    assert_eq!(
+        origin_transaction_count(&pool, "create_reservation:idem-reservation-1").await,
+        1
+    );
 }
 
 #[tokio::test]
 async fn create_reservation_idempotent_replay_returns_stored_booking_snapshot() {
     let pool = test_pool().await;
-    seed_room(&pool, "R604").await.expect("seeds room");
-    seed_pricing_rule(&pool, "standard", 600_000)
+    seed_room_with_price(&pool, "R604", 600_000)
         .await
-        .expect("seeds pricing");
-    let ctx = crate::command_idempotency::WriteCommandContext::for_internal_test(
-        "req-reservation-snapshot",
-        "idem-reservation-snapshot",
-        "create_reservation",
-    );
+        .expect("seeds room/pricing");
+    let ctx = cmd("create_reservation", "idem-reservation-snapshot");
     let first = reservation_lifecycle::create_reservation_idempotent(
         &pool,
         &ctx,
-        CreateReservationRequest {
-            room_id: "R604".to_string(),
-            guest_name: "Snapshot Guest".to_string(),
-            guest_doc_number: Some("DOC604".to_string()),
-            guest_phone: None,
-            check_in_date: "2026-05-01".to_string(),
-            check_out_date: "2026-05-02".to_string(),
-            nights: 1,
-            source: Some("phone".to_string()),
-            notes: None,
-            deposit_amount: Some(50_000),
-        },
+        reservation_req("R604")
+            .guest("Snapshot Guest")
+            .doc("DOC604")
+            .phone(None)
+            .dates("2026-05-01", "2026-05-02")
+            .nights(1)
+            .deposit(Some(50_000))
+            .build(),
     )
     .await
     .expect("first reservation succeeds");
@@ -3776,18 +2507,14 @@ async fn create_reservation_idempotent_replay_returns_stored_booking_snapshot() 
     let replay = reservation_lifecycle::create_reservation_idempotent(
         &pool,
         &ctx,
-        CreateReservationRequest {
-            room_id: "R604".to_string(),
-            guest_name: "Snapshot Guest".to_string(),
-            guest_doc_number: Some("DOC604".to_string()),
-            guest_phone: None,
-            check_in_date: "2026-05-01".to_string(),
-            check_out_date: "2026-05-02".to_string(),
-            nights: 1,
-            source: Some("phone".to_string()),
-            notes: None,
-            deposit_amount: Some(50_000),
-        },
+        reservation_req("R604")
+            .guest("Snapshot Guest")
+            .doc("DOC604")
+            .phone(None)
+            .dates("2026-05-01", "2026-05-02")
+            .nights(1)
+            .deposit(Some(50_000))
+            .build(),
     )
     .await
     .expect("replay succeeds");
@@ -3803,32 +2530,22 @@ async fn create_reservation_idempotent_replay_returns_stored_booking_snapshot() 
 #[tokio::test]
 async fn create_reservation_same_key_different_payload_conflicts() {
     let pool = test_pool().await;
-    seed_room(&pool, "R602").await.expect("seeds room");
-    seed_room(&pool, "R603").await.expect("seeds room");
-    seed_pricing_rule(&pool, "standard", 600_000)
+    seed_rooms_with_price(&pool, &["R602", "R603"], 600_000)
         .await
-        .expect("seeds pricing");
-    let ctx = crate::command_idempotency::WriteCommandContext::for_internal_test(
-        "req-reservation-conflict",
-        "idem-reservation-conflict",
-        "create_reservation",
-    );
+        .expect("seeds rooms/pricing");
+    let ctx = cmd("create_reservation", "idem-reservation-conflict");
 
     reservation_lifecycle::create_reservation_idempotent(
         &pool,
         &ctx,
-        CreateReservationRequest {
-            room_id: "R602".to_string(),
-            guest_name: "Conflict Guest".to_string(),
-            guest_doc_number: Some("DOC602".to_string()),
-            guest_phone: None,
-            check_in_date: "2026-05-01".to_string(),
-            check_out_date: "2026-05-02".to_string(),
-            nights: 1,
-            source: Some("phone".to_string()),
-            notes: None,
-            deposit_amount: Some(50_000),
-        },
+        reservation_req("R602")
+            .guest("Conflict Guest")
+            .doc("DOC602")
+            .phone(None)
+            .dates("2026-05-01", "2026-05-02")
+            .nights(1)
+            .deposit(Some(50_000))
+            .build(),
     )
     .await
     .expect("first reservation succeeds");
@@ -3836,18 +2553,14 @@ async fn create_reservation_same_key_different_payload_conflicts() {
     let error = reservation_lifecycle::create_reservation_idempotent(
         &pool,
         &ctx,
-        CreateReservationRequest {
-            room_id: "R603".to_string(),
-            guest_name: "Conflict Guest".to_string(),
-            guest_doc_number: Some("DOC602".to_string()),
-            guest_phone: None,
-            check_in_date: "2026-05-01".to_string(),
-            check_out_date: "2026-05-02".to_string(),
-            nights: 1,
-            source: Some("phone".to_string()),
-            notes: None,
-            deposit_amount: Some(50_000),
-        },
+        reservation_req("R603")
+            .guest("Conflict Guest")
+            .doc("DOC602")
+            .phone(None)
+            .dates("2026-05-01", "2026-05-02")
+            .nights(1)
+            .deposit(Some(50_000))
+            .build(),
     )
     .await
     .expect_err("same key with different payload conflicts");
@@ -3861,15 +2574,10 @@ async fn create_reservation_same_key_different_payload_conflicts() {
 #[tokio::test]
 async fn reservation_command_idempotency_create_hashes_deposit_as_integer_vnd_units() {
     let pool = test_pool().await;
-    seed_room(&pool, "R690").await.expect("seeds room");
-    seed_pricing_rule(&pool, "standard", 600_000)
+    seed_room_with_price(&pool, "R690", 600_000)
         .await
-        .expect("seeds pricing");
-    let ctx = crate::command_idempotency::WriteCommandContext::for_internal_test(
-        "req-reservation-deposit-vnd",
-        "idem-reservation-deposit-vnd",
-        "create_reservation",
-    );
+        .expect("seeds room/pricing");
+    let ctx = cmd("create_reservation", "idem-reservation-deposit-vnd");
     let request = CreateReservationRequest {
         room_id: "R690".to_string(),
         guest_name: "Deposit Units Guest".to_string(),
@@ -3947,23 +2655,14 @@ async fn reservation_command_idempotency_create_hashes_deposit_as_integer_vnd_un
 async fn reservation_command_idempotency_rejects_invalid_deposit_before_claim() {
     let pool = test_pool().await;
 
-    for (deposit_amount, request_id, idempotency_key) in [
-        (
-            -1,
-            "req-reservation-deposit-negative",
-            "idem-reservation-deposit-negative",
-        ),
+    for (deposit_amount, idempotency_key) in [
+        (-1, "idem-reservation-deposit-negative"),
         (
             crate::money::MAX_TRANSPORT_SAFE_MONEY_VND + 1,
-            "req-reservation-deposit-unsafe",
             "idem-reservation-deposit-unsafe",
         ),
     ] {
-        let ctx = crate::command_idempotency::WriteCommandContext::for_internal_test(
-            request_id,
-            idempotency_key,
-            "create_reservation",
-        );
+        let ctx = cmd("create_reservation", idempotency_key);
         let mut request = minimal_reservation_request("R691");
         request.deposit_amount = Some(deposit_amount);
 
@@ -3980,45 +2679,20 @@ async fn reservation_command_idempotency_rejects_invalid_deposit_before_claim() 
             "error should name the invalid field: {error:?}"
         );
 
-        let claim_count: i64 = sqlx::query_scalar(
-            "SELECT COUNT(*) FROM command_idempotency
-             WHERE command_name = ? AND idempotency_key = ?",
-        )
-        .bind(&ctx.command_name)
-        .bind(&ctx.idempotency_key)
-        .fetch_one(&pool)
-        .await
-        .unwrap();
-        assert_eq!(claim_count, 0);
-    }
-}
-
-fn reservation_modify_request(
-    booking_id: &str,
-    check_in: &str,
-    check_out: &str,
-    nights: i32,
-) -> crate::models::ModifyReservationRequest {
-    crate::models::ModifyReservationRequest {
-        booking_id: booking_id.to_string(),
-        new_check_in_date: check_in.to_string(),
-        new_check_out_date: check_out.to_string(),
-        new_nights: nights,
+        assert_eq!(
+            command_claim_count(&pool, &ctx.command_name, &ctx.idempotency_key).await,
+            0
+        );
     }
 }
 
 #[tokio::test]
 async fn reservation_command_idempotency_create_replay_does_not_duplicate_booking_or_calendar() {
     let pool = test_pool().await;
-    seed_room(&pool, "R691").await.expect("seeds room");
-    seed_pricing_rule(&pool, "standard", 600_000)
+    seed_room_with_price(&pool, "R691", 600_000)
         .await
-        .expect("seeds pricing");
-    let ctx = crate::command_idempotency::WriteCommandContext::for_internal_test(
-        "req-create-replay-no-dup",
-        "idem-create-replay-no-dup",
-        "reservation.create",
-    );
+        .expect("seeds room/pricing");
+    let ctx = cmd("reservation.create", "idem-create-replay-no-dup");
 
     let first = reservation_lifecycle::create_reservation_idempotent(
         &pool,
@@ -4035,17 +2709,8 @@ async fn reservation_command_idempotency_create_replay_does_not_duplicate_bookin
     .await
     .expect("create replays");
 
-    assert!(!first.replayed);
-    assert!(replay.replayed);
-    assert_eq!(first.response, replay.response);
-    assert_eq!(
-        sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM bookings WHERE room_id = ?")
-            .bind("R691")
-            .fetch_one(&pool)
-            .await
-            .expect("counts bookings"),
-        1
-    );
+    assert_replayed_pair(&first, &replay);
+    assert_eq!(booking_count_for_room(&pool, "R691").await, 1);
     assert_eq!(
         sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM room_calendar WHERE room_id = ?")
             .bind("R691")
@@ -4059,16 +2724,10 @@ async fn reservation_command_idempotency_create_replay_does_not_duplicate_bookin
 #[tokio::test]
 async fn reservation_command_idempotency_modify_replay_returns_stored_snapshot() {
     let pool = test_pool().await;
-    seed_room(&pool, "R692").await.unwrap();
-    seed_pricing_rule(&pool, "standard", 600_000).await.unwrap();
-    seed_booked_reservation(&pool, "B692", "R692")
+    seed_booked_reservation_with_price(&pool, "B692", "R692", 600_000)
         .await
         .unwrap();
-    let ctx = crate::command_idempotency::WriteCommandContext::for_internal_test(
-        "req-modify-snapshot",
-        "idem-modify-snapshot",
-        "reservation.modify",
-    );
+    let ctx = cmd("reservation.modify", "idem-modify-snapshot");
 
     let first = reservation_lifecycle::modify_reservation_idempotent(
         &pool,
@@ -4090,24 +2749,18 @@ async fn reservation_command_idempotency_modify_replay_returns_stored_snapshot()
     .await
     .expect("modify replays");
 
-    assert!(replay.replayed);
     assert_eq!(first.response, replay.response);
+    assert!(replay.replayed);
     assert_eq!(replay.response["total_price"], serde_json::json!(1_800_000));
 }
 
 #[tokio::test]
 async fn reservation_command_idempotency_modify_replay_does_not_duplicate_calendar() {
     let pool = test_pool().await;
-    seed_room(&pool, "R693").await.unwrap();
-    seed_pricing_rule(&pool, "standard", 600_000).await.unwrap();
-    seed_booked_reservation(&pool, "B693", "R693")
+    seed_booked_reservation_with_price(&pool, "B693", "R693", 600_000)
         .await
         .unwrap();
-    let ctx = crate::command_idempotency::WriteCommandContext::for_internal_test(
-        "req-modify-calendar",
-        "idem-modify-calendar",
-        "reservation.modify",
-    );
+    let ctx = cmd("reservation.modify", "idem-modify-calendar");
     reservation_lifecycle::modify_reservation_idempotent(
         &pool,
         &ctx,
@@ -4123,14 +2776,7 @@ async fn reservation_command_idempotency_modify_replay_does_not_duplicate_calend
     .await
     .expect("modify replays");
 
-    assert_eq!(
-        sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM room_calendar WHERE booking_id = ?")
-            .bind("B693")
-            .fetch_one(&pool)
-            .await
-            .expect("counts calendar rows"),
-        3
-    );
+    assert_eq!(calendar_count_for_booking(&pool, "B693").await, 3);
 }
 
 #[tokio::test]
@@ -4140,11 +2786,7 @@ async fn reservation_command_idempotency_cancel_replay_does_not_duplicate_cancel
     seed_booked_reservation(&pool, "B694", "R694")
         .await
         .unwrap();
-    let ctx = crate::command_idempotency::WriteCommandContext::for_internal_test(
-        "req-cancel-fee",
-        "idem-cancel-fee",
-        "reservation.cancel",
-    );
+    let ctx = cmd("reservation.cancel", "idem-cancel-fee");
 
     let first = reservation_lifecycle::cancel_reservation_idempotent(&pool, &ctx, "B694")
         .await
@@ -4153,8 +2795,8 @@ async fn reservation_command_idempotency_cancel_replay_does_not_duplicate_cancel
         .await
         .expect("cancel replays");
 
-    assert_eq!(first.response, replay.response);
     assert!(replay.replayed);
+    assert_eq!(first.response, replay.response);
     assert_eq!(
         sqlx::query_scalar::<_, i64>(
             "SELECT COUNT(*) FROM transactions WHERE booking_id = ? AND type = 'cancellation_fee'",
@@ -4170,16 +2812,10 @@ async fn reservation_command_idempotency_cancel_replay_does_not_duplicate_cancel
 #[tokio::test]
 async fn reservation_command_idempotency_confirm_replay_does_not_duplicate_room_charge() {
     let pool = test_pool().await;
-    seed_room(&pool, "R695").await.unwrap();
-    seed_pricing_rule(&pool, "standard", 600_000).await.unwrap();
-    seed_booked_reservation(&pool, "B695", "R695")
+    seed_booked_reservation_with_price(&pool, "B695", "R695", 600_000)
         .await
         .unwrap();
-    let ctx = crate::command_idempotency::WriteCommandContext::for_internal_test(
-        "req-confirm-charge",
-        "idem-confirm-charge",
-        "reservation.confirm",
-    );
+    let ctx = cmd("reservation.confirm", "idem-confirm-charge");
 
     reservation_lifecycle::confirm_reservation_idempotent(&pool, &ctx, "B695")
         .await
@@ -4203,16 +2839,10 @@ async fn reservation_command_idempotency_confirm_replay_does_not_duplicate_room_
 #[tokio::test]
 async fn reservation_command_idempotency_confirm_replay_does_not_requery_or_reprice_later_retry() {
     let pool = test_pool().await;
-    seed_room(&pool, "R696").await.unwrap();
-    seed_pricing_rule(&pool, "standard", 600_000).await.unwrap();
-    seed_booked_reservation(&pool, "B696", "R696")
+    seed_booked_reservation_with_price(&pool, "B696", "R696", 600_000)
         .await
         .unwrap();
-    let ctx = crate::command_idempotency::WriteCommandContext::for_internal_test(
-        "req-confirm-no-reprice",
-        "idem-confirm-no-reprice",
-        "reservation.confirm",
-    );
+    let ctx = cmd("reservation.confirm", "idem-confirm-no-reprice");
 
     let first = reservation_lifecycle::confirm_reservation_idempotent(&pool, &ctx, "B696")
         .await
@@ -4239,9 +2869,9 @@ async fn reservation_command_idempotency_confirm_replay_does_not_requery_or_repr
 async fn reservation_command_idempotency_modify_cancel_confirm_same_key_different_payload_conflicts(
 ) {
     let pool = test_pool().await;
-    seed_room(&pool, "R697A").await.unwrap();
-    seed_room(&pool, "R697B").await.unwrap();
-    seed_pricing_rule(&pool, "standard", 600_000).await.unwrap();
+    seed_rooms_with_price(&pool, &["R697A", "R697B"], 600_000)
+        .await
+        .unwrap();
     seed_booked_reservation(&pool, "B697A", "R697A")
         .await
         .unwrap();
@@ -4249,11 +2879,7 @@ async fn reservation_command_idempotency_modify_cancel_confirm_same_key_differen
         .await
         .unwrap();
 
-    let modify_ctx = crate::command_idempotency::WriteCommandContext::for_internal_test(
-        "req-modify-hash-conflict",
-        "idem-modify-hash-conflict",
-        "reservation.modify",
-    );
+    let modify_ctx = cmd("reservation.modify", "idem-modify-hash-conflict");
     reservation_lifecycle::modify_reservation_idempotent(
         &pool,
         &modify_ctx,
@@ -4283,11 +2909,7 @@ async fn reservation_command_idempotency_modify_cancel_confirm_same_key_differen
         crate::app_error::codes::CONFLICT_IDEMPOTENCY_HASH_MISMATCH
     );
 
-    let cancel_ctx = crate::command_idempotency::WriteCommandContext::for_internal_test(
-        "req-cancel-hash-conflict",
-        "idem-cancel-hash-conflict",
-        "reservation.cancel",
-    );
+    let cancel_ctx = cmd("reservation.cancel", "idem-cancel-hash-conflict");
     reservation_lifecycle::cancel_reservation_idempotent(&pool, &cancel_ctx, "B697A")
         .await
         .expect("first cancel succeeds");
@@ -4300,11 +2922,7 @@ async fn reservation_command_idempotency_modify_cancel_confirm_same_key_differen
         crate::app_error::codes::CONFLICT_IDEMPOTENCY_HASH_MISMATCH
     );
 
-    let confirm_ctx = crate::command_idempotency::WriteCommandContext::for_internal_test(
-        "req-confirm-hash-conflict",
-        "idem-confirm-hash-conflict",
-        "reservation.confirm",
-    );
+    let confirm_ctx = cmd("reservation.confirm", "idem-confirm-hash-conflict");
     reservation_lifecycle::confirm_reservation_idempotent(&pool, &confirm_ctx, "B697B")
         .await
         .expect("first confirm succeeds");
@@ -4321,9 +2939,7 @@ async fn reservation_command_idempotency_modify_cancel_confirm_same_key_differen
 #[tokio::test]
 async fn reservation_command_idempotency_modify_conflict_replays_terminal_room_unavailable() {
     let pool = test_pool().await;
-    seed_room(&pool, "R698").await.unwrap();
-    seed_pricing_rule(&pool, "standard", 600_000).await.unwrap();
-    seed_booked_reservation(&pool, "B698", "R698")
+    seed_booked_reservation_with_price(&pool, "B698", "R698", 600_000)
         .await
         .unwrap();
     sqlx::query(
@@ -4334,11 +2950,7 @@ async fn reservation_command_idempotency_modify_conflict_replays_terminal_room_u
     .execute(&pool)
     .await
     .expect("seeds conflicting calendar");
-    let ctx = crate::command_idempotency::WriteCommandContext::for_internal_test(
-        "req-modify-room-conflict",
-        "idem-modify-room-conflict",
-        "reservation.modify",
-    );
+    let ctx = cmd("reservation.modify", "idem-modify-room-conflict");
     let first = reservation_lifecycle::modify_reservation_idempotent(
         &pool,
         &ctx,
@@ -4388,11 +3000,7 @@ async fn reservation_command_idempotency_cancel_confirm_invalid_state_replays_te
         .await
         .expect("makes confirm invalid");
 
-    let cancel_ctx = crate::command_idempotency::WriteCommandContext::for_internal_test(
-        "req-cancel-invalid-replay",
-        "idem-cancel-invalid-replay",
-        "reservation.cancel",
-    );
+    let cancel_ctx = cmd("reservation.cancel", "idem-cancel-invalid-replay");
     let cancel_first =
         reservation_lifecycle::cancel_reservation_idempotent(&pool, &cancel_ctx, "B699A")
             .await
@@ -4407,11 +3015,7 @@ async fn reservation_command_idempotency_cancel_confirm_invalid_state_replays_te
             .await
             .expect_err("cancel invalid state replays");
 
-    let confirm_ctx = crate::command_idempotency::WriteCommandContext::for_internal_test(
-        "req-confirm-invalid-replay",
-        "idem-confirm-invalid-replay",
-        "reservation.confirm",
-    );
+    let confirm_ctx = cmd("reservation.confirm", "idem-confirm-invalid-replay");
     let confirm_first =
         reservation_lifecycle::confirm_reservation_idempotent(&pool, &confirm_ctx, "B699B")
             .await
@@ -4442,16 +3046,11 @@ async fn reservation_command_idempotency_cancel_confirm_invalid_state_replays_te
 async fn reservation_command_idempotency_missing_booking_for_cancel_modify_confirm_replays_terminal(
 ) {
     let pool = test_pool().await;
-    seed_room(&pool, "R700A").await.unwrap();
-    seed_room(&pool, "R700B").await.unwrap();
-    seed_room(&pool, "R700C").await.unwrap();
-    seed_pricing_rule(&pool, "standard", 600_000).await.unwrap();
+    seed_rooms_with_price(&pool, &["R700A", "R700B", "R700C"], 600_000)
+        .await
+        .unwrap();
 
-    let cancel_ctx = crate::command_idempotency::WriteCommandContext::for_internal_test(
-        "req-cancel-missing",
-        "idem-cancel-missing",
-        "reservation.cancel",
-    );
+    let cancel_ctx = cmd("reservation.cancel", "idem-cancel-missing");
     let cancel_first =
         reservation_lifecycle::cancel_reservation_idempotent(&pool, &cancel_ctx, "B700A")
             .await
@@ -4464,11 +3063,7 @@ async fn reservation_command_idempotency_missing_booking_for_cancel_modify_confi
             .await
             .expect_err("missing cancel booking replays");
 
-    let modify_ctx = crate::command_idempotency::WriteCommandContext::for_internal_test(
-        "req-modify-missing",
-        "idem-modify-missing",
-        "reservation.modify",
-    );
+    let modify_ctx = cmd("reservation.modify", "idem-modify-missing");
     let modify_first = reservation_lifecycle::modify_reservation_idempotent(
         &pool,
         &modify_ctx,
@@ -4487,11 +3082,7 @@ async fn reservation_command_idempotency_missing_booking_for_cancel_modify_confi
     .await
     .expect_err("missing modify booking replays");
 
-    let confirm_ctx = crate::command_idempotency::WriteCommandContext::for_internal_test(
-        "req-confirm-missing",
-        "idem-confirm-missing",
-        "reservation.confirm",
-    );
+    let confirm_ctx = cmd("reservation.confirm", "idem-confirm-missing");
     let confirm_first =
         reservation_lifecycle::confirm_reservation_idempotent(&pool, &confirm_ctx, "B700C")
             .await
@@ -4523,33 +3114,12 @@ async fn reservation_command_idempotency_duplicate_in_flight_returns_conflict() 
     seed_booked_reservation(&pool, "B701", "R701")
         .await
         .unwrap();
-    let ctx = crate::command_idempotency::WriteCommandContext::for_internal_test(
-        "req-cancel-in-flight",
-        "idem-cancel-in-flight",
-        "reservation.cancel",
-    );
+    let ctx = cmd("reservation.cancel", "idem-cancel-in-flight");
     let payload = serde_json::json!({
         "schema": "reservation.cancel.v1",
         "booking_id": "B701",
     });
-    let now = chrono::Utc::now().to_rfc3339();
-    let lease_expires_at = (chrono::Utc::now() + chrono::Duration::seconds(30)).to_rfc3339();
-    sqlx::query(
-        "INSERT INTO command_idempotency (
-            idempotency_key, command_name, request_hash, intent_json, lock_keys_json,
-            status, claim_token, retryable, lease_expires_at, created_at, updated_at, last_attempt_at
-        ) VALUES (?, ?, ?, '{}', '[]', 'in_progress', 'other-claim', 0, ?, ?, ?, ?)",
-    )
-    .bind(&ctx.idempotency_key)
-    .bind(&ctx.command_name)
-    .bind(crate::command_idempotency::stable_request_hash(&payload).expect("payload hashes"))
-    .bind(&lease_expires_at)
-    .bind(&now)
-    .bind(&now)
-    .bind(&now)
-    .execute(&pool)
-    .await
-    .expect("seeds in-flight row");
+    seed_live_in_progress_command(&pool, &ctx.command_name, &ctx.idempotency_key, &payload).await;
 
     let error = reservation_lifecycle::cancel_reservation_idempotent(&pool, &ctx, "B701")
         .await
@@ -4568,11 +3138,7 @@ async fn reservation_command_idempotency_retryable_reclaimable_failure_can_be_re
     seed_booked_reservation(&pool, "B702", "R702")
         .await
         .unwrap();
-    let ctx = crate::command_idempotency::WriteCommandContext::for_internal_test(
-        "req-cancel-reclaim",
-        "idem-cancel-reclaim",
-        "reservation.cancel",
-    );
+    let ctx = cmd("reservation.cancel", "idem-cancel-reclaim");
     let payload = serde_json::json!({
         "schema": "reservation.cancel.v1",
         "booking_id": "B702",
@@ -4618,16 +3184,10 @@ async fn reservation_command_idempotency_retryable_reclaimable_failure_can_be_re
 #[tokio::test]
 async fn reservation_command_idempotency_invalid_modify_nights_replays_terminal_error() {
     let pool = test_pool().await;
-    seed_room(&pool, "R703").await.unwrap();
-    seed_pricing_rule(&pool, "standard", 600_000).await.unwrap();
-    seed_booked_reservation(&pool, "B703", "R703")
+    seed_booked_reservation_with_price(&pool, "B703", "R703", 600_000)
         .await
         .unwrap();
-    let ctx = crate::command_idempotency::WriteCommandContext::for_internal_test(
-        "req-modify-invalid-nights",
-        "idem-modify-invalid-nights",
-        "reservation.modify",
-    );
+    let ctx = cmd("reservation.modify", "idem-modify-invalid-nights");
 
     let first = reservation_lifecycle::modify_reservation_idempotent(
         &pool,
@@ -4663,19 +3223,10 @@ async fn reservation_command_idempotency_invalid_modify_nights_replays_terminal_
 #[tokio::test]
 async fn reservation_command_idempotency_same_plain_key_across_commands_scopes_origin_rows() {
     let pool = test_pool().await;
-    seed_room(&pool, "R704").await.unwrap();
-    seed_pricing_rule(&pool, "standard", 600_000).await.unwrap();
+    seed_room_with_price(&pool, "R704", 600_000).await.unwrap();
     let plain_key = "idem-shared-reservation-origin";
-    let create_ctx = crate::command_idempotency::WriteCommandContext::for_internal_test(
-        "req-create-shared-origin",
-        plain_key,
-        "reservation.create",
-    );
-    let cancel_ctx = crate::command_idempotency::WriteCommandContext::for_internal_test(
-        "req-cancel-shared-origin",
-        plain_key,
-        "reservation.cancel",
-    );
+    let create_ctx = cmd("reservation.create", plain_key);
+    let cancel_ctx = cmd("reservation.cancel", plain_key);
 
     let created = reservation_lifecycle::create_reservation_idempotent(
         &pool,
@@ -4712,15 +3263,9 @@ async fn reservation_command_idempotency_same_plain_key_across_commands_scopes_o
 #[tokio::test]
 async fn reservation_lifecycle_smoke_covers_confirm_and_cancel_paths() {
     let pool = test_pool().await;
-    seed_room(&pool, "R-SMOKE-CONFIRM")
+    seed_rooms_with_price(&pool, &["R-SMOKE-CONFIRM", "R-SMOKE-CANCEL"], 600_000)
         .await
-        .expect("seed confirm room");
-    seed_room(&pool, "R-SMOKE-CANCEL")
-        .await
-        .expect("seed cancel room");
-    seed_pricing_rule(&pool, "standard", 600_000)
-        .await
-        .expect("seed pricing");
+        .expect("seed smoke rooms/pricing");
 
     let today = Local::now().date_naive();
     let reservation_request = |room_id: &str, start_offset_days: i64| {
@@ -4740,10 +3285,10 @@ async fn reservation_lifecycle_smoke_covers_confirm_and_cancel_paths() {
         }
     };
 
-    let create_confirm_ctx = crate::command_idempotency::WriteCommandContext::for_internal_test(
+    let create_confirm_ctx = cmd_with_request(
+        "create_reservation",
         "req-smoke-reservation-create-confirm",
         "idem-smoke-reservation-create-confirm",
-        "create_reservation",
     );
     let created_for_confirm = reservation_lifecycle::create_reservation_idempotent(
         &pool,
@@ -4761,40 +3306,18 @@ async fn reservation_lifecycle_smoke_covers_confirm_and_cancel_paths() {
         created_for_confirm.response["status"],
         serde_json::json!("booked")
     );
+    assert_room_status(&pool, "R-SMOKE-CONFIRM", "vacant").await;
+    assert_calendar_rows(&pool, &confirm_booking_id, "booked", 2).await;
     assert_eq!(
-        sqlx::query_scalar::<_, String>("SELECT status FROM rooms WHERE id = ?")
-            .bind("R-SMOKE-CONFIRM")
-            .fetch_one(&pool)
-            .await
-            .expect("confirm room status after create"),
-        "vacant"
-    );
-    assert_eq!(
-        sqlx::query_scalar::<_, i64>(
-            "SELECT COUNT(*) FROM room_calendar WHERE booking_id = ? AND status = 'booked'",
-        )
-        .bind(&confirm_booking_id)
-        .fetch_one(&pool)
-        .await
-        .expect("booked calendar rows after create"),
-        2
-    );
-    assert_eq!(
-        sqlx::query_scalar::<_, i64>(
-            "SELECT COALESCE(SUM(amount), 0) FROM transactions WHERE booking_id = ? AND type = 'deposit'",
-        )
-        .bind(&confirm_booking_id)
-        .fetch_one(&pool)
-        .await
-        .expect("reservation deposit total"),
+        transaction_sum(&pool, &confirm_booking_id, "deposit", None).await,
         50_000
     );
     assert_single_outbox_event(&pool, &create_confirm_ctx, "booking.reservation_created").await;
 
-    let confirm_ctx = crate::command_idempotency::WriteCommandContext::for_internal_test(
+    let confirm_ctx = cmd_with_request(
+        "confirm_reservation",
         "req-smoke-reservation-confirm",
         "idem-smoke-reservation-confirm",
-        "confirm_reservation",
     );
     let confirmed = reservation_lifecycle::confirm_reservation_idempotent(
         &pool,
@@ -4811,48 +3334,19 @@ async fn reservation_lifecycle_smoke_covers_confirm_and_cancel_paths() {
         .expect("confirmed reservation total price");
 
     assert_eq!(confirmed.response["status"], serde_json::json!("active"));
+    assert_booking_status(&pool, &confirm_booking_id, "active").await;
+    assert_room_status(&pool, "R-SMOKE-CONFIRM", "occupied").await;
+    assert_calendar_rows(&pool, &confirm_booking_id, "occupied", confirmed_nights).await;
     assert_eq!(
-        sqlx::query_scalar::<_, String>("SELECT status FROM bookings WHERE id = ?")
-            .bind(&confirm_booking_id)
-            .fetch_one(&pool)
-            .await
-            .expect("confirmed booking status"),
-        "active"
-    );
-    assert_eq!(
-        sqlx::query_scalar::<_, String>("SELECT status FROM rooms WHERE id = ?")
-            .bind("R-SMOKE-CONFIRM")
-            .fetch_one(&pool)
-            .await
-            .expect("confirm room status"),
-        "occupied"
-    );
-    assert_eq!(
-        sqlx::query_scalar::<_, i64>(
-            "SELECT COUNT(*) FROM room_calendar WHERE booking_id = ? AND status = 'occupied'",
-        )
-        .bind(&confirm_booking_id)
-        .fetch_one(&pool)
-        .await
-        .expect("occupied calendar rows after confirm"),
-        confirmed_nights
-    );
-    assert_eq!(
-        sqlx::query_scalar::<_, i64>(
-            "SELECT COALESCE(SUM(amount), 0) FROM transactions WHERE booking_id = ? AND type = 'charge'",
-        )
-        .bind(&confirm_booking_id)
-        .fetch_one(&pool)
-        .await
-        .expect("reservation room charge total"),
+        transaction_sum(&pool, &confirm_booking_id, "charge", None).await,
         confirmed_total_price
     );
     assert_single_outbox_event(&pool, &confirm_ctx, "booking.reservation_confirmed").await;
 
-    let create_cancel_ctx = crate::command_idempotency::WriteCommandContext::for_internal_test(
+    let create_cancel_ctx = cmd_with_request(
+        "create_reservation",
         "req-smoke-reservation-create-cancel",
         "idem-smoke-reservation-create-cancel",
-        "create_reservation",
     );
     let created_for_cancel = reservation_lifecycle::create_reservation_idempotent(
         &pool,
@@ -4867,10 +3361,10 @@ async fn reservation_lifecycle_smoke_covers_confirm_and_cancel_paths() {
         .to_string();
     assert_single_outbox_event(&pool, &create_cancel_ctx, "booking.reservation_created").await;
 
-    let cancel_ctx = crate::command_idempotency::WriteCommandContext::for_internal_test(
+    let cancel_ctx = cmd_with_request(
+        "cancel_reservation",
         "req-smoke-reservation-cancel",
         "idem-smoke-reservation-cancel",
-        "cancel_reservation",
     );
     let cancelled = reservation_lifecycle::cancel_reservation_idempotent(
         &pool,
@@ -4881,38 +3375,14 @@ async fn reservation_lifecycle_smoke_covers_confirm_and_cancel_paths() {
     .expect("reservation cancel succeeds");
 
     assert_eq!(cancelled.response["ok"], serde_json::json!(true));
+    assert_booking_status(&pool, &cancel_booking_id, "cancelled").await;
+    assert_room_status(&pool, "R-SMOKE-CANCEL", "vacant").await;
     assert_eq!(
-        sqlx::query_scalar::<_, String>("SELECT status FROM bookings WHERE id = ?")
-            .bind(&cancel_booking_id)
-            .fetch_one(&pool)
-            .await
-            .expect("cancelled booking status"),
-        "cancelled"
-    );
-    assert_eq!(
-        sqlx::query_scalar::<_, String>("SELECT status FROM rooms WHERE id = ?")
-            .bind("R-SMOKE-CANCEL")
-            .fetch_one(&pool)
-            .await
-            .expect("cancel room status"),
-        "vacant"
-    );
-    assert_eq!(
-        sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM room_calendar WHERE booking_id = ?")
-            .bind(&cancel_booking_id)
-            .fetch_one(&pool)
-            .await
-            .expect("cancelled calendar rows"),
+        calendar_count_for_booking(&pool, &cancel_booking_id).await,
         0
     );
     assert_eq!(
-        sqlx::query_scalar::<_, i64>(
-            "SELECT COALESCE(SUM(amount), 0) FROM transactions WHERE booking_id = ? AND type = 'cancellation_fee'",
-        )
-        .bind(&cancel_booking_id)
-        .fetch_one(&pool)
-        .await
-        .expect("cancellation fee total"),
+        transaction_sum(&pool, &cancel_booking_id, "cancellation_fee", None).await,
         50_000
     );
     assert_single_outbox_event(&pool, &cancel_ctx, "booking.reservation_cancelled").await;
@@ -4944,13 +3414,7 @@ async fn cancel_reservation_releases_calendar_and_keeps_fee_record() {
     assert_eq!(booking.get::<String, _>("status"), "cancelled");
     assert_eq!(booking.get::<Option<i64>, _>("paid_amount"), Some(50_000));
 
-    let remaining_calendar: (i64,) =
-        sqlx::query_as("SELECT COUNT(*) FROM room_calendar WHERE booking_id = ?")
-            .bind("B161")
-            .fetch_one(&pool)
-            .await
-            .unwrap();
-    assert_eq!(remaining_calendar.0, 0);
+    assert_eq!(calendar_count_for_booking(&pool, "B161").await, 0);
 
     let room = sqlx::query("SELECT status FROM rooms WHERE id = ?")
         .bind("R161")
@@ -5000,14 +3464,9 @@ async fn cancel_reservation_returns_invalid_state_when_booking_is_not_booked() {
 #[tokio::test]
 async fn do_create_reservation_returns_service_booking_and_leaves_room_vacant() {
     let pool = test_pool().await;
-    seed_room(&pool, "R162").await.unwrap();
-    seed_pricing_rule(&pool, "standard", 600_000).await.unwrap();
+    seed_room_with_price(&pool, "R162", 600_000).await.unwrap();
 
-    let ctx = crate::command_idempotency::WriteCommandContext::for_internal_test(
-        "req-do-create-reservation",
-        "idem-do-create-reservation",
-        "create_reservation",
-    );
+    let ctx = cmd("create_reservation", "idem-do-create-reservation");
     let booking =
         reservations::do_create_reservation(&pool, None, &ctx, minimal_reservation_request("R162"))
             .await
@@ -5025,14 +3484,7 @@ async fn do_create_reservation_returns_service_booking_and_leaves_room_vacant() 
         .unwrap();
     assert_eq!(room.get::<String, _>("status"), "vacant");
 
-    let calendar_days: (i64,) = sqlx::query_as(
-        "SELECT COUNT(*) FROM room_calendar WHERE booking_id = ? AND status = 'booked'",
-    )
-    .bind(&booking.id)
-    .fetch_one(&pool)
-    .await
-    .unwrap();
-    assert_eq!(calendar_days.0, 2);
+    assert_calendar_rows(&pool, &booking.id, "booked", 2).await;
 }
 
 #[tokio::test]
@@ -5049,11 +3501,7 @@ async fn do_cancel_reservation_cleans_legacy_booked_room_state() {
         .await
         .unwrap();
 
-    let ctx = crate::command_idempotency::WriteCommandContext::for_internal_test(
-        "req-do-cancel-reservation",
-        "idem-do-cancel-reservation",
-        "cancel_reservation",
-    );
+    let ctx = cmd("cancel_reservation", "idem-do-cancel-reservation");
     let response = reservations::do_cancel_reservation(&pool, None, &ctx, "B163")
         .await
         .unwrap();
@@ -5067,21 +3515,13 @@ async fn do_cancel_reservation_cleans_legacy_booked_room_state() {
         .unwrap();
     assert_eq!(room.get::<String, _>("status"), "vacant");
 
-    let remaining_calendar: (i64,) =
-        sqlx::query_as("SELECT COUNT(*) FROM room_calendar WHERE booking_id = ?")
-            .bind("B163")
-            .fetch_one(&pool)
-            .await
-            .unwrap();
-    assert_eq!(remaining_calendar.0, 0);
+    assert_eq!(calendar_count_for_booking(&pool, "B163").await, 0);
 }
 
 #[tokio::test]
 async fn confirm_reservation_reprices_and_marks_room_occupied() {
     let pool = test_pool().await;
-    seed_room(&pool, "R164").await.unwrap();
-    seed_pricing_rule(&pool, "standard", 600_000).await.unwrap();
-    seed_booked_reservation(&pool, "B164", "R164")
+    seed_booked_reservation_with_price(&pool, "B164", "R164", 600_000)
         .await
         .unwrap();
 
@@ -5179,9 +3619,7 @@ async fn confirm_reservation_reprices_and_marks_room_occupied() {
 #[tokio::test]
 async fn confirm_reservation_rejects_no_show_calendar_rows() {
     let pool = test_pool().await;
-    seed_room(&pool, "R165").await.unwrap();
-    seed_pricing_rule(&pool, "standard", 600_000).await.unwrap();
-    seed_booked_reservation(&pool, "B165", "R165")
+    seed_booked_reservation_with_price(&pool, "B165", "R165", 600_000)
         .await
         .unwrap();
 
@@ -5229,9 +3667,7 @@ async fn confirm_reservation_returns_invalid_state_when_booking_is_not_booked() 
 #[tokio::test]
 async fn confirm_reservation_late_arrival_persists_effective_checkout() {
     let pool = test_pool().await;
-    seed_room(&pool, "R165A").await.unwrap();
-    seed_pricing_rule(&pool, "standard", 600_000).await.unwrap();
-    seed_booked_reservation(&pool, "B165A", "R165A")
+    seed_booked_reservation_with_price(&pool, "B165A", "R165A", 600_000)
         .await
         .unwrap();
 
@@ -5291,9 +3727,7 @@ async fn confirm_reservation_late_arrival_persists_effective_checkout() {
 #[tokio::test]
 async fn confirm_reservation_preserves_extra_precheckin_payment() {
     let pool = test_pool().await;
-    seed_room(&pool, "R165B").await.unwrap();
-    seed_pricing_rule(&pool, "standard", 600_000).await.unwrap();
-    seed_booked_reservation(&pool, "B165B", "R165B")
+    seed_booked_reservation_with_price(&pool, "B165B", "R165B", 600_000)
         .await
         .unwrap();
 
@@ -5327,20 +3761,13 @@ async fn confirm_reservation_preserves_extra_precheckin_payment() {
 #[tokio::test]
 async fn modify_reservation_rewrites_booked_calendar_range() {
     let pool = test_pool().await;
-    seed_room(&pool, "R166").await.unwrap();
-    seed_pricing_rule(&pool, "standard", 600_000).await.unwrap();
-    seed_booked_reservation(&pool, "B166", "R166")
+    seed_booked_reservation_with_price(&pool, "B166", "R166", 600_000)
         .await
         .unwrap();
 
     let booking = reservation_lifecycle::modify_reservation(
         &pool,
-        crate::models::ModifyReservationRequest {
-            booking_id: "B166".to_string(),
-            new_check_in_date: "2026-04-23".to_string(),
-            new_check_out_date: "2026-04-26".to_string(),
-            new_nights: 3,
-        },
+        reservation_modify_request("B166", "2026-04-23", "2026-04-26", 3),
     )
     .await
     .unwrap();
@@ -5389,9 +3816,7 @@ async fn modify_reservation_rewrites_booked_calendar_range() {
 #[tokio::test]
 async fn modify_reservation_rejects_inconsistent_nights_input() {
     let pool = test_pool().await;
-    seed_room(&pool, "R166A").await.unwrap();
-    seed_pricing_rule(&pool, "standard", 600_000).await.unwrap();
-    seed_booked_reservation(&pool, "B166A", "R166A")
+    seed_booked_reservation_with_price(&pool, "B166A", "R166A", 600_000)
         .await
         .unwrap();
 
@@ -5429,12 +3854,7 @@ async fn modify_reservation_returns_invalid_state_when_booking_is_not_booked() {
 
     let error = reservation_lifecycle::modify_reservation(
         &pool,
-        crate::models::ModifyReservationRequest {
-            booking_id: "B-CAS-MOD".to_string(),
-            new_check_in_date: "2026-04-24".to_string(),
-            new_check_out_date: "2026-04-26".to_string(),
-            new_nights: 2,
-        },
+        reservation_modify_request("B-CAS-MOD", "2026-04-24", "2026-04-26", 2),
     )
     .await
     .expect_err("stale reservation should fail");
@@ -5447,27 +3867,16 @@ async fn modify_reservation_returns_invalid_state_when_booking_is_not_booked() {
 #[tokio::test]
 async fn do_modify_reservation_returns_service_booking_without_app_handle() {
     let pool = test_pool().await;
-    seed_room(&pool, "R167").await.unwrap();
-    seed_pricing_rule(&pool, "standard", 600_000).await.unwrap();
-    seed_booked_reservation(&pool, "B167", "R167")
+    seed_booked_reservation_with_price(&pool, "B167", "R167", 600_000)
         .await
         .unwrap();
 
-    let ctx = crate::command_idempotency::WriteCommandContext::for_internal_test(
-        "req-do-modify-reservation",
-        "idem-do-modify-reservation",
-        "modify_reservation",
-    );
+    let ctx = cmd("modify_reservation", "idem-do-modify-reservation");
     let booking = reservations::do_modify_reservation(
         &pool,
         None,
         &ctx,
-        crate::models::ModifyReservationRequest {
-            booking_id: "B167".to_string(),
-            new_check_in_date: "2026-04-24".to_string(),
-            new_check_out_date: "2026-04-26".to_string(),
-            new_nights: 2,
-        },
+        reservation_modify_request("B167", "2026-04-24", "2026-04-26", 2),
     )
     .await
     .unwrap();
@@ -5478,14 +3887,7 @@ async fn do_modify_reservation_returns_service_booking_without_app_handle() {
     assert_eq!(booking.nights, 2);
     assert_eq!(booking.total_price, 1_200_000);
 
-    let calendar_days: (i64,) = sqlx::query_as(
-        "SELECT COUNT(*) FROM room_calendar WHERE booking_id = ? AND status = 'booked'",
-    )
-    .bind("B167")
-    .fetch_one(&pool)
-    .await
-    .unwrap();
-    assert_eq!(calendar_days.0, 2);
+    assert_calendar_rows(&pool, "B167", "booked", 2).await;
 }
 
 #[tokio::test]
@@ -5501,12 +3903,7 @@ async fn check_in_posts_charge_and_marks_room_occupied() {
     .await
     .unwrap();
 
-    let room = sqlx::query("SELECT status FROM rooms WHERE id = ?")
-        .bind("R201")
-        .fetch_one(&pool)
-        .await
-        .unwrap();
-    assert_eq!(room.get::<String, _>("status"), "occupied");
+    assert_room_status(&pool, "R201", "occupied").await;
 
     let charge = sqlx::query(
         "SELECT type, amount FROM transactions WHERE booking_id = ? AND type = 'charge' LIMIT 1",
@@ -5518,33 +3915,22 @@ async fn check_in_posts_charge_and_marks_room_occupied() {
     assert_eq!(charge.get::<String, _>("type"), "charge");
     assert_eq!(charge.get::<i64, _>("amount"), booking.total_price);
 
-    let calendar_days: (i64,) = sqlx::query_as(
-        "SELECT COUNT(*) FROM room_calendar WHERE booking_id = ? AND status = 'occupied'",
-    )
-    .bind(&booking.id)
-    .fetch_one(&pool)
-    .await
-    .unwrap();
-    assert_eq!(calendar_days.0, 2);
+    assert_calendar_rows(&pool, &booking.id, "occupied", 2).await;
 }
 
 #[tokio::test]
 async fn stay_lifecycle_smoke_covers_checkin_extend_and_checkout() {
     let pool = test_pool().await;
-    seed_room(&pool, "R-SMOKE-STAY")
+    seed_room_with_price(&pool, "R-SMOKE-STAY", 250_000)
         .await
-        .expect("seed stay room");
-    seed_pricing_rule(&pool, "standard", 250_000)
-        .await
-        .expect("seed stay pricing");
+        .expect("seed stay room/pricing");
 
-    let check_in_ctx = crate::command_idempotency::WriteCommandContext::for_internal_test(
+    let check_in_ctx = cmd_with_request(
+        "check_in",
         "req-smoke-stay-checkin",
         "idem-smoke-stay-checkin",
-        "check_in",
     );
-    let mut check_in_req = minimal_checkin_request("R-SMOKE-STAY");
-    check_in_req.paid_amount = Some(50_000);
+    let check_in_req = paid_checkin_req("R-SMOKE-STAY", 50_000);
 
     let checked_in = stay_lifecycle::check_in_idempotent(
         &pool,
@@ -5564,58 +3950,29 @@ async fn stay_lifecycle_smoke_covers_checkin_extend_and_checkout() {
         .to_string();
 
     assert_eq!(checked_in.response["status"], serde_json::json!("active"));
+    assert_booking_status(&pool, &booking_id, "active").await;
+    assert_room_status(&pool, "R-SMOKE-STAY", "occupied").await;
+    assert_calendar_rows(&pool, &booking_id, "occupied", 2).await;
     assert_eq!(
-        sqlx::query_scalar::<_, String>("SELECT status FROM bookings WHERE id = ?")
-            .bind(&booking_id)
-            .fetch_one(&pool)
-            .await
-            .expect("active booking status"),
-        "active"
-    );
-    assert_eq!(
-        sqlx::query_scalar::<_, String>("SELECT status FROM rooms WHERE id = ?")
-            .bind("R-SMOKE-STAY")
-            .fetch_one(&pool)
-            .await
-            .expect("occupied stay room"),
-        "occupied"
-    );
-    assert_eq!(
-        sqlx::query_scalar::<_, i64>(
-            "SELECT COUNT(*) FROM room_calendar WHERE booking_id = ? AND status = 'occupied'",
-        )
-        .bind(&booking_id)
-        .fetch_one(&pool)
-        .await
-        .expect("occupied calendar rows after check-in"),
-        2
-    );
-    assert_eq!(
-        sqlx::query_scalar::<_, i64>(
-            "SELECT COALESCE(SUM(amount), 0) FROM transactions WHERE booking_id = ? AND type = 'charge'",
-        )
-        .bind(&booking_id)
-        .fetch_one(&pool)
-        .await
-        .expect("check-in charge total"),
+        transaction_sum(&pool, &booking_id, "charge", None).await,
         500_000
     );
     assert_eq!(
-        sqlx::query_scalar::<_, i64>(
-            "SELECT COALESCE(SUM(amount), 0) FROM transactions WHERE booking_id = ? AND type = 'payment' AND note = 'Thanh toán khi check-in'",
+        transaction_sum(
+            &pool,
+            &booking_id,
+            "payment",
+            Some("Thanh toán khi check-in")
         )
-        .bind(&booking_id)
-        .fetch_one(&pool)
-        .await
-        .expect("check-in payment total"),
+        .await,
         50_000
     );
     assert_single_outbox_event(&pool, &check_in_ctx, "booking.checked_in").await;
 
-    let extend_ctx = crate::command_idempotency::WriteCommandContext::for_internal_test(
+    let extend_ctx = cmd_with_request(
+        "extend_stay",
         "req-smoke-stay-extend",
         "idem-smoke-stay-extend",
-        "extend_stay",
     );
     let extended = stay_lifecycle::extend_stay_idempotent(&pool, &extend_ctx, &booking_id)
         .await
@@ -5631,72 +3988,30 @@ async fn stay_lifecycle_smoke_covers_checkin_extend_and_checkout() {
     assert_eq!(extended.response["nights"], serde_json::json!(3));
     assert_eq!(extended.response["total_price"], serde_json::json!(750_000));
     assert_eq!(extended_checkout, initial_checkout + Duration::days(1));
+    assert_calendar_rows(&pool, &booking_id, "occupied", 3).await;
     assert_eq!(
-        sqlx::query_scalar::<_, i64>(
-            "SELECT COUNT(*) FROM room_calendar WHERE booking_id = ? AND status = 'occupied'",
-        )
-        .bind(&booking_id)
-        .fetch_one(&pool)
-        .await
-        .expect("occupied calendar rows after extend"),
-        3
-    );
-    assert_eq!(
-        sqlx::query_scalar::<_, i64>(
-            "SELECT COALESCE(SUM(amount), 0) FROM transactions WHERE booking_id = ? AND type = 'charge' AND note = 'Extended stay +1 night'",
-        )
-        .bind(&booking_id)
-        .fetch_one(&pool)
-        .await
-        .expect("extension charge total"),
+        transaction_sum(&pool, &booking_id, "charge", Some("Extended stay +1 night")).await,
         250_000
     );
     assert_single_outbox_event(&pool, &extend_ctx, "booking.stay_extended").await;
 
-    let check_out_ctx = crate::command_idempotency::WriteCommandContext::for_internal_test(
+    let check_out_ctx = cmd_with_request(
+        "check_out",
         "req-smoke-stay-checkout",
         "idem-smoke-stay-checkout",
-        "check_out",
     );
     let checked_out = stay_lifecycle::check_out_idempotent(
         &pool,
         &check_out_ctx,
-        CheckOutRequest {
-            booking_id: booking_id.clone(),
-            settlement_mode: CheckoutSettlementMode::BookedNights,
-            final_total: 750_000,
-        },
+        checkout_req(&booking_id, CheckoutSettlementMode::BookedNights, 750_000),
     )
     .await
     .expect("stay checkout succeeds");
 
     assert_eq!(checked_out.response["ok"], serde_json::json!(true));
-    assert_eq!(
-        sqlx::query_scalar::<_, String>("SELECT status FROM bookings WHERE id = ?")
-            .bind(&booking_id)
-            .fetch_one(&pool)
-            .await
-            .expect("checked-out booking status"),
-        "checked_out"
-    );
-    assert_eq!(
-        sqlx::query_scalar::<_, String>("SELECT status FROM rooms WHERE id = ?")
-            .bind("R-SMOKE-STAY")
-            .fetch_one(&pool)
-            .await
-            .expect("room status after checkout"),
-        "cleaning"
-    );
-    assert_eq!(
-        sqlx::query_scalar::<_, i64>(
-            "SELECT COUNT(*) FROM housekeeping WHERE room_id = ? AND status = 'needs_cleaning'",
-        )
-        .bind("R-SMOKE-STAY")
-        .fetch_one(&pool)
-        .await
-        .expect("checkout housekeeping task"),
-        1
-    );
+    assert_booking_status(&pool, &booking_id, "checked_out").await;
+    assert_room_status(&pool, "R-SMOKE-STAY", "cleaning").await;
+    assert_housekeeping_rows(&pool, "R-SMOKE-STAY", "needs_cleaning", 1).await;
     assert_eq!(
         sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM room_calendar WHERE booking_id = ?")
             .bind(&booking_id)
@@ -5706,40 +4021,28 @@ async fn stay_lifecycle_smoke_covers_checkin_extend_and_checkout() {
         0
     );
     assert_eq!(
-        sqlx::query_scalar::<_, i64>(
-            "SELECT COALESCE(SUM(amount), 0) FROM transactions WHERE booking_id = ? AND type = 'payment' AND note = 'Thanh toán khi check-out'",
+        transaction_sum(
+            &pool,
+            &booking_id,
+            "payment",
+            Some("Thanh toán khi check-out")
         )
-        .bind(&booking_id)
-        .fetch_one(&pool)
-        .await
-        .expect("checkout payment delta"),
+        .await,
         700_000
     );
-    assert_eq!(
-        sqlx::query_scalar::<_, i64>("SELECT paid_amount FROM bookings WHERE id = ?")
-            .bind(&booking_id)
-            .fetch_one(&pool)
-            .await
-            .expect("paid amount after checkout"),
-        750_000
-    );
+    assert_eq!(booking_paid_amount(&pool, &booking_id).await, Some(750_000));
     assert_single_outbox_event(&pool, &check_out_ctx, "booking.checked_out").await;
 }
 
 #[tokio::test]
 async fn check_in_idempotent_retry_replays_and_does_not_duplicate_rows() {
     let pool = test_pool().await;
-    seed_room(&pool, "R-CHECKIN-IDEM").await.unwrap();
-    seed_pricing_rule(&pool, "standard", 250_000).await.unwrap();
-    let ctx = crate::command_idempotency::WriteCommandContext::for_internal_test(
-        "req-checkin-idem",
-        "idem-checkin-1",
-        "check_in",
-    );
-    let mut first_req = minimal_checkin_request("R-CHECKIN-IDEM");
-    first_req.paid_amount = Some(50_000);
-    let mut second_req = minimal_checkin_request("R-CHECKIN-IDEM");
-    second_req.paid_amount = Some(50_000);
+    seed_room_with_price(&pool, "R-CHECKIN-IDEM", 250_000)
+        .await
+        .unwrap();
+    let ctx = cmd_with_request("check_in", "req-checkin-idem", "idem-checkin-1");
+    let first_req = paid_checkin_req("R-CHECKIN-IDEM", 50_000);
+    let second_req = paid_checkin_req("R-CHECKIN-IDEM", 50_000);
 
     let first =
         stay_lifecycle::check_in_idempotent(&pool, &ctx, first_req, Some("user-1".to_string()))
@@ -5750,48 +4053,16 @@ async fn check_in_idempotent_retry_replays_and_does_not_duplicate_rows() {
             .await
             .unwrap();
 
-    assert!(!first.replayed);
-    assert!(second.replayed);
-    assert_eq!(first.response, second.response);
+    assert_replayed_pair(&first, &second);
 
     let booking_id = first.response["id"].as_str().unwrap();
-    let booking_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM bookings WHERE room_id = ?")
-        .bind("R-CHECKIN-IDEM")
-        .fetch_one(&pool)
-        .await
-        .unwrap();
-    assert_eq!(booking_count, 1);
+    assert_eq!(booking_count_for_room(&pool, "R-CHECKIN-IDEM").await, 1);
+    assert_eq!(booking_guest_count_for_booking(&pool, booking_id).await, 1);
+    assert_eq!(transaction_count_for_booking(&pool, booking_id).await, 2);
 
-    let guest_link_count: i64 =
-        sqlx::query_scalar("SELECT COUNT(*) FROM booking_guests WHERE booking_id = ?")
-            .bind(booking_id)
-            .fetch_one(&pool)
-            .await
-            .unwrap();
-    assert_eq!(guest_link_count, 1);
+    assert_eq!(booking_paid_amount(&pool, booking_id).await, Some(50_000));
 
-    let transaction_count: i64 =
-        sqlx::query_scalar("SELECT COUNT(*) FROM transactions WHERE booking_id = ?")
-            .bind(booking_id)
-            .fetch_one(&pool)
-            .await
-            .unwrap();
-    assert_eq!(transaction_count, 2);
-
-    let paid_amount: i64 = sqlx::query_scalar("SELECT paid_amount FROM bookings WHERE id = ?")
-        .bind(booking_id)
-        .fetch_one(&pool)
-        .await
-        .unwrap();
-    assert_eq!(paid_amount, 50_000);
-
-    let calendar_count: i64 =
-        sqlx::query_scalar("SELECT COUNT(*) FROM room_calendar WHERE booking_id = ?")
-            .bind(booking_id)
-            .fetch_one(&pool)
-            .await
-            .unwrap();
-    assert_eq!(calendar_count, 2);
+    assert_eq!(calendar_count_for_booking(&pool, booking_id).await, 2);
     assert_single_outbox_event(&pool, &ctx, "booking.checked_in").await;
 }
 
@@ -5800,16 +4071,8 @@ async fn two_check_in_commands_for_same_room_leave_one_booking_and_consistent_ca
     let pool = test_pool().await;
     seed_room(&pool, "R-CHECKIN-RACE").await.unwrap();
     seed_pricing_rule(&pool, "standard", 250_000).await.unwrap();
-    let first_ctx = crate::command_idempotency::WriteCommandContext::for_internal_test(
-        "req-checkin-race-1",
-        "idem-checkin-race-1",
-        "check_in",
-    );
-    let second_ctx = crate::command_idempotency::WriteCommandContext::for_internal_test(
-        "req-checkin-race-2",
-        "idem-checkin-race-2",
-        "check_in",
-    );
+    let first_ctx = cmd_with_request("check_in", "req-checkin-race-1", "idem-checkin-race-1");
+    let second_ctx = cmd_with_request("check_in", "req-checkin-race-2", "idem-checkin-race-2");
 
     let (first, second) = tokio::join!(
         stay_lifecycle::check_in_idempotent(
@@ -5844,12 +4107,7 @@ async fn two_check_in_commands_for_same_room_leave_one_booking_and_consistent_ca
         .unwrap();
     assert_eq!(booking_count, 1);
 
-    let room_status: String = sqlx::query_scalar("SELECT status FROM rooms WHERE id = ?")
-        .bind("R-CHECKIN-RACE")
-        .fetch_one(&pool)
-        .await
-        .unwrap();
-    assert_eq!(room_status, "occupied");
+    assert_room_status(&pool, "R-CHECKIN-RACE", "occupied").await;
 
     let occupied_calendar_count: i64 = sqlx::query_scalar(
         "SELECT COUNT(*) FROM room_calendar WHERE room_id = ? AND status = 'occupied'",
@@ -5864,13 +4122,10 @@ async fn two_check_in_commands_for_same_room_leave_one_booking_and_consistent_ca
 #[tokio::test]
 async fn check_in_idempotent_same_key_changed_guest_conflicts() {
     let pool = test_pool().await;
-    seed_room(&pool, "R-CHECKIN-HASH").await.unwrap();
-    seed_pricing_rule(&pool, "standard", 250_000).await.unwrap();
-    let ctx = crate::command_idempotency::WriteCommandContext::for_internal_test(
-        "req-checkin-hash",
-        "idem-checkin-hash",
-        "check_in",
-    );
+    seed_room_with_price(&pool, "R-CHECKIN-HASH", 250_000)
+        .await
+        .unwrap();
+    let ctx = cmd_with_request("check_in", "req-checkin-hash", "idem-checkin-hash");
 
     stay_lifecycle::check_in_idempotent(
         &pool,
@@ -5899,11 +4154,7 @@ async fn check_in_idempotent_duplicate_in_flight_returns_conflict() {
     let pool = test_pool().await;
     seed_room(&pool, "R-CHECKIN-LIVE").await.unwrap();
     seed_pricing_rule(&pool, "standard", 250_000).await.unwrap();
-    let ctx = crate::command_idempotency::WriteCommandContext::for_internal_test(
-        "req-checkin-live",
-        "idem-checkin-live",
-        "check_in",
-    );
+    let ctx = cmd_with_request("check_in", "req-checkin-live", "idem-checkin-live");
     let payload = serde_json::json!({
         "schema": "stay.check_in.v1",
         "room_id": "R-CHECKIN-LIVE",
@@ -5925,25 +4176,7 @@ async fn check_in_idempotent_duplicate_in_flight_returns_conflict() {
         "paid_amount": 0,
         "pricing_type": "nightly",
     });
-    let now = chrono::Utc::now().to_rfc3339();
-    let lease_expires_at = (chrono::Utc::now() + chrono::Duration::seconds(30)).to_rfc3339();
-
-    sqlx::query(
-        "INSERT INTO command_idempotency (
-            idempotency_key, command_name, request_hash, intent_json, lock_keys_json,
-            status, claim_token, retryable, lease_expires_at, created_at, updated_at, last_attempt_at
-        ) VALUES (?, ?, ?, '{}', '[]', 'in_progress', 'other-claim', 0, ?, ?, ?, ?)",
-    )
-    .bind(&ctx.idempotency_key)
-    .bind(&ctx.command_name)
-    .bind(crate::command_idempotency::stable_request_hash(&payload).expect("payload hashes"))
-    .bind(&lease_expires_at)
-    .bind(&now)
-    .bind(&now)
-    .bind(&now)
-    .execute(&pool)
-    .await
-    .expect("seeds in-flight row");
+    seed_live_in_progress_command(&pool, &ctx.command_name, &ctx.idempotency_key, &payload).await;
 
     let error = stay_lifecycle::check_in_idempotent(
         &pool,
@@ -5978,10 +4211,10 @@ async fn check_in_fails_when_second_pool_blocks_room_calendar_first() {
     .await
     .unwrap();
 
-    let ctx = crate::command_idempotency::WriteCommandContext::for_internal_test(
+    let ctx = cmd_with_request(
+        "check_in",
         "req-checkin-2pool-calendar",
         "idem-checkin-2pool-calendar",
-        "check_in",
     );
     let error = stay_lifecycle::check_in_idempotent(
         &pool_a,
@@ -6016,32 +4249,23 @@ async fn check_out_idempotent_retry_replays_without_duplicate_money_or_housekeep
     seed_active_booking(&pool, "B-CHECKOUT-IDEM", "R-CHECKOUT-IDEM")
         .await
         .unwrap();
-    let first_req = CheckOutRequest {
-        booking_id: "B-CHECKOUT-IDEM".to_string(),
-        settlement_mode: CheckoutSettlementMode::BookedNights,
-        final_total: 1_000_000,
+    let ctx = cmd_with_request("check_out", "req-checkout-idem", "idem-checkout-1");
+    let replay_checkout = || {
+        checkout_req(
+            "B-CHECKOUT-IDEM",
+            CheckoutSettlementMode::BookedNights,
+            1_000_000,
+        )
     };
-    let second_req = CheckOutRequest {
-        booking_id: "B-CHECKOUT-IDEM".to_string(),
-        settlement_mode: CheckoutSettlementMode::BookedNights,
-        final_total: 1_000_000,
-    };
-    let ctx = crate::command_idempotency::WriteCommandContext::for_internal_test(
-        "req-checkout-idem",
-        "idem-checkout-1",
-        "check_out",
-    );
 
-    let first = stay_lifecycle::check_out_idempotent(&pool, &ctx, first_req)
+    let first = stay_lifecycle::check_out_idempotent(&pool, &ctx, replay_checkout())
         .await
         .unwrap();
-    let second = stay_lifecycle::check_out_idempotent(&pool, &ctx, second_req)
+    let second = stay_lifecycle::check_out_idempotent(&pool, &ctx, replay_checkout())
         .await
         .unwrap();
 
-    assert!(!first.replayed);
-    assert!(second.replayed);
-    assert_eq!(first.response, second.response);
+    assert_replayed_pair(&first, &second);
 
     let housekeeping_count: i64 =
         sqlx::query_scalar("SELECT COUNT(*) FROM housekeeping WHERE room_id = ?")
@@ -6074,11 +4298,7 @@ async fn check_out_idempotent_same_key_changed_total_conflicts() {
     seed_active_booking(&pool, "B-CHECKOUT-HASH", "R-CHECKOUT-HASH")
         .await
         .unwrap();
-    let ctx = crate::command_idempotency::WriteCommandContext::for_internal_test(
-        "req-checkout-hash",
-        "idem-checkout-hash",
-        "check_out",
-    );
+    let ctx = cmd_with_request("check_out", "req-checkout-hash", "idem-checkout-hash");
     let first_req = CheckOutRequest {
         booking_id: "B-CHECKOUT-HASH".to_string(),
         settlement_mode: CheckoutSettlementMode::BookedNights,
@@ -6110,45 +4330,23 @@ async fn check_out_idempotent_duplicate_in_flight_returns_conflict() {
     seed_active_booking(&pool, "B-CHECKOUT-LIVE", "R-CHECKOUT-LIVE")
         .await
         .unwrap();
-    let ctx = crate::command_idempotency::WriteCommandContext::for_internal_test(
-        "req-checkout-live",
-        "idem-checkout-live",
-        "check_out",
-    );
+    let ctx = cmd_with_request("check_out", "req-checkout-live", "idem-checkout-live");
     let payload = serde_json::json!({
         "schema": "stay.check_out.v1",
         "booking_id": "B-CHECKOUT-LIVE",
         "settlement_mode": "booked_nights",
         "final_total": 1_000_000,
     });
-    let now = chrono::Utc::now().to_rfc3339();
-    let lease_expires_at = (chrono::Utc::now() + chrono::Duration::seconds(30)).to_rfc3339();
-
-    sqlx::query(
-        "INSERT INTO command_idempotency (
-            idempotency_key, command_name, request_hash, intent_json, lock_keys_json,
-            status, claim_token, retryable, lease_expires_at, created_at, updated_at, last_attempt_at
-        ) VALUES (?, ?, ?, '{}', '[]', 'in_progress', 'other-claim', 0, ?, ?, ?, ?)",
-    )
-    .bind(&ctx.idempotency_key)
-    .bind(&ctx.command_name)
-    .bind(crate::command_idempotency::stable_request_hash(&payload).expect("payload hashes"))
-    .bind(&lease_expires_at)
-    .bind(&now)
-    .bind(&now)
-    .bind(&now)
-    .execute(&pool)
-    .await
-    .expect("seeds in-flight row");
+    seed_live_in_progress_command(&pool, &ctx.command_name, &ctx.idempotency_key, &payload).await;
 
     let error = stay_lifecycle::check_out_idempotent(
         &pool,
         &ctx,
-        CheckOutRequest {
-            booking_id: "B-CHECKOUT-LIVE".to_string(),
-            settlement_mode: CheckoutSettlementMode::BookedNights,
-            final_total: 1_000_000,
-        },
+        checkout_req(
+            "B-CHECKOUT-LIVE",
+            CheckoutSettlementMode::BookedNights,
+            1_000_000,
+        ),
     )
     .await
     .expect_err("duplicate in-flight conflicts");
@@ -6209,11 +4407,7 @@ async fn checkout_fails_when_second_pool_checked_out_booking_first() {
 
     let error = stay_lifecycle::check_out(
         &pool_a,
-        CheckOutRequest {
-            booking_id: "B-2POOL".to_string(),
-            settlement_mode: CheckoutSettlementMode::BookedNights,
-            final_total: 100_000,
-        },
+        checkout_req("B-2POOL", CheckoutSettlementMode::BookedNights, 100_000),
     )
     .await
     .expect_err("checkout should reject stale booking state");
@@ -6225,6 +4419,45 @@ async fn checkout_fails_when_second_pool_checked_out_booking_first() {
     pool_a.close().await;
     pool_b.close().await;
     let _ = std::fs::remove_file(db_path);
+}
+
+fn checkout_dt(year: i32, month: u32, day: u32, hour: u32, minute: u32) -> chrono::DateTime<Local> {
+    chrono::Local
+        .with_ymd_and_hms(year, month, day, hour, minute, 0)
+        .single()
+        .unwrap()
+}
+
+async fn preview_checkout_at(
+    pool: &sqlx::Pool<sqlx::Sqlite>,
+    booking_id: &str,
+    settlement_mode: CheckoutSettlementMode,
+    now: chrono::DateTime<Local>,
+) -> crate::domain::booking::BookingResult<crate::models::CheckoutSettlementPreview> {
+    stay_lifecycle::preview_checkout_settlement_at(
+        pool,
+        CheckoutSettlementPreviewRequest {
+            booking_id: booking_id.to_string(),
+            settlement_mode,
+        },
+        now,
+    )
+    .await
+}
+
+async fn check_out_booking_at(
+    pool: &sqlx::Pool<sqlx::Sqlite>,
+    booking_id: &str,
+    settlement_mode: CheckoutSettlementMode,
+    final_total: i64,
+    now: chrono::DateTime<Local>,
+) -> crate::domain::booking::BookingResult<()> {
+    stay_lifecycle::check_out_at(
+        pool,
+        checkout_req(booking_id, settlement_mode, final_total),
+        now,
+    )
+    .await
 }
 
 #[tokio::test]
@@ -6245,16 +4478,11 @@ async fn check_out_settles_same_day_actual_nights_to_minimum_one_night() {
     .await
     .unwrap();
 
-    let preview = stay_lifecycle::preview_checkout_settlement_at(
+    let preview = preview_checkout_at(
         &pool,
-        CheckoutSettlementPreviewRequest {
-            booking_id: "B410".to_string(),
-            settlement_mode: CheckoutSettlementMode::ActualNights,
-        },
-        chrono::Local
-            .with_ymd_and_hms(2026, 4, 20, 18, 0, 0)
-            .single()
-            .unwrap(),
+        "B410",
+        CheckoutSettlementMode::ActualNights,
+        checkout_dt(2026, 4, 20, 18, 0),
     )
     .await
     .unwrap();
@@ -6262,17 +4490,12 @@ async fn check_out_settles_same_day_actual_nights_to_minimum_one_night() {
     assert_eq!(preview.settled_nights, 1);
     assert_eq!(preview.recommended_total, 500_000);
 
-    stay_lifecycle::check_out_at(
+    check_out_booking_at(
         &pool,
-        CheckOutRequest {
-            booking_id: "B410".to_string(),
-            settlement_mode: CheckoutSettlementMode::ActualNights,
-            final_total: preview.recommended_total,
-        },
-        chrono::Local
-            .with_ymd_and_hms(2026, 4, 20, 18, 0, 0)
-            .single()
-            .unwrap(),
+        "B410",
+        CheckoutSettlementMode::ActualNights,
+        preview.recommended_total,
+        checkout_dt(2026, 4, 20, 18, 0),
     )
     .await
     .unwrap();
@@ -6315,16 +4538,11 @@ async fn check_out_keeps_active_booking_values_for_booked_nights_mode() {
         .await
         .unwrap();
 
-    let preview = stay_lifecycle::preview_checkout_settlement_at(
+    let preview = preview_checkout_at(
         &pool,
-        CheckoutSettlementPreviewRequest {
-            booking_id: "B411".to_string(),
-            settlement_mode: CheckoutSettlementMode::BookedNights,
-        },
-        chrono::Local
-            .with_ymd_and_hms(2026, 4, 22, 9, 0, 0)
-            .single()
-            .unwrap(),
+        "B411",
+        CheckoutSettlementMode::BookedNights,
+        checkout_dt(2026, 4, 22, 9, 0),
     )
     .await
     .unwrap();
@@ -6332,17 +4550,12 @@ async fn check_out_keeps_active_booking_values_for_booked_nights_mode() {
     assert_eq!(preview.settled_nights, 5);
     assert_eq!(preview.recommended_total, 2_500_000);
 
-    stay_lifecycle::check_out_at(
+    check_out_booking_at(
         &pool,
-        CheckOutRequest {
-            booking_id: "B411".to_string(),
-            settlement_mode: CheckoutSettlementMode::BookedNights,
-            final_total: preview.recommended_total,
-        },
-        chrono::Local
-            .with_ymd_and_hms(2026, 4, 22, 9, 0, 0)
-            .single()
-            .unwrap(),
+        "B411",
+        CheckoutSettlementMode::BookedNights,
+        preview.recommended_total,
+        checkout_dt(2026, 4, 22, 9, 0),
     )
     .await
     .unwrap();
@@ -6375,33 +4588,23 @@ async fn check_out_booked_nights_enforces_minimum_one_night_for_corrupted_bookin
     .await
     .unwrap();
 
-    let preview = stay_lifecycle::preview_checkout_settlement_at(
+    let preview = preview_checkout_at(
         &pool,
-        CheckoutSettlementPreviewRequest {
-            booking_id: "B413".to_string(),
-            settlement_mode: CheckoutSettlementMode::BookedNights,
-        },
-        chrono::Local
-            .with_ymd_and_hms(2026, 4, 20, 12, 0, 0)
-            .single()
-            .unwrap(),
+        "B413",
+        CheckoutSettlementMode::BookedNights,
+        checkout_dt(2026, 4, 20, 12, 0),
     )
     .await
     .unwrap();
 
     assert_eq!(preview.settled_nights, 1);
 
-    stay_lifecycle::check_out_at(
+    check_out_booking_at(
         &pool,
-        CheckOutRequest {
-            booking_id: "B413".to_string(),
-            settlement_mode: CheckoutSettlementMode::BookedNights,
-            final_total: 0,
-        },
-        chrono::Local
-            .with_ymd_and_hms(2026, 4, 20, 12, 0, 0)
-            .single()
-            .unwrap(),
+        "B413",
+        CheckoutSettlementMode::BookedNights,
+        0,
+        checkout_dt(2026, 4, 20, 12, 0),
     )
     .await
     .unwrap();
@@ -6433,16 +4636,11 @@ async fn check_out_actual_nights_uses_early_checkout_nights() {
     .await
     .unwrap();
 
-    let preview = stay_lifecycle::preview_checkout_settlement_at(
+    let preview = preview_checkout_at(
         &pool,
-        CheckoutSettlementPreviewRequest {
-            booking_id: "B414".to_string(),
-            settlement_mode: CheckoutSettlementMode::ActualNights,
-        },
-        chrono::Local
-            .with_ymd_and_hms(2026, 4, 22, 9, 0, 0)
-            .single()
-            .unwrap(),
+        "B414",
+        CheckoutSettlementMode::ActualNights,
+        checkout_dt(2026, 4, 22, 9, 0),
     )
     .await
     .unwrap();
@@ -6450,17 +4648,12 @@ async fn check_out_actual_nights_uses_early_checkout_nights() {
     assert_eq!(preview.settled_nights, 2);
     assert_eq!(preview.recommended_total, 1_000_000);
 
-    stay_lifecycle::check_out_at(
+    check_out_booking_at(
         &pool,
-        CheckOutRequest {
-            booking_id: "B414".to_string(),
-            settlement_mode: CheckoutSettlementMode::ActualNights,
-            final_total: preview.recommended_total,
-        },
-        chrono::Local
-            .with_ymd_and_hms(2026, 4, 22, 9, 0, 0)
-            .single()
-            .unwrap(),
+        "B414",
+        CheckoutSettlementMode::ActualNights,
+        preview.recommended_total,
+        checkout_dt(2026, 4, 22, 9, 0),
     )
     .await
     .unwrap();
@@ -6492,17 +4685,12 @@ async fn check_out_hourly_persists_manual_settlement() {
     .await
     .unwrap();
 
-    stay_lifecycle::check_out_at(
+    check_out_booking_at(
         &pool,
-        CheckOutRequest {
-            booking_id: "B415".to_string(),
-            settlement_mode: CheckoutSettlementMode::Hourly,
-            final_total: 500_000,
-        },
-        chrono::Local
-            .with_ymd_and_hms(2026, 4, 20, 10, 0, 0)
-            .single()
-            .unwrap(),
+        "B415",
+        CheckoutSettlementMode::Hourly,
+        500_000,
+        checkout_dt(2026, 4, 20, 10, 0),
     )
     .await
     .unwrap();
@@ -6551,17 +4739,12 @@ async fn check_out_hourly_multi_day_stay_still_persists_one_night() {
     .await
     .unwrap();
 
-    stay_lifecycle::check_out_at(
+    check_out_booking_at(
         &pool,
-        CheckOutRequest {
-            booking_id: "B419".to_string(),
-            settlement_mode: CheckoutSettlementMode::Hourly,
-            final_total: 500_000,
-        },
-        chrono::Local
-            .with_ymd_and_hms(2026, 4, 22, 9, 0, 0)
-            .single()
-            .unwrap(),
+        "B419",
+        CheckoutSettlementMode::Hourly,
+        500_000,
+        checkout_dt(2026, 4, 22, 9, 0),
     )
     .await
     .unwrap();
@@ -6597,33 +4780,23 @@ async fn check_out_persists_manual_override_when_final_total_differs_from_recomm
         .await
         .unwrap();
 
-    let preview = stay_lifecycle::preview_checkout_settlement_at(
+    let preview = preview_checkout_at(
         &pool,
-        CheckoutSettlementPreviewRequest {
-            booking_id: "B416".to_string(),
-            settlement_mode: CheckoutSettlementMode::ActualNights,
-        },
-        chrono::Local
-            .with_ymd_and_hms(2026, 4, 22, 9, 0, 0)
-            .single()
-            .unwrap(),
+        "B416",
+        CheckoutSettlementMode::ActualNights,
+        checkout_dt(2026, 4, 22, 9, 0),
     )
     .await
     .unwrap();
 
     assert_eq!(preview.recommended_total, 1_000_000);
 
-    stay_lifecycle::check_out_at(
+    check_out_booking_at(
         &pool,
-        CheckOutRequest {
-            booking_id: "B416".to_string(),
-            settlement_mode: CheckoutSettlementMode::ActualNights,
-            final_total: 800_000,
-        },
-        chrono::Local
-            .with_ymd_and_hms(2026, 4, 22, 9, 0, 0)
-            .single()
-            .unwrap(),
+        "B416",
+        CheckoutSettlementMode::ActualNights,
+        800_000,
+        checkout_dt(2026, 4, 22, 9, 0),
     )
     .await
     .unwrap();
@@ -6675,17 +4848,12 @@ async fn check_out_writes_charge_adjustment_ledger_when_settled_total_drops() {
         .await
         .unwrap();
 
-    stay_lifecycle::check_out_at(
+    check_out_booking_at(
         &pool,
-        CheckOutRequest {
-            booking_id: "B417".to_string(),
-            settlement_mode: CheckoutSettlementMode::ActualNights,
-            final_total: 800_000,
-        },
-        chrono::Local
-            .with_ymd_and_hms(2026, 4, 22, 9, 0, 0)
-            .single()
-            .unwrap(),
+        "B417",
+        CheckoutSettlementMode::ActualNights,
+        800_000,
+        checkout_dt(2026, 4, 22, 9, 0),
     )
     .await
     .unwrap();
@@ -6737,17 +4905,12 @@ async fn check_out_writes_payment_delta_ledger_when_collecting_extra_payment() {
         .await
         .unwrap();
 
-    stay_lifecycle::check_out_at(
+    check_out_booking_at(
         &pool,
-        CheckOutRequest {
-            booking_id: "B418".to_string(),
-            settlement_mode: CheckoutSettlementMode::BookedNights,
-            final_total: 2_500_000,
-        },
-        chrono::Local
-            .with_ymd_and_hms(2026, 4, 22, 9, 0, 0)
-            .single()
-            .unwrap(),
+        "B418",
+        CheckoutSettlementMode::BookedNights,
+        2_500_000,
+        checkout_dt(2026, 4, 22, 9, 0),
     )
     .await
     .unwrap();
@@ -6762,12 +4925,6 @@ async fn check_out_writes_payment_delta_ledger_when_collecting_extra_payment() {
     .await
     .unwrap();
 
-    let booking = sqlx::query("SELECT paid_amount FROM bookings WHERE id = ?")
-        .bind("B418")
-        .fetch_one(&pool)
-        .await
-        .unwrap();
-
     let charge_adjustment_count: (i64,) = sqlx::query_as(
         "SELECT COUNT(*) FROM transactions
          WHERE booking_id = ? AND type = 'charge' AND note LIKE 'Điều chỉnh %'",
@@ -6779,7 +4936,7 @@ async fn check_out_writes_payment_delta_ledger_when_collecting_extra_payment() {
 
     assert_eq!(payment.get::<i64, _>("amount"), 1_500_000);
     assert_eq!(payment.get::<String, _>("note"), "Thanh toán khi check-out");
-    assert_eq!(booking.get::<i64, _>("paid_amount"), 2_500_000);
+    assert_eq!(booking_paid_amount(&pool, "B418").await, Some(2_500_000));
     assert_eq!(charge_adjustment_count.0, 0);
 }
 
@@ -6814,26 +4971,16 @@ async fn checkout_paid_amount_is_ledger_projection_not_direct_overwrite() {
     .await
     .unwrap();
 
-    stay_lifecycle::check_out_at(
+    check_out_booking_at(
         &pool,
-        CheckOutRequest {
-            booking_id: "B420".to_string(),
-            settlement_mode: CheckoutSettlementMode::ActualNights,
-            final_total: 75_000,
-        },
-        chrono::Local
-            .with_ymd_and_hms(2026, 4, 21, 9, 0, 0)
-            .single()
-            .unwrap(),
+        "B420",
+        CheckoutSettlementMode::ActualNights,
+        75_000,
+        checkout_dt(2026, 4, 21, 9, 0),
     )
     .await
     .unwrap();
 
-    let booking = sqlx::query("SELECT paid_amount FROM bookings WHERE id = ?")
-        .bind("B420")
-        .fetch_one(&pool)
-        .await
-        .unwrap();
     let ledger_total: i64 = sqlx::query_scalar(
         "SELECT CAST(COALESCE(SUM(amount), 0) AS INTEGER)
          FROM transactions
@@ -6845,7 +4992,7 @@ async fn checkout_paid_amount_is_ledger_projection_not_direct_overwrite() {
     .unwrap();
 
     assert_eq!(ledger_total, 75_000);
-    assert_eq!(booking.get::<i64, _>("paid_amount"), ledger_total);
+    assert_eq!(booking_paid_amount(&pool, "B420").await, Some(ledger_total));
 }
 
 #[tokio::test]
@@ -6868,17 +5015,12 @@ async fn check_out_rejects_overpaid_booking_until_refund_flow_exists() {
         .await
         .unwrap();
 
-    let error = stay_lifecycle::check_out_at(
+    let error = check_out_booking_at(
         &pool,
-        CheckOutRequest {
-            booking_id: "B412".to_string(),
-            settlement_mode: CheckoutSettlementMode::Hourly,
-            final_total: 500_000,
-        },
-        chrono::Local
-            .with_ymd_and_hms(2026, 4, 20, 12, 0, 0)
-            .single()
-            .unwrap(),
+        "B412",
+        CheckoutSettlementMode::Hourly,
+        500_000,
+        checkout_dt(2026, 4, 20, 12, 0),
     )
     .await
     .unwrap_err();
@@ -6932,11 +5074,7 @@ async fn extend_stay_idempotent_retry_replays_without_extra_night_or_charge() {
     )
     .await
     .unwrap();
-    let ctx = crate::command_idempotency::WriteCommandContext::for_internal_test(
-        "req-extend-idem",
-        "idem-extend-1",
-        "extend_stay",
-    );
+    let ctx = cmd_with_request("extend_stay", "req-extend-idem", "idem-extend-1");
 
     let first = stay_lifecycle::extend_stay_idempotent(&pool, &ctx, "B-EXT-IDEM")
         .await
@@ -6945,9 +5083,7 @@ async fn extend_stay_idempotent_retry_replays_without_extra_night_or_charge() {
         .await
         .unwrap();
 
-    assert!(!first.replayed);
-    assert!(second.replayed);
-    assert_eq!(first.response, second.response);
+    assert_replayed_pair(&first, &second);
 
     let nights: i32 = sqlx::query_scalar("SELECT nights FROM bookings WHERE id = ?")
         .bind("B-EXT-IDEM")
@@ -6956,14 +5092,10 @@ async fn extend_stay_idempotent_retry_replays_without_extra_night_or_charge() {
         .unwrap();
     assert_eq!(nights, 3);
 
-    let charge_count: i64 =
-        sqlx::query_scalar("SELECT COUNT(*) FROM transactions WHERE booking_id = ? AND note = ?")
-            .bind("B-EXT-IDEM")
-            .bind("Extended stay +1 night")
-            .fetch_one(&pool)
-            .await
-            .unwrap();
-    assert_eq!(charge_count, 1);
+    assert_eq!(
+        transaction_count_for_note(&pool, "B-EXT-IDEM", "Extended stay +1 night").await,
+        1
+    );
     assert_single_outbox_event(&pool, &ctx, "booking.stay_extended").await;
 }
 
@@ -6978,11 +5110,7 @@ async fn extend_stay_idempotent_same_key_different_booking_conflicts() {
     seed_active_booking(&pool, "B-EXT-HASH-B", "R-EXT-HASH-B")
         .await
         .unwrap();
-    let ctx = crate::command_idempotency::WriteCommandContext::for_internal_test(
-        "req-extend-hash",
-        "idem-extend-hash",
-        "extend_stay",
-    );
+    let ctx = cmd_with_request("extend_stay", "req-extend-hash", "idem-extend-hash");
 
     stay_lifecycle::extend_stay_idempotent(&pool, &ctx, "B-EXT-HASH-A")
         .await
@@ -7004,35 +5132,13 @@ async fn extend_stay_idempotent_duplicate_in_flight_returns_conflict() {
     seed_active_booking(&pool, "B-EXT-LIVE", "R-EXT-LIVE")
         .await
         .unwrap();
-    let ctx = crate::command_idempotency::WriteCommandContext::for_internal_test(
-        "req-extend-live",
-        "idem-extend-live",
-        "extend_stay",
-    );
+    let ctx = cmd_with_request("extend_stay", "req-extend-live", "idem-extend-live");
     let payload = serde_json::json!({
         "schema": "stay.extend.v1",
         "booking_id": "B-EXT-LIVE",
         "operation": "add_one_night",
     });
-    let now = chrono::Utc::now().to_rfc3339();
-    let lease_expires_at = (chrono::Utc::now() + chrono::Duration::seconds(30)).to_rfc3339();
-
-    sqlx::query(
-        "INSERT INTO command_idempotency (
-            idempotency_key, command_name, request_hash, intent_json, lock_keys_json,
-            status, claim_token, retryable, lease_expires_at, created_at, updated_at, last_attempt_at
-        ) VALUES (?, ?, ?, '{}', '[]', 'in_progress', 'other-claim', 0, ?, ?, ?, ?)",
-    )
-    .bind(&ctx.idempotency_key)
-    .bind(&ctx.command_name)
-    .bind(crate::command_idempotency::stable_request_hash(&payload).expect("payload hashes"))
-    .bind(&lease_expires_at)
-    .bind(&now)
-    .bind(&now)
-    .bind(&now)
-    .execute(&pool)
-    .await
-    .expect("seeds in-flight row");
+    seed_live_in_progress_command(&pool, &ctx.command_name, &ctx.idempotency_key, &payload).await;
 
     let error = stay_lifecycle::extend_stay_idempotent(&pool, &ctx, "B-EXT-LIVE")
         .await
@@ -7059,10 +5165,10 @@ async fn extend_stay_fails_when_second_pool_checked_out_booking_first() {
         .await
         .unwrap();
 
-    let ctx = crate::command_idempotency::WriteCommandContext::for_internal_test(
+    let ctx = cmd_with_request(
+        "extend_stay",
         "req-extend-2pool-checkout",
         "idem-extend-2pool-checkout",
-        "extend_stay",
     );
     let error = stay_lifecycle::extend_stay_idempotent(&pool_a, &ctx, "B-2POOL-EXTEND")
         .await
@@ -7087,8 +5193,9 @@ async fn extend_stay_fails_when_second_pool_checked_out_booking_first() {
 #[tokio::test]
 async fn revenue_queries_use_recognized_room_revenue_and_ignore_payments() {
     let pool = test_pool().await;
-    seed_room(&pool, "R301").await.unwrap();
-    seed_active_booking(&pool, "B301", "R301").await.unwrap();
+    seed_active_booking_with_room(&pool, "B301", "R301")
+        .await
+        .unwrap();
     seed_transaction(
         &pool,
         "B301",
@@ -7135,8 +5242,9 @@ async fn revenue_queries_use_recognized_room_revenue_and_ignore_payments() {
 #[tokio::test]
 async fn analytics_breakdowns_reconcile_to_total_revenue() {
     let pool = test_pool().await;
-    seed_room(&pool, "R302").await.unwrap();
-    seed_active_booking(&pool, "B302", "R302").await.unwrap();
+    seed_active_booking_with_room(&pool, "B302", "R302")
+        .await
+        .unwrap();
     seed_transaction(
         &pool,
         "B302",
@@ -7198,10 +5306,7 @@ async fn revenue_queries_include_cancellation_fees_in_recognized_revenue() {
     )
     .await
     .unwrap();
-    let export_rows = audit_queries::load_booking_export_rows(&pool, "2026-04-01", "2026-04-30")
-        .await
-        .unwrap();
-    let cancelled_row = export_rows.iter().find(|row| row.id == "B305").unwrap();
+    let cancelled_row = booking_export_row(&pool, "2026-04-01", "2026-04-30", "B305").await;
 
     assert_eq!(stats.total_revenue, 50_000);
     assert_eq!(cancelled_row.charge_total, 0);
@@ -7306,14 +5411,20 @@ async fn folio_and_cancellation_revenue_use_local_rfc3339_created_dates() {
     assert_eq!(cancellation_fee_revenue, 50_000);
 }
 
-#[tokio::test]
-async fn same_day_checkout_settlement_counts_one_room_sold_and_full_revenue() {
-    let pool = test_pool().await;
-    seed_room(&pool, "R420").await.unwrap();
+#[allow(clippy::too_many_arguments)]
+async fn seed_checked_out_actual_nights_settlement(
+    pool: &sqlx::Pool<sqlx::Sqlite>,
+    booking_id: &str,
+    room_id: &str,
+    paid_amount: i64,
+    original_charge: i64,
+    adjustment: i64,
+) {
+    seed_room(pool, room_id).await.unwrap();
     seed_active_booking_with_terms(
-        &pool,
-        "B420",
-        "R420",
+        pool,
+        booking_id,
+        room_id,
         "2026-04-20T08:00:00+07:00",
         "2026-04-25T12:00:00+07:00",
         5,
@@ -7329,19 +5440,20 @@ async fn same_day_checkout_settlement_counts_one_room_sold_and_full_revenue() {
              actual_checkout = '2026-04-20T18:00:00+07:00',
              nights = 1,
              total_price = 500000,
-             paid_amount = 500000,
+             paid_amount = ?,
              pricing_snapshot = ?
          WHERE id = ?",
     )
+    .bind(paid_amount)
     .bind(r#"{"checkout_settlement":{"mode":"actual_nights","reporting_checkout":"2026-04-21","settled_nights":1,"settled_total":500000}}"#)
-    .bind("B420")
-    .execute(&pool)
+    .bind(booking_id)
+    .execute(pool)
     .await
     .unwrap();
     seed_transaction(
-        &pool,
-        "B420",
-        250_000,
+        pool,
+        booking_id,
+        original_charge,
         "charge",
         "Room charge",
         "2026-04-20T08:00:00+07:00",
@@ -7349,15 +5461,22 @@ async fn same_day_checkout_settlement_counts_one_room_sold_and_full_revenue() {
     .await
     .unwrap();
     seed_transaction(
-        &pool,
-        "B420",
-        -1_750_000,
+        pool,
+        booking_id,
+        adjustment,
         "charge",
         "Điều chỉnh checkout settlement",
         "2026-04-20T18:00:00+07:00",
     )
     .await
     .unwrap();
+}
+
+#[tokio::test]
+async fn same_day_checkout_settlement_counts_one_room_sold_and_full_revenue() {
+    let pool = test_pool().await;
+    seed_checked_out_actual_nights_settlement(&pool, "B420", "R420", 500_000, 250_000, -1_750_000)
+        .await;
 
     let stats = revenue_queries::load_revenue_stats(&pool, "2026-04-20", "2026-04-20")
         .await
@@ -7412,60 +5531,12 @@ async fn booked_nights_settlement_uses_reporting_checkout_for_financial_revenue(
 #[tokio::test]
 async fn checkout_settlement_updates_booking_export_rows() {
     let pool = test_pool().await;
-    seed_room(&pool, "R422").await.unwrap();
-    seed_active_booking_with_terms(
-        &pool,
-        "B422",
-        "R422",
-        "2026-04-20T08:00:00+07:00",
-        "2026-04-25T12:00:00+07:00",
-        5,
-        2_500_000,
-        Some(0),
+    seed_checked_out_actual_nights_settlement(
+        &pool, "B422", "R422", 500_000, 2_500_000, -2_000_000,
     )
-    .await
-    .unwrap();
+    .await;
 
-    sqlx::query(
-        "UPDATE bookings
-         SET status = 'checked_out',
-             actual_checkout = '2026-04-20T18:00:00+07:00',
-             nights = 1,
-             total_price = 500000,
-             paid_amount = 500000,
-             pricing_snapshot = ?
-         WHERE id = ?",
-    )
-    .bind(r#"{"checkout_settlement":{"mode":"actual_nights","reporting_checkout":"2026-04-21","settled_nights":1,"settled_total":500000}}"#)
-    .bind("B422")
-    .execute(&pool)
-    .await
-    .unwrap();
-    seed_transaction(
-        &pool,
-        "B422",
-        2_500_000,
-        "charge",
-        "Room charge",
-        "2026-04-20T08:00:00+07:00",
-    )
-    .await
-    .unwrap();
-    seed_transaction(
-        &pool,
-        "B422",
-        -2_000_000,
-        "charge",
-        "Điều chỉnh checkout settlement",
-        "2026-04-20T18:00:00+07:00",
-    )
-    .await
-    .unwrap();
-
-    let export_rows = audit_queries::load_booking_export_rows(&pool, "2026-04-01", "2026-04-30")
-        .await
-        .unwrap();
-    let row = export_rows.iter().find(|row| row.id == "B422").unwrap();
+    let row = booking_export_row(&pool, "2026-04-01", "2026-04-30", "B422").await;
 
     assert_eq!(row.room_price, 500_000);
     assert_eq!(row.charge_total, 500_000);
@@ -7475,60 +5546,12 @@ async fn checkout_settlement_updates_booking_export_rows() {
 #[tokio::test]
 async fn checkout_settlement_export_rows_follow_reporting_checkout_boundary() {
     let pool = test_pool().await;
-    seed_room(&pool, "R423").await.unwrap();
-    seed_active_booking_with_terms(
-        &pool,
-        "B423",
-        "R423",
-        "2026-04-20T08:00:00+07:00",
-        "2026-04-25T12:00:00+07:00",
-        5,
-        2_500_000,
-        Some(0),
+    seed_checked_out_actual_nights_settlement(
+        &pool, "B423", "R423", 500_000, 2_500_000, -2_000_000,
     )
-    .await
-    .unwrap();
+    .await;
 
-    sqlx::query(
-        "UPDATE bookings
-         SET status = 'checked_out',
-             actual_checkout = '2026-04-20T18:00:00+07:00',
-             nights = 1,
-             total_price = 500000,
-             paid_amount = 500000,
-             pricing_snapshot = ?
-         WHERE id = ?",
-    )
-    .bind(r#"{"checkout_settlement":{"mode":"actual_nights","reporting_checkout":"2026-04-21","settled_nights":1,"settled_total":500000}}"#)
-    .bind("B423")
-    .execute(&pool)
-    .await
-    .unwrap();
-    seed_transaction(
-        &pool,
-        "B423",
-        2_500_000,
-        "charge",
-        "Room charge",
-        "2026-04-20T08:00:00+07:00",
-    )
-    .await
-    .unwrap();
-    seed_transaction(
-        &pool,
-        "B423",
-        -2_000_000,
-        "charge",
-        "Điều chỉnh checkout settlement",
-        "2026-04-20T18:00:00+07:00",
-    )
-    .await
-    .unwrap();
-
-    let export_rows = audit_queries::load_booking_export_rows(&pool, "2026-04-21", "2026-04-21")
-        .await
-        .unwrap();
-    let row = export_rows.iter().find(|row| row.id == "B423").unwrap();
+    let row = booking_export_row(&pool, "2026-04-21", "2026-04-21", "B423").await;
 
     assert_eq!(row.expected_checkout, "2026-04-21");
     assert_eq!(row.actual_checkout, "2026-04-20T18:00:00+07:00");
@@ -7537,62 +5560,12 @@ async fn checkout_settlement_export_rows_follow_reporting_checkout_boundary() {
 #[tokio::test]
 async fn checkout_settlement_export_rows_exclude_original_checkin_window_after_shift() {
     let pool = test_pool().await;
-    seed_room(&pool, "R424").await.unwrap();
-    seed_active_booking_with_terms(
-        &pool,
-        "B424",
-        "R424",
-        "2026-04-20T08:00:00+07:00",
-        "2026-04-25T12:00:00+07:00",
-        5,
-        2_500_000,
-        Some(0),
+    seed_checked_out_actual_nights_settlement(
+        &pool, "B424", "R424", 500_000, 2_500_000, -2_000_000,
     )
-    .await
-    .unwrap();
+    .await;
 
-    sqlx::query(
-        "UPDATE bookings
-         SET status = 'checked_out',
-             actual_checkout = '2026-04-20T18:00:00+07:00',
-             nights = 1,
-             total_price = 500000,
-             paid_amount = 500000,
-             pricing_snapshot = ?
-         WHERE id = ?",
-    )
-    .bind(r#"{"checkout_settlement":{"mode":"actual_nights","reporting_checkout":"2026-04-21","settled_nights":1,"settled_total":500000}}"#)
-    .bind("B424")
-    .execute(&pool)
-    .await
-    .unwrap();
-    seed_transaction(
-        &pool,
-        "B424",
-        2_500_000,
-        "charge",
-        "Room charge",
-        "2026-04-20T08:00:00+07:00",
-    )
-    .await
-    .unwrap();
-    seed_transaction(
-        &pool,
-        "B424",
-        -2_000_000,
-        "charge",
-        "Điều chỉnh checkout settlement",
-        "2026-04-20T18:00:00+07:00",
-    )
-    .await
-    .unwrap();
-
-    let export_rows = audit_queries::load_booking_export_rows(&pool, "2026-04-20", "2026-04-20")
-        .await
-        .unwrap();
-    let row = export_rows.iter().find(|row| row.id == "B424");
-
-    assert!(row.is_none());
+    assert!(missing_booking_export_row(&pool, "2026-04-20", "2026-04-20", "B424").await);
 }
 
 #[tokio::test]
@@ -7627,10 +5600,7 @@ async fn cancellation_fee_export_uses_transaction_period_when_checkin_is_future(
     .await
     .unwrap();
 
-    let export_rows = audit_queries::load_booking_export_rows(&pool, "2026-04-15", "2026-04-15")
-        .await
-        .unwrap();
-    let row = export_rows.iter().find(|row| row.id == "B425").unwrap();
+    let row = booking_export_row(&pool, "2026-04-15", "2026-04-15", "B425").await;
 
     assert_eq!(row.cancellation_fee_total, 50_000);
     assert_eq!(row.recognized_revenue, 50_000);
@@ -7653,11 +5623,7 @@ async fn booking_export_includes_local_rfc3339_non_checkout_checkin_date() {
     .await
     .unwrap();
 
-    let export_rows = audit_queries::load_booking_export_rows(&pool, "2026-05-06", "2026-05-06")
-        .await
-        .unwrap();
-
-    let row = export_rows.iter().find(|row| row.id == "B426").unwrap();
+    let row = booking_export_row(&pool, "2026-05-06", "2026-05-06", "B426").await;
     assert_eq!(row.check_in_at, "2026-05-06T00:30:00+07:00");
 }
 
@@ -7693,11 +5659,7 @@ async fn booking_export_includes_local_rfc3339_cancellation_fee_date() {
     .await
     .unwrap();
 
-    let export_rows = audit_queries::load_booking_export_rows(&pool, "2026-05-06", "2026-05-06")
-        .await
-        .unwrap();
-
-    let row = export_rows.iter().find(|row| row.id == "B427").unwrap();
+    let row = booking_export_row(&pool, "2026-05-06", "2026-05-06", "B427").await;
     assert_eq!(row.cancellation_fee_total, 50_000);
     assert_eq!(row.recognized_revenue, 50_000);
 }
@@ -7771,8 +5733,9 @@ async fn run_night_audit_uses_canonical_room_and_folio_revenue() {
 #[tokio::test]
 async fn billing_and_export_queries_preserve_canonical_revenue_columns() {
     let pool = test_pool().await;
-    seed_room(&pool, "R304").await.unwrap();
-    seed_active_booking(&pool, "B304", "R304").await.unwrap();
+    seed_active_booking_with_room(&pool, "B304", "R304")
+        .await
+        .unwrap();
     seed_transaction(
         &pool,
         "B304",
@@ -7812,53 +5775,51 @@ async fn billing_and_export_queries_preserve_canonical_revenue_columns() {
     assert_eq!(export_rows[0].recognized_revenue, 285_000);
 }
 
+async fn add_staff_laundry_line_idempotent(
+    pool: &sqlx::Pool<sqlx::Sqlite>,
+    ctx: &crate::command_idempotency::WriteCommandContext,
+    booking_id: &str,
+    description: &str,
+    amount: i64,
+) -> crate::app_error::CommandResult<
+    crate::command_idempotency::IdempotentCommandResult<serde_json::Value>,
+> {
+    add_folio_line_idempotent(
+        pool,
+        ctx,
+        booking_id,
+        "laundry",
+        description,
+        amount,
+        Some("staff-1"),
+    )
+    .await
+}
+
 #[tokio::test]
 async fn add_folio_line_idempotent_retry_replays_and_does_not_duplicate_row() {
     let pool = test_pool().await;
-    seed_room(&pool, "FOLIO-IDEM-1").await.unwrap();
-    seed_active_booking(&pool, "B-FOLIO-IDEM-1", "FOLIO-IDEM-1")
+    seed_active_booking_with_room(&pool, "B-FOLIO-IDEM-1", "FOLIO-IDEM-1")
         .await
         .unwrap();
-    let ctx = crate::command_idempotency::WriteCommandContext::for_internal_test(
-        "req-folio-idem-1",
-        "idem-folio-line-1",
-        "add_folio_line",
-    );
+    let ctx = cmd_with_request("add_folio_line", "req-folio-idem-1", "idem-folio-line-1");
 
-    let first = add_folio_line_idempotent(
-        &pool,
-        &ctx,
-        "B-FOLIO-IDEM-1",
-        "laundry",
-        "Laundry bundle",
-        25_000,
-        Some("staff-1"),
-    )
-    .await
-    .expect("first folio line succeeds");
-    let second = add_folio_line_idempotent(
-        &pool,
-        &ctx,
-        "B-FOLIO-IDEM-1",
-        "laundry",
-        "Laundry bundle",
-        25_000,
-        Some("staff-1"),
-    )
-    .await
-    .expect("retry replays");
+    let first =
+        add_staff_laundry_line_idempotent(&pool, &ctx, "B-FOLIO-IDEM-1", "Laundry bundle", 25_000)
+            .await
+            .expect("first folio line succeeds");
+    let second =
+        add_staff_laundry_line_idempotent(&pool, &ctx, "B-FOLIO-IDEM-1", "Laundry bundle", 25_000)
+            .await
+            .expect("retry replays");
 
-    assert!(!first.replayed);
-    assert!(second.replayed);
+    assert_replayed_pair(&first, &second);
     assert_eq!(first.response["id"], second.response["id"]);
 
-    let count: i64 =
-        sqlx::query_scalar("SELECT COUNT(*) FROM folio_lines WHERE origin_idempotency_key = ?")
-            .bind("add_folio_line:idem-folio-line-1")
-            .fetch_one(&pool)
-            .await
-            .unwrap();
-    assert_eq!(count, 1);
+    assert_eq!(
+        folio_line_count_for_key(&pool, "add_folio_line:idem-folio-line-1").await,
+        1
+    );
     assert_single_outbox_event(&pool, &ctx, "folio.line_added").await;
 }
 
@@ -7870,23 +5831,16 @@ async fn add_folio_line_idempotent_accepts_uuid_booking_id_in_safe_ledger_metada
     seed_active_booking(&pool, &booking_id, "FOLIO-IDEM-UUID")
         .await
         .unwrap();
-    let ctx = crate::command_idempotency::WriteCommandContext::for_internal_test(
+    let ctx = cmd_with_request(
+        "add_folio_line",
         "req-folio-idem-uuid",
         "idem-folio-line-uuid",
-        "add_folio_line",
     );
 
-    let result = add_folio_line_idempotent(
-        &pool,
-        &ctx,
-        &booking_id,
-        "laundry",
-        "Laundry bundle",
-        25_000,
-        Some("staff-1"),
-    )
-    .await
-    .expect("uuid booking id should not be rejected by safe ledger metadata");
+    let result =
+        add_staff_laundry_line_idempotent(&pool, &ctx, &booking_id, "Laundry bundle", 25_000)
+            .await
+            .expect("uuid booking id should not be rejected by safe ledger metadata");
 
     assert!(!result.replayed);
     assert_eq!(
@@ -7912,14 +5866,13 @@ async fn add_folio_line_idempotent_accepts_uuid_booking_id_in_safe_ledger_metada
 #[tokio::test]
 async fn add_folio_line_idempotent_metadata_is_sanitized_and_contains_lock_keys() {
     let pool = test_pool().await;
-    seed_room(&pool, "FOLIO-IDEM-META").await.unwrap();
-    seed_active_booking(&pool, "B-FOLIO-IDEM-META", "FOLIO-IDEM-META")
+    seed_active_booking_with_room(&pool, "B-FOLIO-IDEM-META", "FOLIO-IDEM-META")
         .await
         .unwrap();
-    let ctx = crate::command_idempotency::WriteCommandContext::for_internal_test(
+    let ctx = cmd_with_request(
+        "add_folio_line",
         "req-folio-idem-meta",
         "idem-folio-line-meta",
-        "add_folio_line",
     );
 
     add_folio_line_idempotent(
@@ -7965,36 +5918,21 @@ async fn add_folio_line_idempotent_metadata_is_sanitized_and_contains_lock_keys(
 #[tokio::test]
 async fn add_folio_line_idempotent_same_key_different_payload_conflicts() {
     let pool = test_pool().await;
-    seed_room(&pool, "FOLIO-IDEM-2").await.unwrap();
-    seed_active_booking(&pool, "B-FOLIO-IDEM-2", "FOLIO-IDEM-2")
+    seed_active_booking_with_room(&pool, "B-FOLIO-IDEM-2", "FOLIO-IDEM-2")
         .await
         .unwrap();
-    let ctx = crate::command_idempotency::WriteCommandContext::for_internal_test(
-        "req-folio-idem-2",
-        "idem-folio-line-2",
-        "add_folio_line",
-    );
+    let ctx = cmd("add_folio_line", "idem-folio-line-2");
 
-    add_folio_line_idempotent(
+    add_staff_laundry_line_idempotent(&pool, &ctx, "B-FOLIO-IDEM-2", "Laundry bundle", 25_000)
+        .await
+        .expect("first folio line succeeds");
+
+    let error = add_staff_laundry_line_idempotent(
         &pool,
         &ctx,
         "B-FOLIO-IDEM-2",
-        "laundry",
-        "Laundry bundle",
-        25_000,
-        Some("staff-1"),
-    )
-    .await
-    .expect("first folio line succeeds");
-
-    let error = add_folio_line_idempotent(
-        &pool,
-        &ctx,
-        "B-FOLIO-IDEM-2",
-        "laundry",
         "Different description",
         25_000,
-        Some("staff-1"),
     )
     .await
     .expect_err("same key with different payload conflicts");
@@ -8008,36 +5946,21 @@ async fn add_folio_line_idempotent_same_key_different_payload_conflicts() {
 #[tokio::test]
 async fn add_folio_line_idempotent_same_key_changed_amount_conflicts() {
     let pool = test_pool().await;
-    seed_room(&pool, "FOLIO-IDEM-AMOUNT").await.unwrap();
-    seed_active_booking(&pool, "B-FOLIO-IDEM-AMOUNT", "FOLIO-IDEM-AMOUNT")
+    seed_active_booking_with_room(&pool, "B-FOLIO-IDEM-AMOUNT", "FOLIO-IDEM-AMOUNT")
         .await
         .unwrap();
-    let ctx = crate::command_idempotency::WriteCommandContext::for_internal_test(
-        "req-folio-idem-amount",
-        "idem-folio-line-amount",
-        "add_folio_line",
-    );
+    let ctx = cmd("add_folio_line", "idem-folio-line-amount");
 
-    add_folio_line_idempotent(
+    add_staff_laundry_line_idempotent(&pool, &ctx, "B-FOLIO-IDEM-AMOUNT", "Laundry bundle", 25_000)
+        .await
+        .expect("first folio line succeeds");
+
+    let error = add_staff_laundry_line_idempotent(
         &pool,
         &ctx,
         "B-FOLIO-IDEM-AMOUNT",
-        "laundry",
-        "Laundry bundle",
-        25_000,
-        Some("staff-1"),
-    )
-    .await
-    .expect("first folio line succeeds");
-
-    let error = add_folio_line_idempotent(
-        &pool,
-        &ctx,
-        "B-FOLIO-IDEM-AMOUNT",
-        "laundry",
         "Laundry bundle",
         30_000,
-        Some("staff-1"),
     )
     .await
     .expect_err("same key with changed amount conflicts");
@@ -8051,27 +5974,15 @@ async fn add_folio_line_idempotent_same_key_changed_amount_conflicts() {
 #[tokio::test]
 async fn add_folio_line_idempotent_replay_returns_stored_snapshot() {
     let pool = test_pool().await;
-    seed_room(&pool, "FOLIO-IDEM-3").await.unwrap();
-    seed_active_booking(&pool, "B-FOLIO-IDEM-3", "FOLIO-IDEM-3")
+    seed_active_booking_with_room(&pool, "B-FOLIO-IDEM-3", "FOLIO-IDEM-3")
         .await
         .unwrap();
-    let ctx = crate::command_idempotency::WriteCommandContext::for_internal_test(
-        "req-folio-idem-3",
-        "idem-folio-line-3",
-        "add_folio_line",
-    );
+    let ctx = cmd("add_folio_line", "idem-folio-line-3");
 
-    let first = add_folio_line_idempotent(
-        &pool,
-        &ctx,
-        "B-FOLIO-IDEM-3",
-        "laundry",
-        "Snapshot line",
-        25_000,
-        Some("staff-1"),
-    )
-    .await
-    .expect("first folio line succeeds");
+    let first =
+        add_staff_laundry_line_idempotent(&pool, &ctx, "B-FOLIO-IDEM-3", "Snapshot line", 25_000)
+            .await
+            .expect("first folio line succeeds");
     let line_id = first.response["id"].as_str().unwrap().to_string();
     let first_amount = first.response["amount"].as_i64().unwrap();
 
@@ -8081,17 +5992,10 @@ async fn add_folio_line_idempotent_replay_returns_stored_snapshot() {
         .await
         .unwrap();
 
-    let replay = add_folio_line_idempotent(
-        &pool,
-        &ctx,
-        "B-FOLIO-IDEM-3",
-        "laundry",
-        "Snapshot line",
-        25_000,
-        Some("staff-1"),
-    )
-    .await
-    .expect("replay succeeds");
+    let replay =
+        add_staff_laundry_line_idempotent(&pool, &ctx, "B-FOLIO-IDEM-3", "Snapshot line", 25_000)
+            .await
+            .expect("replay succeeds");
 
     assert!(replay.replayed);
     assert_eq!(replay.response["amount"].as_i64(), Some(first_amount));
@@ -8101,15 +6005,10 @@ async fn add_folio_line_idempotent_replay_returns_stored_snapshot() {
 #[tokio::test]
 async fn add_folio_line_idempotent_duplicate_seeded_live_in_flight_returns_conflict() {
     let pool = test_pool().await;
-    seed_room(&pool, "FOLIO-IDEM-INFLIGHT").await.unwrap();
-    seed_active_booking(&pool, "B-FOLIO-IDEM-INFLIGHT", "FOLIO-IDEM-INFLIGHT")
+    seed_active_booking_with_room(&pool, "B-FOLIO-IDEM-INFLIGHT", "FOLIO-IDEM-INFLIGHT")
         .await
         .unwrap();
-    let ctx = crate::command_idempotency::WriteCommandContext::for_internal_test(
-        "req-folio-idem-inflight",
-        "idem-folio-line-inflight",
-        "add_folio_line",
-    );
+    let ctx = cmd("add_folio_line", "idem-folio-line-inflight");
     seed_live_in_progress_command(
         &pool,
         "add_folio_line",
@@ -8124,14 +6023,12 @@ async fn add_folio_line_idempotent_duplicate_seeded_live_in_flight_returns_confl
     )
     .await;
 
-    let error = add_folio_line_idempotent(
+    let error = add_staff_laundry_line_idempotent(
         &pool,
         &ctx,
         "B-FOLIO-IDEM-INFLIGHT",
-        "laundry",
         "Laundry bundle",
         25_000,
-        Some("staff-1"),
     )
     .await
     .expect_err("duplicate live in-flight command should conflict");
@@ -8145,8 +6042,7 @@ async fn add_folio_line_idempotent_duplicate_seeded_live_in_flight_returns_confl
 #[tokio::test]
 async fn add_folio_line_idempotent_rejects_blank_key_before_any_write() {
     let pool = test_pool().await;
-    seed_room(&pool, "FOLIO-IDEM-4").await.unwrap();
-    seed_active_booking(&pool, "B-FOLIO-IDEM-4", "FOLIO-IDEM-4")
+    seed_active_booking_with_room(&pool, "B-FOLIO-IDEM-4", "FOLIO-IDEM-4")
         .await
         .unwrap();
 
@@ -8161,79 +6057,43 @@ async fn add_folio_line_idempotent_rejects_blank_key_before_any_write() {
         crate::app_error::codes::IDEMPOTENCY_KEY_REQUIRED
     );
 
-    let folio_count: i64 =
-        sqlx::query_scalar("SELECT COUNT(*) FROM folio_lines WHERE booking_id = ?")
-            .bind("B-FOLIO-IDEM-4")
-            .fetch_one(&pool)
-            .await
-            .unwrap();
-    assert_eq!(folio_count, 0);
-
-    let claim_count: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM command_idempotency
-         WHERE command_name = 'add_folio_line' AND request_id = 'req-folio-idem-4'",
-    )
-    .fetch_one(&pool)
-    .await
-    .unwrap();
-    assert_eq!(claim_count, 0);
+    assert_eq!(
+        folio_line_count_for_booking(&pool, "B-FOLIO-IDEM-4").await,
+        0
+    );
+    assert_eq!(
+        command_claim_count_by_request(&pool, "add_folio_line", "req-folio-idem-4").await,
+        0
+    );
 }
 
 #[tokio::test]
 async fn add_folio_line_idempotent_invalid_amount_does_not_consume_claim_or_ordinal() {
     let pool = test_pool().await;
-    seed_room(&pool, "FOLIO-IDEM-5").await.unwrap();
-    seed_active_booking(&pool, "B-FOLIO-IDEM-5", "FOLIO-IDEM-5")
+    seed_active_booking_with_room(&pool, "B-FOLIO-IDEM-5", "FOLIO-IDEM-5")
         .await
         .unwrap();
-    let ctx = crate::command_idempotency::WriteCommandContext::for_internal_test(
-        "req-folio-idem-5",
-        "idem-folio-line-5",
-        "add_folio_line",
-    );
+    let ctx = cmd("add_folio_line", "idem-folio-line-5");
 
-    let error = add_folio_line_idempotent(
-        &pool,
-        &ctx,
-        "B-FOLIO-IDEM-5",
-        "laundry",
-        "Invalid amount",
-        0,
-        Some("staff-1"),
-    )
-    .await
-    .expect_err("invalid amount rejected");
+    let error =
+        add_staff_laundry_line_idempotent(&pool, &ctx, "B-FOLIO-IDEM-5", "Invalid amount", 0)
+            .await
+            .expect_err("invalid amount rejected");
     assert_eq!(error.code, crate::app_error::codes::BOOKING_INVALID_STATE);
 
-    let folio_count: i64 =
-        sqlx::query_scalar("SELECT COUNT(*) FROM folio_lines WHERE booking_id = ?")
-            .bind("B-FOLIO-IDEM-5")
-            .fetch_one(&pool)
+    assert_eq!(
+        folio_line_count_for_booking(&pool, "B-FOLIO-IDEM-5").await,
+        0
+    );
+    assert_eq!(
+        command_claim_count(&pool, "add_folio_line", "idem-folio-line-5").await,
+        0
+    );
+
+    let success =
+        add_staff_laundry_line_idempotent(&pool, &ctx, "B-FOLIO-IDEM-5", "Valid amount", 15_000)
             .await
-            .unwrap();
-    assert_eq!(folio_count, 0);
-
-    let claim_count: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM command_idempotency
-         WHERE command_name = 'add_folio_line' AND idempotency_key = ?",
-    )
-    .bind("idem-folio-line-5")
-    .fetch_one(&pool)
-    .await
-    .unwrap();
-    assert_eq!(claim_count, 0);
-
-    let success = add_folio_line_idempotent(
-        &pool,
-        &ctx,
-        "B-FOLIO-IDEM-5",
-        "laundry",
-        "Valid amount",
-        15_000,
-        Some("staff-1"),
-    )
-    .await
-    .expect("valid amount succeeds");
+            .expect("valid amount succeeds");
     assert!(!success.replayed);
 
     let row = sqlx::query(
@@ -8259,49 +6119,33 @@ async fn add_folio_line_idempotent_unsafe_amount_does_not_consume_claim_or_write
     seed_active_booking(&pool, "B-FOLIO-FRACTION", "B-FOLIO-FRACTION")
         .await
         .unwrap();
-    let ctx = crate::command_idempotency::WriteCommandContext::for_internal_test(
-        "req-folio-unsafe",
-        "idem-folio-unsafe",
-        "add_folio_line",
-    );
+    let ctx = cmd_with_request("add_folio_line", "req-folio-unsafe", "idem-folio-unsafe");
 
-    let error = add_folio_line_idempotent(
+    let error = add_staff_laundry_line_idempotent(
         &pool,
         &ctx,
         "B-FOLIO-FRACTION",
-        "laundry",
         "Unsafe amount",
         MAX_TRANSPORT_SAFE_MONEY_VND + 1,
-        Some("staff-1"),
     )
     .await
     .expect_err("unsafe amount rejected");
     assert_eq!(error.code, crate::app_error::codes::BOOKING_INVALID_STATE);
 
-    let folio_count: i64 =
-        sqlx::query_scalar("SELECT COUNT(*) FROM folio_lines WHERE booking_id = ?")
-            .bind("B-FOLIO-FRACTION")
-            .fetch_one(&pool)
-            .await
-            .unwrap();
-    assert_eq!(folio_count, 0);
-
-    let claim_count: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM command_idempotency
-         WHERE command_name = 'add_folio_line' AND idempotency_key = ?",
-    )
-    .bind("idem-folio-unsafe")
-    .fetch_one(&pool)
-    .await
-    .unwrap();
-    assert_eq!(claim_count, 0);
+    assert_eq!(
+        folio_line_count_for_booking(&pool, "B-FOLIO-FRACTION").await,
+        0
+    );
+    assert_eq!(
+        command_claim_count(&pool, "add_folio_line", "idem-folio-unsafe").await,
+        0
+    );
 }
 
 #[tokio::test]
 async fn folio_line_insert_rolls_back_with_parent_transaction() {
     let pool = test_pool().await;
-    seed_room(&pool, "FOLIO-1").await.unwrap();
-    seed_active_booking(&pool, "B-FOLIO-1", "FOLIO-1")
+    seed_active_booking_with_room(&pool, "B-FOLIO-1", "FOLIO-1")
         .await
         .unwrap();
 
@@ -8321,11 +6165,7 @@ async fn folio_line_insert_rolls_back_with_parent_transaction() {
     .unwrap();
     tx.rollback().await.unwrap();
 
-    let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM folio_lines WHERE booking_id = ?")
-        .bind("B-FOLIO-1")
-        .fetch_one(&pool)
-        .await
-        .unwrap();
+    let count = folio_line_count_for_booking(&pool, "B-FOLIO-1").await;
 
     assert_eq!(count, 0);
 }
@@ -8375,8 +6215,7 @@ async fn insert_folio_line_with_origin_writes_origin_key_and_ordinal() {
 #[tokio::test]
 async fn duplicate_folio_origin_is_blocked_by_unique_origin_ordinal() {
     let pool = test_pool().await;
-    seed_room(&pool, "R-FOLIO-ORIGIN-DUP").await.unwrap();
-    seed_active_booking(&pool, "B-FOLIO-ORIGIN-DUP", "R-FOLIO-ORIGIN-DUP")
+    seed_active_booking_with_room(&pool, "B-FOLIO-ORIGIN-DUP", "R-FOLIO-ORIGIN-DUP")
         .await
         .unwrap();
     let origin = OriginSideEffect::new("origin-duplicate-folio", 0).unwrap();
@@ -8416,13 +6255,5 @@ async fn duplicate_folio_origin_is_blocked_by_unique_origin_ordinal() {
     assert!(duplicate.is_err(), "duplicate folio origin must fail");
     second_tx.rollback().await.unwrap();
 
-    let count: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM folio_lines
-         WHERE origin_idempotency_key = ? AND origin_line_ordinal = 0",
-    )
-    .bind("origin-duplicate-folio")
-    .fetch_one(&pool)
-    .await
-    .unwrap();
-    assert_eq!(count, 1);
+    assert_folio_origin(&pool, "origin-duplicate-folio", 0, 1).await;
 }
