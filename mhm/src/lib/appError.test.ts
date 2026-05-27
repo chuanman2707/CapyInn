@@ -11,6 +11,7 @@ import errorCodes from "../../shared/error-codes.json";
 import { invokeCommand } from "./invokeCommand";
 import { createAppErrorException } from "./appError";
 import {
+  APP_ERROR_CODE_MAP,
   APP_ERROR_REGISTRY,
   FALLBACK_SYSTEM_APP_ERROR,
   formatAppError,
@@ -153,6 +154,12 @@ describe("appError", () => {
       errorCodes.find((entry) => entry.code === "SYSTEM_INTERNAL_ERROR")?.defaultMessage ??
         "Có lỗi hệ thống, vui lòng thử lại",
     );
+  });
+
+  it("keeps public registry constants immutable", () => {
+    expect(Object.isFrozen(APP_ERROR_REGISTRY)).toBe(true);
+    expect(Object.isFrozen(APP_ERROR_CODE_MAP)).toBe(true);
+    expect(Object.isFrozen(FALLBACK_SYSTEM_APP_ERROR)).toBe(true);
   });
 
   it("rethrows structured auth errors as Error-like app errors", async () => {

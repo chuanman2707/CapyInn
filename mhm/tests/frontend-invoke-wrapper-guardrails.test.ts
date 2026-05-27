@@ -59,7 +59,7 @@ const RAW_INVOKE_ALLOWED_COMMANDS: Record<string, string> = {
 };
 
 const RAW_INVOKE_ALLOWED_NON_LITERAL_SITES: Record<string, string> = {
-  "src/lib/invokeCommand.ts": "central invoke wrapper dispatch boundary",
+  "src/lib/command/invoke.ts": "central invoke wrapper dispatch boundary",
 };
 
 let rawInvokeOccurrencesCache: RawInvokeOccurrence[] | undefined;

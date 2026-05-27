@@ -1,4 +1,4 @@
-use super::{emit_db_update, get_money_vnd, get_optional_money_vnd, get_user, AppState};
+use super::{emit_db_update, get_user, AppState};
 use crate::services::booking::reservation_lifecycle::{self, ReservationCancelResponse};
 use crate::{
     app_error::{
@@ -13,9 +13,10 @@ use crate::{
     },
     domain::booking::BookingError,
     models::*,
+    queries::booking::room_queries,
 };
 use serde_json::{json, Value};
-use sqlx::{Pool, Row, Sqlite};
+use sqlx::{Pool, Sqlite};
 use tauri::State;
 
 // ═══════════════════════════════════════════════
@@ -30,51 +31,7 @@ pub async fn do_check_availability(
     from_date: &str,
     to_date: &str,
 ) -> Result<AvailabilityResult, String> {
-    let rows = sqlx::query(
-        "SELECT rc.date, rc.status, rc.booking_id, COALESCE(g.full_name, '') as guest_name
-         FROM room_calendar rc
-         LEFT JOIN bookings b ON b.id = rc.booking_id
-         LEFT JOIN guests g ON g.id = b.primary_guest_id
-         WHERE rc.room_id = ? AND rc.date >= ? AND rc.date < ?
-         ORDER BY rc.date ASC",
-    )
-    .bind(room_id)
-    .bind(from_date)
-    .bind(to_date)
-    .fetch_all(pool)
-    .await
-    .map_err(|e| e.to_string())?;
-
-    if rows.is_empty() {
-        return Ok(AvailabilityResult {
-            available: true,
-            conflicts: vec![],
-            max_nights: None,
-        });
-    }
-
-    let conflicts: Vec<CalendarConflict> = rows
-        .iter()
-        .map(|r| CalendarConflict {
-            date: r.get("date"),
-            status: r.get("status"),
-            guest_name: r.get("guest_name"),
-            booking_id: r.get("booking_id"),
-        })
-        .collect();
-
-    let first_date = &conflicts[0].date;
-    let from_naive =
-        chrono::NaiveDate::parse_from_str(from_date, "%Y-%m-%d").map_err(|e| e.to_string())?;
-    let first_naive =
-        chrono::NaiveDate::parse_from_str(first_date, "%Y-%m-%d").map_err(|e| e.to_string())?;
-    let max_nights = (first_naive - from_naive).num_days() as i32;
-
-    Ok(AvailabilityResult {
-        available: false,
-        conflicts,
-        max_nights: Some(max_nights),
-    })
+    room_queries::check_room_availability(pool, room_id, from_date, to_date).await
 }
 
 #[tauri::command]
@@ -699,27 +656,9 @@ pub async fn get_room_calendar(
     from: String,
     to: String,
 ) -> Result<Vec<CalendarEntry>, String> {
-    let rows = sqlx::query(
-        "SELECT room_id, date, booking_id, status FROM room_calendar
-         WHERE room_id = ? AND date >= ? AND date <= ?
-         ORDER BY date ASC",
-    )
-    .bind(&room_id)
-    .bind(&from)
-    .bind(&to)
-    .fetch_all(&state.db)
-    .await
-    .map_err(|e| e.to_string())?;
-
-    Ok(rows
-        .iter()
-        .map(|r| CalendarEntry {
-            room_id: r.get("room_id"),
-            date: r.get("date"),
-            booking_id: r.get("booking_id"),
-            status: r.get("status"),
-        })
-        .collect())
+    room_queries::load_room_calendar(&state.db, &room_id, &from, &to)
+        .await
+        .map_err(|e| e.to_string())
 }
 
 // ─── Get Rooms Availability (Dashboard) ───
@@ -727,84 +666,9 @@ pub async fn get_room_calendar(
 pub async fn do_get_rooms_availability(
     pool: &Pool<Sqlite>,
 ) -> Result<Vec<RoomWithAvailability>, String> {
-    let room_rows = sqlx::query("SELECT id, name, type, floor, has_balcony, base_price, max_guests, extra_person_fee, status FROM rooms ORDER BY id")
-        .fetch_all(pool).await.map_err(|e| e.to_string())?;
-
-    let today = chrono::Local::now().format("%Y-%m-%d").to_string();
-    let mut results = Vec::new();
-
-    for rr in &room_rows {
-        let room = Room {
-            id: rr.get("id"),
-            name: rr.get("name"),
-            room_type: rr.get("type"),
-            floor: rr.get("floor"),
-            has_balcony: rr.get::<i32, _>("has_balcony") == 1,
-            base_price: get_money_vnd(rr, "base_price"),
-            max_guests: rr.try_get::<i32, _>("max_guests").unwrap_or(2),
-            extra_person_fee: get_money_vnd(rr, "extra_person_fee"),
-            status: rr.get("status"),
-        };
-
-        let current_booking =
-            sqlx::query("SELECT * FROM bookings WHERE room_id = ? AND status = 'active' LIMIT 1")
-                .bind(&room.id)
-                .fetch_optional(pool)
-                .await
-                .map_err(|e| e.to_string())?
-                .map(|r| Booking {
-                    id: r.get("id"),
-                    room_id: r.get("room_id"),
-                    primary_guest_id: r.get("primary_guest_id"),
-                    check_in_at: r.get("check_in_at"),
-                    expected_checkout: r.get("expected_checkout"),
-                    actual_checkout: r.get("actual_checkout"),
-                    nights: r.get("nights"),
-                    total_price: get_money_vnd(&r, "total_price"),
-                    paid_amount: get_money_vnd(&r, "paid_amount"),
-                    status: r.get("status"),
-                    source: r.get("source"),
-                    notes: r.get("notes"),
-                    created_at: r.get("created_at"),
-                });
-
-        let res_rows = sqlx::query(
-            "SELECT b.id, g.full_name, b.scheduled_checkin, b.scheduled_checkout, b.deposit_amount, b.status
-             FROM bookings b
-             JOIN guests g ON g.id = b.primary_guest_id
-             WHERE b.room_id = ? AND b.status = 'booked' AND b.scheduled_checkin >= ?
-             ORDER BY b.scheduled_checkin ASC"
-        )
-        .bind(&room.id).bind(&today)
-        .fetch_all(pool).await.map_err(|e| e.to_string())?;
-
-        let upcoming: Vec<UpcomingReservation> = res_rows
-            .iter()
-            .map(|r| UpcomingReservation {
-                booking_id: r.get("id"),
-                guest_name: r.get("full_name"),
-                scheduled_checkin: r
-                    .get::<Option<String>, _>("scheduled_checkin")
-                    .unwrap_or_default(),
-                scheduled_checkout: r
-                    .get::<Option<String>, _>("scheduled_checkout")
-                    .unwrap_or_default(),
-                deposit_amount: get_optional_money_vnd(r, "deposit_amount").unwrap_or(0),
-                status: r.get("status"),
-            })
-            .collect();
-
-        let next_until = upcoming.first().map(|u| u.scheduled_checkin.clone());
-
-        results.push(RoomWithAvailability {
-            room,
-            current_booking,
-            upcoming_reservations: upcoming,
-            next_available_until: next_until,
-        });
-    }
-
-    Ok(results)
+    room_queries::load_rooms_availability(pool)
+        .await
+        .map_err(|e| e.to_string())
 }
 
 #[tauri::command]

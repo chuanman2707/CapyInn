@@ -12,7 +12,7 @@ use crate::{
     domain::booking::BookingError,
     models::*,
     money::validate_non_negative_money_vnd,
-    queries::booking::revenue_queries,
+    queries::booking::{revenue_queries, room_queries},
     services::booking::stay_lifecycle,
 };
 use serde_json::{json, Value};
@@ -22,29 +22,9 @@ use tauri::State;
 // ─── Room Commands ───
 
 pub async fn do_get_rooms(pool: &Pool<Sqlite>) -> Result<Vec<Room>, String> {
-    let rows = sqlx::query(
-        "SELECT id, name, type, floor, has_balcony, base_price, max_guests, extra_person_fee, status FROM rooms ORDER BY floor, id"
-    )
-    .fetch_all(pool)
-    .await
-    .map_err(|e| e.to_string())?;
-
-    let rooms: Vec<Room> = rows
-        .iter()
-        .map(|r| Room {
-            id: r.get("id"),
-            name: r.get("name"),
-            room_type: r.get("type"),
-            floor: r.get("floor"),
-            has_balcony: r.get::<i32, _>("has_balcony") == 1,
-            base_price: get_money_vnd(r, "base_price"),
-            max_guests: r.try_get::<i32, _>("max_guests").unwrap_or(2),
-            extra_person_fee: get_money_vnd(r, "extra_person_fee"),
-            status: r.get("status"),
-        })
-        .collect();
-
-    Ok(rooms)
+    room_queries::load_rooms(pool)
+        .await
+        .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -404,80 +384,9 @@ pub async fn do_get_room_detail(
     pool: &Pool<Sqlite>,
     room_id: &str,
 ) -> Result<RoomWithBooking, String> {
-    let row = sqlx::query("SELECT id, name, type, floor, has_balcony, base_price, max_guests, extra_person_fee, status FROM rooms WHERE id = ?")
-        .bind(room_id)
-        .fetch_one(pool).await.map_err(|e| e.to_string())?;
-
-    let room = Room {
-        id: row.get("id"),
-        name: row.get("name"),
-        room_type: row.get("type"),
-        floor: row.get("floor"),
-        has_balcony: row.get::<i32, _>("has_balcony") == 1,
-        base_price: get_money_vnd(&row, "base_price"),
-        max_guests: row.try_get::<i32, _>("max_guests").unwrap_or(2),
-        extra_person_fee: get_money_vnd(&row, "extra_person_fee"),
-        status: row.get("status"),
-    };
-
-    let booking = sqlx::query(
-        "SELECT id, room_id, primary_guest_id, check_in_at, expected_checkout, actual_checkout, nights, total_price, paid_amount, status, source, notes, created_at
-         FROM bookings WHERE room_id = ? AND status = 'active' LIMIT 1"
-    )
-    .bind(room_id)
-    .fetch_optional(pool).await.map_err(|e| e.to_string())?
-    .map(|r| Booking {
-        id: r.get("id"),
-        room_id: r.get("room_id"),
-        primary_guest_id: r.get("primary_guest_id"),
-        check_in_at: r.get("check_in_at"),
-        expected_checkout: r.get("expected_checkout"),
-        actual_checkout: r.get("actual_checkout"),
-        nights: r.get("nights"),
-        total_price: get_money_vnd(&r, "total_price"),
-        paid_amount: get_money_vnd(&r, "paid_amount"),
-        status: r.get("status"),
-        source: r.get("source"),
-        notes: r.get("notes"),
-        created_at: r.get("created_at"),
-    });
-
-    let guests = if let Some(ref b) = booking {
-        let rows = sqlx::query(
-            "SELECT g.* FROM guests g
-             JOIN booking_guests bg ON bg.guest_id = g.id
-             WHERE bg.booking_id = ?",
-        )
-        .bind(&b.id)
-        .fetch_all(pool)
+    room_queries::load_room_detail(pool, room_id)
         .await
-        .map_err(|e| e.to_string())?;
-
-        rows.iter()
-            .map(|r| Guest {
-                id: r.get("id"),
-                guest_type: r.get("guest_type"),
-                full_name: r.get("full_name"),
-                doc_number: r.get("doc_number"),
-                dob: r.get("dob"),
-                gender: r.get("gender"),
-                nationality: r.get("nationality"),
-                address: r.get("address"),
-                visa_expiry: r.get("visa_expiry"),
-                scan_path: r.get("scan_path"),
-                phone: r.get("phone"),
-                created_at: r.get("created_at"),
-            })
-            .collect()
-    } else {
-        vec![]
-    };
-
-    Ok(RoomWithBooking {
-        room,
-        booking,
-        guests,
-    })
+        .map_err(|e| e.to_string())
 }
 
 #[tauri::command]

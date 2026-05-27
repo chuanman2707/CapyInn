@@ -2684,6 +2684,207 @@ async fn group_checkout_clears_master_flag_when_group_completes() {
 }
 
 #[tokio::test]
+async fn group_booking_lifecycle_smoke_covers_partial_and_final_checkout() {
+    let pool = test_pool().await;
+    seed_room(&pool, "G-SMOKE-1").await.unwrap();
+    seed_room(&pool, "G-SMOKE-2").await.unwrap();
+    seed_pricing_rule(&pool, "standard", 250_000).await.unwrap();
+
+    let group = group_lifecycle::group_checkin(
+        &pool,
+        Some("seed-user".to_string()),
+        minimal_group_checkin_request(&["G-SMOKE-1", "G-SMOKE-2"]),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(group.status, "active");
+
+    let initial_group =
+        sqlx::query("SELECT status, master_booking_id FROM booking_groups WHERE id = ?")
+            .bind(&group.id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(initial_group.get::<String, _>("status"), "active");
+    let first_master_booking_id = initial_group
+        .get::<Option<String>, _>("master_booking_id")
+        .expect("group check-in should assign a master booking");
+
+    let initial_bookings = sqlx::query(
+        "SELECT id, room_id, status, is_master_room
+         FROM bookings
+         WHERE group_id = ?
+         ORDER BY room_id",
+    )
+    .bind(&group.id)
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    assert_eq!(initial_bookings.len(), 2);
+    assert!(initial_bookings.iter().any(|row| {
+        row.get::<String, _>("id") == first_master_booking_id
+            && row.get::<String, _>("status") == "active"
+            && row.get::<i64, _>("is_master_room") == 1
+    }));
+    assert!(initial_bookings
+        .iter()
+        .all(|row| row.get::<String, _>("status") == "active"));
+
+    let occupied_count: (i64,) = sqlx::query_as(
+        "SELECT COUNT(*)
+         FROM rooms
+         WHERE id IN ('G-SMOKE-1', 'G-SMOKE-2')
+           AND status = 'occupied'",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(occupied_count.0, 2);
+
+    group_lifecycle::group_checkout(
+        &pool,
+        GroupCheckoutRequest {
+            group_id: group.id.clone(),
+            booking_ids: vec![first_master_booking_id.clone()],
+            final_paid: Some(40_000),
+        },
+    )
+    .await
+    .unwrap();
+
+    let partial_group =
+        sqlx::query("SELECT status, master_booking_id FROM booking_groups WHERE id = ?")
+            .bind(&group.id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(
+        partial_group.get::<String, _>("status"),
+        "partial_checkout"
+    );
+    let second_master_booking_id = partial_group
+        .get::<Option<String>, _>("master_booking_id")
+        .expect("partial checkout should reassign a master booking");
+    assert_ne!(second_master_booking_id, first_master_booking_id);
+
+    let checked_out_status: String =
+        sqlx::query_scalar("SELECT status FROM bookings WHERE id = ?")
+            .bind(&first_master_booking_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(checked_out_status, "checked_out");
+
+    let remaining_master = sqlx::query(
+        "SELECT id, is_master_room
+         FROM bookings
+         WHERE group_id = ? AND status = 'active'
+         LIMIT 1",
+    )
+    .bind(&group.id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        remaining_master.get::<String, _>("id"),
+        second_master_booking_id
+    );
+    assert_eq!(remaining_master.get::<i64, _>("is_master_room"), 1);
+
+    let first_room_cleaning_count: (i64,) = sqlx::query_as(
+        "SELECT COUNT(*)
+         FROM rooms
+         WHERE id = 'G-SMOKE-1' AND status = 'cleaning'",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(first_room_cleaning_count.0, 1);
+
+    let first_housekeeping_count: (i64,) = sqlx::query_as(
+        "SELECT COUNT(*)
+         FROM housekeeping
+         WHERE room_id = 'G-SMOKE-1' AND status = 'needs_cleaning'",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(first_housekeeping_count.0, 1);
+
+    group_lifecycle::group_checkout(
+        &pool,
+        GroupCheckoutRequest {
+            group_id: group.id.clone(),
+            booking_ids: vec![second_master_booking_id],
+            final_paid: None,
+        },
+    )
+    .await
+    .unwrap();
+
+    let final_group =
+        sqlx::query("SELECT status, master_booking_id FROM booking_groups WHERE id = ?")
+            .bind(&group.id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(final_group.get::<String, _>("status"), "completed");
+    assert_eq!(final_group.get::<Option<String>, _>("master_booking_id"), None);
+
+    let active_booking_count: (i64,) =
+        sqlx::query_as("SELECT COUNT(*) FROM bookings WHERE group_id = ? AND status = 'active'")
+            .bind(&group.id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(active_booking_count.0, 0);
+
+    let checked_out_booking_count: (i64,) = sqlx::query_as(
+        "SELECT COUNT(*)
+         FROM bookings WHERE group_id = ? AND status = 'checked_out'",
+    )
+    .bind(&group.id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(checked_out_booking_count.0, 2);
+
+    let remaining_occupied_rooms: (i64,) = sqlx::query_as(
+        "SELECT COUNT(*)
+         FROM rooms
+         WHERE id IN ('G-SMOKE-1', 'G-SMOKE-2')
+           AND status = 'occupied'",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(remaining_occupied_rooms.0, 0);
+
+    let cleaning_room_count: (i64,) = sqlx::query_as(
+        "SELECT COUNT(*)
+         FROM rooms
+         WHERE id IN ('G-SMOKE-1', 'G-SMOKE-2')
+           AND status = 'cleaning'",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(cleaning_room_count.0, 2);
+
+    let housekeeping_count: (i64,) = sqlx::query_as(
+        "SELECT COUNT(*)
+         FROM housekeeping
+         WHERE room_id IN ('G-SMOKE-1', 'G-SMOKE-2')
+           AND status = 'needs_cleaning'",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(housekeeping_count.0, 2);
+}
+
+#[tokio::test]
 async fn group_checkout_rejects_stale_selected_booking() {
     let pool = test_pool().await;
     seed_room(&pool, "G501").await.unwrap();
