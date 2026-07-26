@@ -1,6 +1,7 @@
 //! Đo extractor trên ảnh giấy tờ thật.
 //!
 //! Chạy: cargo run --bin kbtt_probe -- <đường-dẫn-ảnh> [thêm ảnh...]
+//!       cargo run --bin kbtt_probe -- --check-resources
 //!
 //! Gate của Bước 1: QR CCCD phải ra đúng 7 trường; MRZ phải đạt >=3/5
 //! checksum trên ảnh chụp bình thường.
@@ -8,15 +9,63 @@
 //! KHÔNG in payload thô và KHÔNG in đường dẫn ảnh đầy đủ — đó là dữ liệu cá
 //! nhân (§12.3). Chỉ in tên file và các trường đã parse.
 
+use capyinn_lib::declaration::catalog::Catalog;
 use capyinn_lib::declaration::extractor::{
     mrz::MrzExtractor, ocr_rs_mrz::OcrRsMrz, qr_cccd::QrCccdExtractor, IdentityExtractor,
 };
+use capyinn_lib::declaration::find_kbtt_resource;
+
+/// Xác nhận một bản đã đóng gói thật sự tìm được resource của nó.
+///
+/// Đây là thứ mà "test xanh + build thành công" KHÔNG chứng minh được: unit
+/// test chạy trong thư mục source nơi file vô tình có sẵn, còn app mở từ
+/// Finder có thư mục làm việc là `/`. Chạy lệnh này từ trong bản .app mới biết.
+fn check_resources() -> i32 {
+    let mut failed = false;
+
+    for name in ["kbtt_catalog.json", "tblt_vn_import.xlsx"] {
+        match find_kbtt_resource(name) {
+            Ok(path) => println!("OK   {name} -> {}", path.display()),
+            Err(e) => {
+                println!("LỖI  {name}: {e}");
+                failed = true;
+            }
+        }
+    }
+
+    match Catalog::load() {
+        Ok(c) => println!(
+            "OK   catalog nạp được: {} quốc tịch, {} tỉnh, {} phường (nguồn {})",
+            c.quoc_tich.len(),
+            c.tinh_thanh.len(),
+            c.phuong_xa.len(),
+            c.source_date
+        ),
+        Err(e) => {
+            println!("LỖI  không nạp được catalog: {e}");
+            failed = true;
+        }
+    }
+
+    if failed {
+        println!("\nKHÔNG ĐẠT — bản build này sẽ hỏng khi khai báo.");
+        1
+    } else {
+        println!("\nĐẠT — bản build tìm được đủ resource.");
+        0
+    }
+}
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     if args.is_empty() {
         eprintln!("Dùng: kbtt_probe <ảnh> [ảnh...]");
+        eprintln!("      kbtt_probe --check-resources");
         std::process::exit(2);
+    }
+
+    if args[0] == "--check-resources" {
+        std::process::exit(check_resources());
     }
 
     let today_year = 2026;
