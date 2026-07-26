@@ -1,4 +1,4 @@
-import { type ComponentType } from "react";
+import { type ComponentType, useEffect, useState } from "react";
 import {
   BarChart3,
   BedDouble,
@@ -9,6 +9,7 @@ import {
   LogOut,
   Moon,
   Settings as SettingsIcon,
+  ShieldCheck,
   Sparkles,
   Users,
   UsersRound,
@@ -29,8 +30,10 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { useAppUpdate } from "@/contexts/AppUpdateContext";
 import { APP_NAME } from "@/lib/appIdentity";
+import { invokeCommand } from "@/lib/invokeCommand";
 import Analytics from "@/pages/Analytics";
 import Dashboard from "@/pages/Dashboard";
+import Declaration from "@/pages/Declaration";
 import GroupManagement from "@/pages/GroupManagement";
 import Guests from "@/pages/Guests";
 import Housekeeping from "@/pages/Housekeeping";
@@ -53,6 +56,7 @@ const NAV_MANAGEMENT = [
   { key: "housekeeping" as const, label: "Housekeeping", icon: Sparkles },
   { key: "analytics" as const, label: "Analytics", icon: BarChart3 },
   { key: "audit" as const, label: "Night Audit", icon: Moon },
+  { key: "declaration" as const, label: "Khai báo tạm trú", icon: ShieldCheck },
 ];
 
 const NAV_SYSTEM = [{ key: "settings" as const, label: "Settings", icon: SettingsIcon }];
@@ -67,12 +71,27 @@ const PAGE_TITLES: Record<string, string> = {
   analytics: "Analytics",
   settings: "Settings",
   audit: "Night Audit",
+  declaration: "Khai báo tạm trú",
 };
 
 export function MainShell() {
   const { activeTab, setTab, setCheckinOpen, setGroupCheckinOpen, checkinRoomId } = useHotelStore();
   const { user, logout } = useAuthStore();
   const { collapsed, toggleCollapse } = useSidebarCollapse();
+
+  // Số khách đã đến trong 48h mà chưa nằm trong lô nào được đối chiếu khớp.
+  // Con số này làm module hữu ích ngay từ trước khi ai bấm vào tab.
+  const [undeclared, setUndeclared] = useState(0);
+  useEffect(() => {
+    const load = () => {
+      invokeCommand<number>("kbtt_undeclared_count")
+        .then(setUndeclared)
+        .catch(() => {});
+    };
+    load();
+    const timer = setInterval(load, 60_000);
+    return () => clearInterval(timer);
+  }, []);
   const appUpdate = useAppUpdate();
   const {
     backupUi,
@@ -118,6 +137,11 @@ export function MainShell() {
       >
         <Icon className={collapsed ? "" : "mr-3"} size={20} />
         {!collapsed && item.label}
+        {item.key === "declaration" && undeclared > 0 && !collapsed && (
+          <Badge variant="destructive" className="ml-auto">
+            {undeclared}
+          </Badge>
+        )}
       </Button>
     );
   };
@@ -318,6 +342,7 @@ export function MainShell() {
             {activeTab === "housekeeping" && <Housekeeping />}
             {activeTab === "analytics" && <Analytics />}
             {activeTab === "audit" && <NightAudit />}
+            {activeTab === "declaration" && <Declaration />}
             {activeTab === "settings" && <Settings />}
           </div>
         </div>
