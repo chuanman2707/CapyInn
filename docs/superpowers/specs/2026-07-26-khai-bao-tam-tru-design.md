@@ -88,6 +88,8 @@ thì đây là bẫy pháp lý, không phải tiện ích.
 | H7 | Repo **đã có** `ocr-rs` 2.1 (PP-OCRv5, MNN), `src/ocr.rs`, `watcher.rs` theo dõi thư mục `Scans/`, và `src/bin/test_ocr.rs`. `Backend::Metal` hardcode → **macOS-only**. | `Cargo.toml`, source |
 | H8 | Schema version hiện tại **19**, migration đăng ký tuần tự trong `db.rs`. | `db.rs`, `schema_version` |
 | H9 | XML mẫu của cổng có **2 record**, cả hai đều mang tiền tố `[TEST]` trong `ho_ten`. | `Danh_Sach_Mau.xml` |
+| H10 | **Danh sách quốc tịch có 198 mã, không phải 205.** Named range `QUOC_TICH` khai `E2:E206` (205 dòng) nhưng **E26–E32 trống** — template thiếu hẳn 7 quốc tịch giữa `BWA - Botswana` và `CMR - Cameroon`, trong đó có **Brazil, Brunei, Bulgaria**. | `gen_kbtt_catalog.py` assert chéo |
+| H11 | `umya-spreadsheet` 3.0.1 round-trip **giữ nguyên** 40 definedName, 9 dataValidation, 13 zip entry, cả 4 sheet. Nhưng `defined_names()` của nó trả **0** dù file có 40 — phải đếm bằng cách đọc zip. Round-trip đổi **thứ tự thuộc tính** XML của row 4 nhưng không đổi giá trị. | Spike đo trực tiếp |
 
 ### 1.4 Ranh giới tin cậy — thiết kế phải phản ánh đúng bảng này
 
@@ -609,7 +611,7 @@ Chạy trên `Vec<DeclarationRow>` đã ghép, trả `Vec<Finding>` gồm `code`
 | `E02` | `full_name` chỉ có 1 token, **và** `single_token_name_ok = 0` |
 | `E03` | **NNN:** `full_name` có dấu tiếng Việt hoặc chữ thường |
 | `E04` | **NNN:** `name_confirmed_by_human = 0` (G5) |
-| `E05` | `nationality_iso3` không thuộc 205 mã trong catalog |
+| `E05` | `nationality_iso3` không đúng dạng ISO3 (3 chữ cái HOA) |
 | `E06` | Giá trị enum không khớp danh mục |
 | `E07` | `expected_check_out` < `check_in_date` |
 | `E08` | **NNN:** thiếu `visa_valid_until` |
@@ -646,6 +648,7 @@ nhiệm trước pháp luật".
 | `W04` | `check_in_at` cách hôm nay > 24h mà chưa có lô `verified` → **đã quá hạn khai báo** |
 | `W05` | `extract_confidence = 'needs_review'` |
 | `W06` | `doc_type_source = 'heuristic'` (G8) |
+| `W07` | `nationality_iso3` đúng dạng ISO3 nhưng **không có trong danh mục template** (H10) |
 
 `W04` trả về từ cùng một hàm validator để Dashboard dùng lại, không viết truy
 vấn thứ hai.
@@ -940,6 +943,21 @@ không gộp vào phạm vi v1.
 **13.8 — `guest_type` nói dối.** H2. Đừng dùng nó để phân loại NNN/VN. Nguồn duy
 nhất đúng là `nationality_iso3` trích từ ảnh.
 
+**13.9 — Danh mục quốc tịch của cổng bị thủng.** H10. 198 mã chứ không phải 205;
+E26–E32 trống, thiếu Brazil, Brunei, Bulgaria và bốn nước nữa nằm giữa Botswana
+và Cameroon.
+
+Vì thế `E05` **không** chặn theo danh mục. Nếu chặn, một khách Brazil hợp lệ sẽ
+không khai báo được và người vận hành không có đường nào đi tiếp — module tự tạo
+ra bế tắc mà bản thân nó không giải quyết nổi. `E05` chỉ chặn khi mã sai *dạng*
+(không phải 3 chữ HOA), tức là bắt lỗi gõ nhầm. Mã đúng dạng nhưng vắng trong
+danh mục sinh `W07` để người vận hành biết mà xử lý với cổng.
+
+Ảnh hưởng thực tế hẹp hơn vẻ ngoài: danh mục này thuộc form khách Việt Nam, mà
+khách Việt thì quốc tịch luôn là `VNM`. Khách nước ngoài đi đường XML với mã
+ISO3 trần, nhiều khả năng không bị ràng buộc bởi dropdown này — nhưng **chưa
+test được**, nên xem §14.8.
+
 ---
 
 ## 14. Ẩn số — chưa test, đừng giả định
@@ -953,6 +971,7 @@ nhất đúng là `nationality_iso3` trích từ ảnh.
 | 14.5 | XLSX: STT ở row 5 nên từ 1 hay 2? | Đã chạy với `2`. Thử `1` xem có khác |
 | 14.6 | Thẻ Căn Cước mới (2024+) có payload QR khác không? | Cần 1 ảnh thẻ mới để test |
 | 14.7 | `ocr-rs` có đọc được MRZ không? | `kbtt_probe` trên 5–10 ảnh hộ chiếu thật |
+| 14.8 | XML có nhận mã ISO3 ngoài 198 mã của template không? (H10) | Xuất 1 record `BRA` và upload thử |
 
 **14.1 là ẩn số nguy hiểm nhất.** Ba kết quả, ba hệ quả:
 

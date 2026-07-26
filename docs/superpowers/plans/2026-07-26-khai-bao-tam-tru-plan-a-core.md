@@ -304,7 +304,9 @@ mod tests {
         assert_eq!(c.noi_cu_tru.len(), 3);
         assert_eq!(c.ly_do_cu_tru.len(), 20);
         assert_eq!(c.gioi_tinh.len(), 2);
-        assert_eq!(c.quoc_tich.len(), 205);
+        // 198, KHÔNG phải 205: named range QUOC_TICH khai E2:E206 nhưng
+        // E26-E32 trống — template thiếu 7 nước giữa Botswana và Cameroon.
+        assert_eq!(c.quoc_tich.len(), 198);
         assert_eq!(c.tinh_thanh.len(), 34);
         assert_eq!(c.phuong_xa.len(), 3323);
     }
@@ -1653,11 +1655,21 @@ mod tests {
         assert!(codes(&validate(&[r], &cat(), "2026-07-26")).contains(&"E04".to_string()));
     }
 
+    /// H10 — danh mục của cổng thiếu Brazil, Brunei, Bulgaria. Chặn cứng theo
+    /// danh mục sẽ khóa oan một khách Brazil hợp lệ và người vận hành không có
+    /// đường nào đi tiếp. E05 chỉ bắt lỗi DẠNG; thiếu trong danh mục là W07.
     #[test]
-    fn e05_rejects_unknown_nationality() {
-        let mut r = nnn_row();
-        r.identity.nationality_iso3 = "XXX".into();
-        assert!(codes(&validate(&[r], &cat(), "2026-07-26")).contains(&"E05".to_string()));
+    fn e05_rejects_malformed_but_not_merely_missing_codes() {
+        let mut bad = nnn_row();
+        bad.identity.nationality_iso3 = "Ru".into();
+        assert!(codes(&validate(&[bad], &cat(), "2026-07-26")).contains(&"E05".to_string()));
+
+        let mut brazil = nnn_row();
+        brazil.identity.nationality_iso3 = "BRA".into();
+        let f = validate(&[brazil], &cat(), "2026-07-26");
+        assert!(!codes(&f).contains(&"E05".to_string()), "khách Brazil phải khai được");
+        assert!(codes(&f).contains(&"W07".to_string()), "nhưng phải được cảnh báo");
+        assert!(!has_blocking(&f));
     }
 
     #[test]
