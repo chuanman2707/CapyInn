@@ -120,6 +120,7 @@ export type HotelTab =
   | "housekeeping"
   | "analytics"
   | "settings"
+  | "declaration"
   | "audit";
 
 export interface CheckInGuestInput {
@@ -436,4 +437,109 @@ export interface GroupInvoiceRoomLine {
   price_per_night: MoneyVnd;
   total: MoneyVnd;
   guest_name: string;
+}
+
+// ── Khai báo tạm trú ──
+// Shapes mirror `declaration_identity` / `declaration_link` / `declaration_batch`
+// in the design spec §5. Field names stay snake_case because they come straight
+// off the Rust structs.
+
+export type DeclarationSource = "qr_cccd" | "mrz_td3" | "manual";
+export type DeclarationConfidence = "verified" | "needs_review";
+export type DeclarationBatchKind = "NNN" | "VN";
+export type DeclarationSeverity = "blocking" | "warning";
+export type DeclarationBatchStatus = "exported" | "uploaded" | "verified" | "failed";
+export type DeclarationDocTypeSource = "heuristic" | "human";
+
+export interface DeclarationIdentity {
+  id: string;
+  full_name: string;
+  dob: string;
+  gender: string;
+  nationality_iso3: string;
+  // khách Việt Nam
+  doc_type_code?: string | null;
+  doc_type_source?: DeclarationDocTypeSource | null;
+  doc_type_name?: string | null;
+  doc_no?: string | null;
+  phone?: string | null;
+  residence_status?: string | null;
+  address_detail?: string | null;
+  // khách nước ngoài
+  passport_no?: string | null;
+  passport_expiry?: string | null;
+  /** Nhập tay. KHÁC `passport_expiry` — xem §8.1 E10. */
+  visa_valid_until?: string | null;
+  // kiểm soát
+  name_confirmed_by_human: boolean;
+  single_token_name_ok?: boolean;
+}
+
+export interface ExtractedIdentity {
+  source: DeclarationSource;
+  confidence: DeclarationConfidence;
+  identity: DeclarationIdentity;
+  review_hints: string[];
+  /** data:image/png;base64,… — chỉ đi qua IPC, không bao giờ ghi đĩa (§12.4). */
+  crop_data_url?: string | null;
+}
+
+export interface StayInfo {
+  stay_id: string;
+  room_no: string | null;
+  check_in: string;
+  expected_out: string;
+  /** Tên khách đã có trong CapyInn — dùng để xếp hạng gợi ý ghép (§7). */
+  guest_name?: string | null;
+}
+
+export interface DeclarationRow {
+  link_id: string;
+  identity_id: string;
+  full_name: string;
+  dob: string;
+  gender: string;
+  nationality_iso3: string;
+  doc_type_code: string | null;
+  doc_type_name: string | null;
+  doc_no: string | null;
+  phone: string | null;
+  residence_status: string | null;
+  address_detail: string | null;
+  passport_no: string | null;
+  passport_expiry: string | null;
+  visa_valid_until: string | null;
+  room_no: string | null;
+  check_in_date: string;
+  expected_check_out: string;
+  stay_reason: string;
+  stay_reason_note: string | null;
+  name_confirmed_by_human: boolean;
+  single_token_name_ok: boolean;
+}
+
+export interface DeclarationFinding {
+  code: string;
+  severity: DeclarationSeverity;
+  link_id: string;
+  field?: string | null;
+  message: string;
+}
+
+export interface DeclarationExportResult {
+  batch_id: string;
+  file_path: string;
+  row_count: number;
+  kind: DeclarationBatchKind;
+}
+
+export interface DeclarationBatch {
+  id: string;
+  kind: DeclarationBatchKind;
+  file_path: string;
+  row_count: number;
+  status: DeclarationBatchStatus;
+  verified_count: number | null;
+  verified_at: string | null;
+  created_at: string;
 }

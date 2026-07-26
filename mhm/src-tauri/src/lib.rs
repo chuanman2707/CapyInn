@@ -366,6 +366,18 @@ pub fn run() {
             // Night Audit
             commands::audit::run_night_audit,
             commands::audit::get_audit_logs,
+            // Khai báo tạm trú
+            commands::declaration::kbtt_extract_from_image,
+            commands::declaration::kbtt_list_stays,
+            commands::declaration::kbtt_save_identity,
+            commands::declaration::kbtt_link,
+            commands::declaration::kbtt_pending_rows,
+            commands::declaration::kbtt_validate,
+            commands::declaration::kbtt_export,
+            commands::declaration::kbtt_reconcile,
+            commands::declaration::kbtt_undeclared_count,
+            commands::declaration::kbtt_list_batches,
+            commands::declaration::kbtt_open_export_dir,
             // Backup & Export
             commands::audit::backup_database,
             commands::audit::export_bookings_csv,

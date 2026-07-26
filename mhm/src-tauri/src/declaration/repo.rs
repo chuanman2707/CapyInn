@@ -423,6 +423,82 @@ pub async fn confidence_by_link(
         .collect())
 }
 
+/// Link đã ghép nhưng chưa nằm trong lô `verified` nào.
+///
+/// Đây là định nghĩa "còn phải khai" ở mức từng hồ sơ, khác với
+/// `count_undeclared_within_48h` vốn đếm theo lượt lưu trú cho badge sidebar.
+pub async fn pending_link_ids(pool: &Pool<Sqlite>) -> Result<Vec<String>, String> {
+    sqlx::query_scalar::<_, String>(
+        "SELECT dl.id
+           FROM declaration_link dl
+          WHERE NOT EXISTS (
+                SELECT 1
+                  FROM declaration_entry de
+                  JOIN declaration_batch db ON db.id = de.batch_id
+                 WHERE de.link_id = dl.id AND db.status = 'verified'
+          )
+          ORDER BY dl.created_at",
+    )
+    .fetch_all(pool)
+    .await
+    .map_err(|e| format!("Không đọc được danh sách chờ khai: {e}"))
+}
+
+#[derive(Debug, serde::Serialize)]
+pub struct BatchSummary {
+    pub id: String,
+    pub kind: String,
+    pub file_path: String,
+    pub row_count: i64,
+    pub status: String,
+    pub verified_count: Option<i64>,
+    pub verified_at: Option<String>,
+    pub created_at: String,
+}
+
+/// Lô chưa xong nổi lên đầu: `failed` rồi `exported`/`uploaded`, sau đó mới tới
+/// lô đã `verified`. Người vận hành cần thấy cái đang hỏng trước.
+pub async fn list_batches(pool: &Pool<Sqlite>) -> Result<Vec<BatchSummary>, String> {
+    let rows = sqlx::query(
+        "SELECT id, kind, file_path, row_count, status,
+                verified_count, verified_at, created_at
+           FROM declaration_batch
+          ORDER BY CASE status
+                     WHEN 'failed'   THEN 0
+                     WHEN 'exported' THEN 1
+                     WHEN 'uploaded' THEN 1
+                     ELSE 2
+                   END,
+                   created_at DESC",
+    )
+    .fetch_all(pool)
+    .await
+    .map_err(|e| format!("Không đọc được lịch sử lô: {e}"))?;
+
+    Ok(rows
+        .iter()
+        .map(|r| BatchSummary {
+            id: r.get("id"),
+            kind: r.get("kind"),
+            file_path: r.get("file_path"),
+            row_count: r.get("row_count"),
+            status: r.get("status"),
+            verified_count: r.get("verified_count"),
+            verified_at: r.get("verified_at"),
+            created_at: r.get("created_at"),
+        })
+        .collect())
+}
+
+pub async fn batch_file_path(pool: &Pool<Sqlite>, batch_id: &str) -> Result<String, String> {
+    sqlx::query_scalar::<_, String>("SELECT file_path FROM declaration_batch WHERE id = ?")
+        .bind(batch_id)
+        .fetch_optional(pool)
+        .await
+        .map_err(|e| format!("Không đọc được lô: {e}"))?
+        .ok_or_else(|| "Không tìm thấy lô.".to_string())
+}
+
 // ─── Bốn khóa settings (§4.2) ───────────────────────────────────────────────
 
 async fn setting(pool: &Pool<Sqlite>, key: &str) -> Result<Option<String>, String> {
