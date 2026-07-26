@@ -30,7 +30,7 @@ fn now() -> String {
 }
 
 fn placeholders(n: usize) -> String {
-    std::iter::repeat("?").take(n).collect::<Vec<_>>().join(",")
+    std::iter::repeat_n("?", n).collect::<Vec<_>>().join(",")
 }
 
 // ─── Đọc PMS — CHỈ SELECT ───────────────────────────────────────────────────
