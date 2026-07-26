@@ -131,6 +131,30 @@ fn updater_enabled() -> bool {
     )
 }
 
+/// Auto-update is a convenience. Losing it must never cost the operator their app.
+///
+/// `plugins.updater.pubkey` lives in a CI variable, not in `tauri.conf.json`, so any
+/// release built outside the release workflow registers the plugin against a config
+/// with no `pubkey` and the plugin refuses to initialise. This used to be an
+/// `.expect()`, which turned a missing convenience into a startup panic: the app died
+/// before it ever opened the database. Crash bundles from 2026-04-22 (0.1.4) and
+/// 2026-07-26 (0.1.6) are both this exact failure.
+///
+/// Returns whether the plugin registered, so callers can report it; the app runs
+/// either way.
+fn report_updater_registration<E: std::fmt::Display>(result: Result<(), E>) -> bool {
+    match result {
+        Ok(()) => true,
+        Err(error) => {
+            error!(
+                "Updater plugin failed to register, continuing without auto-update: {}",
+                error
+            );
+            false
+        }
+    }
+}
+
 fn gateway_runtime_effective_enabled() -> bool {
     runtime_config::effective_experimental_gateway_runtime_enabled()
 }
@@ -193,9 +217,10 @@ pub fn run() {
             #[cfg(desktop)]
             {
                 if updater_enabled() {
-                    app.handle()
-                        .plugin(tauri_plugin_updater::Builder::new().build())
-                        .expect("failed to register updater plugin");
+                    report_updater_registration(
+                        app.handle()
+                            .plugin(tauri_plugin_updater::Builder::new().build()),
+                    );
                 } else {
                     info!("Updater plugin disabled for this build");
                 }
@@ -508,7 +533,7 @@ mod tests {
     use super::{
         experimental_runtime_status_value, gateway_management_disabled_error,
         gateway_runtime_effective_enabled, outbox_subscribers_for_runtime_profile,
-        updater_enabled_from_env,
+        report_updater_registration, updater_enabled_from_env,
     };
 
     fn clear_experimental_runtime_env() {
@@ -537,6 +562,27 @@ mod tests {
     #[test]
     fn updater_stays_enabled_outside_dev_even_without_env_flag() {
         assert!(updater_enabled_from_env(false, false));
+    }
+
+    /// The exact string the plugin returns when `tauri.conf.json` carries no
+    /// `pubkey` — i.e. every release built outside the release workflow.
+    #[test]
+    fn a_release_built_without_the_updater_pubkey_still_starts() {
+        let missing_pubkey = "PluginInitialization(\"updater\", \"Error deserializing \
+             'plugins.updater' within your Tauri configuration: missing field `pubkey`\")";
+
+        // The point of the test is that this line returns instead of unwinding.
+        let registered = report_updater_registration(Err(missing_pubkey));
+
+        assert!(
+            !registered,
+            "a config without pubkey must report the updater as unregistered"
+        );
+    }
+
+    #[test]
+    fn a_successful_registration_reports_the_updater_as_live() {
+        assert!(report_updater_registration(Ok::<(), &str>(())));
     }
 
     #[test]
