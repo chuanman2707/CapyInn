@@ -650,6 +650,7 @@ version = "0.1.6"
 dependencies = [
  "async-stream",
  "axum",
+ "base64 0.22.1",
  "chrono",
  "dirs",
  "env_logger",
@@ -678,6 +679,7 @@ dependencies = [
  "tower",
  "umya-spreadsheet",
  "uuid",
+ "zip 8.6.0",
 ]
 
 [[package]]
