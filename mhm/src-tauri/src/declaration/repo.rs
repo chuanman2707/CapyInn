@@ -712,7 +712,7 @@ mod tests {
             .await
             .expect("ghép link");
 
-        let rows = load_rows_by_link_ids(&pool, &[link_id.clone()])
+        let rows = load_rows_by_link_ids(&pool, std::slice::from_ref(&link_id))
             .await
             .expect("đọc dòng");
         assert_eq!(rows.len(), 1);
@@ -724,7 +724,7 @@ mod tests {
         assert_eq!(rows[0].stay.stay_id, "booking-1");
         assert!(rows[0].stay.room_no.is_empty());
 
-        let conf = confidence_by_link(&pool, &[link_id.clone()])
+        let conf = confidence_by_link(&pool, std::slice::from_ref(&link_id))
             .await
             .expect("đọc độ tin cậy");
         assert_eq!(conf.get(&link_id).map(String::as_str), Some("verified"));
@@ -881,7 +881,7 @@ mod tests {
         let batch = insert_batch(&pool, "VN", "/tmp/kbtt.xlsx", 1)
             .await
             .expect("lưu lô");
-        insert_entries(&pool, &batch, &[link_id.clone()])
+        insert_entries(&pool, &batch, std::slice::from_ref(&link_id))
             .await
             .expect("lưu dòng");
 

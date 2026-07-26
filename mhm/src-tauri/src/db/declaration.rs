@@ -284,7 +284,7 @@ mod tests {
         let batch = crate::declaration::repo::insert_batch(&pool, "VN", "/tmp/x.xlsx", 1)
             .await
             .expect("lưu được lô");
-        crate::declaration::repo::insert_entries(&pool, &batch, &[link.clone()])
+        crate::declaration::repo::insert_entries(&pool, &batch, std::slice::from_ref(&link))
             .await
             .expect("lưu được dòng của lô");
 
