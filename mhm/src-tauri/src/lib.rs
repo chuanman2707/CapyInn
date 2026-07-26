@@ -14,6 +14,7 @@ mod commands;
 mod crash_index;
 mod db;
 pub mod db_error_monitoring;
+pub mod declaration;
 mod diagnostics;
 mod domain;
 pub mod gateway;
