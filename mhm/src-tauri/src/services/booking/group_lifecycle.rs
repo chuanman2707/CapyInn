@@ -430,12 +430,12 @@ async fn group_checkin_tx(
             "walk-in"
         };
         let booking_checkin_at = if is_reservation {
-            format!("{}T14:00:00+07:00", &checkin_date)
+            format!("{}T14:00:00+07:00", checkin_date)
         } else {
             now_rfc3339.clone()
         };
         let booking_checkout_at = if is_reservation {
-            format!("{}T12:00:00+07:00", &checkout_date)
+            format!("{}T12:00:00+07:00", checkout_date)
         } else {
             (now + Duration::days(req.nights as i64)).to_rfc3339()
         };
