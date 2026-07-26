@@ -15,7 +15,8 @@
         "title": "CapyInn",
         "width": 1280,
         "height": 800,
-        "maximized": true
+        "minWidth": 1100,
+        "minHeight": 700
       }
     ],
     "security": {

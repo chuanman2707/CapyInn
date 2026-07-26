@@ -1,5 +1,6 @@
 use log::{error, info};
 use tauri::Manager;
+use tauri_plugin_window_state::AppHandleExt;
 
 pub mod agent;
 pub mod aggregate_locks;
@@ -31,6 +32,7 @@ mod runtime_config;
 mod services;
 pub mod support_log;
 mod watcher;
+mod window_state;
 pub mod write_manifest;
 
 use commands::AppState;
@@ -186,6 +188,7 @@ pub fn run() {
     let app = tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_process::init())
+        .plugin(window_state::plugin())
         .setup(|app| {
             #[cfg(desktop)]
             {
@@ -197,6 +200,10 @@ pub fn run() {
                     info!("Updater plugin disabled for this build");
                 }
             }
+
+            // Before the database work below, so the window settles at its final size
+            // rather than resizing after startup.
+            window_state::apply_startup_geometry(app.handle());
 
             let rt = tokio::runtime::Runtime::new().expect("Failed to create Tokio runtime");
             let pool = rt.block_on(db::init_db()).expect("Failed to init database");
@@ -411,6 +418,13 @@ pub fn run() {
 
     app.run(|app_handle, event| match event {
         tauri::RunEvent::ExitRequested { api, .. } => {
+            // Must run before prevent_exit(): the exit path below drains backups on a
+            // spawned task and only then calls exit(0), so the plugin's own save on
+            // RunEvent::Exit can read a cache that was never refreshed from live
+            // geometry when the user quits with Cmd+Q without closing the window.
+            // Here the window is guaranteed to still exist.
+            let _ = app_handle.save_window_state(window_state::state_flags());
+
             api.prevent_exit();
             if !app_handle
                 .state::<backup::BackupCoordinator>()
