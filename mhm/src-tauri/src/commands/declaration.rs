@@ -209,6 +209,13 @@ pub async fn kbtt_discard_identity(
     repo::delete_unlinked_identity(&state.db, &identity_id).await
 }
 
+/// Gỡ một khai báo đã ghép — ghép nhầm phòng, hoặc ghép trùng. Từ chối nếu nó
+/// đã nằm trong lô đã đối soát.
+#[tauri::command]
+pub async fn kbtt_unlink(state: State<'_, AppState>, link_id: String) -> Result<(), String> {
+    repo::delete_link(&state.db, &link_id).await
+}
+
 #[tauri::command]
 pub async fn kbtt_pending_rows(
     state: State<'_, AppState>,

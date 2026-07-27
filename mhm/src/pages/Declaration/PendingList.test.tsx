@@ -260,6 +260,28 @@ describe("PendingList", () => {
     expect(screen.getByTitle(/Chưa ai xác nhận tên/i)).toBeInTheDocument();
   });
 
+  /// Ghép nhầm phòng hoặc ghép trùng thì phải gỡ được ngay trên dòng đó —
+  /// không có nó, một dòng thừa chặn E14 và cả lô không xuất được.
+  it("removes a wrong declaration straight from its row", async () => {
+    mockCommands({
+      kbtt_pending_rows: [row({ link_id: "l1", full_name: "Phạm Thị Minh Hiền" })],
+      kbtt_unlink: null,
+    });
+
+    render(<PendingList />);
+
+    const remove = await screen.findByLabelText(
+      /Gỡ khai báo của Phạm Thị Minh Hiền/i,
+    );
+    fireEvent.click(remove);
+
+    await waitFor(() => {
+      expect(invokeCommand).toHaveBeenCalledWith("kbtt_unlink", {
+        linkId: "l1",
+      });
+    });
+  });
+
   it("reports the selected link ids upward", async () => {
     mockCommands({
       kbtt_pending_rows: [row({ link_id: "l1", nationality_iso3: "VNM" })],

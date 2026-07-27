@@ -181,6 +181,17 @@ export default function PendingList({
     }
   };
 
+  const handleUnlink = async (linkId: string, name: string) => {
+    try {
+      await invokeCommand<void>("kbtt_unlink", { linkId });
+      toast.success(`Đã gỡ khai báo của ${name}`);
+      loadRows();
+      loadWaiting();
+    } catch (e) {
+      toast.error(formatAppError(e));
+    }
+  };
+
   const handleDiscard = async (id: string, name: string) => {
     try {
       await invokeCommand<void>("kbtt_discard_identity", { identityId: id });
@@ -216,6 +227,7 @@ export default function PendingList({
                 <th className="px-3 py-2">Phòng</th>
                 <th className="px-3 py-2">Ngày đến</th>
                 <th className="px-3 py-2">Kiểm tra</th>
+                <th className="w-16 px-3 py-2" />
               </tr>
             </thead>
             <tbody>
@@ -257,6 +269,16 @@ export default function PendingList({
                           ))}
                         </span>
                       )}
+                    </td>
+                    <td className="px-3 py-2 text-right">
+                      <button
+                        type="button"
+                        aria-label={`Gỡ khai báo của ${r.full_name}`}
+                        className="text-xs text-slate-400 underline hover:text-red-600"
+                        onClick={() => handleUnlink(r.link_id, r.full_name)}
+                      >
+                        Gỡ
+                      </button>
                     </td>
                   </tr>
                 );
