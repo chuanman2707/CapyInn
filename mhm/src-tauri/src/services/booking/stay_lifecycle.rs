@@ -55,7 +55,7 @@ fn ensure_locked_room_matches_booking(
     }
 }
 
-fn map_check_in_command_error(error: BookingError) -> CommandError {
+pub(super) fn map_check_in_command_error(error: BookingError) -> CommandError {
     match error {
         BookingError::Validation(message) => {
             CommandError::user(codes::BOOKING_INVALID_STATE, message)
@@ -82,7 +82,7 @@ fn map_check_in_command_error(error: BookingError) -> CommandError {
     }
 }
 
-fn map_check_out_command_error(error: BookingError) -> CommandError {
+pub(super) fn map_check_out_command_error(error: BookingError) -> CommandError {
     match error {
         BookingError::Validation(message)
             if message == "Tổng quyết toán phải lớn hơn hoặc bằng 0"
@@ -111,7 +111,7 @@ fn map_check_out_command_error(error: BookingError) -> CommandError {
     }
 }
 
-fn map_extend_stay_command_error(error: BookingError) -> CommandError {
+pub(super) fn map_extend_stay_command_error(error: BookingError) -> CommandError {
     match error {
         BookingError::Conflict(message) => {
             if is_room_unavailable_conflict_message(&message) {
