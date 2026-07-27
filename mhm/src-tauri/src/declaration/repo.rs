@@ -383,6 +383,23 @@ pub async fn delete_link(pool: &Pool<Sqlite>, link_id: &str) -> Result<(), Strin
     Ok(())
 }
 
+/// Gác một khai báo sang một bên (held = true) hoặc đưa lại (false).
+/// Khách gác lại không vào file xuất nhưng badge vẫn đếm — họ chưa được khai.
+pub async fn set_link_held(pool: &Pool<Sqlite>, link_id: &str, held: bool) -> Result<(), String> {
+    let held_at = if held { Some(now()) } else { None };
+    let affected = sqlx::query("UPDATE declaration_link SET held_at = ? WHERE id = ?")
+        .bind(held_at)
+        .bind(link_id)
+        .execute(pool)
+        .await
+        .map_err(|e| format!("Không cập nhật được trạng thái gác: {e}"))?
+        .rows_affected();
+    if affected == 0 {
+        return Err("Không tìm thấy khai báo.".into());
+    }
+    Ok(())
+}
+
 /// Danh tính đã lưu nhưng chưa ghép vào lượt lưu trú nào.
 ///
 /// Tồn tại vì trước đây danh tính vừa trích chỉ sống trong `useState` của màn
@@ -1432,5 +1449,34 @@ mod tests {
         .await
         .expect("đọc lại dòng mới nhất");
         assert_eq!(new_link, newest, "giá trị trả về phải đúng là dòng vừa ghi");
+    }
+
+    /// "Gác lại" sống trong DB — nhịp "rảnh thì làm" có thể cách nhau nhiều
+    /// ngày và nhiều lần tắt app.
+    #[tokio::test]
+    async fn holding_a_guest_is_persisted_and_reversible() {
+        let pool = pool().await;
+        save_identity_ensuring_link(&pool, &vn_identity(), "qr_cccd", "verified")
+            .await
+            .expect("lưu");
+        let link = pending_link_ids(&pool).await.expect("đọc")[0].clone();
+
+        set_link_held(&pool, &link, true).await.expect("gác");
+        let held: Option<String> =
+            sqlx::query_scalar("SELECT held_at FROM declaration_link WHERE id = ?")
+                .bind(&link)
+                .fetch_one(&pool)
+                .await
+                .expect("đọc");
+        assert!(held.is_some());
+
+        set_link_held(&pool, &link, false).await.expect("đưa lại");
+        let held: Option<String> =
+            sqlx::query_scalar("SELECT held_at FROM declaration_link WHERE id = ?")
+                .bind(&link)
+                .fetch_one(&pool)
+                .await
+                .expect("đọc lại");
+        assert!(held.is_none());
     }
 }

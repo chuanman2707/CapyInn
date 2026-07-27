@@ -236,6 +236,16 @@ pub async fn kbtt_unlink(state: State<'_, AppState>, link_id: String) -> Result<
 }
 
 #[tauri::command]
+pub async fn kbtt_hold(state: State<'_, AppState>, link_id: String) -> Result<(), String> {
+    repo::set_link_held(&state.db, &link_id, true).await
+}
+
+#[tauri::command]
+pub async fn kbtt_release(state: State<'_, AppState>, link_id: String) -> Result<(), String> {
+    repo::set_link_held(&state.db, &link_id, false).await
+}
+
+#[tauri::command]
 pub async fn kbtt_pending_rows(
     state: State<'_, AppState>,
 ) -> Result<Vec<DeclarationRowDto>, String> {
