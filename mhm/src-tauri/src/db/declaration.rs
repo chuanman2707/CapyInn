@@ -663,62 +663,61 @@ mod tests {
         assert!(stays[0].check_in_raw.contains('T'));
     }
 
+    /// Badge = một biểu thức duy nhất: link chưa nằm trong lô `verified`.
+    /// Tự nhiên gồm cả "chưa xuất", "gác lại", "chờ đối chiếu" và lô `failed`.
     #[tokio::test]
-    async fn undeclared_count_drops_only_when_a_batch_is_verified() {
+    async fn the_badge_counts_every_link_not_yet_verified() {
         let pool = seeded_pool().await;
+        use crate::declaration::repo;
 
-        let before = crate::declaration::repo::count_undeclared_within_48h(&pool)
+        let card = crate::declaration::model::Identity {
+            full_name: "Phan Thị Mỹ Hà".into(),
+            dob: "1995-07-28".into(),
+            gender: "F".into(),
+            nationality_iso3: "VNM".into(),
+            doc_no: Some("058195006173".into()),
+            ..Default::default()
+        };
+        repo::save_identity_ensuring_link(&pool, &card, "qr_cccd", "verified")
             .await
-            .expect("đếm được");
-        assert_eq!(before, 2, "hai khách trong booking, chưa ai được khai");
+            .expect("khách 1");
+        let card2 = crate::declaration::model::Identity {
+            full_name: "Khách Thứ Hai".into(),
+            dob: "1991-02-02".into(),
+            gender: "M".into(),
+            nationality_iso3: "VNM".into(),
+            doc_no: Some("012345678901".into()),
+            ..Default::default()
+        };
+        repo::save_identity_ensuring_link(&pool, &card2, "qr_cccd", "verified")
+            .await
+            .expect("khách 2");
 
-        let identity = crate::declaration::repo::insert_identity(
-            &pool,
-            &crate::declaration::model::Identity {
-                full_name: "Phan Thị Mỹ Hà".into(),
-                dob: "1995-07-28".into(),
-                gender: "F".into(),
-                nationality_iso3: "VNM".into(),
-                ..Default::default()
-            },
-            "qr_cccd",
-            "verified",
-        )
-        .await
-        .expect("lưu được danh tính");
-        let link = crate::declaration::repo::insert_link(&pool, &identity, Some("booking-1"), "2", None)
-            .await
-            .expect("lưu được link");
-        let batch = crate::declaration::repo::insert_batch(&pool, "VN", "/tmp/x.xlsx", 1)
-            .await
-            .expect("lưu được lô");
-        crate::declaration::repo::insert_entries(&pool, &batch, std::slice::from_ref(&link))
-            .await
-            .expect("lưu được dòng của lô");
+        let b = repo::undeclared_breakdown(&pool).await.expect("đếm");
+        assert_eq!((b.total, b.not_exported, b.held, b.awaiting), (2, 2, 0, 0));
 
-        // Lô mới xuất ('exported') chưa tính là đã khai.
-        let exported = crate::declaration::repo::count_undeclared_within_48h(&pool)
-            .await
-            .expect("đếm được");
-        assert_eq!(exported, 2, "xuất file chưa phải là đã khai");
+        // Gác một khách.
+        let links = repo::pending_link_ids(&pool).await.expect("đọc");
+        repo::set_link_held(&pool, &links[0], true).await.expect("gác");
+        let b = repo::undeclared_breakdown(&pool).await.expect("đếm");
+        assert_eq!((b.total, b.not_exported, b.held, b.awaiting), (2, 1, 1, 0));
 
-        crate::declaration::repo::set_batch_verified(&pool, &batch, 1)
+        // Xuất khách còn lại.
+        let batch = repo::insert_batch(&pool, "VN", "/tmp/x.xlsx", 1).await.expect("lô");
+        repo::insert_entries(&pool, &batch, std::slice::from_ref(&links[1]))
             .await
-            .expect("đối chiếu xong");
-        let verified = crate::declaration::repo::count_undeclared_within_48h(&pool)
-            .await
-            .expect("đếm được");
-        assert_eq!(verified, 1, "một khách đã khai, còn một chưa");
+            .expect("dòng");
+        let b = repo::undeclared_breakdown(&pool).await.expect("đếm");
+        assert_eq!((b.total, b.not_exported, b.held, b.awaiting), (2, 0, 1, 1));
 
-        // §5.3 — lô failed không có entry verified nào, khách tự động quay lại
-        // trạng thái chưa khai. Không cần code hoàn tác.
-        crate::declaration::repo::set_batch_failed(&pool, &batch, 0)
-            .await
-            .expect("đánh dấu lô hỏng");
-        let failed = crate::declaration::repo::count_undeclared_within_48h(&pool)
-            .await
-            .expect("đếm được");
-        assert_eq!(failed, 2);
+        // Lô fail: vẫn đếm (khách chưa được khai thật).
+        repo::set_batch_failed(&pool, &batch, 0).await.expect("fail");
+        assert_eq!(repo::undeclared_breakdown(&pool).await.expect("đếm").total, 2);
+
+        // Đối soát khớp: khách rời badge.
+        repo::set_batch_verified(&pool, &batch, 1).await.expect("chốt");
+        let b = repo::undeclared_breakdown(&pool).await.expect("đếm");
+        assert_eq!((b.total, b.not_exported, b.held, b.awaiting), (1, 0, 1, 0));
     }
 
     /// v22 — khái niệm "hồ sơ chờ chưa ghép" biến mất: danh tính mồ côi từ

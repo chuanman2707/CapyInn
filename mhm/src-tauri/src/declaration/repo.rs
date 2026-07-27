@@ -68,32 +68,44 @@ pub async fn load_stays_for_declaration(pool: &Pool<Sqlite>) -> Result<Vec<StayI
         .collect())
 }
 
-/// Khách chưa khai = lượt lưu trú không có link nào thuộc lô `verified`.
-/// Tính bằng query, không cần cột mới ở bảng cũ (§5.3).
-pub async fn count_undeclared_within_48h(pool: &Pool<Sqlite>) -> Result<i64, String> {
-    let rows = sqlx::query(
+#[derive(Debug, serde::Serialize)]
+pub struct UndeclaredBreakdown {
+    pub total: i64,
+    pub not_exported: i64,
+    pub held: i64,
+    pub awaiting: i64,
+}
+
+/// Badge + dòng diễn giải. Một nguồn duy nhất: link chưa thuộc lô `verified`.
+pub async fn undeclared_breakdown(pool: &Pool<Sqlite>) -> Result<UndeclaredBreakdown, String> {
+    let row = sqlx::query(
         "SELECT
-            (SELECT COUNT(*) FROM booking_guests bg WHERE bg.booking_id = b.id) AS guest_count,
-            (SELECT COUNT(*) FROM declaration_link dl
-               JOIN declaration_entry de  ON de.link_id = dl.id
-               JOIN declaration_batch dbt ON dbt.id     = de.batch_id
-              WHERE dl.stay_id = b.id AND dbt.status = 'verified') AS declared_count
-           FROM bookings b
-          WHERE b.status = 'active'
-            AND julianday('now') - julianday(b.check_in_at) <= 2",
+            COALESCE(SUM(CASE WHEN has_entry = 0 AND held = 0 THEN 1 ELSE 0 END), 0) AS not_exported,
+            COALESCE(SUM(CASE WHEN has_entry = 0 AND held = 1 THEN 1 ELSE 0 END), 0) AS held,
+            COALESCE(SUM(CASE WHEN has_entry = 1 THEN 1 ELSE 0 END), 0) AS awaiting
+           FROM (
+             SELECT EXISTS(SELECT 1 FROM declaration_entry de WHERE de.link_id = dl.id) AS has_entry,
+                    dl.held_at IS NOT NULL AS held
+               FROM declaration_link dl
+              WHERE NOT EXISTS (
+                    SELECT 1 FROM declaration_entry de
+                    JOIN declaration_batch b ON b.id = de.batch_id
+                   WHERE de.link_id = dl.id AND b.status = 'verified')
+           )",
     )
-    .fetch_all(pool)
+    .fetch_one(pool)
     .await
     .map_err(|e| format!("Không đếm được khách chưa khai: {e}"))?;
 
-    Ok(rows
-        .iter()
-        .map(|r| {
-            let g: i64 = r.get("guest_count");
-            let d: i64 = r.get("declared_count");
-            (g - d).max(0)
-        })
-        .sum())
+    let not_exported: i64 = row.get("not_exported");
+    let held: i64 = row.get("held");
+    let awaiting: i64 = row.get("awaiting");
+    Ok(UndeclaredBreakdown {
+        total: not_exported + held + awaiting,
+        not_exported,
+        held,
+        awaiting,
+    })
 }
 
 // ─── Ghi — chỉ bốn bảng declaration_* ───────────────────────────────────────

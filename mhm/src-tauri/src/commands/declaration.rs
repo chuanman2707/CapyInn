@@ -399,7 +399,14 @@ pub async fn kbtt_reconcile(
 
 #[tauri::command]
 pub async fn kbtt_undeclared_count(state: State<'_, AppState>) -> Result<i64, String> {
-    repo::count_undeclared_within_48h(&state.db).await
+    Ok(repo::undeclared_breakdown(&state.db).await?.total)
+}
+
+#[tauri::command]
+pub async fn kbtt_undeclared_breakdown(
+    state: State<'_, AppState>,
+) -> Result<repo::UndeclaredBreakdown, String> {
+    repo::undeclared_breakdown(&state.db).await
 }
 
 #[tauri::command]

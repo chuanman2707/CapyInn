@@ -544,3 +544,10 @@ export interface DeclarationBatch {
   verified_at: string | null;
   created_at: string;
 }
+
+export interface DeclarationUndeclaredBreakdown {
+  total: number;
+  not_exported: number;
+  held: number;
+  awaiting: number;
+}

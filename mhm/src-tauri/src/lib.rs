@@ -416,6 +416,7 @@ pub fn run() {
             commands::declaration::kbtt_export,
             commands::declaration::kbtt_reconcile,
             commands::declaration::kbtt_undeclared_count,
+            commands::declaration::kbtt_undeclared_breakdown,
             commands::declaration::kbtt_list_batches,
             commands::declaration::kbtt_open_export_dir,
             // Backup & Export
