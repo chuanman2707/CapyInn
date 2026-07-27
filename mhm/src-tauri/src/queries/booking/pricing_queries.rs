@@ -2,12 +2,12 @@
 //!
 //! Split out of `domain::booking::pricing`, which is now pure.
 //!
-//! Every loader takes the caller's transaction. Pricing is only ever computed
-//! as part of a lifecycle write, which needs to read rows it has inserted but
-//! not committed, so a pool-based read would see stale data. The pool variants
-//! that used to sit beside these were reachable only from tests.
+//! The `_tx` loaders take the caller's transaction: a lifecycle write needs to
+//! read rows it has inserted but not committed, so a pool-based read would see
+//! stale data. The pool loaders below serve the *preview* path, which has no
+//! transaction and keys off a room type rather than a room id.
 
-use sqlx::{Row, Sqlite, Transaction};
+use sqlx::{Pool, Row, Sqlite, Transaction};
 
 use crate::db::row::{get_f64, get_money_vnd};
 use crate::domain::booking::pricing::{StayPricingInputs, StoredPricingRule};
@@ -26,6 +26,30 @@ const FALLBACK_BASE_PRICE_SQL: &str = "SELECT base_price FROM rooms WHERE LOWER(
 
 const SPECIAL_UPLIFT_SQL: &str =
     "SELECT CAST(uplift_pct AS REAL) FROM special_dates WHERE date = ?";
+
+const PRICING_RULE_LISTING_SQL: &str =
+    "SELECT id, room_type, hourly_rate, overnight_rate, daily_rate,
+                overnight_start, overnight_end, daily_checkin, daily_checkout,
+                early_checkin_surcharge_pct, late_checkout_surcharge_pct,
+                weekend_uplift_pct
+         FROM pricing_rules ORDER BY room_type";
+
+const SPECIAL_DATES_SQL: &str =
+    "SELECT id, date, label, uplift_pct FROM special_dates ORDER BY date";
+
+/// A stored rule plus its row id, which the settings screen needs and the
+/// pricing rules themselves do not.
+pub(crate) struct PricingRuleListing {
+    pub(crate) id: String,
+    pub(crate) rule: StoredPricingRule,
+}
+
+pub struct SpecialDate {
+    pub id: String,
+    pub date: String,
+    pub label: String,
+    pub uplift_pct: f64,
+}
 
 fn database_error(error: sqlx::Error) -> BookingError {
     BookingError::database(error.to_string())
@@ -86,6 +110,106 @@ pub(crate) async fn load_stay_pricing_inputs_tx(
         check_out: check_out.to_string(),
         pricing_type: pricing_type.to_string(),
     })
+}
+
+/// The preview counterpart of `load_stay_pricing_inputs_tx`. Callers of the
+/// preview supply a room *type* directly — there is no booking or room yet — so
+/// this skips the room lookup and is otherwise identical.
+///
+/// The special-date read is deliberately lenient: a failure prices the stay at a
+/// 0% uplift rather than failing the preview, which is the behaviour the
+/// preview command has always had. The lifecycle path, which actually charges
+/// money, propagates the error instead.
+pub(crate) async fn load_stay_pricing_inputs_for_room_type(
+    pool: &Pool<Sqlite>,
+    room_type: &str,
+    check_in: &str,
+    check_out: &str,
+    pricing_type: &str,
+) -> BookingResult<StayPricingInputs> {
+    let stored_rule = load_stored_pricing_rule(pool, room_type).await?;
+    let fallback_base_price = if stored_rule.is_none() {
+        load_fallback_base_price(pool, room_type).await?
+    } else {
+        None
+    };
+    let special_uplift_pct = load_special_uplift(pool, check_in).await.unwrap_or(0.0);
+
+    Ok(StayPricingInputs {
+        room_type: room_type.to_string(),
+        stored_rule,
+        fallback_base_price,
+        special_uplift_pct,
+        check_in: check_in.to_string(),
+        check_out: check_out.to_string(),
+        pricing_type: pricing_type.to_string(),
+    })
+}
+
+async fn load_stored_pricing_rule(
+    pool: &Pool<Sqlite>,
+    room_type: &str,
+) -> BookingResult<Option<StoredPricingRule>> {
+    let row = sqlx::query(STORED_PRICING_RULE_SQL)
+        .bind(room_type.to_lowercase())
+        .fetch_optional(pool)
+        .await
+        .map_err(database_error)?;
+
+    Ok(row.as_ref().map(stored_rule_from_row))
+}
+
+async fn load_fallback_base_price(
+    pool: &Pool<Sqlite>,
+    room_type: &str,
+) -> BookingResult<Option<MoneyVnd>> {
+    let row = sqlx::query(FALLBACK_BASE_PRICE_SQL)
+        .bind(room_type.to_lowercase())
+        .fetch_optional(pool)
+        .await
+        .map_err(database_error)?;
+
+    Ok(row.as_ref().map(|row| get_money_vnd(row, "base_price")))
+}
+
+async fn load_special_uplift(pool: &Pool<Sqlite>, date_str: &str) -> BookingResult<f64> {
+    let row: Option<(f64,)> = sqlx::query_as(SPECIAL_UPLIFT_SQL)
+        .bind(date_key(date_str))
+        .fetch_optional(pool)
+        .await
+        .map_err(database_error)?;
+
+    Ok(row.map(|value| value.0).unwrap_or(0.0))
+}
+
+pub(crate) async fn load_pricing_rule_listings(
+    pool: &Pool<Sqlite>,
+) -> Result<Vec<PricingRuleListing>, sqlx::Error> {
+    let rows = sqlx::query(PRICING_RULE_LISTING_SQL)
+        .fetch_all(pool)
+        .await?;
+
+    Ok(rows
+        .iter()
+        .map(|row| PricingRuleListing {
+            id: row.get("id"),
+            rule: stored_rule_from_row(row),
+        })
+        .collect())
+}
+
+pub async fn load_special_dates(pool: &Pool<Sqlite>) -> Result<Vec<SpecialDate>, sqlx::Error> {
+    let rows = sqlx::query(SPECIAL_DATES_SQL).fetch_all(pool).await?;
+
+    Ok(rows
+        .iter()
+        .map(|row| SpecialDate {
+            id: row.get("id"),
+            date: row.get("date"),
+            label: row.get("label"),
+            uplift_pct: get_f64(row, "uplift_pct"),
+        })
+        .collect())
 }
 
 async fn load_room_type_tx(

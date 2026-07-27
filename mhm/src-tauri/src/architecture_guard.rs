@@ -235,13 +235,12 @@ fn production_source(source: &str) -> String {
 /// about emptying it. The test fails both when an unlisted command module grows
 /// SQL *and* when a listed one is cleaned up without being struck off, so the
 /// list cannot quietly rot.
-const COMMANDS_STILL_HOLDING_SQL: [&str; 6] = [
+const COMMANDS_STILL_HOLDING_SQL: [&str; 5] = [
     "commands/analytics.rs",
     "commands/auth.rs",
     "commands/bookings.rs",
     "commands/groups.rs",
     "commands/guests.rs",
-    "commands/pricing.rs",
 ];
 
 #[test]
