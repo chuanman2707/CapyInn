@@ -82,7 +82,7 @@ describe("ReconcileChecklist", () => {
     expect(await screen.findByText(/Lô đã đối chiếu/i)).toBeInTheDocument();
   });
 
-  it("marks the batch failed and keeps guests undeclared when the count differs", async () => {
+  it("marks the batch failed and tells the operator guests are held on this batch, not undeclared-list, when the count differs", async () => {
     invokeCommand.mockResolvedValue("failed");
     render(<ReconcileChecklist batchId="b1" expected={3} />);
 
@@ -93,7 +93,10 @@ describe("ReconcileChecklist", () => {
 
     expect(await screen.findByText(/Lô thất bại/i)).toBeInTheDocument();
     expect(
-      screen.getByText(/vẫn ở trạng thái chưa khai báo/i),
+      screen.getByText(/giữ nguyên trên lô này/i),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText(/đưa khách về danh sách để sửa/i),
     ).toBeInTheDocument();
     await waitFor(() => {
       expect(invokeCommand).toHaveBeenCalledWith("kbtt_reconcile", {
