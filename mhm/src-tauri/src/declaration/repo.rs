@@ -71,12 +71,54 @@ pub async fn load_stays_for_declaration(pool: &Pool<Sqlite>) -> Result<Vec<StayI
 #[derive(Debug, serde::Serialize)]
 pub struct UndeclaredBreakdown {
     pub total: i64,
+    /// Khách PMS đã check-in trong 48h mà CHƯA hề được quét vào module này —
+    /// báo động "khách đã tới, chưa ai đi khai". Ba trường dưới đếm link đã
+    /// quét; trường này đếm phía PMS, và trừ theo MỌI link (không chỉ
+    /// verified) để một khách vừa quét vừa còn trên booking không bị đếm hai
+    /// lần (xem `count_undeclared_within_48h`).
+    pub not_scanned: i64,
     pub not_exported: i64,
     pub held: i64,
     pub awaiting: i64,
 }
 
-/// Badge + dòng diễn giải. Một nguồn duy nhất: link chưa thuộc lô `verified`.
+/// Khách PMS chưa từng được quét vào module khai báo.
+///
+/// Đây là báo động gốc trước khi có khái niệm "link": khách đã check-in mà
+/// chưa ai quét CCCD/hộ chiếu của họ thì badge phải kêu, kể cả khi người vận
+/// hành chưa quét ai — `undeclared_breakdown` phía dưới trước đây chỉ đếm
+/// link đã quét nên badge im lặng đúng lúc cần kêu nhất.
+///
+/// Trừ theo TOÀN BỘ link gắn với lượt lưu trú (không chỉ `verified`): một
+/// khách đã được quét (link nào cũng được, kể cả đang chờ xuất/gác/chờ đối
+/// chiếu) thì đã nằm trong ba nhóm còn lại của `UndeclaredBreakdown` rồi,
+/// trừ hết mọi link tránh đếm họ thêm một lần nữa ở đây.
+async fn count_undeclared_within_48h(pool: &Pool<Sqlite>) -> Result<i64, String> {
+    let rows = sqlx::query(
+        "SELECT
+            (SELECT COUNT(*) FROM booking_guests bg WHERE bg.booking_id = b.id) AS guest_count,
+            (SELECT COUNT(*) FROM declaration_link dl WHERE dl.stay_id = b.id) AS linked_count
+           FROM bookings b
+          WHERE b.status = 'active'
+            AND julianday('now') - julianday(b.check_in_at) <= 2",
+    )
+    .fetch_all(pool)
+    .await
+    .map_err(|e| format!("Không đếm được khách PMS chưa quét: {e}"))?;
+
+    Ok(rows
+        .iter()
+        .map(|r| {
+            let g: i64 = r.get("guest_count");
+            let l: i64 = r.get("linked_count");
+            (g - l).max(0)
+        })
+        .sum())
+}
+
+/// Badge + dòng diễn giải. Bốn nguồn cộng lại, không chồng lấn:
+/// `not_scanned` (PMS, chưa quét) + `not_exported`/`held`/`awaiting` (link đã
+/// quét, chưa thuộc lô `verified`).
 pub async fn undeclared_breakdown(pool: &Pool<Sqlite>) -> Result<UndeclaredBreakdown, String> {
     let row = sqlx::query(
         "SELECT
@@ -100,8 +142,10 @@ pub async fn undeclared_breakdown(pool: &Pool<Sqlite>) -> Result<UndeclaredBreak
     let not_exported: i64 = row.get("not_exported");
     let held: i64 = row.get("held");
     let awaiting: i64 = row.get("awaiting");
+    let not_scanned = count_undeclared_within_48h(pool).await?;
     Ok(UndeclaredBreakdown {
-        total: not_exported + held + awaiting,
+        total: not_scanned + not_exported + held + awaiting,
+        not_scanned,
         not_exported,
         held,
         awaiting,

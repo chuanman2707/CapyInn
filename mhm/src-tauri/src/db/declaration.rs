@@ -674,8 +674,14 @@ mod tests {
         assert!(stays[0].check_in_raw.contains('T'));
     }
 
-    /// Badge = một biểu thức duy nhất: link chưa nằm trong lô `verified`.
-    /// Tự nhiên gồm cả "chưa xuất", "gác lại", "chờ đối chiếu" và lô `failed`.
+    /// Badge = bốn nguồn cộng lại: `not_scanned` (khách PMS check-in trong 48h
+    /// chưa hề được quét — báo động ngay cả khi chưa ai quét ai) cộng ba nhóm
+    /// link đã quét mà chưa nằm trong lô `verified` ("chưa xuất", "gác lại",
+    /// "chờ đối chiếu", kể cả lô `failed`).
+    ///
+    /// `seeded_pool` dựng sẵn `booking-1` (active, check-in "bây giờ") với hai
+    /// khách PMS (`guest-1`, `guest-2`) — nên `not_scanned` khởi điểm là 2 và
+    /// không đổi cho tới khi một link được GẮN vào đúng lượt lưu trú đó.
     #[tokio::test]
     async fn the_badge_counts_every_link_not_yet_verified() {
         let pool = seeded_pool().await;
@@ -704,14 +710,22 @@ mod tests {
             .await
             .expect("khách 2");
 
+        // Hai khách vừa quét chưa gắn vào phòng nào (stay_id NULL) nên không
+        // đụng tới hai khách PMS của booking-1 — not_scanned giữ nguyên 2.
         let b = repo::undeclared_breakdown(&pool).await.expect("đếm");
-        assert_eq!((b.total, b.not_exported, b.held, b.awaiting), (2, 2, 0, 0));
+        assert_eq!(
+            (b.total, b.not_scanned, b.not_exported, b.held, b.awaiting),
+            (4, 2, 2, 0, 0)
+        );
 
         // Gác một khách.
         let links = repo::pending_link_ids(&pool).await.expect("đọc");
         repo::set_link_held(&pool, &links[0], true).await.expect("gác");
         let b = repo::undeclared_breakdown(&pool).await.expect("đếm");
-        assert_eq!((b.total, b.not_exported, b.held, b.awaiting), (2, 1, 1, 0));
+        assert_eq!(
+            (b.total, b.not_scanned, b.not_exported, b.held, b.awaiting),
+            (4, 2, 1, 1, 0)
+        );
 
         // Xuất khách còn lại.
         let batch = repo::insert_batch(&pool, "VN", "/tmp/x.xlsx", 1).await.expect("lô");
@@ -719,16 +733,40 @@ mod tests {
             .await
             .expect("dòng");
         let b = repo::undeclared_breakdown(&pool).await.expect("đếm");
-        assert_eq!((b.total, b.not_exported, b.held, b.awaiting), (2, 0, 1, 1));
+        assert_eq!(
+            (b.total, b.not_scanned, b.not_exported, b.held, b.awaiting),
+            (4, 2, 0, 1, 1)
+        );
+
+        // Chống đếm trùng: gắn khách vừa xuất vào ĐÚNG booking-1 (khách này
+        // hóa ra chính là một trong hai khách PMS của lượt đó). Nếu badge trừ
+        // sai (chỉ trừ link `verified`) thì not_scanned vẫn là 2 và người này
+        // bị đếm hai lần — vừa "chờ đối chiếu" vừa "chưa quét". Trừ đúng
+        // (theo MỌI link, không chỉ verified) thì not_scanned giảm còn 1 và
+        // total giảm đúng 1, không phải giữ nguyên.
+        repo::update_link(&pool, &links[1], Some("booking-1"), "1", None)
+            .await
+            .expect("gắn phòng");
+        let b = repo::undeclared_breakdown(&pool).await.expect("đếm");
+        assert_eq!(
+            (b.total, b.not_scanned, b.not_exported, b.held, b.awaiting),
+            (3, 1, 0, 1, 1),
+            "khách đã quét và đã gắn phòng chỉ được đếm một lần"
+        );
 
         // Lô fail: vẫn đếm (khách chưa được khai thật).
         repo::set_batch_failed(&pool, &batch, 0).await.expect("fail");
-        assert_eq!(repo::undeclared_breakdown(&pool).await.expect("đếm").total, 2);
+        assert_eq!(repo::undeclared_breakdown(&pool).await.expect("đếm").total, 3);
 
-        // Đối soát khớp: khách rời badge.
+        // Đối soát khớp: khách rời ba nhóm link, nhưng vẫn là "đã quét" nên
+        // không quay lại not_scanned — guest-1 (khách PMS còn lại của
+        // booking-1, chưa từng được quét) vẫn giữ not_scanned ở 1.
         repo::set_batch_verified(&pool, &batch, 1).await.expect("chốt");
         let b = repo::undeclared_breakdown(&pool).await.expect("đếm");
-        assert_eq!((b.total, b.not_exported, b.held, b.awaiting), (1, 0, 1, 0));
+        assert_eq!(
+            (b.total, b.not_scanned, b.not_exported, b.held, b.awaiting),
+            (2, 1, 0, 1, 0)
+        );
     }
 
     /// v22 — khái niệm "hồ sơ chờ chưa ghép" biến mất: danh tính mồ côi từ

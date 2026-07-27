@@ -547,6 +547,7 @@ export interface DeclarationBatch {
 
 export interface DeclarationUndeclaredBreakdown {
   total: number;
+  not_scanned: number;
   not_exported: number;
   held: number;
   awaiting: number;
