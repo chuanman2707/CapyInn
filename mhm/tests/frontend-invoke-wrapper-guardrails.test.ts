@@ -39,6 +39,7 @@ const RAW_INVOKE_ALLOWED_COMMANDS: Record<string, string> = {
   get_experimental_runtime_status: "runtime profile read used to hide experimental surfaces",
   get_guest_history: "read-only guest history lookup",
   get_housekeeping_tasks: "read-only housekeeping task lookup",
+  get_invoice: "read-only invoice lookup checked before falling back to generate_invoice",
   get_pending_crash_report: "diagnostics recovery read",
   get_pricing_rules: "read-only pricing rules lookup",
   get_recent_activity: "read-only activity feed lookup",

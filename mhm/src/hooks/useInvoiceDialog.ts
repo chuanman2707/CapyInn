@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { invoke } from "@tauri-apps/api/core";
 import { toast } from "sonner";
 
 import type { InvoiceData } from "@/components/InvoicePDF";
@@ -22,6 +23,24 @@ export function useInvoiceDialog() {
         }
     };
 
+    /**
+     * Xem hóa đơn của một booking đã khép lại: đọc bản đã phát hành trước,
+     * chỉ sinh mới khi chưa có. Tránh ghi ledger cho một thao tác chỉ để xem.
+     */
+    const viewInvoice = async (bookingId: string) => {
+        setInvoiceLoading(true);
+        try {
+            const existing = await invoke<InvoiceData | null>("get_invoice", { bookingId });
+            const data = existing ?? await invokeWriteCommand<InvoiceData>("generate_invoice", { bookingId });
+            setInvoiceData(data);
+            setInvoiceOpen(true);
+        } catch (err) {
+            toast.error("Lỗi tạo invoice: " + err);
+        } finally {
+            setInvoiceLoading(false);
+        }
+    };
+
     const closeInvoice = () => {
         setInvoiceOpen(false);
     };
@@ -31,6 +50,7 @@ export function useInvoiceDialog() {
         invoiceData,
         invoiceLoading,
         openInvoice,
+        viewInvoice,
         closeInvoice,
     };
 }
