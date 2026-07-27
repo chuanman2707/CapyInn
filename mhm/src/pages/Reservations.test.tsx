@@ -58,6 +58,10 @@ vi.mock("@/components/RoomDrawer", () => ({
   default: () => null,
 }));
 
+vi.mock("@/components/InvoiceDialog", () => ({
+  default: ({ open }: { open: boolean }) => (open ? <div>invoice-dialog</div> : null),
+}));
+
 vi.mock("sonner", () => ({
   toast: {
     success: toastSuccess,
@@ -324,5 +328,58 @@ describe("Reservations date navigation", () => {
 
     // Lùi 7 ngày: lưới phủ hôm nay - 10 đến hôm nay + 5, hôm nay vẫn nằm trong.
     expect(screen.getByTestId("timeline-today-marker")).toBeTruthy();
+  });
+});
+
+describe("Reservations checked-out bookings", () => {
+  function checkedOutBooking() {
+    return {
+      ...bookedReservation(),
+      id: "B-OUT",
+      guest_name: "Hoseo Kim",
+      status: "checked_out",
+      actual_checkout: "2026-07-25T09:12:00+07:00",
+      paid_amount: 500000,
+      scheduled_checkin: dateOffsetFromToday(-2),
+      scheduled_checkout: dateOffsetFromToday(-1),
+    };
+  }
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    invoke.mockImplementation(async (command: string) => {
+      if (command === "get_all_bookings") return [checkedOutBooking()];
+      if (command === "get_invoice") return { id: "invoice-1" };
+      return undefined;
+    });
+    invokeWriteCommand.mockResolvedValue(undefined);
+    createCorrelationId.mockReturnValue("COR-5E6F7A8B");
+  });
+
+  it("opens a read-only popup when a checked-out bar is clicked", async () => {
+    const user = userEvent.setup();
+    render(<Reservations />);
+
+    await user.click(await screen.findByTestId("booking-bar-B-OUT"));
+
+    expect(screen.getByText(/Đã trả — Hoseo Kim/)).toBeTruthy();
+    expect(screen.getByText("Trả phòng lúc")).toBeTruthy();
+    expect(screen.queryByRole("button", { name: /^hủy$/i })).toBeNull();
+  });
+
+  it("reads the existing invoice instead of generating a new one", async () => {
+    const user = userEvent.setup();
+    render(<Reservations />);
+
+    await user.click(await screen.findByTestId("booking-bar-B-OUT"));
+    await user.click(screen.getByRole("button", { name: /xem hóa đơn/i }));
+
+    await waitFor(() => {
+      expect(invoke).toHaveBeenCalledWith("get_invoice", { bookingId: "B-OUT" });
+    });
+    expect(invokeWriteCommand).not.toHaveBeenCalledWith(
+      "generate_invoice",
+      expect.anything(),
+    );
   });
 });

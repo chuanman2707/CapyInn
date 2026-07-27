@@ -1,5 +1,5 @@
 import { useState, useEffect } from "react";
-import { Search, ChevronLeft, ChevronRight, Plus, CheckCircle2, XCircle, Pencil } from "lucide-react";
+import { Search, ChevronLeft, ChevronRight, Plus } from "lucide-react";
 import { Input } from "@/components/ui/input";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -8,9 +8,11 @@ import { invoke } from "@tauri-apps/api/core";
 import { getRoomTypeLabel } from "@/lib/constants";
 import { createCorrelationId } from "@/lib/correlationId";
 import { formatAppError } from "@/lib/appError";
-import { fmtNumber } from "@/lib/format";
 import { invokeWriteCommand } from "@/lib/invokeCommand";
 import { toast } from "sonner";
+import BookingDetailPopup from "@/components/BookingDetailPopup";
+import InvoiceDialog from "@/components/InvoiceDialog";
+import { useInvoiceDialog } from "@/hooks/useInvoiceDialog";
 import ReservationSheet from "@/components/ReservationSheet";
 import RoomDrawer from "@/components/RoomDrawer";
 import type { BookingStatus, BookingWithGuest } from "@/types";
@@ -121,6 +123,7 @@ export default function Reservations() {
     const [selectedBooking, setSelectedBooking] = useState<BookingWithGuest | null>(null);
     const [editBooking, setEditBooking] = useState<BookingWithGuest | null>(null);
     const [drawerRoomId, setDrawerRoomId] = useState<string | null>(null);
+    const { invoiceOpen, invoiceData, viewInvoice, closeInvoice } = useInvoiceDialog();
 
     const DAYS = getDateRange(dateOffset);
     const rangeLabel = formatRangeLabel(DAYS);
@@ -357,8 +360,8 @@ export default function Reservations() {
                                                     className="absolute top-1/2 -translate-y-1/2 px-0.5 z-10 cursor-pointer"
                                                     style={{ left: `${bar.left}px`, width: `${bar.width}px` }}
                                                     onClick={() => {
-                                                        if (bar.isBooked) setSelectedBooking(bar);
-                                                        else if (bar.status === "active") setDrawerRoomId(bar.room_id);
+                                                        if (bar.status === "active") setDrawerRoomId(bar.room_id);
+                                                        else setSelectedBooking(bar);
                                                     }}
                                                 >
                                                     <div className={`h-[42px] w-full ${bar.color} border rounded-xl ${bar.clippedLeft ? "rounded-l-none" : ""} ${bar.clippedRight ? "rounded-r-none" : ""} px-3 flex flex-col justify-center hover:shadow-md hover:-translate-y-0.5 transition-all`}>
@@ -396,67 +399,15 @@ export default function Reservations() {
 
             {/* Reservation Action Popup */}
             {selectedBooking && (
-                <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/30" onClick={() => setSelectedBooking(null)}>
-                    <div className="bg-white rounded-2xl shadow-2xl p-6 w-[380px] space-y-4" onClick={(e) => e.stopPropagation()}>
-                        <h3 className="font-bold text-lg text-slate-800">Reservation — {selectedBooking.guest_name}</h3>
-                        <div className="space-y-2 text-sm text-slate-600">
-                            <div className="flex justify-between">
-                                <span>Phòng</span>
-                                <span className="font-semibold">{selectedBooking.room_id}</span>
-                            </div>
-                            <div className="flex justify-between">
-                                <span>Check-in</span>
-                                <span className="font-semibold">{selectedBooking.scheduled_checkin || selectedBooking.check_in_at}</span>
-                            </div>
-                            <div className="flex justify-between">
-                                <span>Check-out</span>
-                                <span className="font-semibold">{selectedBooking.scheduled_checkout || selectedBooking.expected_checkout}</span>
-                            </div>
-                            <div className="flex justify-between">
-                                <span>Số đêm</span>
-                                <span className="font-semibold">{selectedBooking.nights}</span>
-                            </div>
-                            <div className="flex justify-between">
-                                <span>Tổng tiền</span>
-                                <span className="font-bold text-slate-800">{fmtNumber(selectedBooking.total_price)}₫</span>
-                            </div>
-                            {(selectedBooking.deposit_amount || 0) > 0 && (
-                                <div className="flex justify-between">
-                                    <span>Đã cọc</span>
-                                    <span className="font-semibold text-emerald-600">{fmtNumber(selectedBooking.deposit_amount || 0)}₫</span>
-                                </div>
-                            )}
-                            {selectedBooking.guest_phone && (
-                                <div className="flex justify-between">
-                                    <span>SĐT</span>
-                                    <span className="font-semibold">{selectedBooking.guest_phone}</span>
-                                </div>
-                            )}
-                        </div>
-                        <div className="flex gap-2 pt-2">
-                            <Button
-                                className="flex-1 bg-emerald-600 hover:bg-emerald-700 text-white rounded-xl h-10 gap-1.5 cursor-pointer"
-                                onClick={() => handleConfirmReservation(selectedBooking.id)}
-                            >
-                                <CheckCircle2 size={14} /> Check-in
-                            </Button>
-                            <Button
-                                variant="outline"
-                                className="flex-1 border-blue-200 text-blue-600 hover:bg-blue-50 rounded-xl h-10 gap-1.5 cursor-pointer"
-                                onClick={() => { setEditBooking(selectedBooking); setSelectedBooking(null); }}
-                            >
-                                <Pencil size={14} /> Chỉnh sửa
-                            </Button>
-                            <Button
-                                variant="outline"
-                                className="flex-1 border-red-200 text-red-600 hover:bg-red-50 rounded-xl h-10 gap-1.5 cursor-pointer"
-                                onClick={() => handleCancelReservation(selectedBooking.id)}
-                            >
-                                <XCircle size={14} /> Hủy
-                            </Button>
-                        </div>
-                    </div>
-                </div>
+                <BookingDetailPopup
+                    booking={selectedBooking}
+                    mode={selectedBooking.status === "checked_out" ? "readonly" : "reservation"}
+                    onClose={() => setSelectedBooking(null)}
+                    onConfirm={handleConfirmReservation}
+                    onEdit={(booking) => { setEditBooking(booking); setSelectedBooking(null); }}
+                    onCancel={handleCancelReservation}
+                    onViewInvoice={viewInvoice}
+                />
             )}
 
             {/* Reservation Sheet */}
@@ -465,6 +416,14 @@ export default function Reservations() {
                 open={!!drawerRoomId}
                 onClose={() => { setDrawerRoomId(null); loadBookings(); fetchRooms(); }}
                 roomId={drawerRoomId}
+            />
+
+            <InvoiceDialog
+                open={invoiceOpen}
+                onOpenChange={(nextOpen) => {
+                    if (!nextOpen) closeInvoice();
+                }}
+                data={invoiceData}
             />
 
             <ReservationSheet
