@@ -223,6 +223,189 @@ mod tests {
         pool
     }
 
+    /// Đúng tình huống đã kẹt trên máy vận hành: thả cùng một tấm CCCD nhiều
+    /// lần rồi ghép cả hai → hai khai báo cùng số giấy tờ cùng ngày đến → E14
+    /// chặn xuất file, và không có đường nào đi tiếp.
+    #[tokio::test]
+    async fn dropping_the_same_card_twice_reuses_the_identity() {
+        let pool = seeded_pool().await;
+
+        let card = crate::declaration::model::Identity {
+            full_name: "Phạm Thị Minh Hiền".into(),
+            dob: "1988-12-16".into(),
+            gender: "F".into(),
+            nationality_iso3: "VNM".into(),
+            doc_no: Some("056188011500".into()),
+            ..Default::default()
+        };
+
+        let first = crate::declaration::repo::insert_identity(&pool, &card, "qr_cccd", "verified")
+            .await
+            .expect("lần thả thứ nhất");
+        let second = crate::declaration::repo::insert_identity(&pool, &card, "qr_cccd", "verified")
+            .await
+            .expect("lần thả thứ hai");
+
+        assert_eq!(first, second, "cùng số giấy tờ phải là cùng một danh tính");
+
+        let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM declaration_identity")
+            .fetch_one(&pool)
+            .await
+            .expect("đếm danh tính");
+        assert_eq!(count, 1, "không được đẻ thêm dòng");
+    }
+
+    /// Không có số giấy tờ thì không có gì để nhận ra người trùng — nhập tay
+    /// thiếu số vẫn phải lưu được, mỗi lần một dòng.
+    #[tokio::test]
+    async fn an_identity_without_a_document_number_is_never_merged() {
+        let pool = seeded_pool().await;
+
+        let no_doc = crate::declaration::model::Identity {
+            full_name: "Khách nhập tay".into(),
+            dob: "1990-01-01".into(),
+            nationality_iso3: "VNM".into(),
+            ..Default::default()
+        };
+
+        let a = crate::declaration::repo::insert_identity(&pool, &no_doc, "manual", "needs_review")
+            .await
+            .expect("lưu lần 1");
+        let b = crate::declaration::repo::insert_identity(&pool, &no_doc, "manual", "needs_review")
+            .await
+            .expect("lưu lần 2");
+
+        assert_ne!(a, b);
+    }
+
+    /// Đã nộp cho công an rồi thì bản ghi là bằng chứng của cái đã nộp — lần
+    /// thả sau không được sửa nó sau lưng.
+    #[tokio::test]
+    async fn a_declared_identity_is_not_rewritten_by_a_later_scan() {
+        let pool = seeded_pool().await;
+
+        let card = crate::declaration::model::Identity {
+            full_name: "Phạm Thị Minh Hiền".into(),
+            dob: "1988-12-16".into(),
+            gender: "F".into(),
+            nationality_iso3: "VNM".into(),
+            doc_no: Some("056188011500".into()),
+            ..Default::default()
+        };
+        let id = crate::declaration::repo::insert_identity(&pool, &card, "qr_cccd", "verified")
+            .await
+            .expect("lưu danh tính");
+        let link =
+            crate::declaration::repo::insert_link(&pool, &id, Some("booking-1"), "2", None)
+                .await
+                .expect("ghép");
+        let batch = crate::declaration::repo::insert_batch(&pool, "VN", "/tmp/x.xlsx", 1)
+            .await
+            .expect("lô");
+        crate::declaration::repo::insert_entries(&pool, &batch, std::slice::from_ref(&link))
+            .await
+            .expect("dòng của lô");
+        crate::declaration::repo::set_batch_verified(&pool, &batch, 1)
+            .await
+            .expect("đối soát xong");
+
+        let mut misread = card.clone();
+        misread.full_name = "TÊN ĐỌC SAI".into();
+        let again = crate::declaration::repo::insert_identity(&pool, &misread, "qr_cccd", "verified")
+            .await
+            .expect("thả lại");
+
+        assert_eq!(again, id, "vẫn là cùng một người");
+        let name: String =
+            sqlx::query_scalar("SELECT full_name FROM declaration_identity WHERE id = ?")
+                .bind(&id)
+                .fetch_one(&pool)
+                .await
+                .expect("đọc tên");
+        assert_eq!(name, "Phạm Thị Minh Hiền", "tên đã khai không được ghi đè");
+    }
+
+    /// Ghép nhầm thì phải gỡ được — nếu không, một dòng thừa chặn cả lô.
+    #[tokio::test]
+    async fn a_declaration_can_be_unlinked_until_it_has_been_reconciled() {
+        let pool = seeded_pool().await;
+
+        let id = crate::declaration::repo::insert_identity(
+            &pool,
+            &crate::declaration::model::Identity {
+                full_name: "Phạm Thị Minh Hiền".into(),
+                nationality_iso3: "VNM".into(),
+                doc_no: Some("056188011500".into()),
+                ..Default::default()
+            },
+            "qr_cccd",
+            "verified",
+        )
+        .await
+        .expect("danh tính");
+        let link =
+            crate::declaration::repo::insert_link(&pool, &id, Some("booking-1"), "2", None)
+                .await
+                .expect("ghép");
+
+        // Đã xuất file nhưng chưa đối soát: vẫn gỡ được.
+        let batch = crate::declaration::repo::insert_batch(&pool, "VN", "/tmp/x.xlsx", 1)
+            .await
+            .expect("lô");
+        crate::declaration::repo::insert_entries(&pool, &batch, std::slice::from_ref(&link))
+            .await
+            .expect("dòng của lô");
+        crate::declaration::repo::delete_link(&pool, &link)
+            .await
+            .expect("lô chưa đối soát thì gỡ được");
+
+        let left: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM declaration_link")
+            .fetch_one(&pool)
+            .await
+            .expect("đếm");
+        assert_eq!(left, 0);
+    }
+
+    /// Đã đối soát = đã khai lên cổng. Xóa đi là mất dấu vết.
+    #[tokio::test]
+    async fn a_reconciled_declaration_refuses_to_be_unlinked() {
+        let pool = seeded_pool().await;
+
+        let id = crate::declaration::repo::insert_identity(
+            &pool,
+            &crate::declaration::model::Identity {
+                full_name: "Phạm Thị Minh Hiền".into(),
+                nationality_iso3: "VNM".into(),
+                doc_no: Some("056188011500".into()),
+                ..Default::default()
+            },
+            "qr_cccd",
+            "verified",
+        )
+        .await
+        .expect("danh tính");
+        let link =
+            crate::declaration::repo::insert_link(&pool, &id, Some("booking-1"), "2", None)
+                .await
+                .expect("ghép");
+        let batch = crate::declaration::repo::insert_batch(&pool, "VN", "/tmp/x.xlsx", 1)
+            .await
+            .expect("lô");
+        crate::declaration::repo::insert_entries(&pool, &batch, std::slice::from_ref(&link))
+            .await
+            .expect("dòng của lô");
+        crate::declaration::repo::set_batch_verified(&pool, &batch, 1)
+            .await
+            .expect("đối soát");
+
+        assert!(
+            crate::declaration::repo::delete_link(&pool, &link)
+                .await
+                .is_err(),
+            "đã đối soát thì không gỡ được"
+        );
+    }
+
     #[tokio::test]
     async fn v20_creates_four_declaration_tables_and_sets_version() {
         let pool = SqlitePool::connect("sqlite::memory:")

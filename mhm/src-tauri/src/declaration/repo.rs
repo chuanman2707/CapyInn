@@ -98,7 +98,30 @@ pub async fn count_undeclared_within_48h(pool: &Pool<Sqlite>) -> Result<i64, Str
 
 // ─── Ghi — chỉ bốn bảng declaration_* ───────────────────────────────────────
 
-/// Lưu một danh tính đã trích. Trả về id (uuid TEXT) vừa lưu.
+/// Số giấy tờ định danh một con người. CCCD trước, hộ chiếu sau.
+///
+/// Trả `None` khi cả hai đều trống — nhập tay thiếu số giấy tờ thì không có gì
+/// để nhận ra người trùng, đành để mỗi lần lưu là một dòng.
+fn document_key(identity: &Identity) -> Option<String> {
+    [&identity.doc_no, &identity.passport_no]
+        .into_iter()
+        .flatten()
+        .map(|v| v.trim())
+        .find(|v| !v.is_empty())
+        .map(str::to_string)
+}
+
+/// Lưu một danh tính đã trích. Trả về id (uuid TEXT).
+///
+/// **Thả trùng một tấm giấy tờ thì dùng lại dòng cũ, không đẻ dòng mới.** Mỗi
+/// lần thả ảnh sinh một danh tính riêng sẽ dẫn tới hai khai báo cùng số giấy tờ
+/// cùng ngày đến, và validator chặn bằng E14 — đúng, vì nộp trùng lên cổng là
+/// sai — nhưng người vận hành không còn đường nào đi tiếp. Chặn ngay từ đây rẻ
+/// hơn dọn ở cuối.
+///
+/// Dữ liệu mới chỉ được ghi đè khi danh tính CHƯA nằm trong lô nào đã đối soát.
+/// Đã nộp cho công an rồi thì bản ghi đó là bằng chứng của cái đã nộp, không
+/// được sửa sau lưng.
 ///
 /// KHÔNG có cột ảnh và KHÔNG có cột payload thô — xem §12.
 pub async fn insert_identity(
@@ -107,6 +130,36 @@ pub async fn insert_identity(
     source: &str,
     confidence: &str,
 ) -> Result<String, String> {
+    if let Some(key) = document_key(identity) {
+        let existing = sqlx::query(
+            "SELECT id,
+                    EXISTS (SELECT 1
+                              FROM declaration_link dl
+                              JOIN declaration_entry de  ON de.link_id = dl.id
+                              JOIN declaration_batch dbt ON dbt.id     = de.batch_id
+                             WHERE dl.identity_id = di.id
+                               AND dbt.status = 'verified') AS already_declared
+               FROM declaration_identity di
+              WHERE redacted_at IS NULL
+                AND (doc_no = ? OR passport_no = ?)
+              ORDER BY created_at
+              LIMIT 1",
+        )
+        .bind(&key)
+        .bind(&key)
+        .fetch_optional(pool)
+        .await
+        .map_err(|e| format!("Không tra được danh tính đã có: {e}"))?;
+
+        if let Some(row) = existing {
+            let existing_id: String = row.get("id");
+            if row.get::<i64, _>("already_declared") == 0 {
+                update_identity_fields(pool, &existing_id, identity, source, confidence).await?;
+            }
+            return Ok(existing_id);
+        }
+    }
+
     let id = if identity.id.trim().is_empty() {
         uuid::Uuid::new_v4().to_string()
     } else {
@@ -146,6 +199,108 @@ pub async fn insert_identity(
     .map_err(|e| format!("Không lưu được danh tính: {e}"))?;
 
     Ok(id)
+}
+
+/// Cập nhật một danh tính đã có bằng lần trích mới nhất.
+///
+/// Giữ nguyên `id` và `created_at`: link đang trỏ vào id đó, và `created_at` là
+/// lúc người này lần đầu được đưa vào hệ thống.
+async fn update_identity_fields(
+    pool: &Pool<Sqlite>,
+    id: &str,
+    identity: &Identity,
+    source: &str,
+    confidence: &str,
+) -> Result<(), String> {
+    sqlx::query(
+        "UPDATE declaration_identity SET
+            source = ?, extract_confidence = ?, full_name = ?, dob = ?, gender = ?,
+            nationality_iso3 = ?, doc_type_code = ?, doc_type_source = ?, doc_type_name = ?,
+            doc_no = ?, phone = ?, residence_status = ?, address_detail = ?,
+            passport_no = ?, passport_expiry = ?, visa_valid_until = ?,
+            name_confirmed_by_human = ?, single_token_name_ok = ?
+          WHERE id = ?",
+    )
+    .bind(source)
+    .bind(confidence)
+    .bind(&identity.full_name)
+    .bind(&identity.dob)
+    .bind(&identity.gender)
+    .bind(&identity.nationality_iso3)
+    .bind(&identity.doc_type_code)
+    .bind(&identity.doc_type_source)
+    .bind(&identity.doc_type_name)
+    .bind(&identity.doc_no)
+    .bind(&identity.phone)
+    .bind(&identity.residence_status)
+    .bind(&identity.address_detail)
+    .bind(&identity.passport_no)
+    .bind(&identity.passport_expiry)
+    .bind(&identity.visa_valid_until)
+    .bind(i64::from(identity.name_confirmed_by_human))
+    .bind(i64::from(identity.single_token_name_ok))
+    .bind(id)
+    .execute(pool)
+    .await
+    .map_err(|e| format!("Không cập nhật được danh tính: {e}"))?;
+
+    Ok(())
+}
+
+/// Gỡ một khai báo khỏi danh sách chờ.
+///
+/// Người vận hành ghép nhầm phòng, hoặc ghép trùng, thì phải có đường lùi —
+/// không có nó, một dòng thừa chặn E14 vĩnh viễn và cả lô không xuất được.
+///
+/// Đã nằm trong lô ĐÃ ĐỐI SOÁT thì từ chối: đó là bằng chứng khách này đã được
+/// khai lên cổng, xóa đi là mất dấu vết. Lô chưa đối soát (`exported`) thì gỡ
+/// được — file xuất ra vẫn còn trên đĩa, và lô sẽ tự lệch số khi đối soát.
+pub async fn delete_link(pool: &Pool<Sqlite>, link_id: &str) -> Result<(), String> {
+    let declared: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*)
+           FROM declaration_entry de
+           JOIN declaration_batch dbt ON dbt.id = de.batch_id
+          WHERE de.link_id = ? AND dbt.status = 'verified'",
+    )
+    .bind(link_id)
+    .fetch_one(pool)
+    .await
+    .map_err(|e| format!("Không kiểm được lô của khai báo: {e}"))?;
+
+    if declared > 0 {
+        return Err(
+            "Khai báo này đã nằm trong một lô đã đối soát — không gỡ được, vì đó là bằng chứng đã khai."
+                .into(),
+        );
+    }
+
+    let mut tx = pool
+        .begin()
+        .await
+        .map_err(|e| format!("Không mở được giao dịch: {e}"))?;
+
+    // Entry của lô chưa đối soát phải đi trước — declaration_entry.link_id có FK.
+    sqlx::query("DELETE FROM declaration_entry WHERE link_id = ?")
+        .bind(link_id)
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| format!("Không gỡ được dòng khỏi lô: {e}"))?;
+
+    let affected = sqlx::query("DELETE FROM declaration_link WHERE id = ?")
+        .bind(link_id)
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| format!("Không gỡ được khai báo: {e}"))?
+        .rows_affected();
+
+    tx.commit()
+        .await
+        .map_err(|e| format!("Không lưu được thay đổi: {e}"))?;
+
+    if affected == 0 {
+        return Err("Không tìm thấy khai báo cần gỡ.".into());
+    }
+    Ok(())
 }
 
 /// Danh tính đã lưu nhưng chưa ghép vào lượt lưu trú nào.
