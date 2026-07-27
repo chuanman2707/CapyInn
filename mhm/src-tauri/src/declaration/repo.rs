@@ -1310,4 +1310,45 @@ mod tests {
         assert_eq!(pending.len(), 1, "lượt ở mới phải chờ khai");
         assert_ne!(pending[0], old_link, "phải là link MỚI");
     }
+
+    /// `insert_link` tự nó (không qua `save_identity_ensuring_link`) phải trả
+    /// về đúng link VỪA TẠO khi một danh tính đang giữ hai link cùng
+    /// `stay_id NULL` (một đã verified, một vừa ghi) — không phải link cũ đã
+    /// khai xong. `kbtt_link` dùng thẳng giá trị `insert_link` trả về để ghép
+    /// lượt lưu trú, nên trả nhầm link cũ nghĩa là ghép nhầm phòng cho một
+    /// khai báo đã đóng.
+    #[tokio::test]
+    async fn insert_link_returns_the_freshly_created_link_not_the_already_declared_one() {
+        let pool = pool().await;
+        let identity_id = insert_identity(&pool, &vn_identity(), "qr_cccd", "verified")
+            .await
+            .expect("lưu danh tính");
+
+        let old_link = insert_link(&pool, &identity_id, None, "1", None)
+            .await
+            .expect("tạo link lượt 1");
+        let batch = insert_batch(&pool, "VN", "/tmp/x.xlsx", 1).await.expect("lô");
+        insert_entries(&pool, &batch, std::slice::from_ref(&old_link))
+            .await
+            .expect("dòng");
+        set_batch_verified(&pool, &batch, 1).await.expect("đã khai xong");
+
+        let new_link = insert_link(&pool, &identity_id, None, "1", None)
+            .await
+            .expect("tạo link lượt 2");
+
+        assert_ne!(
+            new_link, old_link,
+            "insert_link phải trả về link MỚI vừa ghi, không phải link cũ đã verified"
+        );
+
+        let newest: String = sqlx::query_scalar(
+            "SELECT id FROM declaration_link WHERE identity_id = ? ORDER BY rowid DESC LIMIT 1",
+        )
+        .bind(&identity_id)
+        .fetch_one(&pool)
+        .await
+        .expect("đọc lại dòng mới nhất");
+        assert_eq!(new_link, newest, "giá trị trả về phải đúng là dòng vừa ghi");
+    }
 }
