@@ -49,13 +49,13 @@ describe("05 — Check-out Flow", () => {
         expect(invoke).toHaveBeenCalledWith("get_dashboard_stats");
     });
 
-    it("navigates to dashboard after checkout", async () => {
+    it("stays on the current tab after checkout", async () => {
         setMockResponse("check_out", () => undefined);
 
         useHotelStore.setState({ activeTab: "rooms" });
         await useHotelStore.getState().checkOut("booking-1", "actual_nights", 500000);
 
-        expect(useHotelStore.getState().activeTab).toBe("dashboard");
+        expect(useHotelStore.getState().activeTab).toBe("rooms");
     });
 
     it("handles checkout error", async () => {

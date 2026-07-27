@@ -137,7 +137,6 @@ export const useHotelStore = create<HotelStore>((set, get) => {
         await get().fetchRooms();
         await get().fetchStats();
         set((state) => ({
-          activeTab: "dashboard",
           dashboardRefreshVersion: state.dashboardRefreshVersion + 1,
         }));
       } catch (err) {
@@ -171,7 +170,6 @@ export const useHotelStore = create<HotelStore>((set, get) => {
         await get().fetchRooms();
         await get().fetchStats();
         set((state) => ({
-          activeTab: "dashboard",
           dashboardRefreshVersion: state.dashboardRefreshVersion + 1,
         }));
       } catch (err) {
