@@ -1,7 +1,16 @@
+//! Pricing configuration and price-preview commands.
+//!
+//! Boundary adapters only: check the caller is an admin, shape the JSON the
+//! settings screen expects, and delegate. The preview shares
+//! `services::booking::pricing_service` with the lifecycle charge, so the quote
+//! the UI shows and the amount the guest is billed come from one implementation.
+
 use super::{emit_db_update, require_admin, AppState};
-use crate::db::row::{get_f64, get_money_vnd};
-use crate::money::{validate_non_negative_money_vnd, MoneyVnd};
-use sqlx::{Pool, Row, Sqlite};
+use crate::money::MoneyVnd;
+use crate::queries::booking::pricing_queries;
+use crate::repositories::booking::pricing_repository;
+use crate::services::booking::pricing_service::{self, SavePricingRule};
+use sqlx::{Pool, Sqlite};
 use tauri::State;
 
 // ═══════════════════════════════════════════════
@@ -9,33 +18,26 @@ use tauri::State;
 // ═══════════════════════════════════════════════
 
 pub async fn do_get_pricing_rules(pool: &Pool<Sqlite>) -> Result<Vec<serde_json::Value>, String> {
-    let rows = sqlx::query(
-        "SELECT id, room_type, hourly_rate, overnight_rate, daily_rate,
-                overnight_start, overnight_end, daily_checkin, daily_checkout,
-                early_checkin_surcharge_pct, late_checkout_surcharge_pct,
-                weekend_uplift_pct
-         FROM pricing_rules ORDER BY room_type",
-    )
-    .fetch_all(pool)
-    .await
-    .map_err(|e| e.to_string())?;
+    let listings = pricing_queries::load_pricing_rule_listings(pool)
+        .await
+        .map_err(|e| e.to_string())?;
 
-    Ok(rows
+    Ok(listings
         .iter()
-        .map(|r| {
+        .map(|listing| {
             serde_json::json!({
-                "id": r.get::<String, _>("id"),
-                "room_type": r.get::<String, _>("room_type"),
-                "hourly_rate": get_money_vnd(r, "hourly_rate"),
-                "overnight_rate": get_money_vnd(r, "overnight_rate"),
-                "daily_rate": get_money_vnd(r, "daily_rate"),
-                "overnight_start": r.get::<String, _>("overnight_start"),
-                "overnight_end": r.get::<String, _>("overnight_end"),
-                "daily_checkin": r.get::<String, _>("daily_checkin"),
-                "daily_checkout": r.get::<String, _>("daily_checkout"),
-                "early_checkin_surcharge_pct": get_f64(r, "early_checkin_surcharge_pct"),
-                "late_checkout_surcharge_pct": get_f64(r, "late_checkout_surcharge_pct"),
-                "weekend_uplift_pct": get_f64(r, "weekend_uplift_pct"),
+                "id": listing.id,
+                "room_type": listing.rule.room_type,
+                "hourly_rate": listing.rule.hourly_rate,
+                "overnight_rate": listing.rule.overnight_rate,
+                "daily_rate": listing.rule.daily_rate,
+                "overnight_start": listing.rule.overnight_start,
+                "overnight_end": listing.rule.overnight_end,
+                "daily_checkin": listing.rule.daily_checkin,
+                "daily_checkout": listing.rule.daily_checkout,
+                "early_checkin_surcharge_pct": listing.rule.early_checkin_surcharge_pct,
+                "late_checkout_surcharge_pct": listing.rule.late_checkout_surcharge_pct,
+                "weekend_uplift_pct": listing.rule.weekend_uplift_pct,
             })
         })
         .collect())
@@ -46,18 +48,6 @@ pub async fn get_pricing_rules(
     state: State<'_, AppState>,
 ) -> Result<Vec<serde_json::Value>, String> {
     do_get_pricing_rules(&state.db).await
-}
-
-fn validate_pricing_rule_money(
-    hourly_rate: MoneyVnd,
-    overnight_rate: MoneyVnd,
-    daily_rate: MoneyVnd,
-) -> crate::app_error::CommandResult<(MoneyVnd, MoneyVnd, MoneyVnd)> {
-    Ok((
-        validate_non_negative_money_vnd(hourly_rate, "hourly_rate")?,
-        validate_non_negative_money_vnd(overnight_rate, "overnight_rate")?,
-        validate_non_negative_money_vnd(daily_rate, "daily_rate")?,
-    ))
 }
 
 #[tauri::command]
@@ -78,73 +68,29 @@ pub async fn save_pricing_rule(
     weekend_pct: Option<f64>,
 ) -> Result<(), String> {
     require_admin(&state)?;
-    let (hourly_rate, overnight_rate, daily_rate) =
-        validate_pricing_rule_money(hourly_rate, overnight_rate, daily_rate)?;
 
-    let now = chrono::Local::now().to_rfc3339();
-    let id = uuid::Uuid::new_v4().to_string();
-
-    sqlx::query(
-        "INSERT INTO pricing_rules
-         (id, room_type, hourly_rate, overnight_rate, daily_rate,
-          overnight_start, overnight_end, daily_checkin, daily_checkout,
-          early_checkin_surcharge_pct, late_checkout_surcharge_pct,
-          weekend_uplift_pct, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-         ON CONFLICT(room_type) DO UPDATE SET
-            hourly_rate = excluded.hourly_rate,
-            overnight_rate = excluded.overnight_rate,
-            daily_rate = excluded.daily_rate,
-            overnight_start = excluded.overnight_start,
-            overnight_end = excluded.overnight_end,
-            daily_checkin = excluded.daily_checkin,
-            daily_checkout = excluded.daily_checkout,
-            early_checkin_surcharge_pct = excluded.early_checkin_surcharge_pct,
-            late_checkout_surcharge_pct = excluded.late_checkout_surcharge_pct,
-            weekend_uplift_pct = excluded.weekend_uplift_pct,
-            updated_at = excluded.updated_at",
+    pricing_service::save_pricing_rule(
+        &state.db,
+        SavePricingRule {
+            room_type,
+            hourly_rate,
+            overnight_rate,
+            daily_rate,
+            overnight_start,
+            overnight_end,
+            daily_checkin,
+            daily_checkout,
+            early_pct,
+            late_pct,
+            weekend_pct,
+        },
+        uuid::Uuid::new_v4().to_string(),
+        chrono::Local::now().to_rfc3339(),
     )
-    .bind(&id)
-    .bind(&room_type)
-    .bind(hourly_rate)
-    .bind(overnight_rate)
-    .bind(daily_rate)
-    .bind(overnight_start.as_deref().unwrap_or("22:00"))
-    .bind(overnight_end.as_deref().unwrap_or("11:00"))
-    .bind(daily_checkin.as_deref().unwrap_or("14:00"))
-    .bind(daily_checkout.as_deref().unwrap_or("12:00"))
-    .bind(early_pct.unwrap_or(30.0))
-    .bind(late_pct.unwrap_or(30.0))
-    .bind(weekend_pct.unwrap_or(0.0))
-    .bind(&now)
-    .bind(&now)
-    .execute(&state.db)
-    .await
-    .map_err(|e| e.to_string())?;
+    .await?;
 
     emit_db_update(&app, "pricing");
     Ok(())
-}
-
-#[cfg(test)]
-mod tests {
-    use super::validate_pricing_rule_money;
-    use crate::app_error::codes;
-
-    #[test]
-    fn save_pricing_rule_rejects_negative_money_rates() {
-        for (hourly_rate, overnight_rate, daily_rate, field) in [
-            (-1, 300_000, 400_000, "hourly_rate"),
-            (80_000, -1, 400_000, "overnight_rate"),
-            (80_000, 300_000, -1, "daily_rate"),
-        ] {
-            let error = validate_pricing_rule_money(hourly_rate, overnight_rate, daily_rate)
-                .expect_err("negative pricing money must fail");
-
-            assert_eq!(error.code, codes::VALIDATION_INVALID_INPUT);
-            assert!(error.message.contains(field));
-        }
-    }
 }
 
 pub async fn do_calculate_price_preview(
@@ -154,58 +100,9 @@ pub async fn do_calculate_price_preview(
     check_out: &str,
     pricing_type: &str,
 ) -> Result<crate::pricing::PricingResult, String> {
-    let room_type_lower = room_type.to_lowercase();
-    let row = sqlx::query(
-        "SELECT room_type, hourly_rate, overnight_rate, daily_rate,
-                overnight_start, overnight_end, daily_checkin, daily_checkout,
-                early_checkin_surcharge_pct, late_checkout_surcharge_pct,
-                weekend_uplift_pct
-         FROM pricing_rules WHERE LOWER(room_type) = ?",
-    )
-    .bind(&room_type_lower)
-    .fetch_optional(pool)
-    .await
-    .map_err(|e| e.to_string())?;
-
-    let rule = match row {
-        Some(r) => crate::pricing::PricingRule {
-            room_type: r.get("room_type"),
-            hourly_rate: get_money_vnd(&r, "hourly_rate"),
-            overnight_rate: get_money_vnd(&r, "overnight_rate"),
-            daily_rate: get_money_vnd(&r, "daily_rate"),
-            overnight_start: r.get("overnight_start"),
-            overnight_end: r.get("overnight_end"),
-            daily_checkin: r.get("daily_checkin"),
-            daily_checkout: r.get("daily_checkout"),
-            early_checkin_surcharge_pct: get_f64(&r, "early_checkin_surcharge_pct"),
-            late_checkout_surcharge_pct: get_f64(&r, "late_checkout_surcharge_pct"),
-            weekend_uplift_pct: get_f64(&r, "weekend_uplift_pct"),
-        },
-        None => {
-            let fallback_row =
-                sqlx::query("SELECT base_price FROM rooms WHERE LOWER(type) = ? LIMIT 1")
-                    .bind(&room_type_lower)
-                    .fetch_optional(pool)
-                    .await
-                    .map_err(|e| e.to_string())?;
-            let fallback_price = fallback_row
-                .as_ref()
-                .map(|r| get_money_vnd(r, "base_price"))
-                .unwrap_or(350_000);
-
-            crate::pricing::PricingRule {
-                room_type: room_type.to_string(),
-                hourly_rate: fallback_price / 5,
-                overnight_rate: fallback_price * 75 / 100,
-                daily_rate: fallback_price,
-                ..Default::default()
-            }
-        }
-    };
-
-    let special_uplift = do_get_special_uplift(pool, check_in).await;
-
-    crate::pricing::calculate_price(&rule, check_in, check_out, pricing_type, special_uplift)
+    pricing_service::calculate_price_preview(pool, room_type, check_in, check_out, pricing_type)
+        .await
+        .map_err(|error| error.to_string())
 }
 
 #[tauri::command]
@@ -219,39 +116,22 @@ pub async fn calculate_price_preview(
     do_calculate_price_preview(&state.db, &room_type, &check_in, &check_out, &pricing_type).await
 }
 
-pub async fn do_get_special_uplift(pool: &Pool<Sqlite>, date_str: &str) -> f64 {
-    let date = if date_str.len() >= 10 {
-        &date_str[..10]
-    } else {
-        date_str
-    };
-    let row: Option<(f64,)> =
-        sqlx::query_as("SELECT CAST(uplift_pct AS REAL) FROM special_dates WHERE date = ?")
-            .bind(date)
-            .fetch_optional(pool)
-            .await
-            .ok()
-            .flatten();
-    row.map(|r| r.0).unwrap_or(0.0)
-}
-
 #[tauri::command]
 pub async fn get_special_dates(
     state: State<'_, AppState>,
 ) -> Result<Vec<serde_json::Value>, String> {
-    let rows = sqlx::query("SELECT id, date, label, uplift_pct FROM special_dates ORDER BY date")
-        .fetch_all(&state.db)
+    let dates = pricing_queries::load_special_dates(&state.db)
         .await
         .map_err(|e| e.to_string())?;
 
-    Ok(rows
+    Ok(dates
         .iter()
-        .map(|r| {
+        .map(|date| {
             serde_json::json!({
-                "id": r.get::<String, _>("id"),
-                "date": r.get::<String, _>("date"),
-                "label": r.get::<String, _>("label"),
-                "uplift_pct": get_f64(r, "uplift_pct"),
+                "id": date.id,
+                "date": date.date,
+                "label": date.label,
+                "uplift_pct": date.uplift_pct,
             })
         })
         .collect())
@@ -266,24 +146,14 @@ pub async fn save_special_date(
 ) -> Result<(), String> {
     require_admin(&state)?;
 
-    let id = uuid::Uuid::new_v4().to_string();
-    let now = chrono::Local::now().to_rfc3339();
-
-    sqlx::query(
-        "INSERT INTO special_dates (id, date, label, uplift_pct, created_at)
-         VALUES (?, ?, ?, ?, ?)
-         ON CONFLICT(date) DO UPDATE SET
-            label = excluded.label,
-            uplift_pct = excluded.uplift_pct",
+    pricing_repository::upsert_special_date(
+        &state.db,
+        &uuid::Uuid::new_v4().to_string(),
+        &date,
+        &label,
+        uplift_pct,
+        &chrono::Local::now().to_rfc3339(),
     )
-    .bind(&id)
-    .bind(&date)
-    .bind(&label)
-    .bind(uplift_pct)
-    .bind(&now)
-    .execute(&state.db)
     .await
-    .map_err(|e| e.to_string())?;
-
-    Ok(())
+    .map_err(|e| e.to_string())
 }
