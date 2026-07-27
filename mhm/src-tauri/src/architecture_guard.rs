@@ -101,19 +101,10 @@ const DB_ACCESS_MARKERS: [&str; 5] = [
 
 #[test]
 fn the_domain_layer_does_not_talk_to_sqlite() {
-    // Tracked violation: `domain/booking/pricing.rs` is a DB-backed pricing
-    // resolver that was filed under `domain/`. It is scheduled to move out to
-    // the query/service layer. Until then this test pins the blast radius so no
-    // *new* file starts issuing SQL from the domain layer.
-    const KNOWN_EXCEPTIONS: [&str; 1] = ["domain/booking/pricing.rs"];
-
     let mut violations = Vec::new();
 
     for file in rust_files_in_layer("domain") {
         let name = relative(&file).replace('\\', "/");
-        if KNOWN_EXCEPTIONS.contains(&name.as_str()) {
-            continue;
-        }
         let source = fs::read_to_string(&file).expect("read source file");
         if let Some(marker) = DB_ACCESS_MARKERS
             .iter()
@@ -128,23 +119,5 @@ fn the_domain_layer_does_not_talk_to_sqlite() {
         "the domain layer must hold pure business rules; database access belongs \
          behind `queries/`, `repositories/`, or `services/`.\n\n{}",
         violations.join("\n")
-    );
-}
-
-#[test]
-fn the_tracked_domain_exception_is_still_a_real_exception() {
-    // Guards the exception list itself: once `domain/booking/pricing.rs` stops
-    // touching the database, this fails and tells us to delete the exception
-    // rather than let it rot into a permanent carve-out.
-    let path = src_dir().join("domain/booking/pricing.rs");
-    let source = fs::read_to_string(&path).expect("read domain pricing module");
-    let still_violating = DB_ACCESS_MARKERS
-        .iter()
-        .any(|marker| source.contains(*marker));
-
-    assert!(
-        still_violating,
-        "`domain/booking/pricing.rs` no longer touches the database — remove it \
-         from KNOWN_EXCEPTIONS in `the_domain_layer_does_not_talk_to_sqlite`."
     );
 }

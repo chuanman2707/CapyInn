@@ -1,33 +1,40 @@
-use sqlx::{Pool, Row, Sqlite, Transaction};
+//! Pure stay-pricing rules.
+//!
+//! This module owns the decision of *what a stay costs given its inputs*, and
+//! nothing else. Loading those inputs is `queries::booking::pricing_queries`;
+//! sequencing load-then-calculate is `services::booking::pricing_service`.
+//! Keeping the rules free of SQL is what makes them testable without a
+//! database, and it is enforced by `architecture_guard`.
 
 use super::{BookingError, BookingResult};
 use crate::money::MoneyVnd;
 
-#[allow(dead_code)]
+/// Everything the pricing rules need, already read out of the database.
 #[derive(Debug, Clone)]
-struct StayPricingInputs {
-    room_type: String,
-    stored_rule: Option<StoredPricingRule>,
-    fallback_base_price: Option<MoneyVnd>,
-    special_uplift_pct: f64,
-    check_in: String,
-    check_out: String,
-    pricing_type: String,
+pub(crate) struct StayPricingInputs {
+    pub(crate) room_type: String,
+    pub(crate) stored_rule: Option<StoredPricingRule>,
+    pub(crate) fallback_base_price: Option<MoneyVnd>,
+    pub(crate) special_uplift_pct: f64,
+    pub(crate) check_in: String,
+    pub(crate) check_out: String,
+    pub(crate) pricing_type: String,
 }
 
+/// A row of `pricing_rules`, decoded but not yet interpreted.
 #[derive(Debug, Clone)]
-struct StoredPricingRule {
-    room_type: String,
-    hourly_rate: MoneyVnd,
-    overnight_rate: MoneyVnd,
-    daily_rate: MoneyVnd,
-    overnight_start: String,
-    overnight_end: String,
-    daily_checkin: String,
-    daily_checkout: String,
-    early_checkin_surcharge_pct: f64,
-    late_checkout_surcharge_pct: f64,
-    weekend_uplift_pct: f64,
+pub(crate) struct StoredPricingRule {
+    pub(crate) room_type: String,
+    pub(crate) hourly_rate: MoneyVnd,
+    pub(crate) overnight_rate: MoneyVnd,
+    pub(crate) daily_rate: MoneyVnd,
+    pub(crate) overnight_start: String,
+    pub(crate) overnight_end: String,
+    pub(crate) daily_checkin: String,
+    pub(crate) daily_checkout: String,
+    pub(crate) early_checkin_surcharge_pct: f64,
+    pub(crate) late_checkout_surcharge_pct: f64,
+    pub(crate) weekend_uplift_pct: f64,
 }
 
 impl StoredPricingRule {
@@ -48,7 +55,11 @@ impl StoredPricingRule {
     }
 }
 
-fn build_effective_pricing_rule(inputs: &StayPricingInputs) -> crate::pricing::PricingRule {
+/// A configured rule wins outright; otherwise derive one from the room's base
+/// price, falling back to a house default when the room has no price either.
+pub(crate) fn build_effective_pricing_rule(
+    inputs: &StayPricingInputs,
+) -> crate::pricing::PricingRule {
     if let Some(stored_rule) = &inputs.stored_rule {
         return stored_rule.to_pricing_rule();
     }
@@ -64,8 +75,7 @@ fn build_effective_pricing_rule(inputs: &StayPricingInputs) -> crate::pricing::P
     }
 }
 
-#[allow(dead_code)]
-fn calculate_from_loaded_inputs(
+pub(crate) fn calculate_from_loaded_inputs(
     inputs: &StayPricingInputs,
 ) -> BookingResult<crate::pricing::PricingResult> {
     let rule = build_effective_pricing_rule(inputs);
@@ -80,255 +90,13 @@ fn calculate_from_loaded_inputs(
     .map_err(BookingError::datetime_parse)
 }
 
-#[allow(dead_code)]
-fn stored_rule_from_row(row: &sqlx::sqlite::SqliteRow) -> StoredPricingRule {
-    StoredPricingRule {
-        room_type: row.get("room_type"),
-        hourly_rate: read_money_vnd(row, "hourly_rate"),
-        overnight_rate: read_money_vnd(row, "overnight_rate"),
-        daily_rate: read_money_vnd(row, "daily_rate"),
-        overnight_start: row.get("overnight_start"),
-        overnight_end: row.get("overnight_end"),
-        daily_checkin: row.get("daily_checkin"),
-        daily_checkout: row.get("daily_checkout"),
-        early_checkin_surcharge_pct: read_f64(row, "early_checkin_surcharge_pct"),
-        late_checkout_surcharge_pct: read_f64(row, "late_checkout_surcharge_pct"),
-        weekend_uplift_pct: read_f64(row, "weekend_uplift_pct"),
-    }
-}
-
-#[allow(dead_code)]
-pub async fn calculate_stay_price(
-    pool: &Pool<Sqlite>,
-    room_id: &str,
-    check_in: &str,
-    check_out: &str,
-    pricing_type: &str,
-) -> BookingResult<crate::pricing::PricingResult> {
-    let inputs = load_stay_pricing_inputs(pool, room_id, check_in, check_out, pricing_type).await?;
-    calculate_from_loaded_inputs(&inputs)
-}
-pub async fn calculate_stay_price_tx(
-    tx: &mut Transaction<'_, Sqlite>,
-    room_id: &str,
-    check_in: &str,
-    check_out: &str,
-    pricing_type: &str,
-) -> BookingResult<crate::pricing::PricingResult> {
-    let inputs =
-        load_stay_pricing_inputs_tx(tx, room_id, check_in, check_out, pricing_type).await?;
-    calculate_from_loaded_inputs(&inputs)
-}
-
-async fn load_stay_pricing_inputs(
-    pool: &Pool<Sqlite>,
-    room_id: &str,
-    check_in: &str,
-    check_out: &str,
-    pricing_type: &str,
-) -> BookingResult<StayPricingInputs> {
-    let room_type = load_room_type(pool, room_id).await?;
-    let stored_rule = load_stored_pricing_rule(pool, &room_type).await?;
-    let fallback_base_price = if stored_rule.is_none() {
-        load_fallback_base_price(pool, &room_type).await?
-    } else {
-        None
-    };
-    let special_uplift_pct = load_special_uplift(pool, check_in).await?;
-
-    Ok(StayPricingInputs {
-        room_type,
-        stored_rule,
-        fallback_base_price,
-        special_uplift_pct,
-        check_in: check_in.to_string(),
-        check_out: check_out.to_string(),
-        pricing_type: pricing_type.to_string(),
-    })
-}
-
-async fn load_stay_pricing_inputs_tx(
-    tx: &mut Transaction<'_, Sqlite>,
-    room_id: &str,
-    check_in: &str,
-    check_out: &str,
-    pricing_type: &str,
-) -> BookingResult<StayPricingInputs> {
-    let room_type = load_room_type_tx(tx, room_id).await?;
-    let stored_rule = load_stored_pricing_rule_tx(tx, &room_type).await?;
-    let fallback_base_price = if stored_rule.is_none() {
-        load_fallback_base_price_tx(tx, &room_type).await?
-    } else {
-        None
-    };
-    let special_uplift_pct = load_special_uplift_tx(tx, check_in).await?;
-
-    Ok(StayPricingInputs {
-        room_type,
-        stored_rule,
-        fallback_base_price,
-        special_uplift_pct,
-        check_in: check_in.to_string(),
-        check_out: check_out.to_string(),
-        pricing_type: pricing_type.to_string(),
-    })
-}
-
-#[allow(dead_code)]
-async fn load_room_type(pool: &Pool<Sqlite>, room_id: &str) -> BookingResult<String> {
-    sqlx::query_scalar::<_, String>("SELECT type FROM rooms WHERE id = ? LIMIT 1")
-        .bind(room_id)
-        .fetch_optional(pool)
-        .await
-        .map_err(|error| BookingError::database(error.to_string()))?
-        .ok_or_else(|| BookingError::not_found(format!("Không tìm thấy phòng {}", room_id)))
-}
-
-async fn load_room_type_tx(
-    tx: &mut Transaction<'_, Sqlite>,
-    room_id: &str,
-) -> BookingResult<String> {
-    sqlx::query_scalar::<_, String>("SELECT type FROM rooms WHERE id = ? LIMIT 1")
-        .bind(room_id)
-        .fetch_optional(&mut **tx)
-        .await
-        .map_err(|error| BookingError::database(error.to_string()))?
-        .ok_or_else(|| BookingError::not_found(format!("Không tìm thấy phòng {}", room_id)))
-}
-
-#[allow(dead_code)]
-async fn load_stored_pricing_rule(
-    pool: &Pool<Sqlite>,
-    room_type: &str,
-) -> BookingResult<Option<StoredPricingRule>> {
-    let room_type_lower = room_type.to_lowercase();
-    let row = sqlx::query(
-        "SELECT room_type, hourly_rate, overnight_rate, daily_rate,
-                overnight_start, overnight_end, daily_checkin, daily_checkout,
-                early_checkin_surcharge_pct, late_checkout_surcharge_pct,
-                weekend_uplift_pct
-         FROM pricing_rules WHERE LOWER(room_type) = ?",
-    )
-    .bind(&room_type_lower)
-    .fetch_optional(pool)
-    .await
-    .map_err(|error| BookingError::database(error.to_string()))?;
-
-    Ok(row.as_ref().map(stored_rule_from_row))
-}
-
-async fn load_fallback_base_price(
-    pool: &Pool<Sqlite>,
-    room_type: &str,
-) -> BookingResult<Option<MoneyVnd>> {
-    let room_type_lower = room_type.to_lowercase();
-    let fallback_row = sqlx::query("SELECT base_price FROM rooms WHERE LOWER(type) = ? LIMIT 1")
-        .bind(&room_type_lower)
-        .fetch_optional(pool)
-        .await
-        .map_err(|error| BookingError::database(error.to_string()))?;
-
-    Ok(fallback_row
-        .as_ref()
-        .map(|row| read_money_vnd(row, "base_price")))
-}
-
-async fn load_stored_pricing_rule_tx(
-    tx: &mut Transaction<'_, Sqlite>,
-    room_type: &str,
-) -> BookingResult<Option<StoredPricingRule>> {
-    let room_type_lower = room_type.to_lowercase();
-    let row = sqlx::query(
-        "SELECT room_type, hourly_rate, overnight_rate, daily_rate,
-                overnight_start, overnight_end, daily_checkin, daily_checkout,
-                early_checkin_surcharge_pct, late_checkout_surcharge_pct,
-                weekend_uplift_pct
-         FROM pricing_rules WHERE LOWER(room_type) = ?",
-    )
-    .bind(&room_type_lower)
-    .fetch_optional(&mut **tx)
-    .await
-    .map_err(|error| BookingError::database(error.to_string()))?;
-
-    Ok(row.as_ref().map(stored_rule_from_row))
-}
-
-async fn load_fallback_base_price_tx(
-    tx: &mut Transaction<'_, Sqlite>,
-    room_type: &str,
-) -> BookingResult<Option<MoneyVnd>> {
-    let room_type_lower = room_type.to_lowercase();
-    let fallback_row = sqlx::query("SELECT base_price FROM rooms WHERE LOWER(type) = ? LIMIT 1")
-        .bind(&room_type_lower)
-        .fetch_optional(&mut **tx)
-        .await
-        .map_err(|error| BookingError::database(error.to_string()))?;
-
-    Ok(fallback_row
-        .as_ref()
-        .map(|row| read_money_vnd(row, "base_price")))
-}
-
-#[allow(dead_code)]
-async fn load_special_uplift(pool: &Pool<Sqlite>, date_str: &str) -> BookingResult<f64> {
-    let date = if date_str.len() >= 10 {
-        &date_str[..10]
-    } else {
-        date_str
-    };
-    let row: Option<(f64,)> =
-        sqlx::query_as("SELECT CAST(uplift_pct AS REAL) FROM special_dates WHERE date = ?")
-            .bind(date)
-            .fetch_optional(pool)
-            .await
-            .map_err(|error| BookingError::database(error.to_string()))?;
-
-    Ok(row.map(|value| value.0).unwrap_or(0.0))
-}
-
-async fn load_special_uplift_tx(
-    tx: &mut Transaction<'_, Sqlite>,
-    date_str: &str,
-) -> BookingResult<f64> {
-    let date = if date_str.len() >= 10 {
-        &date_str[..10]
-    } else {
-        date_str
-    };
-    let row: Option<(f64,)> =
-        sqlx::query_as("SELECT CAST(uplift_pct AS REAL) FROM special_dates WHERE date = ?")
-            .bind(date)
-            .fetch_optional(&mut **tx)
-            .await
-            .map_err(|error| BookingError::database(error.to_string()))?;
-
-    Ok(row.map(|value| value.0).unwrap_or(0.0))
-}
-
-fn read_f64(row: &sqlx::sqlite::SqliteRow, column: &str) -> f64 {
-    row.try_get::<f64, _>(column)
-        .unwrap_or_else(|_| row.get::<i64, _>(column) as f64)
-}
-
-fn read_money_vnd(row: &sqlx::sqlite::SqliteRow, column: &str) -> MoneyVnd {
-    row.try_get::<MoneyVnd, _>(column).unwrap_or_else(|_| {
-        let value = row.get::<f64, _>(column);
-        assert!(
-            value.is_finite() && value.fract() == 0.0,
-            "money column {column} must be a whole VND amount"
-        );
-        value as MoneyVnd
-    })
-}
-
 #[cfg(test)]
 mod tests {
     use super::{
-        build_effective_pricing_rule, calculate_from_loaded_inputs, load_stay_pricing_inputs,
-        stored_rule_from_row, StayPricingInputs, StoredPricingRule,
+        build_effective_pricing_rule, calculate_from_loaded_inputs, StayPricingInputs,
+        StoredPricingRule,
     };
     use crate::domain::booking::BookingError;
-    use sqlx::{sqlite::SqlitePoolOptions, Connection, Executor, SqliteConnection};
 
     fn sample_inputs() -> StayPricingInputs {
         StayPricingInputs {
@@ -445,163 +213,5 @@ mod tests {
             error,
             BookingError::DateTimeParse(message) if message.contains("Invalid check-in datetime")
         ));
-    }
-
-    #[tokio::test]
-    async fn stored_rule_from_row_maps_all_columns() {
-        let mut connection = SqliteConnection::connect(":memory:").await.unwrap();
-        let row = sqlx::query(
-            "SELECT
-                'deluxe' AS room_type,
-                120000 AS hourly_rate,
-                500000 AS overnight_rate,
-                700000 AS daily_rate,
-                '21:00' AS overnight_start,
-                '10:00' AS overnight_end,
-                '13:00' AS daily_checkin,
-                '11:00' AS daily_checkout,
-                15.0 AS early_checkin_surcharge_pct,
-                20.0 AS late_checkout_surcharge_pct,
-                12.5 AS weekend_uplift_pct",
-        )
-        .fetch_one(&mut connection)
-        .await
-        .unwrap();
-
-        let rule = stored_rule_from_row(&row);
-
-        assert_eq!(rule.room_type, "deluxe");
-        assert_eq!(rule.hourly_rate, 120_000);
-        assert_eq!(rule.overnight_rate, 500_000);
-        assert_eq!(rule.daily_rate, 700_000);
-        assert_eq!(rule.overnight_start, "21:00");
-        assert_eq!(rule.overnight_end, "10:00");
-        assert_eq!(rule.daily_checkin, "13:00");
-        assert_eq!(rule.daily_checkout, "11:00");
-        assert_eq!(rule.early_checkin_surcharge_pct, 15.0);
-        assert_eq!(rule.late_checkout_surcharge_pct, 20.0);
-        assert_eq!(rule.weekend_uplift_pct, 12.5);
-    }
-
-    async fn setup_loader_pool() -> sqlx::SqlitePool {
-        let pool = SqlitePoolOptions::new()
-            .max_connections(1)
-            .connect(":memory:")
-            .await
-            .unwrap();
-
-        pool.execute(
-            "CREATE TABLE rooms (id TEXT PRIMARY KEY, type TEXT NOT NULL, base_price INTEGER)",
-        )
-        .await
-        .unwrap();
-        pool.execute(
-            "CREATE TABLE pricing_rules (
-                room_type TEXT,
-                hourly_rate INTEGER,
-                overnight_rate INTEGER,
-                daily_rate INTEGER,
-                overnight_start TEXT,
-                overnight_end TEXT,
-                daily_checkin TEXT,
-                daily_checkout TEXT,
-                early_checkin_surcharge_pct REAL,
-                late_checkout_surcharge_pct REAL,
-                weekend_uplift_pct REAL
-            )",
-        )
-        .await
-        .unwrap();
-        pool.execute("CREATE TABLE special_dates (date TEXT PRIMARY KEY, uplift_pct REAL)")
-            .await
-            .unwrap();
-
-        pool
-    }
-
-    #[tokio::test]
-    async fn load_stay_pricing_inputs_prefers_stored_rule_without_fallback_query() {
-        let pool = setup_loader_pool().await;
-
-        pool.execute("DROP TABLE rooms").await.unwrap();
-        pool.execute("CREATE TABLE rooms (id TEXT PRIMARY KEY, type TEXT NOT NULL)")
-            .await
-            .unwrap();
-        sqlx::query("INSERT INTO rooms (id, type) VALUES (?, ?)")
-            .bind("room-1")
-            .bind("deluxe")
-            .execute(&pool)
-            .await
-            .unwrap();
-        sqlx::query(
-            "INSERT INTO pricing_rules (
-                room_type, hourly_rate, overnight_rate, daily_rate, overnight_start,
-                overnight_end, daily_checkin, daily_checkout,
-                early_checkin_surcharge_pct, late_checkout_surcharge_pct, weekend_uplift_pct
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-        )
-        .bind("deluxe")
-        .bind(120000)
-        .bind(500000)
-        .bind(700000)
-        .bind("21:00")
-        .bind("10:00")
-        .bind("13:00")
-        .bind("11:00")
-        .bind(15.0)
-        .bind(20.0)
-        .bind(12.5)
-        .execute(&pool)
-        .await
-        .unwrap();
-        sqlx::query("INSERT INTO special_dates (date, uplift_pct) VALUES (?, ?)")
-            .bind("2026-04-20")
-            .bind(10.0)
-            .execute(&pool)
-            .await
-            .unwrap();
-
-        let inputs = load_stay_pricing_inputs(
-            &pool,
-            "room-1",
-            "2026-04-20T14:00:00+07:00",
-            "2026-04-21T12:00:00+07:00",
-            "nightly",
-        )
-        .await
-        .unwrap();
-
-        assert_eq!(inputs.room_type, "deluxe");
-        assert!(inputs.stored_rule.is_some());
-        assert_eq!(inputs.fallback_base_price, None);
-        assert_eq!(inputs.special_uplift_pct, 10.0);
-    }
-
-    #[tokio::test]
-    async fn load_stay_pricing_inputs_loads_fallback_base_price_when_rule_missing() {
-        let pool = setup_loader_pool().await;
-
-        sqlx::query("INSERT INTO rooms (id, type, base_price) VALUES (?, ?, ?)")
-            .bind("room-2")
-            .bind("standard")
-            .bind(480000)
-            .execute(&pool)
-            .await
-            .unwrap();
-
-        let inputs = load_stay_pricing_inputs(
-            &pool,
-            "room-2",
-            "2026-04-21T14:00:00+07:00",
-            "2026-04-22T12:00:00+07:00",
-            "nightly",
-        )
-        .await
-        .unwrap();
-
-        assert_eq!(inputs.room_type, "standard");
-        assert!(inputs.stored_rule.is_none());
-        assert_eq!(inputs.fallback_base_price, Some(480000));
-        assert_eq!(inputs.special_uplift_pct, 0.0);
     }
 }

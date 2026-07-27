@@ -3,10 +3,7 @@ use sqlx::Row;
 
 use crate::{
     commands::reservations,
-    domain::booking::{
-        pricing::{calculate_stay_price, calculate_stay_price_tx},
-        BookingError, OriginSideEffect,
-    },
+    domain::booking::{BookingError, OriginSideEffect},
     models::{
         AddGroupServiceRequest, CheckOutRequest, CheckoutSettlementMode,
         CheckoutSettlementPreviewRequest, CreateGuestRequest, CreateReservationRequest,
@@ -23,8 +20,9 @@ use super::{
         record_deposit_with_origin_tx, record_payment, record_payment_idempotent,
         record_payment_returning_id_tx, record_payment_tx, record_payment_with_origin_tx,
     },
-    group_lifecycle, group_service_management, guest_service, reservation_lifecycle,
-    stay_lifecycle,
+    group_lifecycle, group_service_management, guest_service,
+    pricing_service::calculate_stay_price_tx,
+    reservation_lifecycle, stay_lifecycle,
 };
 
 mod support;
@@ -2162,35 +2160,13 @@ async fn calculate_stay_price_tx_reads_uncommitted_pricing_rule() {
 }
 
 #[tokio::test]
-async fn calculate_stay_price_matches_tx_path_and_applies_special_date_uplift() {
+async fn calculate_stay_price_tx_applies_special_date_uplift() {
     let pool = test_pool().await;
     seed_room_with_price(&pool, "R149", 600_000).await.unwrap();
     seed_special_date(&pool, "2026-04-20", 10.0).await.unwrap();
 
-    let pool_pricing = calculate_stay_price(
-        &pool,
-        "R149",
-        "2026-04-20T10:00:00+07:00",
-        "2026-04-22T10:00:00+07:00",
-        "nightly",
-    )
-    .await
-    .unwrap();
-
-    assert_eq!(pool_pricing.total, 1_320_000);
-    assert_eq!(pool_pricing.base_amount, 1_200_000);
-    assert_eq!(pool_pricing.surcharge_amount, 120_000);
-    assert_eq!(pool_pricing.weekend_amount, 0);
-    assert_eq!(pool_pricing.breakdown.len(), 2);
-    assert_eq!(pool_pricing.breakdown[0].amount, 1_200_000);
-    assert!(pool_pricing.breakdown[0].label.contains("night(s)"));
-    assert!(pool_pricing
-        .breakdown
-        .iter()
-        .any(|line| line.label == "Holiday surcharge"));
-
     let mut tx = pool.begin().await.unwrap();
-    let tx_pricing = calculate_stay_price_tx(
+    let pricing = calculate_stay_price_tx(
         &mut tx,
         "R149",
         "2026-04-20T10:00:00+07:00",
@@ -2200,11 +2176,18 @@ async fn calculate_stay_price_matches_tx_path_and_applies_special_date_uplift() 
     .await
     .unwrap();
 
-    assert_eq!(tx_pricing.pricing_type, pool_pricing.pricing_type);
-    assert_eq!(tx_pricing.base_amount, pool_pricing.base_amount);
-    assert_eq!(tx_pricing.surcharge_amount, pool_pricing.surcharge_amount);
-    assert_eq!(tx_pricing.weekend_amount, pool_pricing.weekend_amount);
-    assert_eq!(tx_pricing.total, pool_pricing.total);
+    assert_eq!(pricing.pricing_type, "nightly");
+    assert_eq!(pricing.total, 1_320_000);
+    assert_eq!(pricing.base_amount, 1_200_000);
+    assert_eq!(pricing.surcharge_amount, 120_000);
+    assert_eq!(pricing.weekend_amount, 0);
+    assert_eq!(pricing.breakdown.len(), 2);
+    assert_eq!(pricing.breakdown[0].amount, 1_200_000);
+    assert!(pricing.breakdown[0].label.contains("night(s)"));
+    assert!(pricing
+        .breakdown
+        .iter()
+        .any(|line| line.label == "Holiday surcharge"));
 
     tx.rollback().await.unwrap();
 }
@@ -2307,47 +2290,6 @@ async fn calculate_stay_price_tx_reads_uncommitted_special_date() {
     assert_eq!(pricing.total, 1_320_000);
 
     tx.rollback().await.unwrap();
-}
-
-#[tokio::test]
-async fn calculate_stay_price_returns_not_found_for_missing_room() {
-    let pool = test_pool().await;
-
-    let error = calculate_stay_price(
-        &pool,
-        "missing-room",
-        "2026-04-20T10:00:00+07:00",
-        "2026-04-22T10:00:00+07:00",
-        "nightly",
-    )
-    .await
-    .unwrap_err();
-
-    assert!(matches!(
-        error,
-        BookingError::NotFound(message) if message.contains("Không tìm thấy phòng missing-room")
-    ));
-}
-
-#[tokio::test]
-async fn calculate_stay_price_returns_datetime_parse_for_invalid_check_in() {
-    let pool = test_pool().await;
-    seed_room(&pool, "R153").await.unwrap();
-
-    let error = calculate_stay_price(
-        &pool,
-        "R153",
-        "not-a-datetime",
-        "2026-04-22T10:00:00+07:00",
-        "nightly",
-    )
-    .await
-    .unwrap_err();
-
-    assert!(matches!(
-        error,
-        BookingError::DateTimeParse(message) if message.contains("Invalid check-in datetime")
-    ));
 }
 
 #[tokio::test]
