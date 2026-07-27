@@ -10,9 +10,7 @@ use crate::{
         WriteCommandExecutor, WriteCommandRequest,
     },
     db_error_monitoring::{classify_db_error_code, is_room_unavailable_conflict_message},
-    domain::booking::{
-        pricing::calculate_stay_price_tx, BookingError, BookingResult, OriginSideEffect,
-    },
+    domain::booking::{BookingError, BookingResult, OriginSideEffect},
     models::{
         status, BookingGroup, GroupCheckinRequest, GroupCheckoutRequest, GroupCheckoutResponse,
     },
@@ -23,6 +21,7 @@ use crate::{
 use super::{
     billing_service::{record_charge_tx, record_payment_tx, record_payment_with_origin_tx},
     guest_service::{create_group_guest_manifest, link_booking_guests},
+    pricing_service::calculate_stay_price_tx,
     support::{
         begin_immediate_tx, ensure_one_row_affected, ensure_rows_affected,
         insert_room_calendar_rows, invalid_state_transition, validate_non_negative_booking_money,
