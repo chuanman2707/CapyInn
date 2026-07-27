@@ -1,3 +1,7 @@
+// Khách sạn chạy theo giờ Việt Nam; cố định múi giờ để kỳ vọng định dạng
+// ngày giờ không đổi theo máy chạy test.
+process.env.TZ = "Asia/Ho_Chi_Minh";
+
 import type { ButtonHTMLAttributes } from "react";
 import { render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
@@ -70,9 +74,15 @@ describe("BookingDetailPopup", () => {
     const onViewInvoice = vi.fn();
     const onClose = vi.fn();
 
+    // Khách vãng lai: không có lịch đặt trước, cả hai mốc đều là timestamp RFC3339.
     render(
       <BookingDetailPopup
-        booking={booking()}
+        booking={booking({
+          scheduled_checkin: null,
+          scheduled_checkout: null,
+          check_in_at: "2026-07-23T14:03:11.482913+07:00",
+          actual_checkout: "2026-07-25T09:12:00+07:00",
+        })}
         mode="readonly"
         onClose={onClose}
         onViewInvoice={onViewInvoice}
@@ -82,6 +92,11 @@ describe("BookingDetailPopup", () => {
     expect(screen.getByText(/Đã trả — Hoseo Kim/)).toBeTruthy();
     expect(screen.getByText("Trả phòng lúc")).toBeTruthy();
     expect(screen.getByText("Đã thanh toán")).toBeTruthy();
+
+    expect(screen.getByText("14:03 23/07/2026")).toBeTruthy();
+    expect(screen.getByText("09:12 25/07/2026")).toBeTruthy();
+    expect(screen.queryByText("2026-07-23T14:03:11.482913+07:00")).toBeNull();
+    expect(screen.queryByText("2026-07-25T09:12:00+07:00")).toBeNull();
 
     expect(screen.queryByRole("button", { name: /check-in/i })).toBeNull();
     expect(screen.queryByRole("button", { name: /^hủy$/i })).toBeNull();
@@ -103,6 +118,28 @@ describe("BookingDetailPopup", () => {
       />,
     );
 
-    expect(screen.getByText("2026-07-25")).toBeTruthy();
+    // Ngày trơn phải in ra ngày, không kèm giờ ảo của nửa đêm UTC.
+    expect(screen.getByText("25/07/2026")).toBeTruthy();
+    expect(screen.getByText("23/07/2026")).toBeTruthy();
+    expect(screen.queryByText("2026-07-25")).toBeNull();
+    expect(screen.queryByText(/00:00|07:00/)).toBeNull();
+  });
+
+  it("disables the invoice button while an invoice request is in flight", () => {
+    const onViewInvoice = vi.fn();
+
+    render(
+      <BookingDetailPopup
+        booking={booking()}
+        mode="readonly"
+        onClose={vi.fn()}
+        onViewInvoice={onViewInvoice}
+        invoiceLoading
+      />,
+    );
+
+    const button = screen.getByRole("button", { name: /đang tạo/i });
+    expect(button).toBeDisabled();
+    expect(screen.queryByRole("button", { name: /xem hóa đơn/i })).toBeNull();
   });
 });

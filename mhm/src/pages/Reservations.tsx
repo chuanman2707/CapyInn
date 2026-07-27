@@ -111,6 +111,7 @@ function getStatusLabel(status: BookingStatus): string {
     if (status === "booked") return "Đặt trước";
     if (status === "active") return "Đang ở";
     if (status === "checked_out") return "Đã trả";
+    if (status === "no_show") return "Không đến";
     return status;
 }
 
@@ -123,7 +124,7 @@ export default function Reservations() {
     const [selectedBooking, setSelectedBooking] = useState<BookingWithGuest | null>(null);
     const [editBooking, setEditBooking] = useState<BookingWithGuest | null>(null);
     const [drawerRoomId, setDrawerRoomId] = useState<string | null>(null);
-    const { invoiceOpen, invoiceData, viewInvoice, closeInvoice } = useInvoiceDialog();
+    const { invoiceOpen, invoiceData, invoiceLoading, viewInvoice, closeInvoice } = useInvoiceDialog();
 
     const DAYS = getDateRange(dateOffset);
     const rangeLabel = formatRangeLabel(DAYS);
@@ -407,10 +408,10 @@ export default function Reservations() {
                     onEdit={(booking) => { setEditBooking(booking); setSelectedBooking(null); }}
                     onCancel={handleCancelReservation}
                     onViewInvoice={viewInvoice}
+                    invoiceLoading={invoiceLoading}
                 />
             )}
 
-            {/* Reservation Sheet */}
             {/* Room Drawer for active bookings */}
             <RoomDrawer
                 open={!!drawerRoomId}
@@ -426,6 +427,7 @@ export default function Reservations() {
                 data={invoiceData}
             />
 
+            {/* Reservation Sheet */}
             <ReservationSheet
                 open={sheetOpen || !!editBooking}
                 onOpenChange={(v) => {
