@@ -211,6 +211,19 @@ pub async fn kbtt_update_link(
     .await
 }
 
+/// Sửa lỗi trên thẻ khách: bấm dòng lỗi → form prefill → lưu theo id, kể cả
+/// khi danh tính không có số giấy tờ để merge.
+#[tauri::command]
+pub async fn kbtt_update_identity(
+    state: State<'_, AppState>,
+    identity_id: String,
+    identity: Identity,
+    source: String,
+    confidence: String,
+) -> Result<(), String> {
+    repo::update_identity(&state.db, &identity_id, &identity, &source, &confidence).await
+}
+
 /// Danh tính đã lưu nhưng chưa ghép — nguồn sự thật là DB, không phải state của
 /// React, nên đổi tab không làm mất.
 #[tauri::command]

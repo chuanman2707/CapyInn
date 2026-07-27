@@ -281,6 +281,38 @@ async fn update_identity_fields(
     Ok(())
 }
 
+/// Sửa một danh tính theo id (form sửa của thẻ khách). Cùng luật với
+/// `insert_identity`: đã nằm trong lô `verified` thì bản ghi là bằng chứng của
+/// cái đã nộp, không sửa sau lưng.
+///
+/// Khác `insert_identity` ở chỗ không merge theo số giấy tờ — sửa thẳng theo
+/// `identity_id`. Cần đường này vì danh tính nhập tay thiếu đúng số giấy tờ để
+/// merge thì `insert_identity` sẽ đẻ dòng mới thay vì sửa dòng cũ.
+pub async fn update_identity(
+    pool: &Pool<Sqlite>,
+    identity_id: &str,
+    identity: &Identity,
+    source: &str,
+    confidence: &str,
+) -> Result<(), String> {
+    let declared: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM declaration_link dl
+           JOIN declaration_entry de  ON de.link_id = dl.id
+           JOIN declaration_batch dbt ON dbt.id     = de.batch_id
+          WHERE dl.identity_id = ? AND dbt.status = 'verified'",
+    )
+    .bind(identity_id)
+    .fetch_one(pool)
+    .await
+    .map_err(|e| format!("Không kiểm được lịch sử khai của danh tính: {e}"))?;
+
+    if declared > 0 {
+        return Err("Khách này đã có lô khai đã đối soát — thông tin cũ là bằng chứng, không sửa được.".into());
+    }
+
+    update_identity_fields(pool, identity_id, identity, source, confidence).await
+}
+
 /// Link đã nằm trong lô `verified` = bằng chứng đã khai lên cổng.
 async fn link_is_declared(pool: &Pool<Sqlite>, link_id: &str) -> Result<bool, String> {
     let n: i64 = sqlx::query_scalar(
@@ -1597,5 +1629,61 @@ mod tests {
         set_batch_verified(&pool, &batch, 1).await.expect("chốt");
 
         assert!(discard_link(&pool, &link).await.is_err());
+    }
+
+    /// Bấm vào lỗi trên thẻ → sửa trong form → lưu theo id, kể cả khi danh
+    /// tính không có số giấy tờ (đường merge theo doc_no không dùng được).
+    #[tokio::test]
+    async fn an_identity_can_be_edited_by_id() {
+        let pool = pool().await;
+        let no_doc = Identity {
+            full_name: "Khách nhập tay".into(),
+            dob: "1990-01-01".into(),
+            gender: "M".into(),
+            nationality_iso3: "VNM".into(),
+            ..Default::default()
+        };
+        let id = save_identity_ensuring_link(&pool, &no_doc, "manual", "needs_review")
+            .await
+            .expect("lưu");
+
+        let mut fixed = no_doc.clone();
+        fixed.phone = Some("0912345678".into());
+        update_identity(&pool, &id, &fixed, "manual", "needs_review")
+            .await
+            .expect("sửa được");
+
+        let phone: Option<String> =
+            sqlx::query_scalar("SELECT phone FROM declaration_identity WHERE id = ?")
+                .bind(&id)
+                .fetch_one(&pool)
+                .await
+                .expect("đọc");
+        assert_eq!(phone.as_deref(), Some("0912345678"));
+
+        let n: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM declaration_identity")
+            .fetch_one(&pool)
+            .await
+            .expect("đếm");
+        assert_eq!(n, 1, "sửa chứ không đẻ dòng mới");
+    }
+
+    /// Đã có lô verified → bản ghi là bằng chứng, không sửa sau lưng.
+    #[tokio::test]
+    async fn a_declared_identity_refuses_edits_by_id() {
+        let pool = pool().await;
+        let id = save_identity_ensuring_link(&pool, &vn_identity(), "qr_cccd", "verified")
+            .await
+            .expect("lưu");
+        let link = pending_link_ids(&pool).await.expect("đọc")[0].clone();
+        let batch = insert_batch(&pool, "VN", "/tmp/x.xlsx", 1).await.expect("lô");
+        insert_entries(&pool, &batch, std::slice::from_ref(&link)).await.expect("dòng");
+        set_batch_verified(&pool, &batch, 1).await.expect("chốt");
+
+        assert!(
+            update_identity(&pool, &id, &vn_identity(), "manual", "needs_review")
+                .await
+                .is_err()
+        );
     }
 }
