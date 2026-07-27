@@ -304,6 +304,11 @@ pub(crate) async fn run_migrations(pool: &Pool<Sqlite>) -> Result<(), sqlx::Erro
     if current < 20 {
         declaration::migrate_v20_declaration_tables(pool).await?;
     }
+
+    // -- V21: khai báo được phép chưa gắn phòng --
+    if current < 21 {
+        declaration::migrate_v21_optional_stay(pool).await?;
+    }
     Ok(())
 }
 
@@ -831,7 +836,7 @@ mod tests {
             .expect("reads final schema version")
             .get("version");
 
-        assert_eq!(version, 20);
+        assert_eq!(version, 21);
     }
 
     #[tokio::test]
@@ -845,7 +850,7 @@ mod tests {
             .await
             .expect("reads final schema version");
 
-        assert_eq!(version, 20);
+        assert_eq!(version, 21);
 
         assert_table_group_exists(&pool, "PMS core", PMS_CORE_TABLES).await;
         assert_table_group_exists(&pool, "command safety", COMMAND_SAFETY_TABLES).await;
@@ -866,7 +871,7 @@ mod tests {
             .expect("reads version")
             .get("version");
 
-        assert_eq!(version, 20);
+        assert_eq!(version, 21);
         assert_money_columns_are_integer(&pool).await;
     }
 
@@ -1154,7 +1159,7 @@ mod tests {
             .expect("reads final schema version")
             .get("version");
 
-        assert_eq!(version, 20);
+        assert_eq!(version, 21);
     }
 
     #[tokio::test]
@@ -1221,7 +1226,7 @@ mod tests {
             .expect("reads final schema version")
             .get("version");
 
-        assert_eq!(version, 20);
+        assert_eq!(version, 21);
     }
 
     #[tokio::test]
@@ -1301,7 +1306,7 @@ mod tests {
         );
 
         let version = get_schema_version(&pool).await.expect("schema version");
-        assert_eq!(version, 20);
+        assert_eq!(version, 21);
     }
 
     #[tokio::test]
@@ -1341,7 +1346,7 @@ mod tests {
 
         assert_outbox_shape(&pool).await;
         let version = get_schema_version(&pool).await.expect("schema version");
-        assert_eq!(version, 20);
+        assert_eq!(version, 21);
     }
 
     #[tokio::test]
@@ -1359,7 +1364,7 @@ mod tests {
 
         assert_outbox_shape(&pool).await;
         let version = get_schema_version(&pool).await.expect("schema version");
-        assert_eq!(version, 20);
+        assert_eq!(version, 21);
     }
 
     #[tokio::test]
@@ -1389,7 +1394,7 @@ mod tests {
             1
         );
         let version = get_schema_version(&pool).await.expect("schema version");
-        assert_eq!(version, 20);
+        assert_eq!(version, 21);
     }
 
     #[tokio::test]
@@ -1402,7 +1407,7 @@ mod tests {
 
         assert_agent_safety_shape(&pool).await;
         let version = get_schema_version(&pool).await.expect("schema version");
-        assert_eq!(version, 20);
+        assert_eq!(version, 21);
     }
 
     #[tokio::test]
@@ -1435,7 +1440,7 @@ mod tests {
 
         assert_agent_digest_runs_shape(&pool).await;
         let version = get_schema_version(&pool).await.expect("schema version");
-        assert_eq!(version, 20);
+        assert_eq!(version, 21);
     }
 
     #[tokio::test]
@@ -1459,7 +1464,7 @@ mod tests {
 
         assert_agent_safety_shape(&pool).await;
         let version = get_schema_version(&pool).await.expect("schema version");
-        assert_eq!(version, 20);
+        assert_eq!(version, 21);
     }
 
     #[tokio::test]
