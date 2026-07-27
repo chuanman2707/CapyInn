@@ -16,14 +16,26 @@ interface BookingDetailPopupProps {
 }
 
 /**
+ * Ngày trơn `YYYY-MM-DD` được ghép bằng cách tách chuỗi thay vì dựng `Date` —
+ * `new Date("YYYY-MM-DD")` bị hiểu là nửa đêm UTC nên có thể lùi một ngày ở
+ * các múi giờ phía tây UTC. Định dạng đầu ra khớp với fmtDateShort (dd/MM/yyyy).
+ */
+function fmtDateOnlyLocal(value: string): string {
+    const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(value);
+    if (!match) return fmtDateShort(value);
+    const [, year, month, day] = match;
+    return `${day}/${month}/${year}`;
+}
+
+/**
  * Backend trả về hai dạng: ngày trơn `YYYY-MM-DD` (lịch đặt trước) và timestamp
- * RFC3339 (check-in / trả phòng thực tế). Ngày trơn phải đi qua fmtDateShort —
+ * RFC3339 (check-in / trả phòng thực tế). Ngày trơn phải đi qua fmtDateOnlyLocal —
  * fmtDate sẽ hiểu nó là nửa đêm UTC và in thêm giờ ảo, thậm chí lùi một ngày ở
  * các múi giờ phía tây UTC.
  */
 function fmtCheckpoint(value: string): string {
     if (!value) return value;
-    return value.length <= 10 ? fmtDateShort(value) : fmtDate(value);
+    return value.length <= 10 ? fmtDateOnlyLocal(value) : fmtDate(value);
 }
 
 function Row({ label, value }: { label: string; value: string }) {
@@ -49,7 +61,9 @@ export default function BookingDetailPopup({
     const title = isReadonly
         ? `Đã trả — ${booking.guest_name}`
         : `Reservation — ${booking.guest_name}`;
-    const checkInText = booking.scheduled_checkin || booking.check_in_at;
+    const checkInText = isReadonly
+        ? booking.check_in_at ?? booking.scheduled_checkin
+        : booking.scheduled_checkin || booking.check_in_at;
     const checkOutText = isReadonly
         ? booking.actual_checkout || booking.scheduled_checkout || booking.expected_checkout
         : booking.scheduled_checkout || booking.expected_checkout;
