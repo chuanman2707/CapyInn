@@ -16,14 +16,22 @@ import RoomDrawer from "@/components/RoomDrawer";
 import type { BookingStatus, BookingWithGuest } from "@/types";
 
 type BookingBar = BookingWithGuest & {
-    startCol: number;
-    length: number;
+    left: number;
+    width: number;
+    clippedLeft: boolean;
+    clippedRight: boolean;
     color: string;
     statusLabel: string;
     isBooked: boolean;
 };
 
 const DAY_MS = 24 * 60 * 60 * 1000;
+const VISIBLE_DAYS = 16;
+const COL_WIDTH = 80;
+/** Nhận phòng buổi chiều, trả phòng buổi sáng: bar lệch nửa ô ở cả hai đầu. */
+const HALF_DAY = 0.5;
+/** Khách nhận và trả cùng ngày vẫn phải nhìn thấy được. */
+const MIN_BAR_DAYS = 0.5;
 
 function startOfLocalDay(date: Date): Date {
     return new Date(date.getFullYear(), date.getMonth(), date.getDate());
@@ -44,7 +52,7 @@ function differenceInCalendarDays(left: Date, right: Date): number {
 
 function getDateRange(offset: number) {
     const today = startOfLocalDay(new Date());
-    return Array.from({ length: 16 }, (_, i) => {
+    return Array.from({ length: VISIBLE_DAYS }, (_, i) => {
         const d = new Date(today);
         d.setDate(today.getDate() + i - 3 + offset);
         return {
@@ -147,20 +155,28 @@ export default function Reservations() {
                 const checkOut = parseDate(b.scheduled_checkout || b.expected_checkout);
                 const startDay = DAYS[0].dateObj;
 
-                const startCol = Math.max(0, differenceInCalendarDays(checkIn, startDay));
-                const endCol = Math.max(startCol + 1, differenceInCalendarDays(checkOut, startDay));
-                const length = endCol - startCol;
+                const rawStart = differenceInCalendarDays(checkIn, startDay) + HALF_DAY;
+                const rawEnd = Math.max(
+                    differenceInCalendarDays(checkOut, startDay) + HALF_DAY,
+                    rawStart + MIN_BAR_DAYS,
+                );
 
-                if (startCol >= 16 || endCol <= 0) return [];
+                // Lọc trước khi clamp — clamp trước sẽ kéo mọi booking quá khứ về cột 0.
+                if (rawStart >= VISIBLE_DAYS || rawEnd <= 0) return [];
 
-                const clampedStart = Math.max(0, startCol);
-                const clampedLength = Math.min(length, 16 - clampedStart);
+                const visStart = Math.max(0, rawStart);
+                const visEnd = Math.min(VISIBLE_DAYS, rawEnd);
 
-                const isBooked = b.status === "booked";
-                const color = getBookingBarColor(b.status);
-                const statusLabel = getStatusLabel(b.status);
-
-                return [{ ...b, startCol: clampedStart, length: clampedLength, color, statusLabel, isBooked }];
+                return [{
+                    ...b,
+                    left: visStart * COL_WIDTH,
+                    width: (visEnd - visStart) * COL_WIDTH,
+                    clippedLeft: rawStart < 0,
+                    clippedRight: rawEnd > VISIBLE_DAYS,
+                    color: getBookingBarColor(b.status),
+                    statusLabel: getStatusLabel(b.status),
+                    isBooked: b.status === "booked",
+                }];
             })
     }
 
@@ -281,20 +297,21 @@ export default function Reservations() {
                                             ))}
 
                                             {DAYS.some(d => d.isToday) && (
-                                                <div className="absolute top-0 bottom-0 w-[2px] bg-brand-primary/60 z-20" style={{ left: `${DAYS.findIndex(d => d.isToday) * 80 + 40}px` }} />
+                                                <div className="absolute top-0 bottom-0 w-[2px] bg-brand-primary/60 z-20" style={{ left: `${DAYS.findIndex(d => d.isToday) * COL_WIDTH + COL_WIDTH / 2}px` }} />
                                             )}
 
                                             {bars.map((bar) => (
                                                 <div
                                                     key={bar.id}
+                                                    data-testid={`booking-bar-${bar.id}`}
                                                     className="absolute top-1/2 -translate-y-1/2 px-0.5 z-10 cursor-pointer"
-                                                    style={{ left: `${bar.startCol * 80}px`, width: `${bar.length * 80}px` }}
+                                                    style={{ left: `${bar.left}px`, width: `${bar.width}px` }}
                                                     onClick={() => {
                                                         if (bar.isBooked) setSelectedBooking(bar);
                                                         else if (bar.status === "active") setDrawerRoomId(bar.room_id);
                                                     }}
                                                 >
-                                                    <div className={`h-[42px] w-full ${bar.color} border rounded-xl px-3 flex flex-col justify-center hover:shadow-md hover:-translate-y-0.5 transition-all`}>
+                                                    <div className={`h-[42px] w-full ${bar.color} border rounded-xl ${bar.clippedLeft ? "rounded-l-none" : ""} ${bar.clippedRight ? "rounded-r-none" : ""} px-3 flex flex-col justify-center hover:shadow-md hover:-translate-y-0.5 transition-all`}>
                                                         <span className="font-semibold text-xs truncate">{bar.guest_name}</span>
                                                         <div className="flex items-center gap-1.5 mt-0.5">
                                                             <span className="text-[9px] opacity-70">{bar.source || "walk-in"}</span>

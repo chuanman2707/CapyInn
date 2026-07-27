@@ -141,7 +141,10 @@ describe("09 — Reservations", () => {
         const guestName = await screen.findByText("Khách ngày 24");
         const bookingBar = guestName.closest(".absolute");
 
-        expect(bookingBar).toHaveStyle({ left: "240px" });
-        expect(bookingBar).not.toHaveStyle({ left: "160px" });
+        // Grid starts today - 3 (col 0). Check-in on today (col 3) renders half a
+        // day into that cell: (3 + 0.5) * 80 = 280px. A timezone bug that shifts
+        // the calendar day back would land it a full column earlier at 200px.
+        expect(bookingBar).toHaveStyle({ left: "280px" });
+        expect(bookingBar).not.toHaveStyle({ left: "200px" });
     });
 });

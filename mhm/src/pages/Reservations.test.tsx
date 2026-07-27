@@ -97,6 +97,19 @@ function bookedReservation() {
   };
 }
 
+function dateOffsetFromToday(days: number): string {
+  const d = new Date();
+  d.setDate(d.getDate() + days);
+  return formatLocalDate(d);
+}
+
+function bookingAt(overrides: Record<string, unknown>) {
+  return {
+    ...bookedReservation(),
+    ...overrides,
+  };
+}
+
 async function openBookedReservationActions(user: ReturnType<typeof userEvent.setup>) {
   render(<Reservations />);
 
@@ -150,5 +163,108 @@ describe("Reservations", () => {
       );
     });
     expect(toastSuccess).toHaveBeenCalledWith("Đã hủy reservation. Tiền cọc được giữ lại.");
+  });
+});
+
+describe("Reservations timeline geometry", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    invokeWriteCommand.mockResolvedValue(undefined);
+    createCorrelationId.mockReturnValue("COR-5E6F7A8B");
+  });
+
+  function mockBookings(bookings: unknown[]) {
+    invoke.mockImplementation(async (command: string) => {
+      if (command === "get_all_bookings") return bookings;
+      return undefined;
+    });
+  }
+
+  it("places a bar half a day into the check-in cell and half a day into the check-out cell", async () => {
+    // Lưới bắt đầu ở hôm nay - 3. Khách nhận hôm nay - 1, trả hôm nay + 3.
+    // rawStart = (-1 - -3) + 0.5 = 2.5 -> left  = 200px
+    // rawEnd   = ( 3 - -3) + 0.5 = 6.5 -> width = (6.5 - 2.5) * 80 = 320px
+    mockBookings([
+      bookingAt({
+        id: "B-GEO",
+        scheduled_checkin: dateOffsetFromToday(-1),
+        scheduled_checkout: dateOffsetFromToday(3),
+      }),
+    ]);
+
+    render(<Reservations />);
+
+    const bar = await screen.findByTestId("booking-bar-B-GEO");
+    expect(bar.style.left).toBe("200px");
+    expect(bar.style.width).toBe("320px");
+  });
+
+  it("keeps a visible bar for a booking that checks in and out on the same day", async () => {
+    mockBookings([
+      bookingAt({
+        id: "B-SAMEDAY",
+        scheduled_checkin: dateOffsetFromToday(0),
+        scheduled_checkout: dateOffsetFromToday(0),
+        nights: 0,
+      }),
+    ]);
+
+    render(<Reservations />);
+
+    const bar = await screen.findByTestId("booking-bar-B-SAMEDAY");
+    expect(bar.style.width).toBe("40px");
+  });
+
+  it("does not render bookings that ended before the visible window", async () => {
+    mockBookings([
+      bookingAt({
+        id: "B-PAST",
+        scheduled_checkin: dateOffsetFromToday(-20),
+        scheduled_checkout: dateOffsetFromToday(-10),
+        status: "checked_out",
+      }),
+    ]);
+
+    render(<Reservations />);
+
+    await waitFor(() => {
+      expect(screen.getByText(/Không tìm thấy|Chưa có booking|Room R101/)).toBeTruthy();
+    });
+    expect(screen.queryByTestId("booking-bar-B-PAST")).toBeNull();
+  });
+
+  it("does not render bookings that start after the visible window", async () => {
+    mockBookings([
+      bookingAt({
+        id: "B-FUTURE",
+        scheduled_checkin: dateOffsetFromToday(40),
+        scheduled_checkout: dateOffsetFromToday(42),
+      }),
+    ]);
+
+    render(<Reservations />);
+
+    await waitFor(() => {
+      expect(screen.getByText("Room R101")).toBeTruthy();
+    });
+    expect(screen.queryByTestId("booking-bar-B-FUTURE")).toBeNull();
+  });
+
+  it("clips a bar at the left edge and squares off the clipped corner", async () => {
+    mockBookings([
+      bookingAt({
+        id: "B-CLIPPED",
+        scheduled_checkin: dateOffsetFromToday(-10),
+        scheduled_checkout: dateOffsetFromToday(2),
+      }),
+    ]);
+
+    render(<Reservations />);
+
+    const bar = await screen.findByTestId("booking-bar-B-CLIPPED");
+    expect(bar.style.left).toBe("0px");
+    // rawEnd = (2 - -3) + 0.5 = 5.5 -> width = 5.5 * 80 = 440px
+    expect(bar.style.width).toBe("440px");
+    expect(bar.querySelector(".rounded-l-none")).not.toBeNull();
   });
 });
