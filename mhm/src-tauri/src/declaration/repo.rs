@@ -293,13 +293,20 @@ async fn update_identity_fields(
     Ok(())
 }
 
-/// Sửa một danh tính theo id (form sửa của thẻ khách). Cùng luật với
-/// `insert_identity`: đã nằm trong lô `verified` thì bản ghi là bằng chứng của
-/// cái đã nộp, không sửa sau lưng.
+/// Sửa một danh tính theo id (form sửa của thẻ khách). Khác `insert_identity`
+/// ở chỗ không merge theo số giấy tờ — sửa thẳng theo `identity_id`. Cần đường
+/// này vì danh tính nhập tay thiếu đúng số giấy tờ để merge thì
+/// `insert_identity` sẽ đẻ dòng mới thay vì sửa dòng cũ.
 ///
-/// Khác `insert_identity` ở chỗ không merge theo số giấy tờ — sửa thẳng theo
-/// `identity_id`. Cần đường này vì danh tính nhập tay thiếu đúng số giấy tờ để
-/// merge thì `insert_identity` sẽ đẻ dòng mới thay vì sửa dòng cũ.
+/// **Luật hẹp, không phải "có link verified nào thì chặn hết":** cái đã nộp
+/// công an được giữ bằng chứng ở file xuất trên đĩa cộng dòng
+/// `declaration_batch`/`declaration_entry` — dòng `declaration_identity` có
+/// thể đổi thì KHÔNG phải bằng chứng đó. Khách nước ngoài ở tháng 3 (đã khai,
+/// đã verified) quay lại tháng 7 với visa mới thì tái sử dụng đúng dòng danh
+/// tính, còn hạn visa cũ vẫn nằm đó và validator chặn E09 — đường sửa duy nhất
+/// là "bấm lỗi → sửa form → lưu", tức gọi đúng hàm này. Vì vậy chỉ chặn khi
+/// KHÔNG còn link nào sống ngoài lô verified: còn một link sống nghĩa là còn
+/// một lượt lưu trú đang chờ khai, và chính lượt đó cần được sửa.
 pub async fn update_identity(
     pool: &Pool<Sqlite>,
     identity_id: &str,
@@ -307,19 +314,24 @@ pub async fn update_identity(
     source: &str,
     confidence: &str,
 ) -> Result<(), String> {
-    let declared: i64 = sqlx::query_scalar(
+    let live: i64 = sqlx::query_scalar(
         "SELECT COUNT(*) FROM declaration_link dl
-           JOIN declaration_entry de  ON de.link_id = dl.id
-           JOIN declaration_batch dbt ON dbt.id     = de.batch_id
-          WHERE dl.identity_id = ? AND dbt.status = 'verified'",
+          WHERE dl.identity_id = ?
+            AND NOT EXISTS (
+                  SELECT 1 FROM declaration_entry de
+                  JOIN declaration_batch b ON b.id = de.batch_id
+                 WHERE de.link_id = dl.id AND b.status = 'verified')",
     )
     .bind(identity_id)
     .fetch_one(pool)
     .await
     .map_err(|e| format!("Không kiểm được lịch sử khai của danh tính: {e}"))?;
 
-    if declared > 0 {
-        return Err("Khách này đã có lô khai đã đối soát — thông tin cũ là bằng chứng, không sửa được.".into());
+    if live == 0 {
+        return Err(
+            "Khách này chỉ còn khai báo đã đối soát — thông tin cũ là bằng chứng, không sửa được."
+                .into(),
+        );
     }
 
     update_identity_fields(pool, identity_id, identity, source, confidence).await
@@ -1727,7 +1739,8 @@ mod tests {
         assert_eq!(n, 1, "sửa chứ không đẻ dòng mới");
     }
 
-    /// Đã có lô verified → bản ghi là bằng chứng, không sửa sau lưng.
+    /// Cả hai link của danh tính đều verified (không chỉ một) → không còn link
+    /// nào sống để sửa, bản ghi là bằng chứng, không sửa sau lưng.
     #[tokio::test]
     async fn a_declared_identity_refuses_edits_by_id() {
         let pool = pool().await;
@@ -1739,11 +1752,56 @@ mod tests {
         insert_entries(&pool, &batch, std::slice::from_ref(&link)).await.expect("dòng");
         set_batch_verified(&pool, &batch, 1).await.expect("chốt");
 
+        // Quay lại lượt sau: active == 0 nên đẻ link mới — cũng đưa nó tới
+        // verified, để cả hai link của danh tính đều là bằng chứng đã khai.
+        save_identity_ensuring_link(&pool, &vn_identity(), "qr_cccd", "verified")
+            .await
+            .expect("lưu lượt hai");
+        let link2 = pending_link_ids(&pool).await.expect("đọc")[0].clone();
+        let batch2 = insert_batch(&pool, "VN", "/tmp/y.xlsx", 1).await.expect("lô 2");
+        insert_entries(&pool, &batch2, std::slice::from_ref(&link2)).await.expect("dòng 2");
+        set_batch_verified(&pool, &batch2, 1).await.expect("chốt 2");
+
         assert!(
             update_identity(&pool, &id, &vn_identity(), "manual", "needs_review")
                 .await
-                .is_err()
+                .is_err(),
+            "cả hai link đều verified — không còn link nào sống để sửa"
         );
+    }
+
+    /// Khách nước ngoài verified tháng 3, quay lại tháng 7 visa mới: link cũ
+    /// verified vẫn là bằng chứng, nhưng link của lượt ở hiện tại còn sống —
+    /// đó chính là đường sửa E09 (hạn visa cũ chặn xuất file).
+    #[tokio::test]
+    async fn an_identity_with_a_live_link_alongside_a_verified_one_accepts_edits() {
+        let pool = pool().await;
+        let id = save_identity_ensuring_link(&pool, &vn_identity(), "qr_cccd", "verified")
+            .await
+            .expect("lưu tháng 3");
+        let link = pending_link_ids(&pool).await.expect("đọc")[0].clone();
+        let batch = insert_batch(&pool, "VN", "/tmp/x.xlsx", 1).await.expect("lô");
+        insert_entries(&pool, &batch, std::slice::from_ref(&link)).await.expect("dòng");
+        set_batch_verified(&pool, &batch, 1).await.expect("chốt tháng 3");
+
+        // Quay lại tháng 7: active == 0 nên đẻ link mới, link này còn sống.
+        save_identity_ensuring_link(&pool, &vn_identity(), "qr_cccd", "verified")
+            .await
+            .expect("lưu tháng 7");
+
+        let mut renewed = vn_identity();
+        renewed.visa_valid_until = Some("2027-12-31".into());
+        update_identity(&pool, &id, &renewed, "manual", "needs_review")
+            .await
+            .expect("còn link sống ngoài lô verified nên sửa được");
+
+        let visa: Option<String> =
+            sqlx::query_scalar("SELECT visa_valid_until FROM declaration_identity WHERE id = ?")
+                .bind(&id)
+                .fetch_one(&pool)
+                .await
+                .expect("đọc");
+        assert_eq!(visa.as_deref(), Some("2027-12-31"));
     }
 
     /// Đã xuất là rời danh sách "Chưa khai báo" — khách sống trên thẻ đối
