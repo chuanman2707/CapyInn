@@ -170,7 +170,9 @@ pub(super) async fn migrate_v21_optional_stay(pool: &Pool<Sqlite>) -> Result<(),
 ///    chờ xuất. Cột additive nên chỉ cần ALTER, không rebuild bảng.
 /// 2. Backfill: khái niệm "hồ sơ chờ chưa ghép" biến mất khỏi UI, nên danh
 ///    tính nào đang mồ côi (dữ liệu của bản cũ để lại) phải được tạo link mặc
-///    định — nếu không, nâng cấp xong khách biến mất vô hình.
+///    định — nếu không, nâng cấp xong khách biến mất vô hình. Link đó sinh ra
+///    GÁC LẠI (xem `backfill_orphan_identities`) chứ không phải chờ xuất bình
+///    thường — orphan là ảnh quét dở, không chắc là khách thật.
 ///
 /// Đây là bảng của riêng module này — luật "không migrate PMS" không bị đụng.
 pub(super) async fn migrate_v22_conveyor(pool: &Pool<Sqlite>) -> Result<(), sqlx::Error> {
@@ -200,14 +202,23 @@ pub(super) async fn migrate_v22_conveyor(pool: &Pool<Sqlite>) -> Result<(), sqlx
 /// Tách khỏi `migrate_v22_conveyor` để test gọi được đúng code production:
 /// bản thân migration không chạy lại được (ALTER lần hai báo trùng cột), còn
 /// hàm này idempotent nhờ `NOT EXISTS`.
+///
+/// Link backfill LUÔN sinh ra ở trạng thái GÁC LẠI (`held_at` có giá trị).
+/// Danh tính mồ côi trên máy thật là ảnh quét rồi bỏ dở, chưa từng gắn vào
+/// lượt lưu trú nào — nếu để chúng hiện ra như thẻ chờ bình thường, UI cũ vốn
+/// mặc định chọn sẵn mọi dòng chờ để xuất, và bản nâng cấp sẽ tự động xếp một
+/// người chưa từng thật sự là khách vào file khai báo tiếp theo. Gác lại buộc
+/// người vận hành phải chủ động rà rồi mới thả ra.
 pub(crate) async fn backfill_orphan_identities(pool: &Pool<Sqlite>) -> Result<(), sqlx::Error> {
+    let held_at = chrono::Local::now().to_rfc3339();
     sqlx::query(
-        "INSERT INTO declaration_link (id, identity_id, stay_id, stay_reason, created_at)
-         SELECT lower(hex(randomblob(16))), di.id, NULL, '1', di.created_at
+        "INSERT INTO declaration_link (id, identity_id, stay_id, stay_reason, held_at, created_at)
+         SELECT lower(hex(randomblob(16))), di.id, NULL, '1', ?, di.created_at
            FROM declaration_identity di
           WHERE di.redacted_at IS NULL
             AND NOT EXISTS (SELECT 1 FROM declaration_link dl WHERE dl.identity_id = di.id)",
     )
+    .bind(&held_at)
     .execute(pool)
     .await?;
     Ok(())
@@ -754,6 +765,18 @@ mod tests {
         assert_eq!(
             links, 1,
             "mỗi danh tính mồ côi phải có đúng một link mặc định"
+        );
+
+        let held_at: Option<String> = sqlx::query_scalar(
+            "SELECT held_at FROM declaration_link WHERE identity_id = 'orphan-1'",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("đọc held_at");
+        assert!(
+            held_at.is_some(),
+            "link backfill phải sinh ra GÁC LẠI — orphan chưa chắc là khách thật, \
+             không được tự động lọt vào file xuất kế tiếp"
         );
 
         // Gọi lại lần hai để chứng minh hàm thực sự idempotent (đây chính là
