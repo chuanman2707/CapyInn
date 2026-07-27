@@ -168,6 +168,17 @@ describe("Reservations", () => {
     });
     expect(toastSuccess).toHaveBeenCalledWith("Đã hủy reservation. Tiền cọc được giữ lại.");
   });
+
+  it("closes the popup when editing a reservation", async () => {
+    const user = userEvent.setup();
+    await openBookedReservationActions(user);
+
+    expect(screen.getByText(/Reservation — Nguyen Van A/)).toBeTruthy();
+
+    await user.click(screen.getByRole("button", { name: /chỉnh sửa/i }));
+
+    expect(screen.queryByText(/Reservation — Nguyen Van A/)).toBeNull();
+  });
 });
 
 describe("Reservations timeline geometry", () => {
@@ -381,5 +392,6 @@ describe("Reservations checked-out bookings", () => {
       "generate_invoice",
       expect.anything(),
     );
+    expect(await screen.findByText("invoice-dialog")).toBeTruthy();
   });
 });

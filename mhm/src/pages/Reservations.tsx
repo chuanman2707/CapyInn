@@ -361,7 +361,7 @@ export default function Reservations() {
                                                     style={{ left: `${bar.left}px`, width: `${bar.width}px` }}
                                                     onClick={() => {
                                                         if (bar.status === "active") setDrawerRoomId(bar.room_id);
-                                                        else setSelectedBooking(bar);
+                                                        else if (bar.status === "booked" || bar.status === "checked_out") setSelectedBooking(bar);
                                                     }}
                                                 >
                                                     <div className={`h-[42px] w-full ${bar.color} border rounded-xl ${bar.clippedLeft ? "rounded-l-none" : ""} ${bar.clippedRight ? "rounded-r-none" : ""} px-3 flex flex-col justify-center hover:shadow-md hover:-translate-y-0.5 transition-all`}>
