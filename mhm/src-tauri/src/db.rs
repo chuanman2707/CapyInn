@@ -15,6 +15,7 @@ pub mod declaration;
 mod migrations;
 mod money;
 mod outbox;
+pub(crate) mod row;
 
 use crate::app_identity;
 

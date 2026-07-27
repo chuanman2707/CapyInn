@@ -1,6 +1,7 @@
-use super::{emit_db_update, get_money_vnd, require_admin, AppState};
+use super::{emit_db_update, require_admin, AppState};
 use crate::app_error::{codes, log_system_error, CommandError, CommandResult};
 use crate::app_identity;
+use crate::db::row::get_money_vnd;
 use crate::models::*;
 use crate::money::validate_non_negative_money_vnd;
 use serde_json::json;

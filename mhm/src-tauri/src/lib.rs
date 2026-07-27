@@ -6,6 +6,8 @@ pub mod agent;
 pub mod aggregate_locks;
 pub mod app_error;
 pub mod app_identity;
+#[cfg(test)]
+mod architecture_guard;
 mod backup;
 mod command_failure_log;
 pub mod command_idempotency;
