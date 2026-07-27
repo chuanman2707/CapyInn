@@ -407,6 +407,7 @@ pub fn run() {
             commands::declaration::kbtt_unlinked_identities,
             commands::declaration::kbtt_discard_identity,
             commands::declaration::kbtt_unlink,
+            commands::declaration::kbtt_discard,
             commands::declaration::kbtt_hold,
             commands::declaration::kbtt_release,
             commands::declaration::kbtt_pending_rows,

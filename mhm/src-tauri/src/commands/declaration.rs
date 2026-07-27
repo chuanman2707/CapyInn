@@ -235,6 +235,12 @@ pub async fn kbtt_unlink(state: State<'_, AppState>, link_id: String) -> Result<
     repo::delete_link(&state.db, &link_id).await
 }
 
+/// Xóa hẳn một thẻ khách (scan nhầm / khách không ở). Từ chối nếu đã đối soát.
+#[tauri::command]
+pub async fn kbtt_discard(state: State<'_, AppState>, link_id: String) -> Result<(), String> {
+    repo::discard_link(&state.db, &link_id).await
+}
+
 #[tauri::command]
 pub async fn kbtt_hold(state: State<'_, AppState>, link_id: String) -> Result<(), String> {
     repo::set_link_held(&state.db, &link_id, true).await

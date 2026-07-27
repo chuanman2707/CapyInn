@@ -383,6 +383,58 @@ pub async fn delete_link(pool: &Pool<Sqlite>, link_id: &str) -> Result<(), Strin
     Ok(())
 }
 
+/// "Xóa" trên thẻ khách: gỡ link, và nếu danh tính không còn link nào khác thì
+/// xóa luôn danh tính — không để lại bản ghi mồ côi vô hình.
+pub async fn discard_link(pool: &Pool<Sqlite>, link_id: &str) -> Result<(), String> {
+    if link_is_declared(pool, link_id).await? {
+        return Err(
+            "Khai báo này đã nằm trong một lô đã đối soát — không xóa được, vì đó là bằng chứng đã khai."
+                .into(),
+        );
+    }
+
+    let identity_id: Option<String> =
+        sqlx::query_scalar("SELECT identity_id FROM declaration_link WHERE id = ?")
+            .bind(link_id)
+            .fetch_optional(pool)
+            .await
+            .map_err(|e| format!("Không đọc được khai báo: {e}"))?;
+    let Some(identity_id) = identity_id else {
+        return Err("Không tìm thấy khai báo cần xóa.".into());
+    };
+
+    let mut tx = pool
+        .begin()
+        .await
+        .map_err(|e| format!("Không mở được giao dịch: {e}"))?;
+
+    // FK: entry (lô chưa đối soát) đi trước, rồi link, rồi danh tính nếu mồ côi.
+    sqlx::query("DELETE FROM declaration_entry WHERE link_id = ?")
+        .bind(link_id)
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| format!("Không gỡ được dòng khỏi lô: {e}"))?;
+    sqlx::query("DELETE FROM declaration_link WHERE id = ?")
+        .bind(link_id)
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| format!("Không gỡ được khai báo: {e}"))?;
+    sqlx::query(
+        "DELETE FROM declaration_identity
+          WHERE id = ?
+            AND NOT EXISTS (SELECT 1 FROM declaration_link dl WHERE dl.identity_id = ?)",
+    )
+    .bind(&identity_id)
+    .bind(&identity_id)
+    .execute(&mut *tx)
+    .await
+    .map_err(|e| format!("Không xóa được danh tính: {e}"))?;
+
+    tx.commit()
+        .await
+        .map_err(|e| format!("Không lưu được thay đổi: {e}"))
+}
+
 /// Gác một khai báo sang một bên (held = true) hoặc đưa lại (false).
 /// Khách gác lại không vào file xuất nhưng badge vẫn đếm — họ chưa được khai.
 pub async fn set_link_held(pool: &Pool<Sqlite>, link_id: &str, held: bool) -> Result<(), String> {
@@ -1478,5 +1530,72 @@ mod tests {
                 .await
                 .expect("đọc lại");
         assert!(held.is_none());
+    }
+
+    /// Nút "Xóa" trên thẻ: scan nhầm / khách không ở. Xóa link VÀ danh tính
+    /// trong một transaction — không để lại danh tính mồ côi (khái niệm đó đã
+    /// chết cùng v22).
+    #[tokio::test]
+    async fn discarding_a_card_removes_link_and_identity_together() {
+        let pool = pool().await;
+        save_identity_ensuring_link(&pool, &vn_identity(), "qr_cccd", "verified")
+            .await
+            .expect("lưu");
+        let link = pending_link_ids(&pool).await.expect("đọc")[0].clone();
+
+        discard_link(&pool, &link).await.expect("xóa");
+
+        let links: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM declaration_link")
+            .fetch_one(&pool)
+            .await
+            .expect("đếm link");
+        let ids: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM declaration_identity")
+            .fetch_one(&pool)
+            .await
+            .expect("đếm danh tính");
+        assert_eq!((links, ids), (0, 0));
+    }
+
+    /// Danh tính còn link khác (lượt ở trước đã khai) thì CHỈ xóa link này —
+    /// lịch sử lô của lượt trước là bằng chứng, phải còn nguyên.
+    #[tokio::test]
+    async fn discarding_keeps_an_identity_that_other_links_still_need() {
+        let pool = pool().await;
+        let id = save_identity_ensuring_link(&pool, &vn_identity(), "qr_cccd", "verified")
+            .await
+            .expect("lượt 1");
+        let old_link = pending_link_ids(&pool).await.expect("đọc")[0].clone();
+        let batch = insert_batch(&pool, "VN", "/tmp/x.xlsx", 1).await.expect("lô");
+        insert_entries(&pool, &batch, std::slice::from_ref(&old_link)).await.expect("dòng");
+        set_batch_verified(&pool, &batch, 1).await.expect("chốt");
+
+        save_identity_ensuring_link(&pool, &vn_identity(), "qr_cccd", "verified")
+            .await
+            .expect("lượt 2");
+        let new_link = pending_link_ids(&pool).await.expect("đọc")[0].clone();
+
+        discard_link(&pool, &new_link).await.expect("xóa lượt 2");
+
+        let kept: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM declaration_identity WHERE id = ?")
+            .bind(&id)
+            .fetch_one(&pool)
+            .await
+            .expect("đếm");
+        assert_eq!(kept, 1, "danh tính của lượt đã khai phải còn");
+    }
+
+    /// Đã đối soát = bằng chứng — từ chối xóa (luật cũ của delete_link giữ nguyên).
+    #[tokio::test]
+    async fn a_reconciled_card_refuses_to_be_discarded() {
+        let pool = pool().await;
+        save_identity_ensuring_link(&pool, &vn_identity(), "qr_cccd", "verified")
+            .await
+            .expect("lưu");
+        let link = pending_link_ids(&pool).await.expect("đọc")[0].clone();
+        let batch = insert_batch(&pool, "VN", "/tmp/x.xlsx", 1).await.expect("lô");
+        insert_entries(&pool, &batch, std::slice::from_ref(&link)).await.expect("dòng");
+        set_batch_verified(&pool, &batch, 1).await.expect("chốt");
+
+        assert!(discard_link(&pool, &link).await.is_err());
     }
 }
