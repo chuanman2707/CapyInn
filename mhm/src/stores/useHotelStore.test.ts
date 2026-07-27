@@ -382,3 +382,52 @@ describe("useHotelStore monitoring context", () => {
     );
   });
 });
+
+describe("useHotelStore navigation side effects", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    createCorrelationId.mockReturnValue("COR-1A2B3C4D");
+    invokeWriteCommand.mockResolvedValue(undefined);
+    invoke.mockImplementation(async (command: string) => {
+      if (command === "get_rooms") return [];
+      if (command === "get_housekeeping_tasks") return [];
+      if (command === "get_dashboard_stats") {
+        return { total_rooms: 10, occupied: 2, vacant: 8, cleaning: 0, revenue_today: 0 };
+      }
+      throw new Error(`Unhandled invoke ${command}`);
+    });
+    useHotelStore.setState({
+      rooms: [],
+      stats: null,
+      dashboardRefreshVersion: 0,
+      activeTab: "reservations",
+      loading: false,
+    });
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it("stays on the current tab after check-out and still bumps the dashboard version", async () => {
+    await useHotelStore.getState().checkOut("booking-1", "actual_nights", 500000);
+
+    expect(useHotelStore.getState().activeTab).toBe("reservations");
+    expect(useHotelStore.getState().dashboardRefreshVersion).toBe(1);
+  });
+
+  it("stays on the current tab after check-in", async () => {
+    await useHotelStore.getState().checkIn(
+      "101",
+      [{ full_name: "Nguyen Van A", doc_number: "012345678901" }],
+      1,
+      500000,
+      "walk-in",
+      undefined,
+    );
+
+    expect(useHotelStore.getState().activeTab).toBe("reservations");
+    expect(useHotelStore.getState().dashboardRefreshVersion).toBe(1);
+  });
+});
