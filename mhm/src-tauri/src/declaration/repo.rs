@@ -705,6 +705,33 @@ pub async fn set_batch_failed(
     set_batch_outcome(pool, batch_id, "failed", seen).await
 }
 
+/// Mở lại một lô `failed`: gỡ entry để khách quay về danh sách chờ, giữ dòng
+/// lô làm lịch sử. Chỉ cho lô `failed` — `exported` phải qua đối chiếu trước,
+/// `verified` là bằng chứng đã khai.
+pub async fn reopen_failed_batch(pool: &Pool<Sqlite>, batch_id: &str) -> Result<(), String> {
+    let status: Option<String> =
+        sqlx::query_scalar("SELECT status FROM declaration_batch WHERE id = ?")
+            .bind(batch_id)
+            .fetch_optional(pool)
+            .await
+            .map_err(|e| format!("Không đọc được lô: {e}"))?;
+
+    match status.as_deref() {
+        None => return Err("Không tìm thấy lô.".into()),
+        Some("failed") => {}
+        Some(_) => {
+            return Err("Chỉ mở lại được lô đã đối chiếu lệch (failed).".into());
+        }
+    }
+
+    sqlx::query("DELETE FROM declaration_entry WHERE batch_id = ?")
+        .bind(batch_id)
+        .execute(pool)
+        .await
+        .map_err(|e| format!("Không gỡ được khách khỏi lô: {e}"))?;
+    Ok(())
+}
+
 async fn set_batch_outcome(
     pool: &Pool<Sqlite>,
     batch_id: &str,
@@ -1742,6 +1769,52 @@ mod tests {
             pending_link_ids(&pool).await.expect("đọc lần ba").is_empty(),
             "lô fail cũng KHÔNG tự quay lại danh sách — phải qua kbtt_reopen_batch (PR 3)"
         );
+    }
+
+    /// Lô fail vì dữ liệu sai thì phải có đường sửa: mở lại lô đưa khách về
+    /// danh sách, còn dòng lô ở lại làm lịch sử "đã từng xuất và fail".
+    #[tokio::test]
+    async fn reopening_a_failed_batch_returns_its_guests_to_the_list() {
+        let pool = pool().await;
+        save_identity_ensuring_link(&pool, &vn_identity(), "qr_cccd", "verified")
+            .await
+            .expect("lưu");
+        let link = pending_link_ids(&pool).await.expect("đọc")[0].clone();
+        let batch = insert_batch(&pool, "VN", "/tmp/x.xlsx", 1).await.expect("lô");
+        insert_entries(&pool, &batch, std::slice::from_ref(&link)).await.expect("dòng");
+        set_batch_failed(&pool, &batch, 0).await.expect("fail");
+
+        reopen_failed_batch(&pool, &batch).await.expect("mở lại");
+
+        assert_eq!(
+            pending_link_ids(&pool).await.expect("đọc lại"),
+            vec![link],
+            "khách quay lại danh sách chờ"
+        );
+        let status: String =
+            sqlx::query_scalar("SELECT status FROM declaration_batch WHERE id = ?")
+                .bind(&batch)
+                .fetch_one(&pool)
+                .await
+                .expect("đọc lô");
+        assert_eq!(status, "failed", "dòng lô ở lại làm lịch sử");
+    }
+
+    /// Lô chưa fail thì không mở lại được — 'exported' phải đi qua đối chiếu
+    /// trước, 'verified' là bằng chứng.
+    #[tokio::test]
+    async fn only_failed_batches_can_be_reopened() {
+        let pool = pool().await;
+        save_identity_ensuring_link(&pool, &vn_identity(), "qr_cccd", "verified")
+            .await
+            .expect("lưu");
+        let link = pending_link_ids(&pool).await.expect("đọc")[0].clone();
+        let batch = insert_batch(&pool, "VN", "/tmp/x.xlsx", 1).await.expect("lô");
+        insert_entries(&pool, &batch, std::slice::from_ref(&link)).await.expect("dòng");
+
+        assert!(reopen_failed_batch(&pool, &batch).await.is_err(), "exported: chưa được");
+        set_batch_verified(&pool, &batch, 1).await.expect("chốt");
+        assert!(reopen_failed_batch(&pool, &batch).await.is_err(), "verified: không bao giờ");
     }
 
     #[tokio::test]

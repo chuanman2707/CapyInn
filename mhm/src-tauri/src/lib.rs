@@ -415,6 +415,7 @@ pub fn run() {
             commands::declaration::kbtt_validate,
             commands::declaration::kbtt_export,
             commands::declaration::kbtt_reconcile,
+            commands::declaration::kbtt_reopen_batch,
             commands::declaration::kbtt_undeclared_count,
             commands::declaration::kbtt_undeclared_breakdown,
             commands::declaration::kbtt_list_batches,

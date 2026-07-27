@@ -397,6 +397,12 @@ pub async fn kbtt_reconcile(
     }
 }
 
+/// Đường thoát của lô failed: đưa khách về danh sách để sửa và xuất lại.
+#[tauri::command]
+pub async fn kbtt_reopen_batch(state: State<'_, AppState>, batch_id: String) -> Result<(), String> {
+    repo::reopen_failed_batch(&state.db, &batch_id).await
+}
+
 #[tauri::command]
 pub async fn kbtt_undeclared_count(state: State<'_, AppState>) -> Result<i64, String> {
     Ok(repo::undeclared_breakdown(&state.db).await?.total)
