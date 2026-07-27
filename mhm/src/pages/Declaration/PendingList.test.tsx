@@ -66,6 +66,7 @@ function row(over: Partial<DeclarationRow>): DeclarationRow {
     stay_reason_note: null,
     name_confirmed_by_human: true,
     single_token_name_ok: false,
+    held: false,
     ...over,
   };
 }

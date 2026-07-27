@@ -61,10 +61,12 @@ pub struct DeclarationRowDto {
     pub stay_reason_note: Option<String>,
     pub name_confirmed_by_human: bool,
     pub single_token_name_ok: bool,
+    /// Khai báo đang "gác lại" — UI xếp vào khu thu gọn, loại khỏi file xuất.
+    pub held: bool,
 }
 
-impl From<&DeclarationRow> for DeclarationRowDto {
-    fn from(row: &DeclarationRow) -> Self {
+impl DeclarationRowDto {
+    fn new(row: &DeclarationRow, held: bool) -> Self {
         let id = &row.identity;
         let stay = &row.stay;
         DeclarationRowDto {
@@ -94,6 +96,7 @@ impl From<&DeclarationRow> for DeclarationRowDto {
             stay_reason_note: row.stay_reason_note.clone(),
             name_confirmed_by_human: id.name_confirmed_by_human,
             single_token_name_ok: id.single_token_name_ok,
+            held,
         }
     }
 }
@@ -270,7 +273,11 @@ pub async fn kbtt_pending_rows(
 ) -> Result<Vec<DeclarationRowDto>, String> {
     let link_ids = repo::pending_link_ids(&state.db).await?;
     let rows = repo::load_rows_by_link_ids(&state.db, &link_ids).await?;
-    Ok(rows.iter().map(DeclarationRowDto::from).collect())
+    let held = repo::held_by_link(&state.db, &link_ids).await?;
+    Ok(rows
+        .iter()
+        .map(|r| DeclarationRowDto::new(r, held.get(&r.link_id).copied().unwrap_or(false)))
+        .collect())
 }
 
 /// `W05` sinh ở đây chứ không ở validator: `DeclarationRow` không mang
@@ -509,7 +516,7 @@ mod tests {
         let mut expected = typescript_interface_fields(&types_index_ts(), "DeclarationRow");
         expected.sort();
 
-        let actual = json_keys(&DeclarationRowDto::from(&sample_row()));
+        let actual = json_keys(&DeclarationRowDto::new(&sample_row(), false));
 
         assert_eq!(
             actual, expected,
@@ -533,7 +540,7 @@ mod tests {
     /// Khách Việt phải ra đúng `VNM` để `isForeign` xếp vào ngăn XLSX.
     #[test]
     fn a_vietnamese_guest_keeps_its_nationality_through_the_dto() {
-        let dto = DeclarationRowDto::from(&sample_row());
+        let dto = DeclarationRowDto::new(&sample_row(), false);
 
         assert_eq!(dto.nationality_iso3, "VNM");
         assert_eq!(dto.room_no.as_deref(), Some("3B"));
@@ -547,7 +554,7 @@ mod tests {
         let mut row = sample_row();
         row.stay = StayInfo::default();
 
-        let dto = DeclarationRowDto::from(&row);
+        let dto = DeclarationRowDto::new(&row, false);
 
         assert_eq!(dto.room_no, None);
     }

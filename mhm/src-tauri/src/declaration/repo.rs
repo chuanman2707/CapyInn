@@ -844,25 +844,45 @@ pub async fn confidence_by_link(
         .collect())
 }
 
-/// Link đã ghép nhưng chưa nằm trong lô `verified` nào.
-///
-/// Đây là định nghĩa "còn phải khai" ở mức từng hồ sơ, khác với
-/// `count_undeclared_within_48h` vốn đếm theo lượt lưu trú cho badge sidebar.
+/// "Chưa khai báo" của băng chuyền: link chưa từng được xuất (không có entry
+/// nào). Đã xuất — kể cả lô sau đó fail — thì sống trên thẻ đối chiếu, không
+/// quay lại đây để tránh xuất trùng.
 pub async fn pending_link_ids(pool: &Pool<Sqlite>) -> Result<Vec<String>, String> {
     sqlx::query_scalar::<_, String>(
         "SELECT dl.id
            FROM declaration_link dl
-          WHERE NOT EXISTS (
-                SELECT 1
-                  FROM declaration_entry de
-                  JOIN declaration_batch db ON db.id = de.batch_id
-                 WHERE de.link_id = dl.id AND db.status = 'verified'
-          )
+          WHERE NOT EXISTS (SELECT 1 FROM declaration_entry de WHERE de.link_id = dl.id)
           ORDER BY dl.created_at",
     )
     .fetch_all(pool)
     .await
     .map_err(|e| format!("Không đọc được danh sách chờ khai: {e}"))
+}
+
+/// Cờ "gác lại" của từng link — DTO cần nó, `DeclarationRow` (model) không mang.
+pub async fn held_by_link(
+    pool: &Pool<Sqlite>,
+    link_ids: &[String],
+) -> Result<HashMap<String, bool>, String> {
+    if link_ids.is_empty() {
+        return Ok(HashMap::new());
+    }
+    let sql = format!(
+        "SELECT id, held_at FROM declaration_link WHERE id IN ({})",
+        placeholders(link_ids.len())
+    );
+    let mut query = sqlx::query(&sql);
+    for id in link_ids {
+        query = query.bind(id);
+    }
+    let rows = query
+        .fetch_all(pool)
+        .await
+        .map_err(|e| format!("Không đọc được trạng thái gác: {e}"))?;
+    Ok(rows
+        .iter()
+        .map(|r| (r.get("id"), r.get::<Option<String>, _>("held_at").is_some()))
+        .collect())
 }
 
 #[derive(Debug, serde::Serialize)]
@@ -1685,5 +1705,48 @@ mod tests {
                 .await
                 .is_err()
         );
+    }
+
+    /// Đã xuất là rời danh sách "Chưa khai báo" — khách sống trên thẻ đối
+    /// chiếu, kể cả khi lô fail (tránh xuất trùng một khách ra hai file).
+    #[tokio::test]
+    async fn exported_guests_leave_the_pending_list() {
+        let pool = pool().await;
+        save_identity_ensuring_link(&pool, &vn_identity(), "qr_cccd", "verified")
+            .await
+            .expect("lưu");
+        let link = pending_link_ids(&pool).await.expect("đọc")[0].clone();
+
+        let batch = insert_batch(&pool, "VN", "/tmp/x.xlsx", 1).await.expect("lô");
+        insert_entries(&pool, &batch, std::slice::from_ref(&link)).await.expect("dòng");
+
+        assert!(
+            pending_link_ids(&pool).await.expect("đọc lại").is_empty(),
+            "đã xuất thì không còn trong danh sách chờ"
+        );
+
+        set_batch_failed(&pool, &batch, 0).await.expect("lô fail");
+        assert!(
+            pending_link_ids(&pool).await.expect("đọc lần ba").is_empty(),
+            "lô fail cũng KHÔNG tự quay lại danh sách — phải qua kbtt_reopen_batch (PR 3)"
+        );
+    }
+
+    #[tokio::test]
+    async fn held_flags_ride_along_with_the_rows() {
+        let pool = pool().await;
+        save_identity_ensuring_link(&pool, &vn_identity(), "qr_cccd", "verified")
+            .await
+            .expect("lưu");
+        let link = pending_link_ids(&pool).await.expect("đọc")[0].clone();
+        set_link_held(&pool, &link, true).await.expect("gác");
+
+        assert_eq!(
+            pending_link_ids(&pool).await.expect("đọc").len(),
+            1,
+            "khách gác lại vẫn thuộc danh sách (UI xếp xuống khu thu gọn)"
+        );
+        let held = held_by_link(&pool, std::slice::from_ref(&link)).await.expect("map");
+        assert_eq!(held.get(&link), Some(&true));
     }
 }

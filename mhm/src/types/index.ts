@@ -516,6 +516,7 @@ export interface DeclarationRow {
   stay_reason_note: string | null;
   name_confirmed_by_human: boolean;
   single_token_name_ok: boolean;
+  held: boolean;
 }
 
 export interface DeclarationFinding {
