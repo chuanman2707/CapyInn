@@ -204,6 +204,7 @@ fn is_duplicate_column_error(error: &sqlx::Error) -> bool {
 
 /// Version schema hiện hành. Mọi assert trong test đọc hằng này —
 /// thêm migration mới thì chỉ bump ở đây.
+#[cfg(test)]
 pub(crate) const SCHEMA_VERSION: i32 = 22;
 
 pub(crate) async fn run_migrations(pool: &Pool<Sqlite>) -> Result<(), sqlx::Error> {
