@@ -1,7 +1,7 @@
 import { CheckCircle2, XCircle, Pencil, FileText } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
-import { fmtNumber } from "@/lib/format";
+import { fmtDate, fmtDateShort, fmtNumber } from "@/lib/format";
 import type { BookingWithGuest } from "@/types";
 
 interface BookingDetailPopupProps {
@@ -12,6 +12,18 @@ interface BookingDetailPopupProps {
     onEdit?: (booking: BookingWithGuest) => void;
     onCancel?: (bookingId: string) => void;
     onViewInvoice?: (bookingId: string) => void;
+    invoiceLoading?: boolean;
+}
+
+/**
+ * Backend trả về hai dạng: ngày trơn `YYYY-MM-DD` (lịch đặt trước) và timestamp
+ * RFC3339 (check-in / trả phòng thực tế). Ngày trơn phải đi qua fmtDateShort —
+ * fmtDate sẽ hiểu nó là nửa đêm UTC và in thêm giờ ảo, thậm chí lùi một ngày ở
+ * các múi giờ phía tây UTC.
+ */
+function fmtCheckpoint(value: string): string {
+    if (!value) return value;
+    return value.length <= 10 ? fmtDateShort(value) : fmtDate(value);
 }
 
 function Row({ label, value }: { label: string; value: string }) {
@@ -31,6 +43,7 @@ export default function BookingDetailPopup({
     onEdit,
     onCancel,
     onViewInvoice,
+    invoiceLoading,
 }: BookingDetailPopupProps) {
     const isReadonly = mode === "readonly";
     const title = isReadonly
@@ -47,8 +60,8 @@ export default function BookingDetailPopup({
                 <h3 className="font-bold text-lg text-slate-800">{title}</h3>
                 <div className="space-y-2 text-sm text-slate-600">
                     <Row label="Phòng" value={booking.room_id} />
-                    <Row label="Check-in" value={checkInText} />
-                    <Row label={isReadonly ? "Trả phòng lúc" : "Check-out"} value={checkOutText} />
+                    <Row label="Check-in" value={fmtCheckpoint(checkInText)} />
+                    <Row label={isReadonly ? "Trả phòng lúc" : "Check-out"} value={fmtCheckpoint(checkOutText)} />
                     <Row label="Số đêm" value={String(booking.nights)} />
                     <div className="flex justify-between">
                         <span>Tổng tiền</span>
@@ -75,8 +88,9 @@ export default function BookingDetailPopup({
                         <Button
                             className="flex-1 bg-slate-700 hover:bg-slate-800 text-white rounded-xl h-10 gap-1.5 cursor-pointer"
                             onClick={() => onViewInvoice?.(booking.id)}
+                            disabled={invoiceLoading}
                         >
-                            <FileText size={14} /> Xem hóa đơn
+                            <FileText size={14} /> {invoiceLoading ? "Đang tạo..." : "Xem hóa đơn"}
                         </Button>
                         <Button
                             variant="outline"
