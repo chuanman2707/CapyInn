@@ -10,7 +10,7 @@
 
 use sqlx::{Pool, Sqlite};
 
-use super::set_schema_version;
+use super::{execute_compat_alter, set_schema_version};
 
 pub(super) async fn migrate_v20_declaration_tables(
     pool: &Pool<Sqlite>,
@@ -174,9 +174,18 @@ pub(super) async fn migrate_v21_optional_stay(pool: &Pool<Sqlite>) -> Result<(),
 ///
 /// Đây là bảng của riêng module này — luật "không migrate PMS" không bị đụng.
 pub(super) async fn migrate_v22_conveyor(pool: &Pool<Sqlite>) -> Result<(), sqlx::Error> {
-    sqlx::query("ALTER TABLE declaration_link ADD COLUMN held_at TEXT")
-        .execute(pool)
-        .await?;
+    // Dùng execute_compat_alter (không sqlx::query trần) để ALTER an toàn khi
+    // chạy lại: nếu tiến trình chết sau khi ALTER commit nhưng trước khi
+    // schema_version=22 commit, lần khởi động sau sẽ chạy lại migration này —
+    // ALTER trần sẽ báo lỗi "duplicate column name" và app không khởi động
+    // được nữa nếu không sửa DB thủ công.
+    let mut tx = pool.begin().await?;
+    execute_compat_alter(
+        &mut tx,
+        "ALTER TABLE declaration_link ADD COLUMN held_at TEXT",
+    )
+    .await?;
+    tx.commit().await?;
 
     backfill_orphan_identities(pool).await?;
 
@@ -743,7 +752,27 @@ mod tests {
         .fetch_one(&pool)
         .await
         .expect("đếm link");
-        assert_eq!(links, 1, "mỗi danh tính mồ côi phải có đúng một link mặc định");
+        assert_eq!(
+            links, 1,
+            "mỗi danh tính mồ côi phải có đúng một link mặc định"
+        );
+
+        // Gọi lại lần hai để chứng minh hàm thực sự idempotent (đây chính là
+        // lý do hàm được tách khỏi migration), không chỉ suy diễn từ NOT EXISTS.
+        super::backfill_orphan_identities(&pool)
+            .await
+            .expect("backfill chạy lại được lần hai");
+
+        let links_after_second_call: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM declaration_link WHERE identity_id = 'orphan-1' AND stay_id IS NULL",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("đếm link lần hai");
+        assert_eq!(
+            links_after_second_call, 1,
+            "gọi lại backfill lần hai không được tạo thêm link"
+        );
     }
 
     #[tokio::test]
