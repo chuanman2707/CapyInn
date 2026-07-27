@@ -164,6 +164,46 @@ pub(super) async fn migrate_v21_optional_stay(pool: &Pool<Sqlite>) -> Result<(),
     Ok(())
 }
 
+/// Migration v22 — "băng chuyền một chiều" (spec 2026-07-27).
+///
+/// 1. `held_at`: dấu "gác lại" của một khai báo. NULL = đang trong danh sách
+///    chờ xuất. Cột additive nên chỉ cần ALTER, không rebuild bảng.
+/// 2. Backfill: khái niệm "hồ sơ chờ chưa ghép" biến mất khỏi UI, nên danh
+///    tính nào đang mồ côi (dữ liệu của bản cũ để lại) phải được tạo link mặc
+///    định — nếu không, nâng cấp xong khách biến mất vô hình.
+///
+/// Đây là bảng của riêng module này — luật "không migrate PMS" không bị đụng.
+pub(super) async fn migrate_v22_conveyor(pool: &Pool<Sqlite>) -> Result<(), sqlx::Error> {
+    sqlx::query("ALTER TABLE declaration_link ADD COLUMN held_at TEXT")
+        .execute(pool)
+        .await?;
+
+    backfill_orphan_identities(pool).await?;
+
+    let mut tx = pool.begin().await?;
+    set_schema_version(&mut tx, 22).await?;
+    tx.commit().await?;
+    Ok(())
+}
+
+/// Tạo link mặc định cho mọi danh tính chưa có link nào.
+///
+/// Tách khỏi `migrate_v22_conveyor` để test gọi được đúng code production:
+/// bản thân migration không chạy lại được (ALTER lần hai báo trùng cột), còn
+/// hàm này idempotent nhờ `NOT EXISTS`.
+pub(crate) async fn backfill_orphan_identities(pool: &Pool<Sqlite>) -> Result<(), sqlx::Error> {
+    sqlx::query(
+        "INSERT INTO declaration_link (id, identity_id, stay_id, stay_reason, created_at)
+         SELECT lower(hex(randomblob(16))), di.id, NULL, '1', di.created_at
+           FROM declaration_identity di
+          WHERE di.redacted_at IS NULL
+            AND NOT EXISTS (SELECT 1 FROM declaration_link dl WHERE dl.identity_id = di.id)",
+    )
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use crate::db::run_migrations;
@@ -670,5 +710,66 @@ mod tests {
             .await
             .expect("đếm được");
         assert_eq!(failed, 2);
+    }
+
+    /// v22 — khái niệm "hồ sơ chờ chưa ghép" biến mất: danh tính mồ côi từ
+    /// bản cũ phải được tạo link mặc định, không khách nào kẹt vô hình.
+    #[tokio::test]
+    async fn v22_backfills_a_default_link_for_every_orphan_identity() {
+        let pool = seeded_pool().await;
+
+        // Danh tính mồ côi (giả lập dữ liệu để lại từ bản cũ).
+        sqlx::query(
+            "INSERT INTO declaration_identity (
+                id, source, extract_confidence, full_name, dob, gender,
+                nationality_iso3, created_at
+             ) VALUES ('orphan-1', 'qr_cccd', 'verified', 'Khách Mồ Côi', '1990-01-01',
+                       'M', 'VNM', '2026-07-20T09:00:00+07:00')",
+        )
+        .execute(&pool)
+        .await
+        .expect("seeds orphan");
+
+        // Gọi ĐÚNG hàm production, không chép SQL sang test — chép thì test chỉ
+        // chứng minh SQLite chạy được, không chứng minh migration đúng.
+        // Hàm idempotent nhờ NOT EXISTS nên gọi lại sau migration là hợp lệ.
+        super::backfill_orphan_identities(&pool)
+            .await
+            .expect("backfill chạy lại được");
+
+        let links: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM declaration_link WHERE identity_id = 'orphan-1' AND stay_id IS NULL",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("đếm link");
+        assert_eq!(links, 1, "mỗi danh tính mồ côi phải có đúng một link mặc định");
+    }
+
+    #[tokio::test]
+    async fn v22_adds_a_nullable_held_at_column() {
+        let pool = seeded_pool().await;
+        // Cột tồn tại và ghi/đọc được — đủ để chứng minh migration đã chạy.
+        sqlx::query(
+            "INSERT INTO declaration_identity (id, source, extract_confidence, full_name,
+                dob, gender, nationality_iso3, created_at)
+             VALUES ('id-h', 'manual', 'needs_review', 'A', '1990-01-01', 'M', 'VNM', '2026-01-01')",
+        )
+        .execute(&pool)
+        .await
+        .expect("seed");
+        sqlx::query(
+            "INSERT INTO declaration_link (id, identity_id, stay_id, stay_reason, held_at, created_at)
+             VALUES ('l-h', 'id-h', NULL, '1', '2026-07-27T10:00:00+07:00', '2026-01-01')",
+        )
+        .execute(&pool)
+        .await
+        .expect("ghi held_at được");
+        let held: Option<String> =
+            sqlx::query_scalar("SELECT held_at FROM declaration_link WHERE id = 'l-h'")
+                .fetch_one(&pool)
+                .await
+                .expect("đọc lại");
+        assert!(held.is_some());
     }
 }
