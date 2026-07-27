@@ -390,8 +390,11 @@ pub async fn kbtt_reconcile(
         repo::set_batch_verified(pool, &batch_id, seen_count).await?;
         Ok("verified".to_string())
     } else {
-        // Không cần code hoàn tác: lô hỏng không còn entry `verified` nào nên
-        // khách tự động giữ nguyên trạng thái chưa khai.
+        // Lô fail KHÔNG tự trả khách về danh sách chờ (tránh xuất trùng một
+        // khách ra hai file) — khách sống trên thẻ đối chiếu của lô fail này
+        // cho tới khi người vận hành gọi `kbtt_reopen_batch`, hàm đó xóa entry
+        // của lô để khách quay lại `pending_link_ids`, còn dòng lô ở lại làm
+        // lịch sử "đã từng xuất và fail".
         repo::set_batch_failed(pool, &batch_id, seen_count).await?;
         Ok("failed".to_string())
     }
