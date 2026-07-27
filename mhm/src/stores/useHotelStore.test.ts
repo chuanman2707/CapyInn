@@ -199,16 +199,20 @@ describe("useHotelStore monitoring context", () => {
 
     await useHotelStore.getState().groupCheckIn(req);
 
-    expect(createIdempotencyKey).toHaveBeenCalledWith("group_checkin");
-    expect(invokeCommand).toHaveBeenCalledWith(
+    expect(createIdempotencyKey).not.toHaveBeenCalled();
+    expect(invokeWriteCommand).toHaveBeenCalledWith(
       "group_checkin",
       {
         req,
-        idempotencyKey: "group_checkin:IDEM-1",
       },
       {
         correlationId: "COR-1A2B3C4D",
       },
+    );
+    expect(invokeCommand).not.toHaveBeenCalledWith(
+      "group_checkin",
+      expect.anything(),
+      expect.anything(),
     );
   });
 
