@@ -52,17 +52,40 @@ function differenceInCalendarDays(left: Date, right: Date): number {
 
 function getDateRange(offset: number) {
     const today = startOfLocalDay(new Date());
+    const todayKey = formatLocalDate(today);
     return Array.from({ length: VISIBLE_DAYS }, (_, i) => {
         const d = new Date(today);
         d.setDate(today.getDate() + i - 3 + offset);
+        const fullDate = formatLocalDate(d);
         return {
             day: d.toLocaleDateString("vi-VN", { weekday: "short" }).replace(".", ""),
             date: d.getDate(),
-            fullDate: formatLocalDate(d),
-            isToday: i === 3 && offset === 0,
+            fullDate,
+            isToday: fullDate === todayKey,
             dateObj: d,
         };
     });
+}
+
+type TimelineDay = ReturnType<typeof getDateRange>[number];
+
+function formatRangeLabel(days: TimelineDay[]): string {
+    const first = days[0].dateObj;
+    const last = days[days.length - 1].dateObj;
+    const firstMonth = first.getMonth() + 1;
+    const lastMonth = last.getMonth() + 1;
+    const firstYear = first.getFullYear();
+    const lastYear = last.getFullYear();
+
+    if (firstYear !== lastYear) {
+        return `${firstMonth}/${firstYear} – ${lastMonth}/${lastYear}`;
+    }
+
+    if (firstMonth !== lastMonth) {
+        return `THÁNG ${firstMonth}–${lastMonth} / ${firstYear}`;
+    }
+
+    return `THÁNG ${firstMonth} NĂM ${firstYear}`;
 }
 
 function parseDate(s: string): Date {
@@ -94,13 +117,13 @@ export default function Reservations() {
     const [bookings, setBookings] = useState<BookingWithGuest[]>([]);
     const [searchQuery, setSearchQuery] = useState("");
     const [dateOffset, setDateOffset] = useState(0);
-    const [currentMonth] = useState(new Date().toLocaleDateString("vi-VN", { month: "long", year: "numeric" }));
     const [sheetOpen, setSheetOpen] = useState(false);
     const [selectedBooking, setSelectedBooking] = useState<BookingWithGuest | null>(null);
     const [editBooking, setEditBooking] = useState<BookingWithGuest | null>(null);
     const [drawerRoomId, setDrawerRoomId] = useState<string | null>(null);
 
     const DAYS = getDateRange(dateOffset);
+    const rangeLabel = formatRangeLabel(DAYS);
 
     useEffect(() => { fetchRooms(); }, []);
 
@@ -227,6 +250,38 @@ export default function Reservations() {
                 </div>
 
                 <div className="flex items-center gap-3">
+                    <div className="flex items-center gap-1.5 pr-3 border-r border-slate-100">
+                        <button
+                            aria-label="Tuần trước"
+                            className="text-slate-400 hover:text-slate-600 cursor-pointer p-1"
+                            onClick={() => setDateOffset(o => o - 7)}
+                        >
+                            <ChevronLeft size={16} />
+                        </button>
+                        <span
+                            data-testid="timeline-range-label"
+                            className="text-xs font-bold text-slate-600 uppercase whitespace-nowrap min-w-[150px] text-center"
+                        >
+                            {rangeLabel}
+                        </span>
+                        <button
+                            aria-label="Tuần sau"
+                            className="text-slate-400 hover:text-slate-600 cursor-pointer p-1"
+                            onClick={() => setDateOffset(o => o + 7)}
+                        >
+                            <ChevronRight size={16} />
+                        </button>
+                        {dateOffset !== 0 && (
+                            <Button
+                                size="sm"
+                                variant="outline"
+                                className="h-8 px-3 rounded-lg text-xs cursor-pointer"
+                                onClick={() => setDateOffset(0)}
+                            >
+                                Hôm nay
+                            </Button>
+                        )}
+                    </div>
                     <div className="relative w-56">
                         <Search className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" size={16} />
                         <Input
@@ -251,13 +306,8 @@ export default function Reservations() {
 
                 {/* Day Headers */}
                 <div className="flex border-b border-slate-100 bg-white sticky top-0 z-10 w-max min-w-full">
-                    <div className="w-[140px] shrink-0 border-r border-slate-100 bg-white shadow-[2px_0_10px_rgba(0,0,0,0.02)] sticky left-0 z-20 flex items-center justify-between px-4">
+                    <div className="w-[140px] shrink-0 border-r border-slate-100 bg-white shadow-[2px_0_10px_rgba(0,0,0,0.02)] sticky left-0 z-20 flex items-center px-4">
                         <span className="text-xs font-semibold text-slate-500">Rooms</span>
-                        <div className="flex items-center gap-1">
-                            <button className="text-slate-400 hover:text-slate-600 cursor-pointer" onClick={() => setDateOffset(o => o - 7)}><ChevronLeft size={14} /></button>
-                            <span className="text-[10px] font-bold text-slate-600 uppercase">{currentMonth}</span>
-                            <button className="text-slate-400 hover:text-slate-600 cursor-pointer" onClick={() => setDateOffset(o => o + 7)}><ChevronRight size={14} /></button>
-                        </div>
                     </div>
 
                     {DAYS.map((d, i) => (
@@ -297,7 +347,7 @@ export default function Reservations() {
                                             ))}
 
                                             {DAYS.some(d => d.isToday) && (
-                                                <div className="absolute top-0 bottom-0 w-[2px] bg-brand-primary/60 z-20" style={{ left: `${DAYS.findIndex(d => d.isToday) * COL_WIDTH + COL_WIDTH / 2}px` }} />
+                                                <div data-testid="timeline-today-marker" className="absolute top-0 bottom-0 w-[2px] bg-brand-primary/60 z-20" style={{ left: `${DAYS.findIndex(d => d.isToday) * COL_WIDTH + COL_WIDTH / 2}px` }} />
                                             )}
 
                                             {bars.map((bar) => (

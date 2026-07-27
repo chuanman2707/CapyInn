@@ -268,3 +268,60 @@ describe("Reservations timeline geometry", () => {
     expect(bar.querySelector(".rounded-l-none")).not.toBeNull();
   });
 });
+
+describe("Reservations date navigation", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    invoke.mockImplementation(async (command: string) => {
+      if (command === "get_all_bookings") return [];
+      return undefined;
+    });
+    invokeWriteCommand.mockResolvedValue(undefined);
+    createCorrelationId.mockReturnValue("COR-5E6F7A8B");
+  });
+
+  it("shows the month of the visible range and updates it when paging", async () => {
+    const user = userEvent.setup();
+    render(<Reservations />);
+
+    const label = await screen.findByTestId("timeline-range-label");
+    const initial = label.textContent ?? "";
+    expect(initial).toMatch(/THÁNG/);
+
+    // Nhảy 8 tuần về phía trước chắc chắn ra khỏi tháng hiện tại.
+    const next = screen.getByRole("button", { name: /tuần sau/i });
+    for (let i = 0; i < 8; i += 1) {
+      await user.click(next);
+    }
+
+    expect(screen.getByTestId("timeline-range-label").textContent).not.toBe(initial);
+  });
+
+  it("hides the today button until the range moves, then resets the range", async () => {
+    const user = userEvent.setup();
+    render(<Reservations />);
+
+    await screen.findByTestId("timeline-range-label");
+    expect(screen.queryByRole("button", { name: /hôm nay/i })).toBeNull();
+
+    await user.click(screen.getByRole("button", { name: /tuần sau/i }));
+    const todayButton = screen.getByRole("button", { name: /hôm nay/i });
+    const shifted = screen.getByTestId("timeline-range-label").textContent;
+
+    await user.click(todayButton);
+
+    expect(screen.queryByRole("button", { name: /hôm nay/i })).toBeNull();
+    expect(screen.getByTestId("timeline-range-label").textContent).not.toBe(shifted);
+  });
+
+  it("keeps the today marker when today is still inside the range after paging back", async () => {
+    const user = userEvent.setup();
+    render(<Reservations />);
+
+    await screen.findByTestId("timeline-range-label");
+    await user.click(screen.getByRole("button", { name: /tuần trước/i }));
+
+    // Lùi 7 ngày: lưới phủ hôm nay - 10 đến hôm nay + 5, hôm nay vẫn nằm trong.
+    expect(screen.getByTestId("timeline-today-marker")).toBeTruthy();
+  });
+});
