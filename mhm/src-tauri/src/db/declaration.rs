@@ -110,6 +110,60 @@ pub(super) async fn migrate_v20_declaration_tables(
     Ok(())
 }
 
+/// Migration v21 — `declaration_link.stay_id` được phép NULL.
+///
+/// Khách có thể phải khai báo trước khi có phòng: người vận hành cầm CCCD lúc
+/// khách vừa tới, còn booking thì chưa tạo. Trước v21, `stay_id NOT NULL` biến
+/// điều đó thành ngõ cụt — màn khai báo chỉ liệt kê phòng đang có khách.
+///
+/// SQLite không gỡ được `NOT NULL` bằng `ALTER`, nên phải dựng lại bảng. Đây là
+/// bảng của chính module này, không phải bảng của PMS — ràng buộc "không migrate
+/// PMS" không bị đụng tới.
+///
+/// `UNIQUE(identity_id, stay_id)` giữ nguyên: SQLite coi mọi NULL là khác nhau,
+/// nên hai khai báo chưa gắn phòng của cùng một danh tính không chặn nhau.
+pub(super) async fn migrate_v21_optional_stay(pool: &Pool<Sqlite>) -> Result<(), sqlx::Error> {
+    let mut tx = pool.begin().await?;
+
+    sqlx::query(
+        "CREATE TABLE IF NOT EXISTS declaration_link_v21 (
+                id               TEXT PRIMARY KEY,
+                identity_id      TEXT NOT NULL REFERENCES declaration_identity(id),
+                stay_id          TEXT,
+                stay_reason      TEXT NOT NULL,
+                stay_reason_note TEXT,
+                actual_check_out TEXT,
+                created_at       TEXT NOT NULL,
+                UNIQUE(identity_id, stay_id)
+            )",
+    )
+    .execute(&mut *tx)
+    .await?;
+
+    sqlx::query(
+        "INSERT OR IGNORE INTO declaration_link_v21
+            (id, identity_id, stay_id, stay_reason, stay_reason_note, actual_check_out, created_at)
+         SELECT id, identity_id, stay_id, stay_reason, stay_reason_note, actual_check_out, created_at
+           FROM declaration_link",
+    )
+    .execute(&mut *tx)
+    .await?;
+
+    sqlx::query("DROP TABLE declaration_link")
+        .execute(&mut *tx)
+        .await?;
+    sqlx::query("ALTER TABLE declaration_link_v21 RENAME TO declaration_link")
+        .execute(&mut *tx)
+        .await?;
+    sqlx::query("CREATE INDEX IF NOT EXISTS idx_decl_link_stay ON declaration_link(stay_id)")
+        .execute(&mut *tx)
+        .await?;
+
+    set_schema_version(&mut tx, 21).await?;
+    tx.commit().await?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use crate::db::run_migrations;
@@ -196,7 +250,129 @@ mod tests {
             .fetch_one(&pool)
             .await
             .expect("reads schema version");
-        assert_eq!(version, 20);
+        assert_eq!(version, 21);
+    }
+
+    /// Khách tới trước khi có booking: phải khai báo được ngay, không phải chờ
+    /// ai đó check-in xong.
+    #[tokio::test]
+    async fn v21_lets_a_declaration_exist_without_a_stay() {
+        let pool = seeded_pool().await;
+
+        let identity = crate::declaration::repo::insert_identity(
+            &pool,
+            &crate::declaration::model::Identity {
+                full_name: "Phạm Thị Minh Hiền".into(),
+                dob: "1988-12-16".into(),
+                gender: "F".into(),
+                nationality_iso3: "VNM".into(),
+                ..Default::default()
+            },
+            "qr_cccd",
+            "verified",
+        )
+        .await
+        .expect("lưu được danh tính");
+
+        let link = crate::declaration::repo::insert_link(&pool, &identity, None, "1", None)
+            .await
+            .expect("ghép được dù chưa có phòng");
+
+        let rows = crate::declaration::repo::load_rows_by_link_ids(
+            &pool,
+            std::slice::from_ref(&link),
+        )
+        .await
+        .expect("đọc lại được dòng");
+
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].identity.full_name, "Phạm Thị Minh Hiền");
+        assert_eq!(rows[0].stay.room_no, "", "chưa có phòng");
+    }
+
+    /// Dữ liệu cũ (v20, stay_id NOT NULL) phải đi qua v21 mà không mất dòng nào.
+    #[tokio::test]
+    async fn v21_carries_existing_links_across_the_table_rebuild() {
+        let pool = seeded_pool().await;
+
+        sqlx::query(
+            "INSERT INTO declaration_identity (
+                id, source, extract_confidence, full_name, dob, gender,
+                nationality_iso3, created_at
+             ) VALUES ('id-1', 'qr_cccd', 'verified', 'Phan Thị Mỹ Hà', '1995-07-28',
+                       'F', 'VNM', '2026-07-26T09:00:00+07:00')",
+        )
+        .execute(&pool)
+        .await
+        .expect("seeds identity");
+        sqlx::query(
+            "INSERT INTO declaration_link (id, identity_id, stay_id, stay_reason, created_at)
+             VALUES ('link-1', 'id-1', 'booking-1', '2', '2026-07-26T09:00:00+07:00')",
+        )
+        .execute(&pool)
+        .await
+        .expect("seeds link");
+
+        // Chạy lại toàn bộ migration: v21 phải bỏ qua vì version đã là 21.
+        run_migrations(&pool).await.expect("migration chạy lại được");
+
+        let kept: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM declaration_link WHERE id='link-1'")
+            .fetch_one(&pool)
+            .await
+            .expect("đếm link");
+        assert_eq!(kept, 1);
+    }
+
+    /// Danh tính vừa trích phải sống sót khi người vận hành đổi tab — nó nằm
+    /// trong DB, và phải có đường đọc ra.
+    #[tokio::test]
+    async fn an_identity_waiting_to_be_linked_can_be_listed_and_discarded() {
+        let pool = seeded_pool().await;
+
+        let identity = crate::declaration::repo::insert_identity(
+            &pool,
+            &crate::declaration::model::Identity {
+                full_name: "Phạm Thị Minh Hiền".into(),
+                nationality_iso3: "VNM".into(),
+                ..Default::default()
+            },
+            "qr_cccd",
+            "verified",
+        )
+        .await
+        .expect("lưu được danh tính");
+
+        let waiting = crate::declaration::repo::list_unlinked_identities(&pool)
+            .await
+            .expect("đọc được danh sách chờ");
+        assert_eq!(waiting.len(), 1);
+        assert_eq!(waiting[0].full_name, "Phạm Thị Minh Hiền");
+
+        // Ghép xong thì biến khỏi danh sách chờ.
+        let link = crate::declaration::repo::insert_link(&pool, &identity, None, "1", None)
+            .await
+            .expect("ghép được");
+        assert!(crate::declaration::repo::list_unlinked_identities(&pool)
+            .await
+            .expect("đọc lại")
+            .is_empty());
+
+        // Đã ghép rồi thì không xóa thẳng được — đó là bằng chứng đã khai.
+        assert!(
+            crate::declaration::repo::delete_unlinked_identity(&pool, &identity)
+                .await
+                .is_err(),
+            "danh tính đã ghép phải đi đường thu hồi, không xóa thẳng"
+        );
+
+        sqlx::query("DELETE FROM declaration_link WHERE id = ?")
+            .bind(&link)
+            .execute(&pool)
+            .await
+            .expect("gỡ link để thử xóa");
+        crate::declaration::repo::delete_unlinked_identity(&pool, &identity)
+            .await
+            .expect("chưa ghép thì xóa được");
     }
 
     /// §5.2 — stay_id KHÔNG có FK cứng tới `bookings`. Xóa một booking trong
@@ -278,7 +454,7 @@ mod tests {
         )
         .await
         .expect("lưu được danh tính");
-        let link = crate::declaration::repo::insert_link(&pool, &identity, "booking-1", "2", None)
+        let link = crate::declaration::repo::insert_link(&pool, &identity, Some("booking-1"), "2", None)
             .await
             .expect("lưu được link");
         let batch = crate::declaration::repo::insert_batch(&pool, "VN", "/tmp/x.xlsx", 1)

@@ -21,13 +21,21 @@ import {
 import { nameScore } from "./nameMatch";
 
 interface PendingListProps {
-  /** Danh tính vừa lưu, đang chờ ghép với một lượt lưu trú. */
+  /** Danh tính vừa lưu — chỉ dùng để chọn sẵn, dữ liệu thật đọc từ DB. */
   identity?: DeclarationIdentity | null;
   onLinked?: () => void;
   onSelectionChange?: (linkIds: string[]) => void;
   onRowsChange?: (rows: DeclarationRow[]) => void;
   reloadKey?: number;
 }
+
+/**
+ * Giá trị chọn "khai báo trước, chưa biết phòng".
+ *
+ * Cố ý KHÔNG dùng chuỗi rỗng: rỗng là "chưa chọn gì". Người vận hành phải chủ
+ * động chọn mục này, không ai lỡ tay khai báo thiếu phòng vì quên chọn.
+ */
+const STAY_NONE = "__chua_co_phong__";
 
 function rankStays(stays: StayInfo[], fullName: string): StayInfo[] {
   return [...stays].sort(
@@ -52,15 +60,29 @@ export default function PendingList({
   const [stayReason, setStayReason] = useState(STAY_REASON_DEFAULT);
   const [stayReasonNote, setStayReasonNote] = useState("");
   const [linking, setLinking] = useState(false);
+  /** Danh tính đã lưu nhưng chưa ghép — đọc từ DB, không giữ trong state. */
+  const [waiting, setWaiting] = useState<DeclarationIdentity[]>([]);
+  const [activeId, setActiveId] = useState("");
 
   useEffect(() => {
-    if (!identity) return;
     invokeCommand<StayInfo[]>("kbtt_list_stays")
       .then(setStays)
       .catch(() => setStays([]));
-    setStayId("");
-    setStayReason(STAY_REASON_DEFAULT);
-    setStayReasonNote("");
+  }, [reloadKey]);
+
+  const loadWaiting = useCallback(() => {
+    invokeCommand<DeclarationIdentity[]>("kbtt_unlinked_identities")
+      .then((data) => setWaiting(data ?? []))
+      .catch(() => setWaiting([]));
+  }, []);
+
+  useEffect(() => {
+    loadWaiting();
+  }, [loadWaiting, reloadKey]);
+
+  // Ảnh vừa thả xong thì chọn sẵn đúng người đó.
+  useEffect(() => {
+    if (identity?.id) setActiveId(identity.id);
   }, [identity]);
 
   const loadRows = useCallback(() => {
@@ -101,9 +123,16 @@ export default function PendingList({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selected]);
 
+  /**
+   * Người đang chờ ghép. Nguồn là DB, nên đổi sang tab khác rồi quay lại vẫn
+   * còn — trước đây nó nằm trong `useState` và bị hủy cùng component.
+   */
+  const activeIdentity =
+    waiting.find((w) => w.id === activeId) ?? waiting[0] ?? null;
+
   const rankedStays = useMemo(
-    () => rankStays(stays, identity?.full_name ?? ""),
-    [stays, identity],
+    () => rankStays(stays, activeIdentity?.full_name ?? ""),
+    [stays, activeIdentity],
   );
 
   const findingsByLink = useMemo(() => {
@@ -125,23 +154,40 @@ export default function PendingList({
     (stayReason !== STAY_REASON_OTHER || stayReasonNote.trim().length > 0);
 
   const handleLink = async () => {
-    if (!identity || !canLink) return;
+    if (!activeIdentity || !canLink) return;
     setLinking(true);
     try {
       await invokeCommand<string>("kbtt_link", {
-        identityId: identity.id,
-        stayId,
+        identityId: activeIdentity.id,
+        stayId: stayId === STAY_NONE ? null : stayId,
         stayReason,
         note: stayReasonNote.trim() === "" ? null : stayReasonNote.trim(),
       });
-      toast.success("Đã ghép khách vào lượt lưu trú");
+      toast.success(
+        stayId === STAY_NONE
+          ? "Đã khai báo, chưa gắn phòng"
+          : "Đã ghép khách vào lượt lưu trú",
+      );
       setStayId("");
+      setStayReason(STAY_REASON_DEFAULT);
+      setStayReasonNote("");
       loadRows();
+      loadWaiting();
       onLinked?.();
     } catch (e) {
       toast.error(formatAppError(e));
     } finally {
       setLinking(false);
+    }
+  };
+
+  const handleDiscard = async (id: string, name: string) => {
+    try {
+      await invokeCommand<void>("kbtt_discard_identity", { identityId: id });
+      toast.success(`Đã bỏ ${name}`);
+      loadWaiting();
+    } catch (e) {
+      toast.error(formatAppError(e));
     }
   };
 
@@ -226,11 +272,42 @@ export default function PendingList({
     <div className="rounded-2xl bg-white p-6 shadow-soft">
       <h2 className="text-lg font-bold">Cần khai báo</h2>
 
-      {identity && (
+      {waiting.length > 1 && (
+        <div className="mt-3 flex flex-wrap gap-2">
+          {waiting.map((w) => (
+            <button
+              key={w.id}
+              type="button"
+              onClick={() => setActiveId(w.id)}
+              className={`rounded-full px-3 py-1 text-xs ${
+                w.id === activeIdentity?.id
+                  ? "bg-slate-800 text-white"
+                  : "bg-slate-100 text-slate-600"
+              }`}
+            >
+              {w.full_name}
+            </button>
+          ))}
+        </div>
+      )}
+
+      {activeIdentity && (
         <div className="mt-4 rounded-xl border border-slate-200 bg-slate-50 p-4">
-          <p className="mb-3 text-sm">
-            Ghép <strong>{identity.full_name}</strong> vào một lượt lưu trú.
-          </p>
+          <div className="mb-3 flex items-center justify-between gap-3">
+            <p className="text-sm">
+              Ghép <strong>{activeIdentity.full_name}</strong> vào một lượt lưu
+              trú.
+            </p>
+            <button
+              type="button"
+              className="text-xs text-slate-400 underline hover:text-red-600"
+              onClick={() =>
+                handleDiscard(activeIdentity.id, activeIdentity.full_name)
+              }
+            >
+              Bỏ ảnh này
+            </button>
+          </div>
           <div className="grid grid-cols-2 gap-3">
             <div>
               <label
@@ -247,6 +324,9 @@ export default function PendingList({
               >
                 {/* Mặc định rỗng: app xếp thứ tự gợi ý, người chọn (spec §7). */}
                 <option value="">— Chọn lượt lưu trú —</option>
+                <option value={STAY_NONE}>
+                  Chưa xác định phòng — khai báo trước
+                </option>
                 {rankedStays.map((s) => (
                   <option key={s.stay_id} value={s.stay_id}>
                     {s.room_no ? `Phòng ${s.room_no}` : "Chưa có phòng"} ·{" "}
@@ -302,8 +382,8 @@ export default function PendingList({
           </Button>
           <p className="mt-2 flex items-center gap-1.5 text-xs text-brand-muted">
             <AlertTriangle size={12} className="text-amber-500" />
-            App chỉ xếp thứ tự theo độ giống tên, không tự chọn. Khách chưa có
-            trong CapyInn thì phải tạo booking trước.
+            App chỉ xếp thứ tự theo độ giống tên, không tự chọn. Chỉ hiện phòng
+            đang có khách; khách chưa check-in thì chọn "Chưa xác định phòng".
           </p>
         </div>
       )}

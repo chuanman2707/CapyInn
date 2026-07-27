@@ -105,7 +105,7 @@ describe("PendingList", () => {
   });
 
   it("suggests bookings by name similarity but never auto-confirms", async () => {
-    mockCommands({ kbtt_list_stays: stays });
+    mockCommands({ kbtt_list_stays: stays, kbtt_unlinked_identities: [identity] });
 
     render(<PendingList identity={identity} />);
 
@@ -118,7 +118,7 @@ describe("PendingList", () => {
   });
 
   it("orders the suggestions by name similarity", async () => {
-    mockCommands({ kbtt_list_stays: stays });
+    mockCommands({ kbtt_list_stays: stays, kbtt_unlinked_identities: [identity] });
 
     render(<PendingList identity={identity} />);
 
@@ -129,12 +129,17 @@ describe("PendingList", () => {
 
     // ô rỗng luôn đứng đầu, rồi tới ứng viên giống tên nhất
     expect(values[0]).toBe("");
-    expect(values[1]).toBe("b2");
-    expect(values[2]).toBe("b1");
+    expect(values[1]).toBe("__chua_co_phong__");
+    expect(values[2]).toBe("b2");
+    expect(values[3]).toBe("b1");
   });
 
   it("links the identity to the stay the human picked", async () => {
-    mockCommands({ kbtt_list_stays: stays, kbtt_link: "link-1" });
+    mockCommands({
+      kbtt_list_stays: stays,
+      kbtt_link: "link-1",
+      kbtt_unlinked_identities: [identity],
+    });
     const onLinked = vi.fn();
 
     render(<PendingList identity={identity} onLinked={onLinked} />);
@@ -156,8 +161,56 @@ describe("PendingList", () => {
     expect(onLinked).toHaveBeenCalled();
   });
 
+  /**
+   * Lỗi đã xảy ra: người vận hành thả ảnh CCCD, sang tab Dashboard rồi quay lại
+   * thì tưởng mất dữ liệu. Danh tính vẫn nằm trong DB — chỉ là `useState` bị
+   * hủy cùng component. Nguồn sự thật phải là DB.
+   */
+  it("keeps the waiting identity after the tab is switched away and back", async () => {
+    mockCommands({ kbtt_list_stays: stays, kbtt_unlinked_identities: [identity] });
+
+    const first = render(<PendingList identity={identity} />);
+    await screen.findByText(/ZOLOCHEVSKAIA VERONIKA/);
+
+    // Đổi tab = MainShell hủy component (render có điều kiện).
+    first.unmount();
+
+    // Quay lại tab, KHÔNG có prop identity nữa — chỉ còn DB.
+    render(<PendingList />);
+
+    expect(await screen.findByText(/ZOLOCHEVSKAIA VERONIKA/)).toBeInTheDocument();
+    expect(
+      await screen.findByLabelText(/Ghép với khách đang ở/i),
+    ).toBeInTheDocument();
+  });
+
+  it("declares a guest who has no room yet", async () => {
+    mockCommands({
+      kbtt_list_stays: stays,
+      kbtt_link: "link-1",
+      kbtt_unlinked_identities: [identity],
+    });
+
+    render(<PendingList identity={identity} />);
+
+    const select = (await screen.findByLabelText(
+      /Ghép với khách đang ở/i,
+    )) as HTMLSelectElement;
+    fireEvent.change(select, { target: { value: "__chua_co_phong__" } });
+    fireEvent.click(screen.getByRole("button", { name: /^Ghép khách$/i }));
+
+    await waitFor(() => {
+      expect(invokeCommand).toHaveBeenCalledWith("kbtt_link", {
+        identityId: "i1",
+        stayId: null,
+        stayReason: "1",
+        note: null,
+      });
+    });
+  });
+
   it("refuses to link until a stay is picked", async () => {
-    mockCommands({ kbtt_list_stays: stays });
+    mockCommands({ kbtt_list_stays: stays, kbtt_unlinked_identities: [identity] });
 
     render(<PendingList identity={identity} />);
 

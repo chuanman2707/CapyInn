@@ -148,15 +148,84 @@ pub async fn insert_identity(
     Ok(id)
 }
 
+/// Danh tính đã lưu nhưng chưa ghép vào lượt lưu trú nào.
+///
+/// Tồn tại vì trước đây danh tính vừa trích chỉ sống trong `useState` của màn
+/// khai báo: đổi sang tab khác là component bị hủy và người vận hành tưởng mất
+/// dữ liệu, trong khi bản ghi vẫn nằm yên trong DB, không đường nào lấy ra.
+/// Nguồn sự thật là DB, không phải state của React.
+pub async fn list_unlinked_identities(pool: &Pool<Sqlite>) -> Result<Vec<Identity>, String> {
+    let rows = sqlx::query(
+        "SELECT id, full_name, dob, gender, nationality_iso3, doc_type_code, doc_type_source,
+                doc_type_name, doc_no, phone, residence_status, address_detail, passport_no,
+                passport_expiry, visa_valid_until, name_confirmed_by_human, single_token_name_ok
+           FROM declaration_identity di
+          WHERE di.redacted_at IS NULL
+            AND NOT EXISTS (SELECT 1 FROM declaration_link dl WHERE dl.identity_id = di.id)
+          ORDER BY di.created_at",
+    )
+    .fetch_all(pool)
+    .await
+    .map_err(|e| format!("Không đọc được danh tính chờ ghép: {e}"))?;
+
+    Ok(rows
+        .iter()
+        .map(|r| Identity {
+            id: r.get("id"),
+            full_name: r.get("full_name"),
+            dob: r.get("dob"),
+            gender: r.get("gender"),
+            nationality_iso3: r.get("nationality_iso3"),
+            doc_type_code: r.get("doc_type_code"),
+            doc_type_source: r.get("doc_type_source"),
+            doc_type_name: r.get("doc_type_name"),
+            doc_no: r.get("doc_no"),
+            phone: r.get("phone"),
+            residence_status: r.get("residence_status"),
+            address_detail: r.get("address_detail"),
+            passport_no: r.get("passport_no"),
+            passport_expiry: r.get("passport_expiry"),
+            visa_valid_until: r.get("visa_valid_until"),
+            name_confirmed_by_human: r.get::<i64, _>("name_confirmed_by_human") != 0,
+            single_token_name_ok: r.get::<i64, _>("single_token_name_ok") != 0,
+        })
+        .collect())
+}
+
+/// Xóa một danh tính chưa ghép — người vận hành bỏ ảnh quét nhầm.
+///
+/// Chỉ xóa được khi chưa có link nào trỏ tới: đã ghép thì đó là bằng chứng đã
+/// khai báo, phải đi đường thu hồi (§12.5) chứ không xóa thẳng.
+pub async fn delete_unlinked_identity(pool: &Pool<Sqlite>, identity_id: &str) -> Result<(), String> {
+    let affected = sqlx::query(
+        "DELETE FROM declaration_identity
+          WHERE id = ?
+            AND NOT EXISTS (SELECT 1 FROM declaration_link dl WHERE dl.identity_id = ?)",
+    )
+    .bind(identity_id)
+    .bind(identity_id)
+    .execute(pool)
+    .await
+    .map_err(|e| format!("Không xóa được danh tính: {e}"))?
+    .rows_affected();
+
+    if affected == 0 {
+        return Err("Danh tính đã được ghép vào một lượt lưu trú — không xóa thẳng được.".into());
+    }
+    Ok(())
+}
+
 /// Ghép một danh tính với một lượt lưu trú.
 ///
 /// `stay_id` = `bookings.id` nhưng KHÔNG có FK cứng (§5.2). Gọi lại với cùng
 /// cặp (identity, stay) thì cập nhật lý do lưu trú và trả về đúng link cũ —
 /// không đẻ thêm dòng, vì `UNIQUE(identity_id, stay_id)`.
+/// `stay_id = None` khi khai báo chưa gắn vào lượt lưu trú nào (chưa xác định
+/// phòng) — xem migration v21.
 pub async fn insert_link(
     pool: &Pool<Sqlite>,
     identity_id: &str,
-    stay_id: &str,
+    stay_id: Option<&str>,
     stay_reason: &str,
     note: Option<&str>,
 ) -> Result<String, String> {
@@ -180,8 +249,10 @@ pub async fn insert_link(
     .await
     .map_err(|e| format!("Không ghép được danh tính với lượt lưu trú: {e}"))?;
 
+    // `IS` chứ không phải `=`: với stay_id NULL thì `= NULL` không bao giờ đúng
+    // và câu này sẽ không tìm thấy chính dòng vừa ghi.
     sqlx::query_scalar::<_, String>(
-        "SELECT id FROM declaration_link WHERE identity_id = ? AND stay_id = ?",
+        "SELECT id FROM declaration_link WHERE identity_id = ? AND stay_id IS ?",
     )
     .bind(identity_id)
     .bind(stay_id)
@@ -347,11 +418,15 @@ pub async fn load_rows_by_link_ids(
     let mut by_link: HashMap<String, DeclarationRow> = HashMap::new();
     for r in rows.iter() {
         let link_id: String = r.get("link_id");
-        let stay_id: String = r.get("stay_id");
-        let stay = stays.get(&stay_id).cloned().unwrap_or(StayInfo {
-            stay_id: stay_id.clone(),
-            ..Default::default()
-        });
+        // NULL = khai báo chưa gắn phòng (v21). Cũng rơi vào đây khi booking đã
+        // bị PMS xóa — link cố ý không có FK cứng.
+        let stay = match r.get::<Option<String>, _>("stay_id") {
+            Some(stay_id) => stays.get(&stay_id).cloned().unwrap_or(StayInfo {
+                stay_id,
+                ..Default::default()
+            }),
+            None => StayInfo::default(),
+        };
 
         by_link.insert(
             link_id.clone(),
@@ -708,7 +783,7 @@ mod tests {
         let identity_id = insert_identity(&pool, &vn_identity(), "qr_cccd", "verified")
             .await
             .expect("lưu danh tính");
-        let link_id = insert_link(&pool, &identity_id, "booking-1", "2", None)
+        let link_id = insert_link(&pool, &identity_id, Some("booking-1"), "2", None)
             .await
             .expect("ghép link");
 
@@ -739,10 +814,10 @@ mod tests {
             .await
             .expect("lưu danh tính");
 
-        let first = insert_link(&pool, &identity_id, "booking-1", "1", None)
+        let first = insert_link(&pool, &identity_id, Some("booking-1"), "1", None)
             .await
             .expect("ghép lần đầu");
-        let second = insert_link(&pool, &identity_id, "booking-1", "20", Some("Đi công tác"))
+        let second = insert_link(&pool, &identity_id, Some("booking-1"), "20", Some("Đi công tác"))
             .await
             .expect("ghép lại");
 
@@ -767,7 +842,7 @@ mod tests {
                 .await
                 .expect("lưu danh tính");
             links.push(
-                insert_link(&pool, &identity_id, &format!("booking-{n}"), "1", None)
+                insert_link(&pool, &identity_id, Some(&format!("booking-{n}")), "1", None)
                     .await
                     .expect("ghép link"),
             );
@@ -785,7 +860,7 @@ mod tests {
         let identity_id = insert_identity(&pool, &vn_identity(), "qr_cccd", "verified")
             .await
             .expect("lưu danh tính");
-        let link_id = insert_link(&pool, &identity_id, "booking-1", "2", None)
+        let link_id = insert_link(&pool, &identity_id, Some("booking-1"), "2", None)
             .await
             .expect("ghép link");
 
@@ -875,7 +950,7 @@ mod tests {
         let identity_id = insert_identity(&pool, &vn_identity(), "qr_cccd", "verified")
             .await
             .expect("lưu danh tính");
-        let link_id = insert_link(&pool, &identity_id, "booking-1", "2", None)
+        let link_id = insert_link(&pool, &identity_id, Some("booking-1"), "2", None)
             .await
             .expect("ghép link");
         let batch = insert_batch(&pool, "VN", "/tmp/kbtt.xlsx", 1)
@@ -944,7 +1019,7 @@ mod tests {
             .await
             .expect("lưu danh tính");
 
-        let old_link = insert_link(&pool, &identity_id, "booking-cu", "2", None)
+        let old_link = insert_link(&pool, &identity_id, Some("booking-cu"), "2", None)
             .await
             .expect("link cũ");
         let old_batch = insert_batch(&pool, "VN", "/tmp/cu.xlsx", 1)
@@ -963,7 +1038,7 @@ mod tests {
         .expect("lùi ngày");
 
         // Lượt lưu trú mới của cùng khách, chưa đối chiếu.
-        insert_link(&pool, &identity_id, "booking-moi", "2", None)
+        insert_link(&pool, &identity_id, Some("booking-moi"), "2", None)
             .await
             .expect("link mới");
 
