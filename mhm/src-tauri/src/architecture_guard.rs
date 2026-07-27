@@ -54,6 +54,67 @@ fn relative(path: &Path) -> String {
 /// Layers that sit *inside* the command boundary and must never import from it.
 const INNER_LAYERS: [&str; 4] = ["domain", "queries", "repositories", "services"];
 
+/// Test modules are exempt: driving a Tauri command is exactly how you
+/// integration-test the outer boundary, and `services/booking/tests/` does so
+/// deliberately. The rule constrains *production* dependency direction.
+///
+/// This only recognises whole-file test modules (`tests.rs`, anything under a
+/// `tests/` directory). An inline `#[cfg(test)] mod tests` inside a production
+/// file is still checked, which errs strict — the direction we want.
+fn is_test_module(relative_path: &str) -> bool {
+    relative_path.ends_with("tests.rs")
+        || relative_path.contains("/tests/")
+        || relative_path.starts_with("tests/")
+}
+
+/// Finds imports of the command layer, including ones nested inside a
+/// `use crate::{ ... }` block.
+///
+/// Matching the literal `crate::commands` alone is not enough: rustfmt splits
+/// `use crate::{ commands::reservations, models::… }` across lines, leaving a
+/// bare `commands::reservations,` that contains no `crate::` prefix at all. An
+/// earlier version of this guard missed exactly that case and reported a clean
+/// tree while `services/booking/tests.rs` imported the command layer.
+///
+/// Relies on rustfmt's layout: a `use crate::{` block closes with `};` at the
+/// start of a line.
+fn command_layer_imports(source: &str) -> Vec<(usize, String)> {
+    let mut hits = Vec::new();
+    let mut inside_crate_use_block = false;
+
+    for (index, line) in source.lines().enumerate() {
+        let trimmed = line.trim();
+        let line_number = index + 1;
+
+        if trimmed.starts_with("//") {
+            continue;
+        }
+
+        if trimmed.contains("crate::commands")
+            || trimmed.contains("super::commands")
+            || trimmed.contains("crate::{commands")
+        {
+            hits.push((line_number, trimmed.to_string()));
+            continue;
+        }
+
+        if trimmed.starts_with("use crate::{") {
+            inside_crate_use_block = !trimmed.ends_with("};");
+            continue;
+        }
+
+        if inside_crate_use_block {
+            if trimmed.starts_with("};") {
+                inside_crate_use_block = false;
+            } else if trimmed.starts_with("commands::") || trimmed == "commands," {
+                hits.push((line_number, trimmed.to_string()));
+            }
+        }
+    }
+
+    hits
+}
+
 #[test]
 fn inner_layers_do_not_import_the_command_layer() {
     let mut violations = Vec::new();
@@ -66,15 +127,13 @@ fn inner_layers_do_not_import_the_command_layer() {
         );
 
         for file in files {
+            let name = relative(&file).replace('\\', "/");
+            if is_test_module(&name) {
+                continue;
+            }
             let source = fs::read_to_string(&file).expect("read source file");
-            for (index, line) in source.lines().enumerate() {
-                let trimmed = line.trim_start();
-                if trimmed.starts_with("//") {
-                    continue;
-                }
-                if trimmed.contains("crate::commands") || trimmed.contains("super::commands") {
-                    violations.push(format!("{}:{}: {}", relative(&file), index + 1, trimmed));
-                }
+            for (line_number, line) in command_layer_imports(&source) {
+                violations.push(format!("{name}:{line_number}: {line}"));
             }
         }
     }
@@ -87,6 +146,44 @@ fn inner_layers_do_not_import_the_command_layer() {
          instead of re-exporting it from `commands`.\n\n{}",
         violations.join("\n")
     );
+}
+
+#[test]
+fn command_layer_imports_sees_through_a_nested_use_block() {
+    // The exact shape that defeated the first version of this guard.
+    let nested = "use crate::{\n    commands::reservations,\n    models::Booking,\n};\n";
+    assert_eq!(
+        command_layer_imports(nested)
+            .into_iter()
+            .map(|(_, line)| line)
+            .collect::<Vec<_>>(),
+        vec!["commands::reservations,"]
+    );
+
+    for source in [
+        "use crate::commands::mod_thing;\n",
+        "use super::commands::thing;\n",
+        "use crate::{commands::reservations, models::Booking};\n",
+    ] {
+        assert_eq!(
+            command_layer_imports(source).len(),
+            1,
+            "should have flagged: {source}"
+        );
+    }
+
+    for clean in [
+        "use crate::{\n    models::Booking,\n    money::MoneyVnd,\n};\n",
+        "// use crate::commands::thing;\n",
+        "use crate::db::row::get_money_vnd;\n",
+        // `commands` nested under a *different* root is not the command layer.
+        "use other::{\n    commands::thing,\n};\n",
+    ] {
+        assert!(
+            command_layer_imports(clean).is_empty(),
+            "should have been clean: {clean}"
+        );
+    }
 }
 
 /// Markers for *holding a connection or issuing SQL*, as opposed to merely
