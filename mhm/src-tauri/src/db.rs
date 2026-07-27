@@ -202,6 +202,10 @@ fn is_duplicate_column_error(error: &sqlx::Error) -> bool {
     message.contains("duplicate column name") || message.contains("already exists")
 }
 
+/// Version schema hiện hành. Mọi assert trong test đọc hằng này —
+/// thêm migration mới thì chỉ bump ở đây.
+pub(crate) const SCHEMA_VERSION: i32 = 21;
+
 pub(crate) async fn run_migrations(pool: &Pool<Sqlite>) -> Result<(), sqlx::Error> {
     let current = get_schema_version(pool).await?;
 
@@ -836,7 +840,7 @@ mod tests {
             .expect("reads final schema version")
             .get("version");
 
-        assert_eq!(version, 21);
+        assert_eq!(version, crate::db::SCHEMA_VERSION);
     }
 
     #[tokio::test]
@@ -850,7 +854,7 @@ mod tests {
             .await
             .expect("reads final schema version");
 
-        assert_eq!(version, 21);
+        assert_eq!(version, crate::db::SCHEMA_VERSION);
 
         assert_table_group_exists(&pool, "PMS core", PMS_CORE_TABLES).await;
         assert_table_group_exists(&pool, "command safety", COMMAND_SAFETY_TABLES).await;
@@ -871,7 +875,7 @@ mod tests {
             .expect("reads version")
             .get("version");
 
-        assert_eq!(version, 21);
+        assert_eq!(version, crate::db::SCHEMA_VERSION);
         assert_money_columns_are_integer(&pool).await;
     }
 
@@ -1159,7 +1163,7 @@ mod tests {
             .expect("reads final schema version")
             .get("version");
 
-        assert_eq!(version, 21);
+        assert_eq!(version, crate::db::SCHEMA_VERSION);
     }
 
     #[tokio::test]
@@ -1226,7 +1230,7 @@ mod tests {
             .expect("reads final schema version")
             .get("version");
 
-        assert_eq!(version, 21);
+        assert_eq!(version, crate::db::SCHEMA_VERSION);
     }
 
     #[tokio::test]
@@ -1306,7 +1310,7 @@ mod tests {
         );
 
         let version = get_schema_version(&pool).await.expect("schema version");
-        assert_eq!(version, 21);
+        assert_eq!(version, crate::db::SCHEMA_VERSION);
     }
 
     #[tokio::test]
@@ -1346,7 +1350,7 @@ mod tests {
 
         assert_outbox_shape(&pool).await;
         let version = get_schema_version(&pool).await.expect("schema version");
-        assert_eq!(version, 21);
+        assert_eq!(version, crate::db::SCHEMA_VERSION);
     }
 
     #[tokio::test]
@@ -1364,7 +1368,7 @@ mod tests {
 
         assert_outbox_shape(&pool).await;
         let version = get_schema_version(&pool).await.expect("schema version");
-        assert_eq!(version, 21);
+        assert_eq!(version, crate::db::SCHEMA_VERSION);
     }
 
     #[tokio::test]
@@ -1394,7 +1398,7 @@ mod tests {
             1
         );
         let version = get_schema_version(&pool).await.expect("schema version");
-        assert_eq!(version, 21);
+        assert_eq!(version, crate::db::SCHEMA_VERSION);
     }
 
     #[tokio::test]
@@ -1407,7 +1411,7 @@ mod tests {
 
         assert_agent_safety_shape(&pool).await;
         let version = get_schema_version(&pool).await.expect("schema version");
-        assert_eq!(version, 21);
+        assert_eq!(version, crate::db::SCHEMA_VERSION);
     }
 
     #[tokio::test]
@@ -1440,7 +1444,7 @@ mod tests {
 
         assert_agent_digest_runs_shape(&pool).await;
         let version = get_schema_version(&pool).await.expect("schema version");
-        assert_eq!(version, 21);
+        assert_eq!(version, crate::db::SCHEMA_VERSION);
     }
 
     #[tokio::test]
@@ -1464,7 +1468,7 @@ mod tests {
 
         assert_agent_safety_shape(&pool).await;
         let version = get_schema_version(&pool).await.expect("schema version");
-        assert_eq!(version, 21);
+        assert_eq!(version, crate::db::SCHEMA_VERSION);
     }
 
     #[tokio::test]
