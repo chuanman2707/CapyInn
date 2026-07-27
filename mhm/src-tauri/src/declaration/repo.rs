@@ -201,6 +201,40 @@ pub async fn insert_identity(
     Ok(id)
 }
 
+/// Lưu danh tính VÀ bảo đảm nó có mặt trong danh sách chờ khai — "băng chuyền
+/// một chiều": thả ảnh xong là khách hiện ra, không có khu chờ trung gian.
+///
+/// Link "đang hoạt động" = chưa nằm trong lô `verified`. Còn một link như vậy
+/// thì lần quét này là quét lại trong cùng lượt ở — dùng lại, không đẻ thêm.
+/// Mọi link đều đã verified (khách quay lại sau lượt ở trước) thì lượt mới
+/// cần link mới.
+pub async fn save_identity_ensuring_link(
+    pool: &Pool<Sqlite>,
+    identity: &Identity,
+    source: &str,
+    confidence: &str,
+) -> Result<String, String> {
+    let identity_id = insert_identity(pool, identity, source, confidence).await?;
+
+    let active: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM declaration_link dl
+          WHERE dl.identity_id = ?
+            AND NOT EXISTS (
+                  SELECT 1 FROM declaration_entry de
+                  JOIN declaration_batch b ON b.id = de.batch_id
+                 WHERE de.link_id = dl.id AND b.status = 'verified')",
+    )
+    .bind(&identity_id)
+    .fetch_one(pool)
+    .await
+    .map_err(|e| format!("Không kiểm được khai báo đang hoạt động: {e}"))?;
+
+    if active == 0 {
+        insert_link(pool, &identity_id, None, "1", None).await?;
+    }
+    Ok(identity_id)
+}
+
 /// Cập nhật một danh tính đã có bằng lần trích mới nhất.
 ///
 /// Giữ nguyên `id` và `created_at`: link đang trỏ vào id đó, và `created_at` là
@@ -406,8 +440,18 @@ pub async fn insert_link(
 
     // `IS` chứ không phải `=`: với stay_id NULL thì `= NULL` không bao giờ đúng
     // và câu này sẽ không tìm thấy chính dòng vừa ghi.
+    //
+    // `ORDER BY rowid DESC LIMIT 1`: một danh tính có thể có HAI link cùng
+    // `stay_id NULL` (một đã verified, một vừa tạo) — không có ràng buộc nào
+    // chặn việc đó, vì `UNIQUE(identity_id, stay_id)` chỉ chặn khi cả hai vế
+    // giống hệt SQLite coi là bằng nhau, còn khách quay lại sau khi đã khai
+    // xong lượt trước lại cần một link NULL khác. `rowid` tăng dần theo INSERT
+    // nên dòng mới nhất luôn thắng; `created_at` cùng giây thì không phân định
+    // được.
     sqlx::query_scalar::<_, String>(
-        "SELECT id FROM declaration_link WHERE identity_id = ? AND stay_id IS ?",
+        "SELECT id FROM declaration_link
+          WHERE identity_id = ? AND stay_id IS ?
+          ORDER BY rowid DESC LIMIT 1",
     )
     .bind(identity_id)
     .bind(stay_id)
@@ -1202,5 +1246,68 @@ mod tests {
             0,
             "còn một lượt chưa khai xong thì chưa được che"
         );
+    }
+
+    /// Băng chuyền: thả ảnh xong khách phải CÓ MẶT trong danh sách chờ ngay,
+    /// không qua khu "hồ sơ chờ ghép" trung gian nào.
+    #[tokio::test]
+    async fn saving_a_scan_puts_the_guest_straight_into_the_pending_list() {
+        let pool = pool().await;
+
+        save_identity_ensuring_link(&pool, &vn_identity(), "qr_cccd", "verified")
+            .await
+            .expect("lưu");
+
+        let pending = pending_link_ids(&pool).await.expect("đọc danh sách chờ");
+        assert_eq!(pending.len(), 1, "một lần thả ảnh = một dòng chờ khai");
+
+        let rows = load_rows_by_link_ids(&pool, &pending).await.expect("đọc dòng");
+        assert_eq!(rows[0].identity.full_name, "Phan Thị Mỹ Hà");
+        assert_eq!(rows[0].stay_reason, "1", "lý do mặc định là Du lịch");
+        assert!(rows[0].stay.room_no.is_empty(), "phòng mặc định: chưa xác định");
+    }
+
+    /// Quét lại cùng tấm giấy tờ khi link cũ còn hoạt động: KHÔNG đẻ link thứ hai.
+    #[tokio::test]
+    async fn rescanning_while_a_link_is_active_does_not_duplicate() {
+        let pool = pool().await;
+        save_identity_ensuring_link(&pool, &vn_identity(), "qr_cccd", "verified")
+            .await
+            .expect("lần 1");
+        save_identity_ensuring_link(&pool, &vn_identity(), "qr_cccd", "verified")
+            .await
+            .expect("lần 2");
+
+        let n: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM declaration_link")
+            .fetch_one(&pool)
+            .await
+            .expect("đếm");
+        assert_eq!(n, 1);
+    }
+
+    /// Khách quay lại sau khi lượt trước ĐÃ khai xong: lần quét mới là lượt ở
+    /// mới — phải có link mới, và `insert_link` phải trả về đúng link MỚI chứ
+    /// không phải link cũ (hai link cùng identity + stay_id NULL cùng tồn tại).
+    #[tokio::test]
+    async fn a_returning_guest_gets_a_fresh_link_after_the_old_one_was_declared() {
+        let pool = pool().await;
+        let id = save_identity_ensuring_link(&pool, &vn_identity(), "qr_cccd", "verified")
+            .await
+            .expect("lượt 1");
+        let old_link = pending_link_ids(&pool).await.expect("đọc")[0].clone();
+        let batch = insert_batch(&pool, "VN", "/tmp/x.xlsx", 1).await.expect("lô");
+        insert_entries(&pool, &batch, std::slice::from_ref(&old_link))
+            .await
+            .expect("dòng");
+        set_batch_verified(&pool, &batch, 1).await.expect("đã khai xong");
+
+        let id2 = save_identity_ensuring_link(&pool, &vn_identity(), "qr_cccd", "verified")
+            .await
+            .expect("lượt 2");
+        assert_eq!(id, id2, "vẫn là cùng một con người");
+
+        let pending = pending_link_ids(&pool).await.expect("đọc lại");
+        assert_eq!(pending.len(), 1, "lượt ở mới phải chờ khai");
+        assert_ne!(pending[0], old_link, "phải là link MỚI");
     }
 }

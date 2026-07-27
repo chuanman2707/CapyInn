@@ -169,7 +169,7 @@ pub async fn kbtt_save_identity(
     source: String,
     confidence: String,
 ) -> Result<String, String> {
-    repo::insert_identity(&state.db, &identity, &source, &confidence).await
+    repo::save_identity_ensuring_link(&state.db, &identity, &source, &confidence).await
 }
 
 /// `stay_id = None` — khai báo chưa gắn phòng. Cổng không bắt buộc cột phòng;
