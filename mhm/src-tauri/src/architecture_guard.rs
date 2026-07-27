@@ -186,19 +186,61 @@ fn command_layer_imports_sees_through_a_nested_use_block() {
     }
 }
 
-/// Command modules that still issue SQL directly, in descending size. This is a
-/// ratchet, not a permission list: `docs/cleanup/` items E1–E3 are about
-/// emptying it. The test fails both when an unlisted command module grows SQL
-/// *and* when a listed one is cleaned up without being struck off, so the list
-/// cannot quietly rot.
-const COMMANDS_STILL_HOLDING_SQL: [&str; 8] = [
-    "commands/agent_settings.rs",
+/// The source with the bodies of inline `#[cfg(test)] mod … { … }` blocks removed.
+///
+/// Test fixtures seed tables with raw SQL; that is not the command layer owning
+/// SQL, and counting it made this guard report roughly twice the real number. It
+/// named `commands/invoices.rs` (10 test-only calls, zero in production) as the
+/// largest remaining offender when that file was already correct.
+///
+/// Removes each block rather than truncating at the first one: `commands/pricing.rs`
+/// has its test module in the *middle* of the file, with five more production
+/// queries after it. Truncating there would have under-reported — a false clean,
+/// which is the worse failure for a guard.
+///
+/// Relies on rustfmt: a file-level `mod` and its closing brace both sit at column
+/// zero, so the block ends at the next line that is exactly `}`.
+fn production_source(source: &str) -> String {
+    let lines: Vec<&str> = source.lines().collect();
+    let mut kept = Vec::with_capacity(lines.len());
+    let mut index = 0;
+
+    while index < lines.len() {
+        if lines[index] == "#[cfg(test)]" {
+            let mut probe = index + 1;
+            while probe < lines.len() && lines[probe].trim().is_empty() {
+                probe += 1;
+            }
+            let opens_a_module = probe < lines.len()
+                && lines[probe].starts_with("mod ")
+                && lines[probe].ends_with('{');
+            if opens_a_module {
+                index = probe + 1;
+                while index < lines.len() && lines[index] != "}" {
+                    index += 1;
+                }
+                index += 1; // step past the closing brace
+                continue;
+            }
+        }
+        kept.push(lines[index]);
+        index += 1;
+    }
+
+    kept.join("\n")
+}
+
+/// Command modules that still issue SQL in *production* code, largest first.
+/// This is a ratchet, not a permission list: `docs/cleanup/` items E1–E3 are
+/// about emptying it. The test fails both when an unlisted command module grows
+/// SQL *and* when a listed one is cleaned up without being struck off, so the
+/// list cannot quietly rot.
+const COMMANDS_STILL_HOLDING_SQL: [&str; 6] = [
     "commands/analytics.rs",
     "commands/auth.rs",
     "commands/bookings.rs",
     "commands/groups.rs",
     "commands/guests.rs",
-    "commands/invoices.rs",
     "commands/pricing.rs",
 ];
 
@@ -213,7 +255,7 @@ fn command_modules_only_hold_sql_where_the_cleanup_ratchet_still_allows_it() {
             continue;
         }
         let source = fs::read_to_string(&file).expect("read source file");
-        let holds_sql = source.contains("sqlx::query");
+        let holds_sql = production_source(&source).contains("sqlx::query");
         let listed = COMMANDS_STILL_HOLDING_SQL.contains(&name.as_str());
 
         match (holds_sql, listed) {
@@ -235,6 +277,38 @@ fn command_modules_only_hold_sql_where_the_cleanup_ratchet_still_allows_it() {
          COMMANDS_STILL_HOLDING_SQL so the ratchet keeps tightening.\n\n{}",
         already_clean.join("\n")
     );
+}
+
+#[test]
+fn production_source_removes_inline_test_modules_wherever_they_sit() {
+    let with_tests =
+        "use sqlx::Pool;\n\nfn real() {}\n\n#[cfg(test)]\nmod tests {\n    sqlx::query(\"seed\");\n}\n";
+    let production = production_source(with_tests);
+    assert!(production.contains("fn real()"));
+    assert!(!production.contains("sqlx::query"));
+
+    // The `commands/pricing.rs` shape: production code *after* the test module.
+    // Truncating at the first `#[cfg(test)]` reports this file as clean, which is
+    // the worse failure for a guard. An earlier version of this helper did.
+    let tests_in_the_middle = "fn early() {}\n\n#[cfg(test)]\nmod tests {\n    fn seed() {\n        let _ = 1;\n    }\n}\n\nfn late() {\n    sqlx::query(\"real\");\n}\n";
+    let production = production_source(tests_in_the_middle);
+    assert!(production.contains("fn early()"));
+    assert!(production.contains("fn late()"));
+    assert!(production.contains("sqlx::query"));
+
+    // A blank line between the attribute and the module is the same shape.
+    let spaced = "fn real() {}\n\n#[cfg(test)]\n\nmod tests {\n    sqlx::query(\"seed\");\n}\n";
+    assert!(!production_source(spaced).contains("sqlx::query"));
+
+    // `#[cfg(test)]` on a plain item must not swallow anything.
+    let cfg_on_item =
+        "#[cfg(test)]\npub fn helper() {}\n\nfn real() {\n    sqlx::query(\"real\");\n}\n";
+    assert!(production_source(cfg_on_item).contains("sqlx::query"));
+    assert!(production_source(cfg_on_item).contains("pub fn helper()"));
+
+    // No test module at all: nothing is removed.
+    let plain = "fn real() {\n    sqlx::query(\"real\");\n}";
+    assert_eq!(production_source(plain), plain);
 }
 
 /// Markers for *holding a connection or issuing SQL*, as opposed to merely
