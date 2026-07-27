@@ -199,7 +199,7 @@ pub async fn load_rooms_availability(
     Ok(results)
 }
 
-fn map_room(row: &SqliteRow) -> Room {
+pub(crate) fn map_room(row: &SqliteRow) -> Room {
     Room {
         id: row.get("id"),
         name: row.get("name"),

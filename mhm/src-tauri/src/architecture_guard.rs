@@ -186,6 +186,58 @@ fn command_layer_imports_sees_through_a_nested_use_block() {
     }
 }
 
+/// Command modules that still issue SQL directly, in descending size. This is a
+/// ratchet, not a permission list: `docs/cleanup/` items E1–E3 are about
+/// emptying it. The test fails both when an unlisted command module grows SQL
+/// *and* when a listed one is cleaned up without being struck off, so the list
+/// cannot quietly rot.
+const COMMANDS_STILL_HOLDING_SQL: [&str; 9] = [
+    "commands/agent_settings.rs",
+    "commands/analytics.rs",
+    "commands/auth.rs",
+    "commands/bookings.rs",
+    "commands/groups.rs",
+    "commands/guests.rs",
+    "commands/invoices.rs",
+    "commands/pricing.rs",
+    "commands/rooms.rs",
+];
+
+#[test]
+fn command_modules_only_hold_sql_where_the_cleanup_ratchet_still_allows_it() {
+    let mut unexpected = Vec::new();
+    let mut already_clean = Vec::new();
+
+    for file in rust_files_in_layer("commands") {
+        let name = relative(&file).replace('\\', "/");
+        if is_test_module(&name) {
+            continue;
+        }
+        let source = fs::read_to_string(&file).expect("read source file");
+        let holds_sql = source.contains("sqlx::query");
+        let listed = COMMANDS_STILL_HOLDING_SQL.contains(&name.as_str());
+
+        match (holds_sql, listed) {
+            (true, false) => unexpected.push(name),
+            (false, true) => already_clean.push(name),
+            _ => {}
+        }
+    }
+
+    assert!(
+        unexpected.is_empty(),
+        "commands orchestrate; they do not own SQL. Move reads into `queries/` \
+         and writes behind a service or repository.\n\n{}",
+        unexpected.join("\n")
+    );
+    assert!(
+        already_clean.is_empty(),
+        "these command modules no longer hold SQL — remove them from \
+         COMMANDS_STILL_HOLDING_SQL so the ratchet keeps tightening.\n\n{}",
+        already_clean.join("\n")
+    );
+}
+
 /// Markers for *holding a connection or issuing SQL*, as opposed to merely
 /// converting a `sqlx::Error` at a boundary, which is legitimate in any layer.
 const DB_ACCESS_MARKERS: [&str; 5] = [

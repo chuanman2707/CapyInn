@@ -31,7 +31,9 @@ async fn record_payment_returning_id_tx_returns_inserted_transaction_id() {
         .await
         .unwrap();
 
-    let mut tx = crate::services::booking::support::begin_tx(&pool).await.unwrap();
+    let mut tx = crate::services::booking::support::begin_tx(&pool)
+        .await
+        .unwrap();
     let transaction_id =
         record_payment_returning_id_tx(&mut tx, "B-PAY-ID", 25_000, "payment id test")
             .await
