@@ -113,8 +113,13 @@ Mỗi lô đã xuất mà chưa chốt hiện một thẻ:
 - **Thẻ mọc lại khi mở app** nếu còn lô trạng thái `exported` hoặc `failed`:
   dựng từ `kbtt_list_batches` lúc vào trang, không phụ thuộc state trong
   phiên. Thẻ của lô `failed` giữ nguyên hướng dẫn ①②③ (upload lại chính file
-  đó rồi gõ số lần nữa) — khách của lô này KHÔNG quay lại danh sách "Chưa
+  đó rồi gõ số lần nữa) — khách của lô này KHÔNG tự quay lại danh sách "Chưa
   khai báo", tránh xuất trùng một khách ra hai file.
+- Đường thoát khi chính DỮ LIỆU trong file sai (phát hiện lúc lập kế hoạch —
+  không có nó thì lô `failed` là ngõ cụt): thẻ lô `failed` có thêm nút
+  **"Đưa khách về danh sách để sửa"** (`kbtt_reopen_batch`) — gỡ entry của lô
+  để khách quay lại danh sách, dòng lô ở lại làm lịch sử. Chỉ lô `failed` mới
+  mở lại được.
 
 ### 4.4 Badge và dòng diễn giải
 
@@ -145,6 +150,9 @@ Mỗi lô đã xuất mà chưa chốt hiện một thẻ:
 | `kbtt_update_link` | **Mới**: sửa phòng / lý do / ghi chú tại chỗ |
 | `kbtt_hold` / `kbtt_release` | **Mới**: đặt / xóa `held_at` |
 | `kbtt_discard` | **Mới**: xóa link + danh tính (transaction; từ chối nếu lô đã chốt) |
+| `kbtt_update_identity` | **Mới**: sửa thông tin khách theo id (form sửa từ dòng lỗi); từ chối nếu đã có lô chốt |
+| `kbtt_reopen_batch` | **Mới**: mở lại lô `failed`, đưa khách về danh sách (xem §4.3) |
+| `kbtt_undeclared_breakdown` | **Mới**: số liệu cho dòng diễn giải badge (§4.4) |
 | `kbtt_undeclared_count` | Sửa: công thức badge mới |
 | `kbtt_unlinked_identities`, `kbtt_discard_identity`, `kbtt_unlink`, `kbtt_link` | **Gỡ bỏ ở PR 3** — khái niệm hồ sơ chờ không còn, việc tạo link đã nằm trong `kbtt_save_identity`; phần xóa dùng chung repo với `kbtt_discard` |
 | Còn lại (`kbtt_extract_from_image`, `kbtt_list_stays`, `kbtt_validate`, `kbtt_export`, `kbtt_list_batches`, `kbtt_reconcile`, `kbtt_open_export_dir`, `kbtt_pending_rows`) | Giữ nguyên |
