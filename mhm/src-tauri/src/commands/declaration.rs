@@ -192,6 +192,25 @@ pub async fn kbtt_link(
     .await
 }
 
+/// Sửa phòng / lý do tại chỗ trên thẻ khách. `stay_id = None` = chưa xác định phòng.
+#[tauri::command]
+pub async fn kbtt_update_link(
+    state: State<'_, AppState>,
+    link_id: String,
+    stay_id: Option<String>,
+    stay_reason: String,
+    note: Option<String>,
+) -> Result<(), String> {
+    repo::update_link(
+        &state.db,
+        &link_id,
+        stay_id.as_deref().filter(|s| !s.trim().is_empty()),
+        &stay_reason,
+        note.as_deref(),
+    )
+    .await
+}
+
 /// Danh tính đã lưu nhưng chưa ghép — nguồn sự thật là DB, không phải state của
 /// React, nên đổi tab không làm mất.
 #[tauri::command]

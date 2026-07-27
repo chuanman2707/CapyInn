@@ -281,16 +281,9 @@ async fn update_identity_fields(
     Ok(())
 }
 
-/// Gỡ một khai báo khỏi danh sách chờ.
-///
-/// Người vận hành ghép nhầm phòng, hoặc ghép trùng, thì phải có đường lùi —
-/// không có nó, một dòng thừa chặn E14 vĩnh viễn và cả lô không xuất được.
-///
-/// Đã nằm trong lô ĐÃ ĐỐI SOÁT thì từ chối: đó là bằng chứng khách này đã được
-/// khai lên cổng, xóa đi là mất dấu vết. Lô chưa đối soát (`exported`) thì gỡ
-/// được — file xuất ra vẫn còn trên đĩa, và lô sẽ tự lệch số khi đối soát.
-pub async fn delete_link(pool: &Pool<Sqlite>, link_id: &str) -> Result<(), String> {
-    let declared: i64 = sqlx::query_scalar(
+/// Link đã nằm trong lô `verified` = bằng chứng đã khai lên cổng.
+async fn link_is_declared(pool: &Pool<Sqlite>, link_id: &str) -> Result<bool, String> {
+    let n: i64 = sqlx::query_scalar(
         "SELECT COUNT(*)
            FROM declaration_entry de
            JOIN declaration_batch dbt ON dbt.id = de.batch_id
@@ -300,8 +293,61 @@ pub async fn delete_link(pool: &Pool<Sqlite>, link_id: &str) -> Result<(), Strin
     .fetch_one(pool)
     .await
     .map_err(|e| format!("Không kiểm được lô của khai báo: {e}"))?;
+    Ok(n > 0)
+}
 
-    if declared > 0 {
+/// Sửa phòng / lý do / ghi chú của một khai báo tại chỗ (thẻ khách của UI mới).
+pub async fn update_link(
+    pool: &Pool<Sqlite>,
+    link_id: &str,
+    stay_id: Option<&str>,
+    stay_reason: &str,
+    note: Option<&str>,
+) -> Result<(), String> {
+    if link_is_declared(pool, link_id).await? {
+        return Err(
+            "Khai báo này đã nằm trong một lô đã đối soát — không sửa được, vì đó là bằng chứng đã khai."
+                .into(),
+        );
+    }
+
+    let affected = sqlx::query(
+        "UPDATE declaration_link
+            SET stay_id = ?, stay_reason = ?, stay_reason_note = ?
+          WHERE id = ?",
+    )
+    .bind(stay_id)
+    .bind(stay_reason)
+    .bind(note)
+    .bind(link_id)
+    .execute(pool)
+    .await
+    .map_err(|e| {
+        // UNIQUE(identity_id, stay_id): khách này đã có khai báo cho đúng phòng đó.
+        if e.to_string().contains("UNIQUE") {
+            "Khách này đã có một khai báo cho lượt lưu trú đó rồi.".to_string()
+        } else {
+            format!("Không sửa được khai báo: {e}")
+        }
+    })?
+    .rows_affected();
+
+    if affected == 0 {
+        return Err("Không tìm thấy khai báo cần sửa.".into());
+    }
+    Ok(())
+}
+
+/// Gỡ một khai báo khỏi danh sách chờ.
+///
+/// Người vận hành ghép nhầm phòng, hoặc ghép trùng, thì phải có đường lùi —
+/// không có nó, một dòng thừa chặn E14 vĩnh viễn và cả lô không xuất được.
+///
+/// Đã nằm trong lô ĐÃ ĐỐI SOÁT thì từ chối: đó là bằng chứng khách này đã được
+/// khai lên cổng, xóa đi là mất dấu vết. Lô chưa đối soát (`exported`) thì gỡ
+/// được — file xuất ra vẫn còn trên đĩa, và lô sẽ tự lệch số khi đối soát.
+pub async fn delete_link(pool: &Pool<Sqlite>, link_id: &str) -> Result<(), String> {
+    if link_is_declared(pool, link_id).await? {
         return Err(
             "Khai báo này đã nằm trong một lô đã đối soát — không gỡ được, vì đó là bằng chứng đã khai."
                 .into(),
@@ -1309,6 +1355,42 @@ mod tests {
         let pending = pending_link_ids(&pool).await.expect("đọc lại");
         assert_eq!(pending.len(), 1, "lượt ở mới phải chờ khai");
         assert_ne!(pending[0], old_link, "phải là link MỚI");
+    }
+
+    /// Thẻ khách cho sửa phòng và lý do tại chỗ — không còn form ghép riêng.
+    #[tokio::test]
+    async fn room_and_reason_can_be_edited_in_place() {
+        let pool = pool().await;
+        save_identity_ensuring_link(&pool, &vn_identity(), "qr_cccd", "verified")
+            .await
+            .expect("lưu");
+        let link = pending_link_ids(&pool).await.expect("đọc")[0].clone();
+
+        update_link(&pool, &link, Some("booking-9"), "20", Some("Đi công tác"))
+            .await
+            .expect("sửa được");
+
+        let rows = load_rows_by_link_ids(&pool, std::slice::from_ref(&link))
+            .await
+            .expect("đọc lại");
+        assert_eq!(rows[0].stay.stay_id, "booking-9");
+        assert_eq!(rows[0].stay_reason, "20");
+        assert_eq!(rows[0].stay_reason_note.as_deref(), Some("Đi công tác"));
+    }
+
+    /// Đã nằm trong lô verified thì bản ghi là bằng chứng — không sửa được nữa.
+    #[tokio::test]
+    async fn a_declared_link_refuses_edits() {
+        let pool = pool().await;
+        save_identity_ensuring_link(&pool, &vn_identity(), "qr_cccd", "verified")
+            .await
+            .expect("lưu");
+        let link = pending_link_ids(&pool).await.expect("đọc")[0].clone();
+        let batch = insert_batch(&pool, "VN", "/tmp/x.xlsx", 1).await.expect("lô");
+        insert_entries(&pool, &batch, std::slice::from_ref(&link)).await.expect("dòng");
+        set_batch_verified(&pool, &batch, 1).await.expect("chốt");
+
+        assert!(update_link(&pool, &link, None, "1", None).await.is_err());
     }
 
     /// `insert_link` tự nó (không qua `save_identity_ensuring_link`) phải trả

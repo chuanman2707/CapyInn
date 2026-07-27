@@ -403,6 +403,7 @@ pub fn run() {
             commands::declaration::kbtt_list_stays,
             commands::declaration::kbtt_save_identity,
             commands::declaration::kbtt_link,
+            commands::declaration::kbtt_update_link,
             commands::declaration::kbtt_unlinked_identities,
             commands::declaration::kbtt_discard_identity,
             commands::declaration::kbtt_unlink,
