@@ -1,4 +1,5 @@
-use super::{emit_db_update, get_money_vnd, get_optional_money_vnd, get_user_id, AppState};
+use super::{emit_db_update, get_user_id, AppState};
+use crate::db::row::{get_money_vnd, get_optional_money_vnd};
 use crate::services::booking::group_lifecycle;
 use crate::{
     app_error::{codes, log_system_error, normalize_correlation_id, CommandError, CommandResult},

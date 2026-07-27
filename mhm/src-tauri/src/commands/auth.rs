@@ -1,5 +1,6 @@
-use super::{get_money_vnd, get_user, require_admin, AppState};
+use super::{get_user, require_admin, AppState};
 use crate::app_error::{codes, log_system_error, CommandError, CommandResult};
+use crate::db::row::get_money_vnd;
 use crate::models::*;
 use serde_json::json;
 use sqlx::Row;
