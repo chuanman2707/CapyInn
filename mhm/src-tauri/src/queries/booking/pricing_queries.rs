@@ -22,8 +22,7 @@ const STORED_PRICING_RULE_SQL: &str = "SELECT room_type, hourly_rate, overnight_
 
 const ROOM_TYPE_SQL: &str = "SELECT type FROM rooms WHERE id = ? LIMIT 1";
 
-const FALLBACK_BASE_PRICE_SQL: &str =
-    "SELECT base_price FROM rooms WHERE LOWER(type) = ? LIMIT 1";
+const FALLBACK_BASE_PRICE_SQL: &str = "SELECT base_price FROM rooms WHERE LOWER(type) = ? LIMIT 1";
 
 const SPECIAL_UPLIFT_SQL: &str =
     "SELECT CAST(uplift_pct AS REAL) FROM special_dates WHERE date = ?";
