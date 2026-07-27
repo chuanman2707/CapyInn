@@ -125,6 +125,54 @@ describe("BookingDetailPopup", () => {
     expect(screen.queryByText(/00:00|07:00/)).toBeNull();
   });
 
+  it("renders a date-only value as the correct calendar day even west of UTC", () => {
+    // TZ toàn cục của file này là Asia/Ho_Chi_Minh (UTC+7, phía đông UTC), nơi
+    // `new Date("YYYY-MM-DD")` (nửa đêm UTC) tình cờ vẫn hiển thị đúng ngày.
+    // Đổi tạm sang múi giờ phía tây UTC để bài test thật sự bắt được lỗi lùi
+    // ngày nếu ai đó quay lại dùng `new Date()` cho ngày trơn.
+    const originalTz = process.env.TZ;
+    process.env.TZ = "America/Los_Angeles"; // UTC-7/-8, phía tây UTC
+
+    try {
+      render(
+        <BookingDetailPopup
+          booking={booking({
+            scheduled_checkin: "2026-07-25",
+            scheduled_checkout: "2026-07-27",
+          })}
+          mode="reservation"
+          onClose={vi.fn()}
+        />,
+      );
+
+      // Ngày trơn 2026-07-25 phải vẫn hiện 25/07/2026, không lùi về 24/07/2026
+      // như khi `new Date("2026-07-25")` bị hiểu là nửa đêm UTC.
+      expect(screen.getByText("25/07/2026")).toBeTruthy();
+      expect(screen.queryByText("24/07/2026")).toBeNull();
+    } finally {
+      process.env.TZ = originalTz;
+    }
+  });
+
+  it("prefers the actual check-in time over the scheduled one in read-only mode", () => {
+    render(
+      <BookingDetailPopup
+        booking={booking({
+          scheduled_checkin: "2026-07-23",
+          check_in_at: "2026-07-24T21:45:00+07:00",
+        })}
+        mode="readonly"
+        onClose={vi.fn()}
+        onViewInvoice={vi.fn()}
+      />,
+    );
+
+    // Khách nhận phòng trễ hơn dự kiến: phải hiện mốc check-in thật sự
+    // (check_in_at), không phải ngày dự kiến ban đầu (scheduled_checkin).
+    expect(screen.getByText("21:45 24/07/2026")).toBeTruthy();
+    expect(screen.queryByText("23/07/2026")).toBeNull();
+  });
+
   it("disables the invoice button while an invoice request is in flight", () => {
     const onViewInvoice = vi.fn();
 
