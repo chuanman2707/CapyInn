@@ -302,16 +302,17 @@ describe("Reservations date navigation", () => {
     render(<Reservations />);
 
     await screen.findByTestId("timeline-range-label");
+    const initialLabel = screen.getByTestId("timeline-range-label").textContent;
     expect(screen.queryByRole("button", { name: /hôm nay/i })).toBeNull();
 
     await user.click(screen.getByRole("button", { name: /tuần sau/i }));
     const todayButton = screen.getByRole("button", { name: /hôm nay/i });
-    const shifted = screen.getByTestId("timeline-range-label").textContent;
+    expect(todayButton).toBeTruthy();
 
     await user.click(todayButton);
 
     expect(screen.queryByRole("button", { name: /hôm nay/i })).toBeNull();
-    expect(screen.getByTestId("timeline-range-label").textContent).not.toBe(shifted);
+    expect(screen.getByTestId("timeline-range-label").textContent).toBe(initialLabel);
   });
 
   it("keeps the today marker when today is still inside the range after paging back", async () => {
