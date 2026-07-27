@@ -683,8 +683,8 @@ pub async fn set_batch_verified(
     set_batch_outcome(pool, batch_id, "verified", seen).await
 }
 
-/// Cổng nhận thiếu hoặc không nhận. §5.3: không cần code hoàn tác — lô hỏng
-/// không còn entry `verified` nào nên khách tự quay lại trạng thái chưa khai.
+/// Cổng nhận thiếu hoặc không nhận. Khách vẫn nằm ngoài danh sách chờ (tránh
+/// ghi vào hai file xuất khác nhau), cần `kbtt_reopen_batch` để quay lại.
 pub async fn set_batch_failed(
     pool: &Pool<Sqlite>,
     batch_id: &str,
