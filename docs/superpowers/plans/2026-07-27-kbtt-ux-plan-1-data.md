@@ -92,18 +92,12 @@ git commit -m "refactor(db): single SCHEMA_VERSION constant for test asserts"
         .await
         .expect("seeds orphan");
 
-        // Migration đã chạy trong seeded_pool — chạy hàm backfill trực tiếp để
-        // mô phỏng nâng cấp (idempotent nhờ NOT EXISTS).
-        sqlx::query(
-            "INSERT INTO declaration_link (id, identity_id, stay_id, stay_reason, created_at)
-             SELECT lower(hex(randomblob(16))), di.id, NULL, '1', di.created_at
-               FROM declaration_identity di
-              WHERE di.redacted_at IS NULL
-                AND NOT EXISTS (SELECT 1 FROM declaration_link dl WHERE dl.identity_id = di.id)",
-        )
-        .execute(&pool)
-        .await
-        .expect("backfill giống migration");
+        // Gọi ĐÚNG hàm production, không chép SQL sang test — chép thì test chỉ
+        // chứng minh SQLite chạy được, không chứng minh migration đúng.
+        // Hàm idempotent nhờ NOT EXISTS nên gọi lại sau migration là hợp lệ.
+        super::backfill_orphan_identities(&pool)
+            .await
+            .expect("backfill chạy lại được");
 
         let links: i64 = sqlx::query_scalar(
             "SELECT COUNT(*) FROM declaration_link WHERE identity_id = 'orphan-1' AND stay_id IS NULL",
@@ -162,12 +156,24 @@ Sau `migrate_v21_optional_stay`:
 ///
 /// Đây là bảng của riêng module này — luật "không migrate PMS" không bị đụng.
 pub(super) async fn migrate_v22_conveyor(pool: &Pool<Sqlite>) -> Result<(), sqlx::Error> {
-    let mut tx = pool.begin().await?;
-
     sqlx::query("ALTER TABLE declaration_link ADD COLUMN held_at TEXT")
-        .execute(&mut *tx)
+        .execute(pool)
         .await?;
 
+    backfill_orphan_identities(pool).await?;
+
+    let mut tx = pool.begin().await?;
+    set_schema_version(&mut tx, 22).await?;
+    tx.commit().await?;
+    Ok(())
+}
+
+/// Tạo link mặc định cho mọi danh tính chưa có link nào.
+///
+/// Tách khỏi `migrate_v22_conveyor` để test gọi được đúng code production:
+/// bản thân migration không chạy lại được (ALTER lần hai báo trùng cột), còn
+/// hàm này idempotent nhờ `NOT EXISTS`.
+pub(crate) async fn backfill_orphan_identities(pool: &Pool<Sqlite>) -> Result<(), sqlx::Error> {
     sqlx::query(
         "INSERT INTO declaration_link (id, identity_id, stay_id, stay_reason, created_at)
          SELECT lower(hex(randomblob(16))), di.id, NULL, '1', di.created_at
@@ -175,27 +181,24 @@ pub(super) async fn migrate_v22_conveyor(pool: &Pool<Sqlite>) -> Result<(), sqlx
           WHERE di.redacted_at IS NULL
             AND NOT EXISTS (SELECT 1 FROM declaration_link dl WHERE dl.identity_id = di.id)",
     )
-    .execute(&mut *tx)
+    .execute(pool)
     .await?;
-
-    set_schema_version(&mut tx, 22).await?;
-    tx.commit().await?;
     Ok(())
 }
 ```
 
 - [ ] **Step 4: Đăng ký trong `db.rs`**
 
-Sau khối `if current < 21 { ... }`:
+Sau khối `if current < 21 { ... }` (file KHÔNG gán lại `current` giữa các khối — theo đúng pattern hiện có):
 
 ```rust
+    // -- V22: băng chuyền một chiều — held_at + backfill danh tính mồ côi --
     if current < 22 {
         declaration::migrate_v22_conveyor(pool).await?;
-        current = 22;
     }
 ```
 
-(Nếu các khối trước không gán `current`, theo đúng pattern hiện có của file.) Và bump:
+Và bump:
 
 ```rust
 pub(crate) const SCHEMA_VERSION: i32 = 22;
