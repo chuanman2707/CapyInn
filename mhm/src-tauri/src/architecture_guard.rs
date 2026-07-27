@@ -191,7 +191,7 @@ fn command_layer_imports_sees_through_a_nested_use_block() {
 /// emptying it. The test fails both when an unlisted command module grows SQL
 /// *and* when a listed one is cleaned up without being struck off, so the list
 /// cannot quietly rot.
-const COMMANDS_STILL_HOLDING_SQL: [&str; 9] = [
+const COMMANDS_STILL_HOLDING_SQL: [&str; 8] = [
     "commands/agent_settings.rs",
     "commands/analytics.rs",
     "commands/auth.rs",
@@ -200,7 +200,6 @@ const COMMANDS_STILL_HOLDING_SQL: [&str; 9] = [
     "commands/guests.rs",
     "commands/invoices.rs",
     "commands/pricing.rs",
-    "commands/rooms.rs",
 ];
 
 #[test]
