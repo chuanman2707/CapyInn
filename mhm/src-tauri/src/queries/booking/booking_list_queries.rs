@@ -163,6 +163,38 @@ mod tests {
         pool
     }
 
+    #[tokio::test]
+    async fn a_status_string_cannot_reach_the_sql() {
+        let pool = seeded_pool().await;
+
+        // The module doc claims the caller's string selects a branch and never
+        // reaches the SQL. This is that claim as evidence rather than prose: a
+        // payload that would be devastating if concatenated returns the
+        // unfiltered list, because it simply fails to match any branch.
+        for payload in [
+            "' OR 1=1 --",
+            "active'; DROP TABLE bookings; --",
+            "\u{0}active",
+        ] {
+            assert_eq!(
+                status_clause(payload),
+                None,
+                "payload matched a branch: {payload}"
+            );
+
+            let bookings = load_bookings_with_guest(&pool, filter(Some(payload), None, None))
+                .await
+                .expect("an unmatched status must not error");
+            assert_eq!(bookings.len(), 3, "payload changed the result: {payload}");
+        }
+
+        let still_there: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM bookings")
+            .fetch_one(&pool)
+            .await
+            .expect("count bookings");
+        assert_eq!(still_there.0, 3, "the bookings table survived");
+    }
+
     #[test]
     fn status_clause_translates_the_ui_vocabulary_and_ignores_the_unknown() {
         assert_eq!(status_clause("active"), Some(" AND b.status = 'active'"));

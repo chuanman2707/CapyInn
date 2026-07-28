@@ -90,7 +90,7 @@ pub async fn load_group_detail(
 
 /// The arithmetic half of `load_group_detail`, kept separate so the totals can
 /// be checked without a database.
-fn total_group_detail(
+pub(crate) fn total_group_detail(
     group: BookingGroup,
     bookings: Vec<BookingWithGuest>,
     services: Vec<GroupService>,
@@ -159,5 +159,123 @@ fn map_group_service(row: &sqlx::sqlite::SqliteRow) -> GroupService {
         note: row.get("note"),
         created_by: row.get("created_by"),
         created_at: row.get("created_at"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::total_group_detail;
+    use crate::models::{BookingGroup, BookingWithGuest, GroupService};
+
+    fn group() -> BookingGroup {
+        BookingGroup {
+            id: "GRP-1".to_string(),
+            group_name: "Đoàn Hà Nội".to_string(),
+            master_booking_id: None,
+            organizer_name: "Nguyen Van A".to_string(),
+            organizer_phone: Some("0901234567".to_string()),
+            total_rooms: 2,
+            status: "active".to_string(),
+            notes: None,
+            created_by: Some("user-1".to_string()),
+            created_at: "2026-04-01T00:00:00+07:00".to_string(),
+        }
+    }
+
+    fn booking(id: &str, total_price: i64, paid_amount: i64) -> BookingWithGuest {
+        BookingWithGuest {
+            id: id.to_string(),
+            room_id: "101".to_string(),
+            room_name: "Room 101".to_string(),
+            guest_name: "Guest".to_string(),
+            check_in_at: "2026-04-10T14:00:00+07:00".to_string(),
+            expected_checkout: "2026-04-12T12:00:00+07:00".to_string(),
+            actual_checkout: None,
+            nights: 2,
+            total_price,
+            paid_amount,
+            status: "active".to_string(),
+            source: None,
+            booking_type: Some("walk-in".to_string()),
+            deposit_amount: None,
+            scheduled_checkin: None,
+            scheduled_checkout: None,
+            guest_phone: None,
+        }
+    }
+
+    fn service(id: &str, total_price: i64) -> GroupService {
+        GroupService {
+            id: id.to_string(),
+            group_id: "GRP-1".to_string(),
+            booking_id: None,
+            name: "Giặt là".to_string(),
+            quantity: 1,
+            unit_price: total_price,
+            total_price,
+            note: None,
+            created_by: Some("user-1".to_string()),
+            created_at: "2026-04-11T09:00:00+07:00".to_string(),
+        }
+    }
+
+    #[test]
+    fn the_totals_add_rooms_and_services_separately_then_together() {
+        let detail = total_group_detail(
+            group(),
+            vec![booking("B1", 600_000, 200_000), booking("B2", 400_000, 0)],
+            vec![service("S1", 150_000), service("S2", 50_000)],
+        );
+
+        assert_eq!(detail.total_room_cost, 1_000_000);
+        assert_eq!(detail.total_service_cost, 200_000);
+        assert_eq!(detail.grand_total, 1_200_000);
+    }
+
+    #[test]
+    fn paid_amount_counts_room_payments_only_never_services() {
+        // The group invoice's balance_due is grand_total - paid_amount, so a
+        // service payment counted here would under-bill the group. Services
+        // carry no payment field at all; this pins that reading.
+        let detail = total_group_detail(
+            group(),
+            vec![
+                booking("B1", 600_000, 200_000),
+                booking("B2", 400_000, 100_000),
+            ],
+            vec![service("S1", 900_000)],
+        );
+
+        assert_eq!(detail.paid_amount, 300_000, "200k + 100k, the rooms only");
+        assert_eq!(
+            detail.grand_total - detail.paid_amount,
+            1_600_000,
+            "the 900k service is owed, not paid"
+        );
+    }
+
+    #[test]
+    fn an_empty_group_totals_to_zero_rather_than_failing() {
+        let detail = total_group_detail(group(), vec![], vec![]);
+
+        assert_eq!(detail.total_room_cost, 0);
+        assert_eq!(detail.total_service_cost, 0);
+        assert_eq!(detail.grand_total, 0);
+        assert_eq!(detail.paid_amount, 0);
+    }
+
+    #[test]
+    fn the_rows_are_passed_through_untouched() {
+        let detail = total_group_detail(
+            group(),
+            vec![booking("B1", 600_000, 0)],
+            vec![service("S1", 150_000)],
+        );
+
+        assert_eq!(detail.group.id, "GRP-1");
+        assert_eq!(detail.bookings.len(), 1);
+        assert_eq!(detail.bookings[0].id, "B1");
+        assert_eq!(detail.services.len(), 1);
+        assert_eq!(detail.services[0].id, "S1");
     }
 }
