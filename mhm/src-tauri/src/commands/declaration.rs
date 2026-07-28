@@ -189,26 +189,6 @@ pub async fn kbtt_save_identity(
     repo::save_identity_ensuring_link(&state.db, &identity, &source, &confidence).await
 }
 
-/// `stay_id = None` — khai báo chưa gắn phòng. Cổng không bắt buộc cột phòng;
-/// validator vẫn nhắc bằng W01 để không ai quên.
-#[tauri::command]
-pub async fn kbtt_link(
-    state: State<'_, AppState>,
-    identity_id: String,
-    stay_id: Option<String>,
-    stay_reason: String,
-    note: Option<String>,
-) -> Result<String, String> {
-    repo::insert_link(
-        &state.db,
-        &identity_id,
-        stay_id.as_deref().filter(|s| !s.trim().is_empty()),
-        &stay_reason,
-        note.as_deref(),
-    )
-    .await
-}
-
 /// Sửa phòng / lý do tại chỗ trên thẻ khách. `stay_id = None` = chưa xác định phòng.
 #[tauri::command]
 pub async fn kbtt_update_link(
@@ -239,30 +219,6 @@ pub async fn kbtt_update_identity(
     confidence: String,
 ) -> Result<(), String> {
     repo::update_identity(&state.db, &identity_id, &identity, &source, &confidence).await
-}
-
-/// Danh tính đã lưu nhưng chưa ghép — nguồn sự thật là DB, không phải state của
-/// React, nên đổi tab không làm mất.
-#[tauri::command]
-pub async fn kbtt_unlinked_identities(
-    state: State<'_, AppState>,
-) -> Result<Vec<Identity>, String> {
-    repo::list_unlinked_identities(&state.db).await
-}
-
-#[tauri::command]
-pub async fn kbtt_discard_identity(
-    state: State<'_, AppState>,
-    identity_id: String,
-) -> Result<(), String> {
-    repo::delete_unlinked_identity(&state.db, &identity_id).await
-}
-
-/// Gỡ một khai báo đã ghép — ghép nhầm phòng, hoặc ghép trùng. Từ chối nếu nó
-/// đã nằm trong lô đã đối soát.
-#[tauri::command]
-pub async fn kbtt_unlink(state: State<'_, AppState>, link_id: String) -> Result<(), String> {
-    repo::delete_link(&state.db, &link_id).await
 }
 
 /// Xóa hẳn một thẻ khách (scan nhầm / khách không ở). Từ chối nếu đã đối soát.

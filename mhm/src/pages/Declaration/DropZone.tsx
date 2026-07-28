@@ -12,8 +12,8 @@ import IdentityCard from "./IdentityCard";
 import ManualForm from "./ManualForm";
 
 interface DropZoneProps {
-  /** Gọi khi một danh tính đã được lưu, để khối "Cần khai báo" ghép khách. */
-  onIdentitySaved?: (identityId: string, identity: DeclarationIdentity) => void;
+  /** Gọi khi một danh tính đã được lưu, để danh sách khách tự tải lại từ DB. */
+  onIdentitySaved?: () => void;
 }
 
 interface DropPayload {
@@ -87,14 +87,14 @@ export default function DropZone({ onIdentitySaved }: DropZoneProps) {
     if (!card) return;
     setSavingIndex(index);
     try {
-      const identityId = await invokeCommand<string>("kbtt_save_identity", {
+      await invokeCommand<string>("kbtt_save_identity", {
         identity: card.identity,
         source: card.source,
         confidence: card.confidence,
       });
       toast.success("Đã lưu danh tính");
       setCards((prev) => prev.filter((_, i) => i !== index));
-      onIdentitySaved?.(identityId, { ...card.identity, id: identityId });
+      onIdentitySaved?.();
     } catch (e) {
       toast.error(formatAppError(e));
     } finally {
@@ -139,9 +139,9 @@ export default function DropZone({ onIdentitySaved }: DropZoneProps) {
         <div className="mt-4">
           <ManualForm
             onCancel={() => setManualOpen(false)}
-            onSaved={(identityId, identity) => {
+            onSaved={() => {
               setManualOpen(false);
-              onIdentitySaved?.(identityId, identity);
+              onIdentitySaved?.();
             }}
           />
         </div>

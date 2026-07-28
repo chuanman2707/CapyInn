@@ -415,7 +415,7 @@ mod tests {
         crate::declaration::repo::insert_entries(&pool, &batch, std::slice::from_ref(&link))
             .await
             .expect("dòng của lô");
-        crate::declaration::repo::delete_link(&pool, &link)
+        crate::declaration::repo::discard_link(&pool, &link)
             .await
             .expect("lô chưa đối soát thì gỡ được");
 
@@ -459,7 +459,7 @@ mod tests {
             .expect("đối soát");
 
         assert!(
-            crate::declaration::repo::delete_link(&pool, &link)
+            crate::declaration::repo::discard_link(&pool, &link)
                 .await
                 .is_err(),
             "đã đối soát thì không gỡ được"
@@ -564,58 +564,6 @@ mod tests {
             .await
             .expect("đếm link");
         assert_eq!(kept, 1);
-    }
-
-    /// Danh tính vừa trích phải sống sót khi người vận hành đổi tab — nó nằm
-    /// trong DB, và phải có đường đọc ra.
-    #[tokio::test]
-    async fn an_identity_waiting_to_be_linked_can_be_listed_and_discarded() {
-        let pool = seeded_pool().await;
-
-        let identity = crate::declaration::repo::insert_identity(
-            &pool,
-            &crate::declaration::model::Identity {
-                full_name: "Phạm Thị Minh Hiền".into(),
-                nationality_iso3: "VNM".into(),
-                ..Default::default()
-            },
-            "qr_cccd",
-            "verified",
-        )
-        .await
-        .expect("lưu được danh tính");
-
-        let waiting = crate::declaration::repo::list_unlinked_identities(&pool)
-            .await
-            .expect("đọc được danh sách chờ");
-        assert_eq!(waiting.len(), 1);
-        assert_eq!(waiting[0].full_name, "Phạm Thị Minh Hiền");
-
-        // Ghép xong thì biến khỏi danh sách chờ.
-        let link = crate::declaration::repo::insert_link(&pool, &identity, None, "1", None)
-            .await
-            .expect("ghép được");
-        assert!(crate::declaration::repo::list_unlinked_identities(&pool)
-            .await
-            .expect("đọc lại")
-            .is_empty());
-
-        // Đã ghép rồi thì không xóa thẳng được — đó là bằng chứng đã khai.
-        assert!(
-            crate::declaration::repo::delete_unlinked_identity(&pool, &identity)
-                .await
-                .is_err(),
-            "danh tính đã ghép phải đi đường thu hồi, không xóa thẳng"
-        );
-
-        sqlx::query("DELETE FROM declaration_link WHERE id = ?")
-            .bind(&link)
-            .execute(&pool)
-            .await
-            .expect("gỡ link để thử xóa");
-        crate::declaration::repo::delete_unlinked_identity(&pool, &identity)
-            .await
-            .expect("chưa ghép thì xóa được");
     }
 
     /// §5.2 — stay_id KHÔNG có FK cứng tới `bookings`. Xóa một booking trong

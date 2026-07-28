@@ -108,10 +108,9 @@ export default function GuestList({ reloadKey, onStateChange }: GuestListProps) 
 
   useEffect(() => {
     onStateChange({ rows, findings, checkFailed, uncheckedLinkIds });
-    // onStateChange của cha không stable — cùng lý do với PendingList cũ
-    // (xem PendingList.tsx: "onRowsChange intentionally omitted: parent
-    // callbacks are not stable"). Không đưa vào deps để tránh chạy lại effect
-    // này mỗi lần cha re-render.
+    // onStateChange của cha không stable ("onRowsChange intentionally
+    // omitted: parent callbacks are not stable"). Không đưa vào deps để
+    // tránh chạy lại effect này mỗi lần cha re-render.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [rows, findings, checkFailed, uncheckedLinkIds]);
 

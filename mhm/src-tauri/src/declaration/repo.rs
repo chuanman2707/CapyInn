@@ -453,51 +453,6 @@ pub async fn update_link(
     Ok(())
 }
 
-/// Gỡ một khai báo khỏi danh sách chờ.
-///
-/// Người vận hành ghép nhầm phòng, hoặc ghép trùng, thì phải có đường lùi —
-/// không có nó, một dòng thừa chặn E14 vĩnh viễn và cả lô không xuất được.
-///
-/// Đã nằm trong lô ĐÃ ĐỐI SOÁT thì từ chối: đó là bằng chứng khách này đã được
-/// khai lên cổng, xóa đi là mất dấu vết. Lô chưa đối soát (`exported`) thì gỡ
-/// được — file xuất ra vẫn còn trên đĩa, và lô sẽ tự lệch số khi đối soát.
-pub async fn delete_link(pool: &Pool<Sqlite>, link_id: &str) -> Result<(), String> {
-    if link_is_declared(pool, link_id).await? {
-        return Err(
-            "Khai báo này đã nằm trong một lô đã đối soát — không gỡ được, vì đó là bằng chứng đã khai."
-                .into(),
-        );
-    }
-
-    let mut tx = pool
-        .begin()
-        .await
-        .map_err(|e| format!("Không mở được giao dịch: {e}"))?;
-
-    // Entry của lô chưa đối soát phải đi trước — declaration_entry.link_id có FK.
-    sqlx::query("DELETE FROM declaration_entry WHERE link_id = ?")
-        .bind(link_id)
-        .execute(&mut *tx)
-        .await
-        .map_err(|e| format!("Không gỡ được dòng khỏi lô: {e}"))?;
-
-    let affected = sqlx::query("DELETE FROM declaration_link WHERE id = ?")
-        .bind(link_id)
-        .execute(&mut *tx)
-        .await
-        .map_err(|e| format!("Không gỡ được khai báo: {e}"))?
-        .rows_affected();
-
-    tx.commit()
-        .await
-        .map_err(|e| format!("Không lưu được thay đổi: {e}"))?;
-
-    if affected == 0 {
-        return Err("Không tìm thấy khai báo cần gỡ.".into());
-    }
-    Ok(())
-}
-
 /// "Xóa" trên thẻ khách: gỡ link, và nếu danh tính không còn link nào khác thì
 /// xóa luôn danh tính — không để lại bản ghi mồ côi vô hình.
 pub async fn discard_link(pool: &Pool<Sqlite>, link_id: &str) -> Result<(), String> {
@@ -563,73 +518,6 @@ pub async fn set_link_held(pool: &Pool<Sqlite>, link_id: &str, held: bool) -> Re
         .rows_affected();
     if affected == 0 {
         return Err("Không tìm thấy khai báo.".into());
-    }
-    Ok(())
-}
-
-/// Danh tính đã lưu nhưng chưa ghép vào lượt lưu trú nào.
-///
-/// Tồn tại vì trước đây danh tính vừa trích chỉ sống trong `useState` của màn
-/// khai báo: đổi sang tab khác là component bị hủy và người vận hành tưởng mất
-/// dữ liệu, trong khi bản ghi vẫn nằm yên trong DB, không đường nào lấy ra.
-/// Nguồn sự thật là DB, không phải state của React.
-pub async fn list_unlinked_identities(pool: &Pool<Sqlite>) -> Result<Vec<Identity>, String> {
-    let rows = sqlx::query(
-        "SELECT id, full_name, dob, gender, nationality_iso3, doc_type_code, doc_type_source,
-                doc_type_name, doc_no, phone, residence_status, address_detail, passport_no,
-                passport_expiry, visa_valid_until, name_confirmed_by_human, single_token_name_ok
-           FROM declaration_identity di
-          WHERE di.redacted_at IS NULL
-            AND NOT EXISTS (SELECT 1 FROM declaration_link dl WHERE dl.identity_id = di.id)
-          ORDER BY di.created_at",
-    )
-    .fetch_all(pool)
-    .await
-    .map_err(|e| format!("Không đọc được danh tính chờ ghép: {e}"))?;
-
-    Ok(rows
-        .iter()
-        .map(|r| Identity {
-            id: r.get("id"),
-            full_name: r.get("full_name"),
-            dob: r.get("dob"),
-            gender: r.get("gender"),
-            nationality_iso3: r.get("nationality_iso3"),
-            doc_type_code: r.get("doc_type_code"),
-            doc_type_source: r.get("doc_type_source"),
-            doc_type_name: r.get("doc_type_name"),
-            doc_no: r.get("doc_no"),
-            phone: r.get("phone"),
-            residence_status: r.get("residence_status"),
-            address_detail: r.get("address_detail"),
-            passport_no: r.get("passport_no"),
-            passport_expiry: r.get("passport_expiry"),
-            visa_valid_until: r.get("visa_valid_until"),
-            name_confirmed_by_human: r.get::<i64, _>("name_confirmed_by_human") != 0,
-            single_token_name_ok: r.get::<i64, _>("single_token_name_ok") != 0,
-        })
-        .collect())
-}
-
-/// Xóa một danh tính chưa ghép — người vận hành bỏ ảnh quét nhầm.
-///
-/// Chỉ xóa được khi chưa có link nào trỏ tới: đã ghép thì đó là bằng chứng đã
-/// khai báo, phải đi đường thu hồi (§12.5) chứ không xóa thẳng.
-pub async fn delete_unlinked_identity(pool: &Pool<Sqlite>, identity_id: &str) -> Result<(), String> {
-    let affected = sqlx::query(
-        "DELETE FROM declaration_identity
-          WHERE id = ?
-            AND NOT EXISTS (SELECT 1 FROM declaration_link dl WHERE dl.identity_id = ?)",
-    )
-    .bind(identity_id)
-    .bind(identity_id)
-    .execute(pool)
-    .await
-    .map_err(|e| format!("Không xóa được danh tính: {e}"))?
-    .rows_affected();
-
-    if affected == 0 {
-        return Err("Danh tính đã được ghép vào một lượt lưu trú — không xóa thẳng được.".into());
     }
     Ok(())
 }
@@ -789,7 +677,7 @@ pub async fn set_batch_failed(
 /// sách vì cả hai đều đã xong việc.
 ///
 /// Đọc trạng thái rồi xóa+cập nhật nằm chung một `pool.begin()` (như
-/// `delete_link` / `discard_link`): nếu tách câu lệnh, một lượt đối soát chen
+/// `discard_link`): nếu tách câu lệnh, một lượt đối soát chen
 /// vào giữa có thể chốt lô này `verified` ngay sau khi ta vừa đọc "failed", và
 /// các câu ghi đứng riêng sẽ xóa mất entry của một lô giờ đã là bằng chứng đã
 /// khai. Gộp chung transaction thì SQLite giữ nguyên ảnh chụp lúc đọc cho tới
@@ -1659,9 +1547,9 @@ mod tests {
     /// `insert_link` tự nó (không qua `save_identity_ensuring_link`) phải trả
     /// về đúng link VỪA TẠO khi một danh tính đang giữ hai link cùng
     /// `stay_id NULL` (một đã verified, một vừa ghi) — không phải link cũ đã
-    /// khai xong. `kbtt_link` dùng thẳng giá trị `insert_link` trả về để ghép
-    /// lượt lưu trú, nên trả nhầm link cũ nghĩa là ghép nhầm phòng cho một
-    /// khai báo đã đóng.
+    /// khai xong. `save_identity_ensuring_link` dùng thẳng giá trị `insert_link`
+    /// trả về để ghép lượt lưu trú, nên trả nhầm link cũ nghĩa là ghép nhầm
+    /// phòng cho một khai báo đã đóng.
     #[tokio::test]
     async fn insert_link_returns_the_freshly_created_link_not_the_already_declared_one() {
         let pool = pool().await;
@@ -1778,7 +1666,7 @@ mod tests {
         assert_eq!(kept, 1, "danh tính của lượt đã khai phải còn");
     }
 
-    /// Đã đối soát = bằng chứng — từ chối xóa (luật cũ của delete_link giữ nguyên).
+    /// Đã đối soát = bằng chứng — từ chối xóa.
     #[tokio::test]
     async fn a_reconciled_card_refuses_to_be_discarded() {
         let pool = pool().await;
