@@ -18,10 +18,16 @@ const fetchRooms = vi.hoisted(() => vi.fn());
 const openInvoice = vi.hoisted(() => vi.fn());
 const closeInvoice = vi.hoisted(() => vi.fn());
 const resetAvailability = vi.hoisted(() => vi.fn());
-// A stable reference, like the real Zustand store returns — recreating this
-// array on every render would spuriously refire the room-reload effect that
-// depends on it and clobber whatever guest count the user just typed.
-const rooms = vi.hoisted(() => [
+// The real Zustand store is NOT always a stable reference: fetchRooms() does
+// `set({ rooms })` with a brand-new array from a fresh `invoke("get_rooms")`
+// call, and it's wired up to fire on unrelated events (any "db-updated" event,
+// the MCP agent booking path, etc — see useHotelStore.ts / RuntimeStateProvider).
+// ORIGINAL_ROOMS is an immutable snapshot; `rooms` is what the mocked hook
+// currently returns. Tests reassign `rooms` to model either case:
+//   - untouched (same reference across renders), or
+//   - `ORIGINAL_ROOMS.map((r) => ({ ...r }))` (new array, new room objects,
+//     equal contents — exactly what a fetchRooms() refresh produces).
+const ORIGINAL_ROOMS = vi.hoisted(() => [
   {
     id: "R101",
     name: "R101",
@@ -34,7 +40,20 @@ const rooms = vi.hoisted(() => [
     extra_person_fee: 50000,
     status: "vacant",
   },
+  {
+    id: "R102",
+    name: "R102",
+    type: "deluxe",
+    room_type: "deluxe",
+    floor: 2,
+    has_balcony: true,
+    base_price: 800000,
+    max_guests: 5,
+    extra_person_fee: 80000,
+    status: "vacant",
+  },
 ]);
+let rooms = ORIGINAL_ROOMS;
 
 vi.mock("@tauri-apps/api/core", () => ({
   invoke,
@@ -115,6 +134,7 @@ describe("ReservationSheet", () => {
     invoke.mockResolvedValue(undefined);
     invokeWriteCommand.mockResolvedValue(undefined);
     createCorrelationId.mockReturnValue("COR-5E6F7A8B");
+    rooms = ORIGINAL_ROOMS;
   });
 
   it("uses invokeWriteCommand with scrubbed monitoring context for the create flow", async () => {
@@ -389,5 +409,47 @@ describe("ReservationSheet", () => {
         expect.anything(),
       );
     });
+  });
+
+  it("đổi sang phòng khác thì nạp lại số khách theo phòng mới, dù đã gõ tay số khác", async () => {
+    render(<ReservationSheet open onOpenChange={vi.fn()} />);
+
+    fireEvent.change(screen.getByLabelText(/^phòng$/i), { target: { value: "R101" } });
+
+    const guests = screen.getByLabelText(/số khách/i) as HTMLInputElement;
+    await waitFor(() => expect(guests.value).toBe("2"));
+
+    // Người dùng gõ tay một số khách khác với max_guests của phòng đang chọn.
+    fireEvent.change(guests, { target: { value: "9" } });
+    expect(guests.value).toBe("9");
+
+    // Đổi sang phòng khác — đây LÀ một lựa chọn phòng mới của người dùng,
+    // nên số khách phải được nạp lại theo phòng mới (ghi đè số đã gõ tay).
+    fireEvent.change(screen.getByLabelText(/^phòng$/i), { target: { value: "R102" } });
+
+    await waitFor(() => expect(guests.value).toBe("5"));
+  });
+
+  it("một fetchRooms() không liên quan (mảng rooms mới, cùng dữ liệu) không được xoá số khách đã gõ tay", async () => {
+    const { rerender } = render(<ReservationSheet open onOpenChange={vi.fn()} />);
+
+    fireEvent.change(screen.getByLabelText(/^phòng$/i), { target: { value: "R101" } });
+
+    const guests = screen.getByLabelText(/số khách/i) as HTMLInputElement;
+    await waitFor(() => expect(guests.value).toBe("2"));
+
+    // Người dùng gõ tay một số khách khác với max_guests của phòng đang chọn.
+    fireEvent.change(guests, { target: { value: "9" } });
+    expect(guests.value).toBe("9");
+
+    // Mô phỏng đúng những gì fetchRooms() thật làm khi một sự kiện không liên
+    // quan xảy ra ở nơi khác (dọn phòng khác, checkout phòng khác, AI agent
+    // đặt một phòng khác...): store trả về một mảng rooms MỚI (identity mới)
+    // nhưng cùng nội dung — roomId đang chọn không đổi.
+    rooms = ORIGINAL_ROOMS.map((r) => ({ ...r }));
+    rerender(<ReservationSheet open onOpenChange={vi.fn()} />);
+
+    const guestsAfterRefresh = screen.getByLabelText(/số khách/i) as HTMLInputElement;
+    expect(guestsAfterRefresh.value).toBe("9");
   });
 });
