@@ -160,6 +160,46 @@ async fn room_price_preview_matches_what_the_reservation_will_be_charged() {
     assert_eq!(preview.breakdown[1].label, "Phụ thu 2 khách");
 }
 
+/// Two rooms of the same type with different surcharges. The room-keyed
+/// preview must quote the room actually asked for, not whichever same-type
+/// row a bare `LIMIT 1` would happen to return.
+///
+/// `R339` is seeded first so it lands on the lower rowid: `rooms` has no
+/// index on `type`, so `WHERE LOWER(type) = ? LIMIT 1` (the type-keyed query)
+/// resolves via a full table scan in rowid order and would return `R339` —
+/// not `R340`, the room the preview is actually for. If the room-keyed loader
+/// were ever swapped to the type-keyed query, this test would silently start
+/// quoting `R339`'s surcharge for a preview requested against `R340`.
+#[tokio::test]
+async fn room_price_preview_uses_its_own_rooms_surcharge_not_a_same_type_sibling() {
+    let pool = test_pool().await;
+    seed_room_with_guest_pricing(&pool, "R339", 500_000, 2, 900_000)
+        .await
+        .unwrap();
+    seed_room_with_guest_pricing(&pool, "R340", 500_000, 2, 50_000)
+        .await
+        .unwrap();
+
+    let preview = pricing_service::calculate_room_price_preview(
+        &pool,
+        "R340",
+        "2026-08-06",
+        "2026-08-08",
+        "nightly",
+        Some(4),
+    )
+    .await
+    .unwrap();
+
+    // base: 500_000 * 2 nights = 1_000_000
+    // surcharge: R340's own 50_000/night/extra-guest * 2 extra guests * 2 nights = 200_000
+    // If R339's 900_000 fee leaked in instead, surcharge would be 3_600_000 and total 4_600_000.
+    assert_eq!(preview.total, 1_200_000);
+    assert_eq!(preview.breakdown.len(), 2);
+    assert_eq!(preview.breakdown[1].label, "Phụ thu 2 khách");
+    assert_eq!(preview.breakdown[1].amount, 200_000);
+}
+
 #[tokio::test]
 async fn calculate_stay_price_tx_reads_uncommitted_special_date() {
     let pool = test_pool().await;
