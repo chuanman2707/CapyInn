@@ -1,6 +1,8 @@
 import { useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
 
+import Modal from "@/components/ui/Modal";
+import { Button } from "@/components/ui/button";
 import { invokeCommand } from "@/lib/invokeCommand";
 import type {
   DeclarationFinding,
@@ -53,6 +55,11 @@ export default function GuestCard({ row, stays, findings, onChanged }: GuestCard
   const [editing, setEditing] = useState(false);
   const [busy, setBusy] = useState(false);
   const [noteDraft, setNoteDraft] = useState(row.stay_reason_note ?? "");
+  // FINDING E: "Xóa" xóa VĨNH VIỄN — batch entries, liên kết, và cả dòng
+  // danh tính — không như "Gác lại" (chỉ tạm giấu, đưa lại được). Hai nút
+  // này đứng cách nhau vài pixel trong cùng một dòng chữ xám nhỏ; một cú
+  // bấm nhầm không được phép xóa thẳng, phải hỏi lại và nêu đích danh khách.
+  const [confirmingDiscard, setConfirmingDiscard] = useState(false);
   // FINDING C1: E16 ("chưa chọn phòng") trỏ vào chính ô Phòng trên thẻ này,
   // không mở ManualForm — form đó không có ô ngày đến/ngày đi nào để sửa,
   // vì hai ngày đó đến từ lượt lưu trú chứ không phải danh tính.
@@ -292,11 +299,46 @@ export default function GuestCard({ row, stays, findings, onChanged }: GuestCard
           disabled={busy}
           aria-label={`Xóa ${row.full_name}`}
           className="text-slate-400 underline hover:text-red-600"
-          onClick={() => void call(() => invokeCommand<void>("kbtt_discard", { linkId: row.link_id }))}
+          onClick={() => setConfirmingDiscard(true)}
         >
           Xóa
         </button>
       </div>
+
+      {confirmingDiscard && (
+        <Modal title="Xóa khách này">
+          <div className="space-y-4">
+            <p className="text-sm text-slate-600">
+              Xóa <strong>{row.full_name}</strong> khỏi hệ thống — xóa cả liên
+              kết lưu trú lẫn dòng danh tính, không khôi phục lại được. Khác
+              với &quot;Gác lại&quot; (chỉ tạm giấu, đưa lại được), việc này
+              là vĩnh viễn.
+            </p>
+            <div className="flex justify-end gap-2">
+              <Button
+                type="button"
+                variant="outline"
+                onClick={() => setConfirmingDiscard(false)}
+              >
+                Hủy
+              </Button>
+              <Button
+                type="button"
+                variant="destructive"
+                aria-label={`Xác nhận xóa vĩnh viễn ${row.full_name}`}
+                onClick={() => {
+                  setConfirmingDiscard(false);
+                  void call(() =>
+                    invokeCommand<void>("kbtt_discard", { linkId: row.link_id }),
+                  );
+                }}
+              >
+                Xóa vĩnh viễn
+              </Button>
+            </div>
+          </div>
+        </Modal>
+      )}
     </div>
   );
 }

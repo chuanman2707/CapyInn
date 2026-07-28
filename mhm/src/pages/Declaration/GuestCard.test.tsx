@@ -92,10 +92,51 @@ describe("GuestCard", () => {
     );
   });
 
-  it("Xóa gọi kbtt_discard", async () => {
+  // FINDING E: "Xóa" xóa vĩnh viễn cả liên kết lẫn danh tính — nó nằm cách
+  // "Gác lại" vài pixel trong cùng dòng chữ xám nhỏ. Một cú bấm nhầm không
+  // được phép xóa thẳng; phải xác nhận, và câu xác nhận phải nêu đích danh
+  // khách để người vận hành biết chắc mình đang xóa ai.
+  it("Xóa hỏi xác nhận nêu tên khách trước, không gọi kbtt_discard ngay", () => {
     invokeCommand.mockResolvedValue(undefined);
     render(<GuestCard row={row()} stays={stays} findings={[]} onChanged={() => {}} />);
-    fireEvent.click(screen.getByRole("button", { name: /xóa/i }));
+    fireEvent.click(screen.getByRole("button", { name: /xóa nguyễn văn a/i }));
+
+    expect(invokeCommand).not.toHaveBeenCalledWith(
+      "kbtt_discard",
+      expect.anything(),
+    );
+    expect(screen.getAllByText(/Nguyễn Văn A/).length).toBeGreaterThan(0);
+    expect(
+      screen.getByRole("button", { name: /^hủy$/i }),
+    ).toBeTruthy();
+    expect(
+      screen.getByRole("button", { name: /xác nhận xóa vĩnh viễn nguyễn văn a/i }),
+    ).toBeTruthy();
+  });
+
+  it("Xóa: bấm Hủy trong hộp xác nhận thì không xóa gì cả", () => {
+    invokeCommand.mockResolvedValue(undefined);
+    render(<GuestCard row={row()} stays={stays} findings={[]} onChanged={() => {}} />);
+    fireEvent.click(screen.getByRole("button", { name: /xóa nguyễn văn a/i }));
+    fireEvent.click(screen.getByRole("button", { name: /^hủy$/i }));
+
+    expect(invokeCommand).not.toHaveBeenCalledWith(
+      "kbtt_discard",
+      expect.anything(),
+    );
+    // Hộp xác nhận đã đóng.
+    expect(screen.queryByRole("button", { name: /^hủy$/i })).toBeNull();
+  });
+
+  it("Xóa: xác nhận trong hộp thoại mới thật sự gọi kbtt_discard", async () => {
+    invokeCommand.mockResolvedValue(undefined);
+    render(<GuestCard row={row()} stays={stays} findings={[]} onChanged={() => {}} />);
+    fireEvent.click(screen.getByRole("button", { name: /xóa nguyễn văn a/i }));
+
+    fireEvent.click(
+      screen.getByRole("button", { name: /xác nhận xóa vĩnh viễn nguyễn văn a/i }),
+    );
+
     await waitFor(() =>
       expect(invokeCommand).toHaveBeenCalledWith("kbtt_discard", { linkId: "l1" }),
     );
