@@ -106,30 +106,52 @@ mod tests {
         );
     }
 
-    #[test]
-    fn equally_sized_floors_break_the_tie_by_floor_number() {
-        let rooms = vec![
-            room("301", 3),
-            room("302", 3),
-            room("101", 1),
-            room("102", 1),
-        ];
-
-        // Input order puts floor 3 first; the answer must not depend on that.
-        assert_eq!(ids(&rooms, 2), vec!["101", "102"]);
+    /// Six floors of one room each — all tied, so every one of them is a
+    /// candidate and the answer is decided purely by the tie-break.
+    ///
+    /// Six rather than two on purpose. With two tied floors a hash-ordered
+    /// grouping returns the right answer half the time, so a two-floor test
+    /// only catches the historical `HashMap` bug on a coin flip. Six makes a
+    /// wrong order overwhelmingly likely to be seen.
+    fn six_tied_floors() -> Vec<Room> {
+        // Input order is deliberately not ascending: the answer must come from
+        // the tie-break, not from the order rooms happened to arrive in.
+        [4, 1, 6, 3, 5, 2]
+            .into_iter()
+            .map(|floor| room(&format!("{floor}01"), floor))
+            .collect()
     }
 
     #[test]
-    fn the_same_input_always_gives_the_same_answer() {
-        // Enough distinct equal-sized floors that a hash-ordered grouping would
-        // reorder them across runs.
-        let rooms: Vec<_> = (1..=8).flat_map(|f| [room(&format!("{f}01"), f)]).collect();
+    fn equally_sized_floors_break_the_tie_by_floor_number() {
+        assert_eq!(
+            ids(&six_tied_floors(), 3),
+            vec!["101", "201", "301"],
+            "all six floors are tied, so the lowest three win"
+        );
+    }
 
-        let first = ids(&rooms, 3);
-        for _ in 0..25 {
-            assert_eq!(ids(&rooms, 3), first);
+    #[test]
+    fn the_answer_does_not_depend_on_the_order_the_rooms_arrive_in() {
+        // The historical bug was an order the caller could not see or control.
+        // Feeding the same set in several different orders is what a caller can
+        // actually vary, and every permutation must land on the same rooms.
+        let expected = vec!["101", "201", "301"];
+        let mut rooms = six_tied_floors();
+
+        for _ in 0..rooms.len() {
+            rooms.rotate_left(1);
+            assert_eq!(ids(&rooms, 3), expected, "rotated input changed the answer");
         }
-        assert_eq!(first, vec!["101", "201", "301"]);
+
+        rooms.reverse();
+        assert_eq!(
+            ids(&rooms, 3),
+            expected,
+            "reversed input changed the answer"
+        );
+        rooms.sort_by_key(|room| room.floor);
+        assert_eq!(ids(&rooms, 3), expected, "sorted input changed the answer");
     }
 
     #[test]

@@ -145,3 +145,111 @@ pub async fn count_rooms_with_type(
 
     Ok(count.0)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::load_vacant_rooms;
+    use sqlx::{sqlite::SqlitePoolOptions, Pool, Sqlite};
+
+    /// Rooms are inserted in an order that is neither by floor nor by id, so a
+    /// missing `ORDER BY` would show up as the insertion order leaking through.
+    async fn seeded_pool() -> Pool<Sqlite> {
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .expect("connect in-memory sqlite");
+        crate::db::run_migrations(&pool)
+            .await
+            .expect("run migrations");
+
+        for (id, floor, room_type, status) in [
+            ("305", 3, "deluxe", "vacant"),
+            ("101", 1, "standard", "vacant"),
+            ("204", 2, "standard", "occupied"),
+            ("201", 2, "deluxe", "vacant"),
+            ("102", 1, "deluxe", "vacant"),
+            ("301", 3, "standard", "cleaning"),
+        ] {
+            sqlx::query(
+                "INSERT INTO rooms (id, name, type, floor, has_balcony, base_price,
+                                    max_guests, extra_person_fee, status)
+                 VALUES (?, ?, ?, ?, 0, 300000, 2, 0, ?)",
+            )
+            .bind(id)
+            .bind(format!("Room {id}"))
+            .bind(room_type)
+            .bind(floor)
+            .bind(status)
+            .execute(&pool)
+            .await
+            .expect("seed room");
+        }
+
+        pool
+    }
+
+    async fn vacant_ids(pool: &Pool<Sqlite>, room_type: Option<&str>) -> Vec<String> {
+        load_vacant_rooms(pool, room_type)
+            .await
+            .expect("load vacant rooms")
+            .into_iter()
+            .map(|room| room.id)
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn only_vacant_rooms_come_back() {
+        let pool = seeded_pool().await;
+
+        let ids = vacant_ids(&pool, None).await;
+
+        assert!(
+            !ids.contains(&"204".to_string()) && !ids.contains(&"301".to_string()),
+            "occupied and cleaning rooms are not vacant: {ids:?}"
+        );
+        assert_eq!(ids.len(), 4);
+    }
+
+    #[tokio::test]
+    async fn the_order_is_by_floor_then_id_not_by_insertion() {
+        let pool = seeded_pool().await;
+
+        // Room 305 was inserted first; it must still come last.
+        assert_eq!(
+            vacant_ids(&pool, None).await,
+            vec!["101", "102", "201", "305"]
+        );
+    }
+
+    #[tokio::test]
+    async fn the_type_filter_narrows_without_disturbing_the_order() {
+        let pool = seeded_pool().await;
+
+        assert_eq!(
+            vacant_ids(&pool, Some("deluxe")).await,
+            vec!["102", "201", "305"]
+        );
+        assert_eq!(vacant_ids(&pool, Some("standard")).await, vec!["101"]);
+        assert!(
+            vacant_ids(&pool, Some("presidential")).await.is_empty(),
+            "an unknown type matches nothing rather than everything"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_rows_decode_into_whole_rooms() {
+        let pool = seeded_pool().await;
+
+        let rooms = load_vacant_rooms(&pool, Some("deluxe"))
+            .await
+            .expect("load vacant rooms");
+
+        assert_eq!(rooms[0].id, "102");
+        assert_eq!(rooms[0].floor, 1);
+        assert_eq!(rooms[0].room_type, "deluxe");
+        assert_eq!(rooms[0].status, "vacant");
+        assert_eq!(rooms[0].base_price, 300_000);
+        assert_eq!(rooms[0].max_guests, 2);
+    }
+}

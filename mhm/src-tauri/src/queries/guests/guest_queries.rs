@@ -210,19 +210,33 @@ mod tests {
     }
 
     #[test]
-    fn the_three_filters_share_one_projection() {
+    fn the_three_filters_are_the_same_query_with_a_different_where() {
         let unfiltered = summary_sql("", None);
         let searched = summary_sql("g.full_name LIKE ? OR g.doc_number LIKE ?", None);
         let by_phone = summary_sql("g.phone LIKE ?", Some(5));
 
+        // Asserted against the shared constant rather than against literals
+        // copied out of it: this should fail when the three stop being one
+        // query, not when someone reformats the SQL.
         for sql in [&unfiltered, &searched, &by_phone] {
-            assert!(sql.contains("COALESCE(SUM(b.total_price), 0) as total_spent"));
-            assert!(sql.contains("GROUP BY g.id ORDER BY last_visit DESC"));
+            assert!(
+                sql.starts_with(super::GUEST_SUMMARY_SELECT),
+                "every filter must reuse the one projection"
+            );
+            assert!(sql.contains(super::GUEST_SUMMARY_TAIL));
         }
-        assert!(!unfiltered.contains("WHERE"), "no filter, no WHERE clause");
-        assert!(searched.contains("WHERE g.full_name LIKE ? OR g.doc_number LIKE ?"));
+
+        assert_eq!(
+            unfiltered,
+            format!(
+                "{}{}",
+                super::GUEST_SUMMARY_SELECT,
+                super::GUEST_SUMMARY_TAIL
+            ),
+            "no filter adds nothing at all"
+        );
         assert!(by_phone.ends_with(" LIMIT 5"));
-        assert!(!unfiltered.contains("LIMIT"));
+        assert!(!unfiltered.contains("LIMIT") && !searched.contains("LIMIT"));
     }
 
     #[tokio::test]

@@ -200,6 +200,12 @@ fn command_layer_imports_sees_through_a_nested_use_block() {
 ///
 /// Relies on rustfmt: a file-level `mod` and its closing brace both sit at column
 /// zero, so the block ends at the next line that is exactly `}`.
+///
+/// That dependency is the weak point: an unformatted file whose closing brace is
+/// indented would make this swallow to end-of-file and report a *false clean* —
+/// the dangerous direction for a guard. CI runs `cargo fmt -- --check`, which is
+/// what keeps the assumption true; do not remove that check without revisiting
+/// this function.
 fn production_source(source: &str) -> String {
     let lines: Vec<&str> = source.lines().collect();
     let mut kept = Vec::with_capacity(lines.len());

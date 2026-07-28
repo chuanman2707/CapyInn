@@ -3,6 +3,10 @@
 //! Three independent "most recent N" queries. They are not unioned in SQL
 //! because each one carries different columns; the command merges and sorts
 //! them, which it can do as a pure function once the rows are in hand.
+//!
+//! Every loader clamps its limit at zero first. SQLite reads a negative
+//! `LIMIT` as *unbounded*, so without the clamp a nonsense limit turned into
+//! three full-table scans whose rows the caller then threw away.
 
 use sqlx::{Pool, Row, Sqlite};
 
@@ -33,7 +37,7 @@ pub async fn load_recent_check_ins(
          FROM bookings b JOIN guests g ON g.id = b.primary_guest_id
          ORDER BY b.check_in_at DESC LIMIT ?",
     )
-    .bind(limit)
+    .bind(limit.max(0))
     .fetch_all(pool)
     .await?;
 
@@ -57,7 +61,7 @@ pub async fn load_recent_check_outs(
          WHERE b.actual_checkout IS NOT NULL
          ORDER BY b.actual_checkout DESC LIMIT ?",
     )
-    .bind(limit)
+    .bind(limit.max(0))
     .fetch_all(pool)
     .await?;
 
@@ -79,7 +83,7 @@ pub async fn load_recent_housekeeping(
         "SELECT room_id, status, triggered_at FROM housekeeping
          ORDER BY triggered_at DESC LIMIT ?",
     )
-    .bind(limit)
+    .bind(limit.max(0))
     .fetch_all(pool)
     .await?;
 
