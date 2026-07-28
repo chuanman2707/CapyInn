@@ -7,7 +7,19 @@ import GuestCard from "./GuestCard";
 
 interface GuestListProps {
   reloadKey: number;
-  onStateChange: (state: { rows: DeclarationRow[]; findings: DeclarationFinding[] }) => void;
+  onStateChange: (state: {
+    rows: DeclarationRow[];
+    findings: DeclarationFinding[];
+    /** Lần gọi kbtt_validate gần nhất thất bại — xem FINDING I5 dưới đây. */
+    checkFailed: boolean;
+    /**
+     * link_id của các khách đang hoạt động mà lần kiểm tra thành công gần
+     * nhất KHÔNG bao trùm — hoặc vì chưa từng kiểm (vừa thả ảnh xong), hoặc
+     * vì lô đang được kiểm lại. Cha dùng danh sách này để không lỡ mời xuất
+     * một khách mà mình chưa biết chắc có lỗi chặn hay không.
+     */
+    uncheckedLinkIds: string[];
+  }) => void;
 }
 
 /**
@@ -19,6 +31,12 @@ export default function GuestList({ reloadKey, onStateChange }: GuestListProps) 
   const [rows, setRows] = useState<DeclarationRow[]>([]);
   const [stays, setStays] = useState<StayInfo[]>([]);
   const [findings, setFindings] = useState<DeclarationFinding[]>([]);
+  const [checkFailed, setCheckFailed] = useState(false);
+  // link_id đã có kết quả kbtt_validate thành công BAO TRÙM chúng — không
+  // phải "đã từng nằm trong findings" (một khách sạch không sinh finding
+  // nào cả, nhưng vẫn đã-được-kiểm). Thay bằng đúng tập link_ids của lần gọi
+  // kbtt_validate gần nhất trả về thành công.
+  const [checkedLinkIds, setCheckedLinkIds] = useState<Set<string>>(new Set());
   const [localReload, setLocalReload] = useState(0);
 
   const reload = useCallback(() => setLocalReload((k) => k + 1), []);
@@ -48,33 +66,54 @@ export default function GuestList({ reloadKey, onStateChange }: GuestListProps) 
     };
   }, [reloadKey, localReload]);
 
+  // FINDING I5: kbtt_validate thất bại từng bị nuốt thành setFindings([]) —
+  // trông y hệt "đã kiểm, không lỗi", nên nút xuất mời xuất cả lô mà backend
+  // sẽ từ chối trắng tay. Giờ một lần gọi thất bại chỉ báo `checkFailed`,
+  // KHÔNG xóa `findings`/`checkedLinkIds` cũ — dữ liệu cũ vẫn là thứ tốt
+  // nhất đang có, chỉ là không còn chắc nó còn đúng.
   useEffect(() => {
     const linkIds = rows.map((r) => r.link_id);
     if (linkIds.length === 0) {
       setFindings([]);
+      setCheckedLinkIds(new Set());
+      setCheckFailed(false);
       return;
     }
     let cancelled = false;
     invokeCommand<DeclarationFinding[]>("kbtt_validate", { linkIds })
       .then((data) => {
-        if (!cancelled) setFindings(data ?? []);
+        if (cancelled) return;
+        setFindings(data ?? []);
+        setCheckedLinkIds(new Set(linkIds));
+        setCheckFailed(false);
       })
       .catch(() => {
-        if (!cancelled) setFindings([]);
+        if (!cancelled) setCheckFailed(true);
       });
     return () => {
       cancelled = true;
     };
   }, [rows]);
 
+  // Khách chưa nằm trong tập đã-kiểm-thành-công gần nhất: hoặc vừa được thả
+  // vào (chưa có link_id nào tương ứng trong checkedLinkIds), hoặc lần kiểm
+  // hiện tại vẫn đang treo. checkedLinkIds chỉ được GHI ĐÈ khi có kết quả
+  // thành công mới (xem effect trên) nên trong lúc một lượt validate bình
+  // thường (sau khi sửa một thẻ) đang bay, các khách CŨ vẫn coi là đã kiểm —
+  // không có gì để "nhấp nháy" nút xuất trên mỗi lần sửa thẻ bình thường.
+  const uncheckedLinkIds = useMemo(
+    () => rows.filter((r) => !checkedLinkIds.has(r.link_id)).map((r) => r.link_id),
+    [rows, checkedLinkIds],
+  );
+
   useEffect(() => {
-    onStateChange({ rows, findings });
+    onStateChange({ rows, findings, checkFailed, uncheckedLinkIds });
     // onStateChange của cha không stable — cùng lý do với PendingList cũ
     // (xem PendingList.tsx: "onRowsChange intentionally omitted: parent
     // callbacks are not stable"). Không đưa vào deps để tránh chạy lại effect
     // này mỗi lần cha re-render.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [rows, findings]);
+  }, [rows, findings, checkFailed, uncheckedLinkIds]);
 
   const byLink = useMemo(() => {
     const map = new Map<string, DeclarationFinding[]>();

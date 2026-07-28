@@ -96,4 +96,34 @@ describe("Declaration page", () => {
     );
     expect(screen.getByText(/2 khách còn lỗi sẽ ở lại danh sách/)).toBeTruthy();
   });
+
+  // FINDING I5 — GuestList từng nuốt lỗi kbtt_validate thành setFindings([]),
+  // nên index.tsx tính blockedLinks rỗng và nút xuất mời xuất TOÀN BỘ khách
+  // dù backend sẽ từ chối cả lô ("Còn lỗi chặn, không xuất được"). Giờ khi
+  // kiểm tra lỗi, không khách nào được coi là đủ điều kiện và người vận hành
+  // phải thấy rõ lý do.
+  it("kbtt_validate lỗi: không mời xuất khách nào, báo người dùng là kiểm tra thất bại", async () => {
+    invokeCommand.mockImplementation((cmd: string) => {
+      if (cmd === "kbtt_pending_rows") {
+        return Promise.resolve([
+          row({ link_id: "l1", full_name: "Nguyễn Văn A" }),
+          row({ link_id: "l2", identity_id: "i2", full_name: "Trần Thị B" }),
+        ]);
+      }
+      if (cmd === "kbtt_list_stays") return Promise.resolve([]);
+      if (cmd === "kbtt_validate") return Promise.reject(new Error("mất kết nối"));
+      if (cmd === "kbtt_list_batches") return Promise.resolve([]);
+      return Promise.resolve(null);
+    });
+    render(<Declaration />);
+
+    await waitFor(() => expect(screen.getByText("Nguyễn Văn A")).toBeTruthy());
+    // Lỗi validate đến sau một tick nữa (rows nạp xong rồi mới gọi
+    // kbtt_validate) — đợi đúng thông báo lỗi thay vì đọc DOM ngay lập tức.
+    await waitFor(() => expect(screen.getByText(/kiểm tra lỗi/i)).toBeTruthy());
+
+    const button = screen.getByRole("button", { name: /xuất file/i });
+    expect((button as HTMLButtonElement).disabled).toBe(true);
+    expect(button.textContent).not.toMatch(/xuất file cho \d/i);
+  });
 });

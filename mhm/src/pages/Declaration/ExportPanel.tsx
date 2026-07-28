@@ -12,6 +12,14 @@ interface ExportPanelProps {
   eligible: DeclarationRow[];
   blockedCount: number;
   onExported: () => void;
+  /**
+   * Lần gọi kbtt_validate gần nhất thất bại (FINDING I5) — không còn biết
+   * chắc khách nào đủ điều kiện, nên KHÔNG mời xuất ai, kể cả khi `eligible`
+   * (tính từ dữ liệu cũ) trông vẫn đầy đủ.
+   */
+  checkFailed?: boolean;
+  /** Số khách đang hoạt động mà lần kiểm tra chưa xong — không phải lỗi. */
+  pendingCount?: number;
 }
 
 /**
@@ -20,7 +28,13 @@ interface ExportPanelProps {
  * Khách còn lỗi chặn KHÔNG chặn cả đoàn nhưng cũng không bị bỏ rơi im lặng:
  * họ ở lại danh sách với viền đỏ và nút này nói rõ điều đó.
  */
-export default function ExportPanel({ eligible, blockedCount, onExported }: ExportPanelProps) {
+export default function ExportPanel({
+  eligible,
+  blockedCount,
+  onExported,
+  checkFailed = false,
+  pendingCount = 0,
+}: ExportPanelProps) {
   const [exporting, setExporting] = useState(false);
   const [results, setResults] = useState<DeclarationExportResult[]>([]);
 
@@ -63,7 +77,7 @@ export default function ExportPanel({ eligible, blockedCount, onExported }: Expo
     <section className="rounded-2xl border border-slate-200 bg-white p-5">
       <Button
         onClick={() => void runExport()}
-        disabled={eligible.length === 0 || exporting}
+        disabled={eligible.length === 0 || exporting || checkFailed}
         className="rounded-xl"
       >
         {exporting
@@ -72,6 +86,19 @@ export default function ExportPanel({ eligible, blockedCount, onExported }: Expo
             ? `Xuất file cho ${eligible.length} khách`
             : "Xuất file"}
       </Button>
+
+      {checkFailed && (
+        <p className="mt-2 text-sm text-red-700">
+          ⛔ Kiểm tra lỗi thất bại — chưa rõ khách nào đủ điều kiện xuất, chưa
+          xuất được lúc này. Thử tải lại hoặc sửa một thẻ bất kỳ để kiểm lại.
+        </p>
+      )}
+
+      {!checkFailed && pendingCount > 0 && (
+        <p className="mt-2 text-sm text-slate-500">
+          Đang kiểm tra {pendingCount} khách mới — chưa đưa vào lượt xuất này.
+        </p>
+      )}
 
       {blockedCount > 0 && (
         <p className="mt-2 text-sm text-amber-800">

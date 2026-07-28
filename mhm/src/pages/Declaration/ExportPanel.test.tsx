@@ -85,4 +85,20 @@ describe("ExportPanel", () => {
     const button = screen.getByRole("button", { name: /xuất file/i });
     expect((button as HTMLButtonElement).disabled).toBe(true);
   });
+
+  // FINDING I5 — kiểm tra lỗi thì không được cho xuất, kể cả khi `eligible`
+  // (tính từ dữ liệu cũ, không còn đáng tin) trông vẫn đầy đủ.
+  it("checkFailed: nút mờ dù eligible không rỗng, và báo người dùng kiểm tra lỗi", () => {
+    render(
+      <ExportPanel
+        eligible={[row({})]}
+        blockedCount={0}
+        checkFailed
+        onExported={() => {}}
+      />,
+    );
+    const button = screen.getByRole("button", { name: /xuất file/i });
+    expect((button as HTMLButtonElement).disabled).toBe(true);
+    expect(screen.getByText(/kiểm tra lỗi/i)).toBeTruthy();
+  });
 });

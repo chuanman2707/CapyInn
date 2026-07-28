@@ -121,4 +121,58 @@ describe("GuestList", () => {
     await waitFor(() => expect(screen.getByText("Trần Thị B")).toBeTruthy());
     expect(screen.queryByText(/Cũ - nên bị bỏ qua/)).toBeFalsy();
   });
+
+  // FINDING I5 — GuestList từng nuốt lỗi kbtt_validate thành setFindings([]),
+  // khiến mọi khách trông như không còn lỗi chặn nào (blockedLinks rỗng) dù
+  // backend vẫn từ chối xuất cả lô. Giờ báo lỗi lên cha thay vì im lặng giả
+  // vờ "mọi thứ ổn".
+  it("kbtt_validate lỗi: báo checkFailed lên cha, không âm thầm coi như hết lỗi", async () => {
+    mockBackend([row({})]);
+    invokeCommand.mockImplementation((cmd: string) => {
+      if (cmd === "kbtt_pending_rows") return Promise.resolve([row({})]);
+      if (cmd === "kbtt_list_stays") return Promise.resolve([]);
+      if (cmd === "kbtt_validate") return Promise.reject(new Error("mất kết nối"));
+      return Promise.resolve(null);
+    });
+    const onStateChange = vi.fn();
+    render(<GuestList reloadKey={0} onStateChange={onStateChange} />);
+
+    await waitFor(() =>
+      expect(onStateChange).toHaveBeenCalledWith(
+        expect.objectContaining({ checkFailed: true }),
+      ),
+    );
+  });
+
+  it("khách vừa thả vào chưa có kết quả kiểm tra: không báo lên cha là đã kiểm xong", async () => {
+    let resolveValidate: ((data: unknown[]) => void) | undefined;
+    invokeCommand.mockImplementation((cmd: string) => {
+      if (cmd === "kbtt_pending_rows") return Promise.resolve([row({})]);
+      if (cmd === "kbtt_list_stays") return Promise.resolve([]);
+      if (cmd === "kbtt_validate") {
+        return new Promise((resolve) => {
+          resolveValidate = resolve;
+        });
+      }
+      return Promise.resolve(null);
+    });
+    const onStateChange = vi.fn();
+    render(<GuestList reloadKey={0} onStateChange={onStateChange} />);
+
+    await waitFor(() => expect(screen.getByText("Nguyễn Văn A")).toBeTruthy());
+    // Lô đầu tiên chưa từng được kiểm — link "l1" phải nằm trong
+    // uncheckedLinkIds trong lúc kbtt_validate còn treo.
+    await waitFor(() =>
+      expect(onStateChange).toHaveBeenCalledWith(
+        expect.objectContaining({ uncheckedLinkIds: ["l1"], checkFailed: false }),
+      ),
+    );
+
+    resolveValidate?.([]);
+    await waitFor(() =>
+      expect(onStateChange).toHaveBeenCalledWith(
+        expect.objectContaining({ uncheckedLinkIds: [] }),
+      ),
+    );
+  });
 });

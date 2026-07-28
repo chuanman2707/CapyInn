@@ -20,14 +20,30 @@ export default function Declaration() {
   const [reloadKey, setReloadKey] = useState(0);
   const [rows, setRows] = useState<DeclarationRow[]>([]);
   const [findings, setFindings] = useState<DeclarationFinding[]>([]);
+  // FINDING I5 — nếu kbtt_validate thất bại (hoặc chưa kịp trả lời cho lô
+  // khách hiện tại), trang này KHÔNG được coi các khách đó là đủ điều kiện
+  // xuất. `checkFailed` chặn cả lô một cách rõ ràng; `uncheckedLinkIds` chỉ
+  // chặn đúng những khách chưa có kết quả (vd. vừa thả ảnh xong) mà không
+  // đụng tới các khách đã biết chắc là sạch — tránh nút xuất nhấp nháy mờ
+  // trên mỗi lần sửa một thẻ bình thường.
+  const [checkFailed, setCheckFailed] = useState(false);
+  const [uncheckedLinkIds, setUncheckedLinkIds] = useState<string[]>([]);
 
   const bump = () => setReloadKey((k) => k + 1);
 
-  const blockedLinks = new Set(
+  const blockingLinks = new Set(
     findings.filter((f) => f.severity === "blocking").map((f) => f.link_id),
   );
-  const eligible = rows.filter((r) => !r.held && !blockedLinks.has(r.link_id));
-  const blockedCount = rows.filter((r) => !r.held && blockedLinks.has(r.link_id)).length;
+  const unchecked = new Set(uncheckedLinkIds);
+  const active = rows.filter((r) => !r.held);
+
+  const blockedByFinding = active.filter((r) => blockingLinks.has(r.link_id));
+  const pending = active.filter(
+    (r) => !blockingLinks.has(r.link_id) && (checkFailed || unchecked.has(r.link_id)),
+  );
+  const eligible = active.filter(
+    (r) => !blockingLinks.has(r.link_id) && !checkFailed && !unchecked.has(r.link_id),
+  );
 
   return (
     <div className="flex flex-col gap-6">
@@ -35,13 +51,21 @@ export default function Declaration() {
 
       <GuestList
         reloadKey={reloadKey}
-        onStateChange={({ rows: r, findings: f }) => {
+        onStateChange={({ rows: r, findings: f, checkFailed: cf, uncheckedLinkIds: u }) => {
           setRows(r);
           setFindings(f);
+          setCheckFailed(cf);
+          setUncheckedLinkIds(u);
         }}
       />
 
-      <ExportPanel eligible={eligible} blockedCount={blockedCount} onExported={bump} />
+      <ExportPanel
+        eligible={eligible}
+        blockedCount={blockedByFinding.length}
+        pendingCount={pending.length}
+        checkFailed={checkFailed}
+        onExported={bump}
+      />
 
       <ReconcilePanel reloadKey={reloadKey} onSettled={bump} />
 
