@@ -33,13 +33,15 @@ export default function BatchHistory({ refreshKey }: { refreshKey?: number }) {
   }, [refreshKey]);
 
   return (
-    <section className="rounded-2xl border border-slate-200 bg-white p-5">
-      <h2 className="mb-4 text-lg font-semibold">Lịch sử lô</h2>
+    <details className="rounded-2xl border border-slate-200 bg-white p-5">
+      <summary className="cursor-pointer text-sm font-semibold text-slate-500">
+        Lịch sử xuất file ({batches.length})
+      </summary>
 
       {batches.length === 0 ? (
-        <p className="text-sm text-brand-muted">Chưa có lô nào được xuất.</p>
+        <p className="mt-4 text-sm text-brand-muted">Chưa có lô nào được xuất.</p>
       ) : (
-        <div className="overflow-x-auto">
+        <div className="mt-4 overflow-x-auto">
           <table className="w-full text-sm">
             <thead>
               <tr className="text-left text-xs uppercase tracking-wide text-brand-muted">
@@ -72,6 +74,6 @@ export default function BatchHistory({ refreshKey }: { refreshKey?: number }) {
           </table>
         </div>
       )}
-    </section>
+    </details>
   );
 }

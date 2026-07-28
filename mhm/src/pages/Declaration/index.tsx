@@ -1,6 +1,7 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 
-import type { DeclarationFinding, DeclarationRow } from "@/types";
+import { invokeCommand } from "@/lib/invokeCommand";
+import type { DeclarationFinding, DeclarationRow, DeclarationUndeclaredBreakdown } from "@/types";
 
 import BatchHistory from "./BatchHistory";
 import DropZone from "./DropZone";
@@ -20,6 +21,7 @@ export default function Declaration() {
   const [reloadKey, setReloadKey] = useState(0);
   const [rows, setRows] = useState<DeclarationRow[]>([]);
   const [findings, setFindings] = useState<DeclarationFinding[]>([]);
+  const [breakdown, setBreakdown] = useState<DeclarationUndeclaredBreakdown | null>(null);
   // FINDING I5 — nếu kbtt_validate thất bại (hoặc chưa kịp trả lời cho lô
   // khách hiện tại), trang này KHÔNG được coi các khách đó là đủ điều kiện
   // xuất. `checkFailed` chặn cả lô một cách rõ ràng; `uncheckedLinkIds` chỉ
@@ -30,6 +32,12 @@ export default function Declaration() {
   const [uncheckedLinkIds, setUncheckedLinkIds] = useState<string[]>([]);
 
   const bump = () => setReloadKey((k) => k + 1);
+
+  useEffect(() => {
+    invokeCommand<DeclarationUndeclaredBreakdown>("kbtt_undeclared_breakdown")
+      .then(setBreakdown)
+      .catch(() => setBreakdown(null));
+  }, [reloadKey]);
 
   const blockingLinks = new Set(
     findings.filter((f) => f.severity === "blocking").map((f) => f.link_id),
@@ -45,8 +53,25 @@ export default function Declaration() {
     (r) => !blockingLinks.has(r.link_id) && !checkFailed && !unchecked.has(r.link_id),
   );
 
+  // Dòng diễn giải badge sidebar: badge cộng bốn nguồn, có chủ ý đếm thừa
+  // hơn đếm thiếu (xem `undeclared_breakdown` phía Rust). `not_scanned` là
+  // khách PMS mà chưa ai quét giấy tờ — bucket duy nhất còn khác 0 ngay lần
+  // mở app đầu tiên sau khi nâng cấp, lúc danh sách "Cần khai" còn trống.
+  // Bỏ qua bucket = 0 để dòng không dài dòng vô ích.
+  const breakdownParts: string[] = [];
+  if (breakdown?.not_scanned) breakdownParts.push(`${breakdown.not_scanned} chưa quét giấy tờ`);
+  if (breakdown?.not_exported) breakdownParts.push(`${breakdown.not_exported} chưa xuất file`);
+  if (breakdown?.awaiting) breakdownParts.push(`${breakdown.awaiting} chờ đối chiếu`);
+  if (breakdown?.held) breakdownParts.push(`${breakdown.held} gác lại`);
+
   return (
     <div className="flex flex-col gap-6">
+      {breakdown && breakdown.total > 0 && (
+        <p className="text-sm text-brand-muted">
+          {breakdown.total} khách chưa khai xong: {breakdownParts.join(" · ")}
+        </p>
+      )}
+
       <DropZone onIdentitySaved={bump} />
 
       <GuestList

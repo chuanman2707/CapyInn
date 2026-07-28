@@ -126,4 +126,21 @@ describe("Declaration page", () => {
     expect((button as HTMLButtonElement).disabled).toBe(true);
     expect(button.textContent).not.toMatch(/xuất file cho \d/i);
   });
+
+  it("dòng diễn giải nói badge đếm cái gì", async () => {
+    invokeCommand.mockImplementation((cmd: string) => {
+      if (cmd === "kbtt_undeclared_breakdown")
+        return Promise.resolve({ total: 6, not_exported: 3, held: 1, awaiting: 2 });
+      if (cmd === "kbtt_pending_rows") return Promise.resolve([]);
+      if (cmd === "kbtt_list_stays") return Promise.resolve([]);
+      if (cmd === "kbtt_list_batches") return Promise.resolve([]);
+      return Promise.resolve(null);
+    });
+    render(<Declaration />);
+    await waitFor(() =>
+      expect(
+        screen.getByText(/6 khách chưa khai xong: 3 chưa xuất file · 2 chờ đối chiếu · 1 gác lại/),
+      ).toBeTruthy(),
+    );
+  });
 });
