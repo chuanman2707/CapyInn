@@ -235,7 +235,7 @@ fn production_source(source: &str) -> String {
 /// about emptying it. The test fails both when an unlisted command module grows
 /// SQL *and* when a listed one is cleaned up without being struck off, so the
 /// list cannot quietly rot.
-const COMMANDS_STILL_HOLDING_SQL: [&str; 1] = ["commands/groups.rs"];
+const COMMANDS_STILL_HOLDING_SQL: [&str; 0] = [];
 
 #[test]
 fn command_modules_only_hold_sql_where_the_cleanup_ratchet_still_allows_it() {

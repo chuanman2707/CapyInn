@@ -26,6 +26,33 @@ pub async fn load_room(pool: &Pool<Sqlite>, room_id: &str) -> Result<Option<Room
     Ok(row.as_ref().map(map_room))
 }
 
+/// Vacant rooms, optionally of one type, ordered by floor then id.
+///
+/// The order matters to the caller: `domain::booking::room_allocation` groups
+/// by floor and needs a stable sequence within each floor.
+pub async fn load_vacant_rooms(
+    pool: &Pool<Sqlite>,
+    room_type: Option<&str>,
+) -> Result<Vec<Room>, sqlx::Error> {
+    let rows = match room_type {
+        Some(room_type) => {
+            sqlx::query(
+                "SELECT * FROM rooms WHERE status = 'vacant' AND type = ? ORDER BY floor, id",
+            )
+            .bind(room_type)
+            .fetch_all(pool)
+            .await?
+        }
+        None => {
+            sqlx::query("SELECT * FROM rooms WHERE status = 'vacant' ORDER BY floor, id")
+                .fetch_all(pool)
+                .await?
+        }
+    };
+
+    Ok(rows.iter().map(map_room).collect())
+}
+
 pub async fn room_exists(pool: &Pool<Sqlite>, room_id: &str) -> Result<bool, sqlx::Error> {
     let existing: Option<(String,)> = sqlx::query_as("SELECT id FROM rooms WHERE id = ?")
         .bind(room_id)
