@@ -137,6 +137,19 @@ CapyInn is built for a narrow but practical use case: small hotels that need a s
 - Maintenance notes per room
 - Night-audit flow for daily reconciliation
 
+### Temporary residence declaration (Khai báo tạm trú)
+
+- Dedicated workspace that turns guest ID images into upload-ready files for the Ministry of Public Security portal at `tbltkbtt.bocongan.gov.vn`
+- Identity capture reads the CCCD QR code first and falls back to passport MRZ through `ocr-rs`, with a manual form for anything neither can read
+- Extracted identities are linked to an existing stay, then exported as XLSX for Vietnamese guests and XML for foreign guests
+- Batch history and a reconciliation checklist exist because the portal reports "import successful" even when it accepts zero records
+- The module reads PMS tables only; it adds its own tables and never mutates rooms, bookings, or guests
+
+### Auto-update
+
+- Release builds check the GitHub Releases `latest.json` feed through the Tauri updater plugin
+- Update artifacts are signed, and the signing and manifest details are documented in [docs/release-signing.md](docs/release-signing.md)
+
 ### MCP and automation integrations
 
 - CapyInn can be extended through MCP-friendly workflows for operator tooling and agent-driven automations
@@ -168,10 +181,12 @@ CapyInn is built for a narrow but practical use case: small hotels that need a s
 | macOS | 12+ |
 | Node.js | 20+ |
 | Rust | stable via `rustup` |
-| Xcode CLT | recent version |
+| Xcode CLT | recent version (macOS builds) |
 | Disk footprint | roughly 25MB before operational data |
 
-The project is currently verified most heavily on macOS and Apple Silicon.
+The install steps below describe a macOS development machine. The project is verified most heavily on macOS and Apple Silicon, which is the only macOS architecture the release workflow builds.
+
+Tagged releases also publish a Windows NSIS installer and a Linux AppImage. Those bundles are produced by CI on `windows-latest` and `ubuntu-22.04` but receive far less hands-on testing than the macOS build.
 
 ## Local development
 
@@ -213,6 +228,14 @@ cargo test --manifest-path src-tauri/Cargo.toml
 cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings
 ```
 
+The repository also ships scripted verification gates. `verify:full` is the smoke gate the release checklist expects to pass before a tag is pushed; it runs the quick wave, the frontend suite, booking and backup scenario tests, and a native Tauri startup smoke against an isolated runtime root.
+
+```bash
+cd CapyInn/mhm
+npm run verify:quick
+npm run verify:full
+```
+
 If you only need the web UI during frontend work:
 
 ```bash
@@ -225,29 +248,36 @@ npm run dev
 ```text
 CapyInn/
 ├── Public/                 # README demo screenshots
+├── docs/                   # Architecture guardrails, release docs, plans and specs
 ├── mhm/
 │   ├── src/                # React UI, stores, pages, components
-│   ├── src-tauri/          # Rust backend, IPC commands, DB, gateway, OCR
+│   ├── src-tauri/          # Rust backend, IPC commands, DB, gateway, OCR, declaration
 │   ├── tests/              # Vitest suites and mocked desktop flows
+│   ├── scripts/            # Verification and release helper scripts
+│   ├── shared/             # Types shared between the frontend and helper scripts
+│   ├── skills/             # Agent skill definition for the MCP gateway
 │   ├── public/             # Static assets
 │   └── models/             # OCR models
-├── PRD.md                  # Product requirements
+├── CHANGELOG.md
 ├── CONTRIBUTING.md
 ├── SECURITY.md
 └── README.md
 ```
 
+`mhm/` is the current implementation path, not the product name. Renaming it is deliberately postponed; see [docs/architecture/core-pms-boundaries.md](docs/architecture/core-pms-boundaries.md).
+
 ## Known limitations
 
-- OCR is currently optimized for Vietnamese national ID cards; passports and international documents are not complete yet
-- Windows and Linux are not first-class targets yet
+- Check-in OCR is optimized for Vietnamese national ID cards; the passport MRZ reader currently lives in the temporary residence declaration workspace rather than the check-in scan flow
+- macOS Apple Silicon is the primary target; Windows and Linux bundles are published by CI but are not verified as thoroughly
 - The project is designed for mini-hotel scale, not large chain operations
 
 ## Additional docs
 
-- [PRD](PRD.md)
+- [Core PMS boundaries](docs/architecture/core-pms-boundaries.md)
 - [Contributing guide](CONTRIBUTING.md)
 - [Release checklist](docs/release-checklist.md)
+- [Release signing and updater](docs/release-signing.md)
 - [Security policy](SECURITY.md)
 - [Changelog](CHANGELOG.md)
 
