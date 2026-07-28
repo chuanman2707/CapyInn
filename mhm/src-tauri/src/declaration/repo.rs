@@ -779,11 +779,23 @@ pub async fn set_batch_failed(
 /// Mở lại một lô `failed`: gỡ entry để khách quay về danh sách chờ, giữ dòng
 /// lô làm lịch sử. Chỉ cho lô `failed` — `exported` phải qua đối chiếu trước,
 /// `verified` là bằng chứng đã khai.
+///
+/// Đọc trạng thái rồi xóa nằm chung một `pool.begin()` (như `delete_link` /
+/// `discard_link`): nếu tách hai câu lệnh, một lượt đối soát chen vào giữa có
+/// thể chốt lô này `verified` ngay sau khi ta vừa đọc "failed", và câu DELETE
+/// đứng riêng sẽ xóa mất entry của một lô giờ đã là bằng chứng đã khai. Gộp
+/// chung transaction thì SQLite giữ nguyên ảnh chụp lúc đọc cho tới khi
+/// commit — có tranh chấp ghi thật thì commit lỗi thay vì âm thầm xóa nhầm.
 pub async fn reopen_failed_batch(pool: &Pool<Sqlite>, batch_id: &str) -> Result<(), String> {
+    let mut tx = pool
+        .begin()
+        .await
+        .map_err(|e| format!("Không mở được giao dịch: {e}"))?;
+
     let status: Option<String> =
         sqlx::query_scalar("SELECT status FROM declaration_batch WHERE id = ?")
             .bind(batch_id)
-            .fetch_optional(pool)
+            .fetch_optional(&mut *tx)
             .await
             .map_err(|e| format!("Không đọc được lô: {e}"))?;
 
@@ -797,10 +809,13 @@ pub async fn reopen_failed_batch(pool: &Pool<Sqlite>, batch_id: &str) -> Result<
 
     sqlx::query("DELETE FROM declaration_entry WHERE batch_id = ?")
         .bind(batch_id)
-        .execute(pool)
+        .execute(&mut *tx)
         .await
         .map_err(|e| format!("Không gỡ được khách khỏi lô: {e}"))?;
-    Ok(())
+
+    tx.commit()
+        .await
+        .map_err(|e| format!("Không lưu được thay đổi: {e}"))
 }
 
 async fn set_batch_outcome(
