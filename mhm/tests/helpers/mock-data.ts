@@ -20,6 +20,8 @@ export function createRoom(overrides: Partial<Room> = {}): Room {
         floor: overrides.floor ?? 1,
         has_balcony: overrides.has_balcony ?? true,
         base_price: overrides.base_price ?? 350000,
+        max_guests: overrides.max_guests ?? 2,
+        extra_person_fee: overrides.extra_person_fee ?? 0,
         status: overrides.status ?? "vacant",
         ...overrides,
     };

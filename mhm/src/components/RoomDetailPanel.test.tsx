@@ -51,6 +51,8 @@ describe("RoomDetailPanel checkout settlement", () => {
                         floor: 1,
                         has_balcony: false,
                         base_price: 500000,
+                        max_guests: 2,
+                        extra_person_fee: 0,
                         status: "occupied",
                     },
                     booking: {
