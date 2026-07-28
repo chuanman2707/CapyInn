@@ -89,7 +89,7 @@ export default function Dashboard() {
           <StatCard icon={DoorOpen} label="Vacant" value={stats.vacant} sub={`/ ${stats.total_rooms}`} color="text-status-vacant-text" bgColor="bg-status-vacant-bg" />
           <StatCard icon={Paintbrush} label="Need Cleaning" value={stats.cleaning} sub={`/ ${stats.total_rooms}`} color="text-status-unpaid-text" bgColor="bg-status-unpaid-bg" />
           <StatCard icon={TrendingUp} label="Revenue Today" value={fmtNumber(stats.revenue_today)} sub="VNĐ" color="text-status-partPaid-text" bgColor="bg-status-partPaid-bg" />
-          <StatCard icon={ShieldCheck} label="Chưa khai báo tạm trú" value={undeclared} sub="trong 48h" color="text-status-unpaid-text" bgColor="bg-status-unpaid-bg" />
+          <StatCard icon={ShieldCheck} label="Chưa khai báo tạm trú" value={undeclared} sub="cần xử lý" color="text-status-unpaid-text" bgColor="bg-status-unpaid-bg" />
         </div>
       )}
 

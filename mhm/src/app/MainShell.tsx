@@ -79,8 +79,12 @@ export function MainShell() {
   const { user, logout } = useAuthStore();
   const { collapsed, toggleCollapse } = useSidebarCollapse();
 
-  // Số khách đã đến trong 48h mà chưa nằm trong lô nào được đối chiếu khớp.
-  // Con số này làm module hữu ích ngay từ trước khi ai bấm vào tab.
+  // Tổng bốn nhóm "chưa khai xong" (`undeclared_breakdown`, declaration/repo.rs):
+  // khách PMS chưa xác nhận khai báo trong 48h qua, cộng ba nhóm KHÔNG có cửa
+  // sổ thời gian — link đã quét nhưng chưa xuất file, đã gác lại, hoặc đã xuất
+  // nhưng còn chờ đối chiếu. Badge có thể kêu vì một bản scan từ nhiều tuần
+  // trước, không chỉ khách mới tới. Con số này làm module hữu ích ngay từ
+  // trước khi ai bấm vào tab.
   const [undeclared, setUndeclared] = useState(0);
   useEffect(() => {
     const load = () => {
