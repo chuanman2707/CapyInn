@@ -6,6 +6,7 @@ import BatchHistory from "./BatchHistory";
 import DropZone from "./DropZone";
 import ExportPanel from "./ExportPanel";
 import GuestList from "./GuestList";
+import ReconcilePanel from "./ReconcilePanel";
 
 /**
  * Màn khai báo tạm trú — "băng chuyền một chiều"
@@ -41,6 +42,8 @@ export default function Declaration() {
       />
 
       <ExportPanel eligible={eligible} blockedCount={blockedCount} onExported={bump} />
+
+      <ReconcilePanel reloadKey={reloadKey} onSettled={bump} />
 
       <BatchHistory refreshKey={reloadKey} />
     </div>
