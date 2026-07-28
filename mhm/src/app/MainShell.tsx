@@ -80,6 +80,17 @@ export function MainShell() {
   const { user, logout } = useAuthStore();
   const { collapsed, toggleCollapse } = useSidebarCollapse();
 
+  const declarationActive = activeTab === "declaration";
+  // FINDING C2: `KeepMounted` giữ cây Declaration sống qua tab switch (xem
+  // doc-comment ngay dưới), nên không có gì unmount/remount để tự tải lại dữ
+  // liệu server khi quay lại tab — badge, danh sách khách, và số nút xuất đều
+  // đứng im cho tới khi người vận hành vô tình đụng một hành động khác hoặc
+  // khởi động lại app. `declarationReactivateSignal` tăng đúng một lần mỗi
+  // lần tab này chuyển từ ẩn sang hiện (`KeepMounted.onActivate`); Declaration
+  // tự bump `reloadKey` của nó khi thấy giá trị này đổi — tách bạch "giữ
+  // state React" (KeepMounted) khỏi "dữ liệu server còn mới" (reactivateSignal).
+  const [declarationReactivateSignal, setDeclarationReactivateSignal] = useState(0);
+
   // Tổng bốn nhóm "chưa khai xong" (`undeclared_breakdown`, declaration/repo.rs):
   // khách PMS chưa xác nhận khai báo trong 48h qua, cộng ba nhóm KHÔNG có cửa
   // sổ thời gian — link đã quét nhưng chưa xuất file, đã gác lại, hoặc đã xuất
@@ -355,8 +366,11 @@ export function MainShell() {
              * Declaration sống qua mọi lần chuyển tab trong cùng phiên, chỉ
              * ẩn bằng CSS thay vì unmount. Xem KeepMounted.tsx.
              */}
-            <KeepMounted active={activeTab === "declaration"}>
-              <Declaration />
+            <KeepMounted
+              active={declarationActive}
+              onActivate={() => setDeclarationReactivateSignal((n) => n + 1)}
+            >
+              <Declaration reactivateSignal={declarationReactivateSignal} />
             </KeepMounted>
             {activeTab === "settings" && <Settings />}
           </div>

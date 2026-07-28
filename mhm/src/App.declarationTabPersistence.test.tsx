@@ -16,7 +16,10 @@ import { useHotelStore } from "./stores/useHotelStore";
 // (giống thẻ chưa lưu của DropZone) để xác nhận: chuyển sang tab khác rồi
 // quay lại KHÔNG unmount trang — state phải còn nguyên, không reset về 0.
 let declarationMountCount = 0;
-function DeclarationStub() {
+interface DeclarationStubProps {
+  reactivateSignal?: number;
+}
+function DeclarationStub({ reactivateSignal }: DeclarationStubProps) {
   useState(() => {
     declarationMountCount += 1;
     return null;
@@ -25,12 +28,15 @@ function DeclarationStub() {
   return (
     <div>
       <p>Declaration stub — unsaved: {unsavedCards}</p>
+      <p>reactivateSignal: {reactivateSignal ?? "none"}</p>
       <button onClick={() => setUnsavedCards((n) => n + 1)}>Thả ảnh giấy tờ (giả lập)</button>
     </div>
   );
 }
 
-vi.mock("./pages/Declaration", () => ({ default: () => <DeclarationStub /> }));
+vi.mock("./pages/Declaration", () => ({
+  default: (props: DeclarationStubProps) => <DeclarationStub {...props} />,
+}));
 vi.mock("./pages/Dashboard", () => ({ default: () => <div>Dashboard page</div> }));
 vi.mock("./pages/Rooms", () => ({ default: () => <div>Rooms page</div> }));
 vi.mock("./pages/Reservations", () => ({ default: () => <div>Reservations page</div> }));
@@ -138,5 +144,107 @@ describe("MainShell keeps the declaration tab alive across tab switches", () => 
     // Vẫn đúng 1 lần mount — không unmount/remount — và hai thẻ vẫn còn đó.
     expect(declarationMountCount).toBe(1);
     expect(screen.getByText(/unsaved: 2/)).toBeInTheDocument();
+  });
+});
+
+// FINDING C2: sống qua tab switch (test trên) không có nghĩa dữ liệu server
+// bên trong vẫn còn đúng — không có gì unmount/remount để tự tải lại
+// GuestList/badge/ReconcilePanel khi quay lại tab. `MainShell` phải bơm
+// `reactivateSignal` đúng một lần mỗi lần quay lại, và không được lặp/dội khi
+// đứng yên trên tab hay khi đi lòng vòng các tab KHÁC.
+describe("MainShell báo cho trang khai báo biết khi nào cần tải lại", () => {
+  beforeEach(() => {
+    declarationMountCount = 0;
+    clearMockResponses();
+    resetEventMocks();
+    vi.clearAllMocks();
+
+    useHotelStore.setState({
+      rooms: [],
+      stats: null,
+      roomDetail: null,
+      activeTab: "dashboard",
+      housekeepingTasks: [],
+      loading: false,
+      isCheckinOpen: false,
+      checkinRoomId: null,
+      isGroupCheckinOpen: false,
+      groups: [],
+    });
+    useAuthStore.setState({
+      user: null,
+      isAuthenticated: false,
+      loading: false,
+      error: null,
+    });
+
+    setMockResponses({
+      get_bootstrap_status: () => ({
+        setup_completed: true,
+        app_lock_enabled: false,
+        current_user: {
+          id: "admin-1",
+          name: "Owner",
+          role: "admin",
+          active: true,
+          created_at: "2026-04-18T00:00:00.000Z",
+        },
+      }),
+    });
+  });
+
+  it("lần đầu xem tab: reactivateSignal ở giá trị ban đầu (không tính là một lần quay lại)", async () => {
+    const user = userEvent.setup();
+    await renderReadyApp();
+
+    await user.click(screen.getByRole("button", { name: /khai báo tạm trú/i }));
+    expect(screen.getByText(/reactivateSignal: 0/)).toBeInTheDocument();
+  });
+
+  it("rời tab rồi quay lại đúng một lần: reactivateSignal tăng đúng 1", async () => {
+    const user = userEvent.setup();
+    await renderReadyApp();
+
+    await user.click(screen.getByRole("button", { name: /khai báo tạm trú/i }));
+    expect(screen.getByText(/reactivateSignal: 0/)).toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: /^dashboard$/i }));
+
+    await user.click(screen.getByRole("button", { name: /khai báo tạm trú/i }));
+    expect(screen.getByText(/reactivateSignal: 1/)).toBeInTheDocument();
+  });
+
+  it("rời rồi quay lại nhiều lần: reactivateSignal tăng đúng một mỗi lần, không dội", async () => {
+    const user = userEvent.setup();
+    await renderReadyApp();
+
+    await user.click(screen.getByRole("button", { name: /khai báo tạm trú/i }));
+    await user.click(screen.getByRole("button", { name: /^dashboard$/i }));
+    await user.click(screen.getByRole("button", { name: /khai báo tạm trú/i }));
+    expect(screen.getByText(/reactivateSignal: 1/)).toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: /^rooms$/i }));
+    await user.click(screen.getByRole("button", { name: /khai báo tạm trú/i }));
+    expect(screen.getByText(/reactivateSignal: 2/)).toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: /^dashboard$/i }));
+    await user.click(screen.getByRole("button", { name: /khai báo tạm trú/i }));
+    expect(screen.getByText(/reactivateSignal: 3/)).toBeInTheDocument();
+  });
+
+  it("đi lòng vòng các tab KHÁC (không đụng khai báo) không tự tăng reactivateSignal", async () => {
+    const user = userEvent.setup();
+    await renderReadyApp();
+
+    await user.click(screen.getByRole("button", { name: /khai báo tạm trú/i }));
+    expect(screen.getByText(/reactivateSignal: 0/)).toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: /^dashboard$/i }));
+    await user.click(screen.getByRole("button", { name: /^rooms$/i }));
+    await user.click(screen.getByRole("button", { name: /^dashboard$/i }));
+
+    await user.click(screen.getByRole("button", { name: /khai báo tạm trú/i }));
+    // Dù đi qua nhiều tab khác trong lúc rời — vẫn chỉ MỘT lần quay lại.
+    expect(screen.getByText(/reactivateSignal: 1/)).toBeInTheDocument();
   });
 });

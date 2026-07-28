@@ -144,6 +144,62 @@ describe("Declaration page", () => {
     );
   });
 
+  // FINDING C2: trang khai báo giờ sống qua tab switch (KeepMounted), nên
+  // không có gì unmount/remount để tự tải lại dữ liệu khi quay lại tab.
+  // `reactivateSignal` là tín hiệu cha (MainShell/KeepMounted) bơm vào mỗi
+  // lần quay lại tab — component phải tự bump reloadKey khi tín hiệu đó đổi,
+  // để badge/GuestList/ReconcilePanel tải lại đúng lúc quay lại, không phải
+  // mỗi lần render.
+  describe("reactivateSignal", () => {
+    it("mount lần đầu chỉ gọi kbtt_pending_rows đúng một lần, không tải thêm vì reactivateSignal ban đầu", async () => {
+      render(<Declaration reactivateSignal={0} />);
+      await waitFor(() =>
+        expect(screen.getByText(/chưa khai báo \(0\)/i)).toBeTruthy(),
+      );
+      const callsAfterMount = invokeCommand.mock.calls.filter(
+        ([cmd]) => cmd === "kbtt_pending_rows",
+      ).length;
+      expect(callsAfterMount).toBe(1);
+    });
+
+    it("reactivateSignal đổi (quay lại tab) tải lại danh sách khách", async () => {
+      const { rerender } = render(<Declaration reactivateSignal={0} />);
+      await waitFor(() =>
+        expect(screen.getByText(/chưa khai báo \(0\)/i)).toBeTruthy(),
+      );
+      const callsBefore = invokeCommand.mock.calls.filter(
+        ([cmd]) => cmd === "kbtt_pending_rows",
+      ).length;
+      expect(callsBefore).toBe(1);
+
+      rerender(<Declaration reactivateSignal={1} />);
+
+      await waitFor(() => {
+        const callsAfter = invokeCommand.mock.calls.filter(
+          ([cmd]) => cmd === "kbtt_pending_rows",
+        ).length;
+        expect(callsAfter).toBe(2);
+      });
+    });
+
+    it("re-render với cùng reactivateSignal không tải lại thêm lần nào (không dội backend vô hình)", async () => {
+      const { rerender } = render(<Declaration reactivateSignal={0} />);
+      await waitFor(() =>
+        expect(screen.getByText(/chưa khai báo \(0\)/i)).toBeTruthy(),
+      );
+
+      rerender(<Declaration reactivateSignal={0} />);
+      rerender(<Declaration reactivateSignal={0} />);
+
+      // Đợi một tick cho mọi effect có cơ hội chạy rồi mới đếm.
+      await waitFor(() => expect(screen.getByText(/chưa khai báo \(0\)/i)).toBeTruthy());
+      const calls = invokeCommand.mock.calls.filter(
+        ([cmd]) => cmd === "kbtt_pending_rows",
+      ).length;
+      expect(calls).toBe(1);
+    });
+  });
+
   it("dòng diễn giải thêm caveat khi có chồng lấn", async () => {
     invokeCommand.mockImplementation((cmd: string) => {
       if (cmd === "kbtt_undeclared_breakdown")

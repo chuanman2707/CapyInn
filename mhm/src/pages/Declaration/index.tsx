@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 
 import { invokeCommand } from "@/lib/invokeCommand";
 import type { DeclarationFinding, DeclarationRow, DeclarationUndeclaredBreakdown } from "@/types";
@@ -9,6 +9,21 @@ import ExportPanel from "./ExportPanel";
 import GuestList from "./GuestList";
 import ReconcilePanel from "./ReconcilePanel";
 
+interface DeclarationProps {
+  /**
+   * FINDING C2: trang này giờ sống qua tab switch (`KeepMounted` ở
+   * `MainShell`), nên không có gì unmount/remount để tự tải lại dữ liệu khi
+   * quay lại tab — badge, `GuestList` (`kbtt_pending_rows`/`kbtt_list_stays`)
+   * và `ReconcilePanel` (`kbtt_list_batches`) đều chỉ tải lại theo
+   * `reloadKey`/`localReload`. `reactivateSignal` là số đếm cha bơm vào mỗi
+   * lần tab này chuyển từ ẩn sang hiện (xem `KeepMounted.onActivate` ở
+   * `MainShell.tsx`) — component tự bump `reloadKey` của mình khi thấy giá
+   * trị này đổi. Giữ state React sống qua tab switch KHÔNG có nghĩa dữ liệu
+   * server bên trong vẫn còn đúng — đây là hai việc tách bạch.
+   */
+  reactivateSignal?: number;
+}
+
 /**
  * Màn khai báo tạm trú — "băng chuyền một chiều"
  * (spec docs/superpowers/specs/2026-07-27-kbtt-ux-simplify-design.md §4):
@@ -17,7 +32,7 @@ import ReconcilePanel from "./ReconcilePanel";
  * Vẫn không đụng gì tới luồng check-in đang chạy: không sửa `CheckinSheet`,
  * không đụng `watcher.rs` hay `Scans/`.
  */
-export default function Declaration() {
+export default function Declaration({ reactivateSignal }: DeclarationProps) {
   const [reloadKey, setReloadKey] = useState(0);
   const [rows, setRows] = useState<DeclarationRow[]>([]);
   const [findings, setFindings] = useState<DeclarationFinding[]>([]);
@@ -32,6 +47,21 @@ export default function Declaration() {
   const [uncheckedLinkIds, setUncheckedLinkIds] = useState<string[]>([]);
 
   const bump = () => setReloadKey((k) => k + 1);
+
+  // FINDING C2: bỏ qua giá trị `reactivateSignal` LÚC MOUNT — mount ban đầu
+  // đã tự tải đúng một lần qua `reloadKey` khởi tạo (0), bump thêm ở đây sẽ
+  // gọi trùng. Chỉ những lần giá trị này ĐỔI sau đó (quay lại tab) mới bump.
+  const isFirstReactivate = useRef(true);
+  useEffect(() => {
+    if (isFirstReactivate.current) {
+      isFirstReactivate.current = false;
+      return;
+    }
+    bump();
+    // bump() không stable qua closure ở trên nhưng luôn cùng một hành vi
+    // (tăng reloadKey) — không cần trong deps.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [reactivateSignal]);
 
   useEffect(() => {
     invokeCommand<DeclarationUndeclaredBreakdown>("kbtt_undeclared_breakdown")
