@@ -21,6 +21,22 @@ interface Props {
     editBooking?: EditableBooking;
 }
 
+function nightsBetween(checkIn: string, checkOut: string): number {
+    if (!checkIn || !checkOut) return 0;
+    // Ngày dạng "YYYY-MM-DD" (không có giờ) được JS phân giải theo UTC — dùng
+    // nguyên dạng đó (không thêm "T00:00:00") để tránh lệch ngày ở múi giờ
+    // dương như Asia/Ho_Chi_Minh (UTC+7) khi quy đổi qua toISOString().
+    const ms = new Date(checkOut).getTime() - new Date(checkIn).getTime();
+    if (Number.isNaN(ms)) return 0;
+    return Math.round(ms / 86_400_000);
+}
+
+function addDays(date: string, days: number): string {
+    const d = new Date(date);
+    d.setDate(d.getDate() + days);
+    return d.toISOString().split("T")[0];
+}
+
 export default function ReservationSheet({ open, onOpenChange, preSelectedRoomId, editBooking }: Props) {
     const { rooms, fetchRooms } = useHotelStore();
     const [roomId, setRoomId] = useState(preSelectedRoomId || "");
@@ -29,7 +45,8 @@ export default function ReservationSheet({ open, onOpenChange, preSelectedRoomId
     const [guestDoc, setGuestDoc] = useState("");
     const [checkInDate, setCheckInDate] = useState("");
     const [checkOutDate, setCheckOutDate] = useState("");
-    const [nights, setNights] = useState(1);
+    const nights = nightsBetween(checkInDate, checkOutDate);
+    const datesValid = nights > 0;
     const [deposit, setDeposit] = useState("");
     const [source, setSource] = useState("phone");
     const [notes, setNotes] = useState("");
@@ -62,15 +79,13 @@ export default function ReservationSheet({ open, onOpenChange, preSelectedRoomId
                 const cout = editBooking.scheduled_checkout || editBooking.expected_checkout.split("T")[0];
                 setCheckInDate(cin);
                 setCheckOutDate(cout);
-                setNights(editBooking.nights);
                 setDeposit(editBooking.deposit_amount ? String(editBooking.deposit_amount) : "");
                 setSource(editBooking.source || "phone");
             } else {
-                // Set default check-in date to tomorrow
-                const tomorrow = new Date();
-                tomorrow.setDate(tomorrow.getDate() + 1);
-                setCheckInDate(tomorrow.toISOString().split("T")[0]);
-                updateCheckout(tomorrow.toISOString().split("T")[0], 1);
+                // Mặc định: nhận phòng ngày mai, ở 1 đêm.
+                const tomorrow = addDays(new Date().toISOString().split("T")[0], 1);
+                setCheckInDate(tomorrow);
+                setCheckOutDate(addDays(tomorrow, 1));
             }
         }
     }, [open, editBooking]);
@@ -79,16 +94,13 @@ export default function ReservationSheet({ open, onOpenChange, preSelectedRoomId
         if (preSelectedRoomId) setRoomId(preSelectedRoomId);
     }, [preSelectedRoomId]);
 
-    function updateCheckout(cin: string, n: number) {
-        if (!cin) return;
-        const d = new Date(cin);
-        d.setDate(d.getDate() + n);
-        setCheckOutDate(d.toISOString().split("T")[0]);
-    }
-
     async function handleSubmit() {
         if (!roomId || !checkInDate || !checkOutDate) {
             toast.error("Vui lòng điền đầy đủ thông tin");
+            return;
+        }
+        if (nights <= 0) {
+            toast.error("Ngày đi phải sau ngày đến");
             return;
         }
         if (!isEditMode && !guestName) {
@@ -164,7 +176,6 @@ export default function ReservationSheet({ open, onOpenChange, preSelectedRoomId
         setDeposit("");
         setSource("phone");
         setNotes("");
-        setNights(1);
         resetAvailability();
     }
 
@@ -183,8 +194,9 @@ export default function ReservationSheet({ open, onOpenChange, preSelectedRoomId
                 <div className="p-6 space-y-5">
                     {/* Room Selection */}
                     <div className="space-y-1.5">
-                        <label className="text-xs font-semibold text-slate-500 uppercase tracking-wider">Phòng</label>
+                        <label htmlFor="reservation-room" className="text-xs font-semibold text-slate-500 uppercase tracking-wider">Phòng</label>
                         <select
+                            id="reservation-room"
                             className="w-full h-10 px-3 rounded-xl border border-slate-200 bg-slate-50 text-sm focus:outline-none focus:ring-2 focus:ring-blue-200 disabled:opacity-60"
                             value={roomId}
                             onChange={(e) => setRoomId(e.target.value)}
@@ -202,45 +214,41 @@ export default function ReservationSheet({ open, onOpenChange, preSelectedRoomId
                     {/* Dates */}
                     <div className="grid grid-cols-2 gap-3">
                         <div className="space-y-1.5">
-                            <label className="text-xs font-semibold text-slate-500 uppercase tracking-wider">Ngày đến</label>
+                            <label htmlFor="reservation-check-in" className="text-xs font-semibold text-slate-500 uppercase tracking-wider">Ngày đến</label>
                             <input
+                                id="reservation-check-in"
                                 type="date"
                                 className="w-full h-10 px-3 rounded-xl border border-slate-200 bg-slate-50 text-sm focus:outline-none focus:ring-2 focus:ring-blue-200"
                                 value={checkInDate}
                                 min={new Date().toISOString().split("T")[0]}
                                 onChange={(e) => {
-                                    setCheckInDate(e.target.value);
-                                    updateCheckout(e.target.value, nights);
+                                    const nextCheckIn = e.target.value;
+                                    setCheckInDate(nextCheckIn);
+                                    // Giữ ngày đi hợp lệ: đẩy nó ra sau ngày đến mới.
+                                    if (nextCheckIn && nightsBetween(nextCheckIn, checkOutDate) <= 0) {
+                                        setCheckOutDate(addDays(nextCheckIn, 1));
+                                    }
                                 }}
                             />
                         </div>
                         <div className="space-y-1.5">
-                            <label className="text-xs font-semibold text-slate-500 uppercase tracking-wider">Ngày đi</label>
+                            <label htmlFor="reservation-check-out" className="text-xs font-semibold text-slate-500 uppercase tracking-wider">Ngày đi</label>
                             <input
+                                id="reservation-check-out"
                                 type="date"
                                 className="w-full h-10 px-3 rounded-xl border border-slate-200 bg-slate-50 text-sm focus:outline-none focus:ring-2 focus:ring-blue-200"
                                 value={checkOutDate}
-                                readOnly
+                                min={checkInDate ? addDays(checkInDate, 1) : undefined}
+                                onChange={(e) => setCheckOutDate(e.target.value)}
                             />
                         </div>
                     </div>
 
-                    {/* Nights */}
-                    <div className="space-y-1.5">
-                        <label className="text-xs font-semibold text-slate-500 uppercase tracking-wider">Số đêm</label>
-                        <input
-                            type="number"
-                            min={1}
-                            max={90}
-                            className="w-full h-10 px-3 rounded-xl border border-slate-200 bg-slate-50 text-sm focus:outline-none focus:ring-2 focus:ring-blue-200"
-                            value={nights}
-                            onChange={(e) => {
-                                const n = Math.max(1, parseInt(e.target.value) || 1);
-                                setNights(n);
-                                updateCheckout(checkInDate, n);
-                            }}
-                        />
-                    </div>
+                    {checkInDate && checkOutDate && !datesValid && (
+                        <div className="rounded-xl p-3 text-sm bg-red-50 text-red-700 border border-red-200">
+                            Ngày đi phải sau ngày đến ít nhất 1 đêm.
+                        </div>
+                    )}
 
                     {/* Availability Status */}
                     {!isEditMode && roomId && checkInDate && checkOutDate && (
@@ -385,7 +393,7 @@ export default function ReservationSheet({ open, onOpenChange, preSelectedRoomId
                     <Button
                         className="w-full h-12 rounded-xl bg-blue-600 hover:bg-blue-700 text-white font-semibold text-sm cursor-pointer"
                         onClick={handleSubmit}
-                        disabled={loading || (!isEditMode && !guestName) || !roomId || (availability !== null && !availability.available)}
+                        disabled={loading || (!isEditMode && !guestName) || !roomId || !datesValid || (availability !== null && !availability.available)}
                     >
                         {loading ? "Đang xử lý..." : isEditMode ? "💾 Lưu thay đổi" : "📅 Đặt phòng"}
                     </Button>

@@ -122,14 +122,17 @@ describe("ReservationSheet", () => {
     });
 
     const [roomSelect, sourceSelect] = screen.getAllByRole("combobox");
-    const [nightsInput, depositInput] = screen.getAllByRole("spinbutton");
+    const depositInput = screen.getByRole("spinbutton");
 
     fireEvent.change(roomSelect, {
       target: { value: "R101" },
     });
     await user.type(screen.getByPlaceholderText("Họ và tên *"), "Nguyen Van A");
-    fireEvent.change(nightsInput, {
-      target: { value: "2" },
+    fireEvent.change(screen.getByLabelText(/ngày đến/i), {
+      target: { value: "2026-08-06" },
+    });
+    fireEvent.change(screen.getByLabelText(/ngày đi/i), {
+      target: { value: "2026-08-08" },
     });
     fireEvent.change(depositInput, {
       target: { value: "250000" },
@@ -203,9 +206,8 @@ describe("ReservationSheet", () => {
       expect(fetchRooms).toHaveBeenCalledTimes(1);
     });
 
-    const [nightsInput] = screen.getAllByRole("spinbutton");
-    fireEvent.change(nightsInput, {
-      target: { value: "3" },
+    fireEvent.change(screen.getByLabelText(/ngày đi/i), {
+      target: { value: "2026-04-23" },
     });
 
     await user.click(screen.getByRole("button", { name: /lưu thay đổi/i }));
@@ -289,7 +291,7 @@ describe("ReservationSheet", () => {
     });
 
     const [roomSelect] = screen.getAllByRole("combobox");
-    const [, depositInput] = screen.getAllByRole("spinbutton");
+    const depositInput = screen.getByRole("spinbutton");
 
     fireEvent.change(roomSelect, {
       target: { value: "R101" },
@@ -309,5 +311,51 @@ describe("ReservationSheet", () => {
     expect(toastError).toHaveBeenCalledWith(
       "deposit_amount must be a safe integer VND value",
     );
+  });
+
+  it("để người dùng chọn ngày đi và không còn ô số đêm", async () => {
+    render(<ReservationSheet open onOpenChange={vi.fn()} />);
+
+    expect(screen.queryByLabelText(/số đêm/i)).not.toBeInTheDocument();
+
+    const checkOut = screen.getByLabelText(/ngày đi/i) as HTMLInputElement;
+    expect(checkOut.readOnly).toBe(false);
+
+    // Dòng tổng tiền chỉ hiện khi đã chọn phòng — đó là chỗ số đêm hiện ra.
+    fireEvent.change(screen.getByLabelText(/^phòng$/i), { target: { value: "R101" } });
+    fireEvent.change(screen.getByLabelText(/ngày đến/i), {
+      target: { value: "2026-08-06" },
+    });
+    fireEvent.change(checkOut, { target: { value: "2026-08-09" } });
+
+    await waitFor(() => {
+      expect(screen.getByText(/3 đêm/i)).toBeInTheDocument();
+    });
+  });
+
+  it("khoá nút đặt phòng khi ngày đi không sau ngày đến", async () => {
+    render(<ReservationSheet open onOpenChange={vi.fn()} />);
+
+    // Điền đủ phòng và tên khách trước, để nút bị khoá *chỉ vì* ngày sai —
+    // không điền thì nút vốn đã khoá và test không chứng minh được gì.
+    fireEvent.change(screen.getByLabelText(/^phòng$/i), { target: { value: "R101" } });
+    fireEvent.change(screen.getByPlaceholderText(/họ và tên/i), {
+      target: { value: "Nguyễn Nhật Huy" },
+    });
+    fireEvent.change(screen.getByLabelText(/ngày đến/i), {
+      target: { value: "2026-08-06" },
+    });
+
+    const submit = screen.getByRole("button", { name: /đặt phòng/i });
+    await waitFor(() => expect(submit).toBeEnabled());
+
+    fireEvent.change(screen.getByLabelText(/ngày đi/i), {
+      target: { value: "2026-08-06" },
+    });
+
+    await waitFor(() => {
+      expect(screen.getByText(/ngày đi phải sau ngày đến/i)).toBeInTheDocument();
+    });
+    expect(submit).toBeDisabled();
   });
 });
