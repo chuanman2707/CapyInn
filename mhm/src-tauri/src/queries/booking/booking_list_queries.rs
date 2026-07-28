@@ -12,7 +12,7 @@ use crate::models::{BookingFilter, BookingWithGuest};
 const BOOKING_LIST_SQL: &str = "SELECT b.id, b.room_id, r.name as room_name, g.full_name as guest_name,
                 b.check_in_at, b.expected_checkout, b.actual_checkout,
                 b.nights, b.total_price, b.paid_amount, b.status, b.source,
-                b.booking_type, b.deposit_amount, b.scheduled_checkin, b.scheduled_checkout, b.guest_phone
+                b.booking_type, b.deposit_amount, b.scheduled_checkin, b.scheduled_checkout, b.guest_phone, b.guests
          FROM bookings b
          JOIN rooms r ON r.id = b.room_id
          JOIN guests g ON g.id = b.primary_guest_id
@@ -82,6 +82,7 @@ fn map_booking_with_guest(row: &sqlx::sqlite::SqliteRow) -> BookingWithGuest {
         scheduled_checkin: row.get("scheduled_checkin"),
         scheduled_checkout: row.get("scheduled_checkout"),
         guest_phone: row.get("guest_phone"),
+        guests: row.get("guests"),
     }
 }
 

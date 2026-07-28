@@ -359,6 +359,7 @@ pub struct BookingWithGuest {
     pub scheduled_checkin: Option<String>,
     pub scheduled_checkout: Option<String>,
     pub guest_phone: Option<String>,
+    pub guests: Option<i32>,
 }
 
 #[derive(Debug, Deserialize)]

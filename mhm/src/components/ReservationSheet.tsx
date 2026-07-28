@@ -45,6 +45,7 @@ export default function ReservationSheet({ open, onOpenChange, preSelectedRoomId
     const [guestDoc, setGuestDoc] = useState("");
     const [checkInDate, setCheckInDate] = useState("");
     const [checkOutDate, setCheckOutDate] = useState("");
+    const [guests, setGuests] = useState(2);
     const nights = nightsBetween(checkInDate, checkOutDate);
     const datesValid = nights > 0;
     const [deposit, setDeposit] = useState("");
@@ -81,6 +82,7 @@ export default function ReservationSheet({ open, onOpenChange, preSelectedRoomId
                 setCheckOutDate(cout);
                 setDeposit(editBooking.deposit_amount ? String(editBooking.deposit_amount) : "");
                 setSource(editBooking.source || "phone");
+                setGuests(editBooking.guests ?? 2);
             } else {
                 // Mặc định: nhận phòng ngày mai, ở 1 đêm.
                 const tomorrow = addDays(new Date().toISOString().split("T")[0], 1);
@@ -93,6 +95,12 @@ export default function ReservationSheet({ open, onOpenChange, preSelectedRoomId
     useEffect(() => {
         if (preSelectedRoomId) setRoomId(preSelectedRoomId);
     }, [preSelectedRoomId]);
+
+    useEffect(() => {
+        if (isEditMode || !roomId) return;
+        const room = rooms.find((r) => r.id === roomId);
+        if (room) setGuests(room.max_guests);
+    }, [roomId, rooms, isEditMode]);
 
     async function handleSubmit() {
         if (!roomId || !checkInDate || !checkOutDate) {
@@ -121,6 +129,7 @@ export default function ReservationSheet({ open, onOpenChange, preSelectedRoomId
                         new_check_in_date: checkInDate,
                         new_check_out_date: checkOutDate,
                         new_nights: nights,
+                        new_guests: guests,
                     },
                 }, {
                     correlationId,
@@ -144,6 +153,7 @@ export default function ReservationSheet({ open, onOpenChange, preSelectedRoomId
                         check_in_date: checkInDate,
                         check_out_date: checkOutDate,
                         nights,
+                        guests,
                         deposit_amount: depositAmount,
                         source,
                         notes: notes || null,
@@ -176,6 +186,7 @@ export default function ReservationSheet({ open, onOpenChange, preSelectedRoomId
         setDeposit("");
         setSource("phone");
         setNotes("");
+        setGuests(2);
         resetAvailability();
     }
 
@@ -242,6 +253,19 @@ export default function ReservationSheet({ open, onOpenChange, preSelectedRoomId
                                 onChange={(e) => setCheckOutDate(e.target.value)}
                             />
                         </div>
+                    </div>
+
+                    {/* Guests */}
+                    <div className="space-y-1.5">
+                        <label htmlFor="reservation-guests" className="text-xs font-semibold text-slate-500 uppercase tracking-wider">Số khách</label>
+                        <input
+                            id="reservation-guests"
+                            type="number"
+                            min={1}
+                            className="w-full h-10 px-3 rounded-xl border border-slate-200 bg-slate-50 text-sm focus:outline-none focus:ring-2 focus:ring-blue-200"
+                            value={guests}
+                            onChange={(e) => setGuests(Math.max(1, parseInt(e.target.value) || 1))}
+                        />
                     </div>
 
                     {checkInDate && checkOutDate && !datesValid && (

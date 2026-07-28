@@ -22,6 +22,8 @@ export interface Room {
   floor: number;
   has_balcony: boolean;
   base_price: MoneyVnd;
+  max_guests: number;
+  extra_person_fee: MoneyVnd;
   status: RoomStatus;
 }
 
@@ -184,6 +186,7 @@ export interface EditableBooking {
   check_in_at: string;
   expected_checkout: string;
   nights: number;
+  guests: number | null;
   total_price: MoneyVnd;
   deposit_amount: MoneyVnd | null;
   source: string | null;
@@ -281,6 +284,7 @@ export interface BookingWithGuest {
   scheduled_checkin: string | null;
   scheduled_checkout: string | null;
   guest_phone: string | null;
+  guests: number | null;
 }
 
 export interface ActivityItem {

@@ -18,6 +18,23 @@ const fetchRooms = vi.hoisted(() => vi.fn());
 const openInvoice = vi.hoisted(() => vi.fn());
 const closeInvoice = vi.hoisted(() => vi.fn());
 const resetAvailability = vi.hoisted(() => vi.fn());
+// A stable reference, like the real Zustand store returns — recreating this
+// array on every render would spuriously refire the room-reload effect that
+// depends on it and clobber whatever guest count the user just typed.
+const rooms = vi.hoisted(() => [
+  {
+    id: "R101",
+    name: "R101",
+    type: "standard",
+    room_type: "standard",
+    floor: 1,
+    has_balcony: false,
+    base_price: 500000,
+    max_guests: 2,
+    extra_person_fee: 50000,
+    status: "vacant",
+  },
+]);
 
 vi.mock("@tauri-apps/api/core", () => ({
   invoke,
@@ -33,20 +50,7 @@ vi.mock("@/lib/correlationId", () => ({
 
 vi.mock("@/stores/useHotelStore", () => ({
   useHotelStore: () => ({
-    rooms: [
-      {
-        id: "R101",
-        name: "R101",
-        type: "standard",
-        room_type: "standard",
-        floor: 1,
-        has_balcony: false,
-        base_price: 500000,
-        max_guests: 2,
-        extra_person_fee: 0,
-        status: "vacant",
-      },
-    ],
+    rooms,
     fetchRooms,
   }),
 }));
@@ -122,7 +126,7 @@ describe("ReservationSheet", () => {
     });
 
     const [roomSelect, sourceSelect] = screen.getAllByRole("combobox");
-    const depositInput = screen.getByRole("spinbutton");
+    const depositInput = screen.getByPlaceholderText("0");
 
     fireEvent.change(roomSelect, {
       target: { value: "R101" },
@@ -160,6 +164,7 @@ describe("ReservationSheet", () => {
             check_in_date: expect.any(String),
             check_out_date: expect.any(String),
             nights: 2,
+            guests: 2,
             deposit_amount: 250000,
             source: "zalo",
             notes: "Khách thích tầng cao",
@@ -195,6 +200,7 @@ describe("ReservationSheet", () => {
           scheduled_checkin: "2026-04-20",
           scheduled_checkout: "2026-04-22",
           nights: 2,
+          guests: 2,
           total_price: 1000000,
           source: "phone",
           deposit_amount: 50000,
@@ -222,6 +228,7 @@ describe("ReservationSheet", () => {
             new_check_in_date: "2026-04-20",
             new_check_out_date: "2026-04-23",
             new_nights: 3,
+            new_guests: 2,
           },
         },
         {
@@ -291,7 +298,7 @@ describe("ReservationSheet", () => {
     });
 
     const [roomSelect] = screen.getAllByRole("combobox");
-    const depositInput = screen.getByRole("spinbutton");
+    const depositInput = screen.getByPlaceholderText("0");
 
     fireEvent.change(roomSelect, {
       target: { value: "R101" },
@@ -357,5 +364,30 @@ describe("ReservationSheet", () => {
       expect(screen.getByText(/ngày đi phải sau ngày đến/i)).toBeInTheDocument();
     });
     expect(submit).toBeDisabled();
+  });
+
+  it("nạp số khách theo phòng và gửi nó khi đặt phòng", async () => {
+    render(<ReservationSheet open onOpenChange={vi.fn()} />);
+
+    fireEvent.change(screen.getByLabelText(/^phòng$/i), { target: { value: "R101" } });
+
+    const guests = screen.getByLabelText(/số khách/i) as HTMLInputElement;
+    await waitFor(() => expect(guests.value).toBe("2"));
+
+    fireEvent.change(guests, { target: { value: "4" } });
+    fireEvent.change(screen.getByPlaceholderText(/họ và tên/i), {
+      target: { value: "Nguyễn Nhật Huy" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: /đặt phòng/i }));
+
+    await waitFor(() => {
+      expect(invokeWriteCommand).toHaveBeenCalledWith(
+        "create_reservation",
+        expect.objectContaining({
+          req: expect.objectContaining({ guests: 4 }),
+        }),
+        expect.anything(),
+      );
+    });
   });
 });
