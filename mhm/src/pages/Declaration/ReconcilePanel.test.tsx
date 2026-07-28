@@ -73,6 +73,19 @@ describe("ReconcilePanel", () => {
     expect(onSettled).toHaveBeenCalled();
   });
 
+  it("bấm Mở thư mục → kbtt_open_export_dir đúng batch id", async () => {
+    mockBatches([batch({})]);
+    render(<ReconcilePanel reloadKey={0} onSettled={() => {}} />);
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: /mở thư mục/i })).toBeTruthy(),
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: /mở thư mục/i }));
+    await waitFor(() =>
+      expect(invokeCommand).toHaveBeenCalledWith("kbtt_open_export_dir", { batchId: "b1" }),
+    );
+  });
+
   it("không còn lô dở thì panel biến mất", async () => {
     mockBatches([batch({ id: "b9", status: "verified" })]);
     const { container } = render(<ReconcilePanel reloadKey={0} onSettled={() => {}} />);

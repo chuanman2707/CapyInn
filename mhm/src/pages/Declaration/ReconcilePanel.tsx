@@ -98,6 +98,14 @@ function ReconcileCard({ batch, onSettled }: { batch: DeclarationBatch; onSettle
     }
   };
 
+  const openExportDir = async () => {
+    try {
+      await invokeCommand<void>("kbtt_open_export_dir", { batchId: batch.id });
+    } catch (e) {
+      toast.error(formatAppError(e));
+    }
+  };
+
   return (
     <section
       className={`rounded-2xl border p-5 ${
@@ -118,7 +126,17 @@ function ReconcileCard({ batch, onSettled }: { batch: DeclarationBatch; onSettle
       )}
 
       <ol className="mt-3 list-inside space-y-1 text-sm">
-        <li>① Mở cổng, upload file này ({batch.row_count} khách).</li>
+        <li className="flex flex-wrap items-center gap-2">
+          <span>① Mở cổng, upload file này ({batch.row_count} khách).</span>
+          <Button
+            type="button"
+            variant="secondary"
+            size="sm"
+            onClick={() => void openExportDir()}
+          >
+            Mở thư mục
+          </Button>
+        </li>
         <li>② Trên màn danh sách của cổng, bấm &quot;Làm mới&quot;.</li>
         <li>③ Đếm số hồ sơ cổng hiển thị, gõ vào ô dưới.</li>
       </ol>
