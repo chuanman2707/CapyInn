@@ -675,13 +675,17 @@ mod tests {
     }
 
     /// Badge = bốn nguồn cộng lại: `not_scanned` (khách PMS check-in trong 48h
-    /// chưa hề được quét — báo động ngay cả khi chưa ai quét ai) cộng ba nhóm
-    /// link đã quét mà chưa nằm trong lô `verified` ("chưa xuất", "gác lại",
-    /// "chờ đối chiếu", kể cả lô `failed`).
+    /// chưa hề có khai báo VERIFIED — báo động ngay cả khi chưa ai quét ai)
+    /// cộng ba nhóm link đã quét mà chưa nằm trong lô `verified` ("chưa
+    /// xuất", "gác lại", "chờ đối chiếu", kể cả lô `failed`).
     ///
     /// `seeded_pool` dựng sẵn `booking-1` (active, check-in "bây giờ") với hai
     /// khách PMS (`guest-1`, `guest-2`) — nên `not_scanned` khởi điểm là 2 và
-    /// không đổi cho tới khi một link được GẮN vào đúng lượt lưu trú đó.
+    /// không đổi cho tới khi một link ĐÃ VERIFIED được gắn vào đúng lượt lưu
+    /// trú đó. Gắn một link CHƯA verified vào booking-1 không kéo not_scanned
+    /// xuống — khách đó vẫn chưa thật sự được khai lên cổng, nên vẫn phải
+    /// đếm ở not_scanned, đồng thời vẫn đếm ở nhóm link của nó (đếm-thừa có
+    /// chủ ý, xem doc của `count_undeclared_within_48h`).
     #[tokio::test]
     async fn the_badge_counts_every_link_not_yet_verified() {
         let pool = seeded_pool().await;
@@ -738,34 +742,135 @@ mod tests {
             (4, 2, 0, 1, 1)
         );
 
-        // Chống đếm trùng: gắn khách vừa xuất vào ĐÚNG booking-1 (khách này
-        // hóa ra chính là một trong hai khách PMS của lượt đó). Nếu badge trừ
-        // sai (chỉ trừ link `verified`) thì not_scanned vẫn là 2 và người này
-        // bị đếm hai lần — vừa "chờ đối chiếu" vừa "chưa quét". Trừ đúng
-        // (theo MỌI link, không chỉ verified) thì not_scanned giảm còn 1 và
-        // total giảm đúng 1, không phải giữ nguyên.
+        // Gắn khách vừa xuất (link[1], lô CHƯA verified) vào ĐÚNG booking-1
+        // (khách này hóa ra chính là một trong hai khách PMS của lượt đó).
+        // Anh ta CHƯA thật sự được khai lên cổng (lô mới `exported`, chưa đối
+        // soát) nên not_scanned KHÔNG được giảm — badge phải thà đếm thừa
+        // (not_scanned vẫn 2, cùng lúc anh ta vẫn đứng trong "awaiting") còn
+        // hơn tắt tiếng một khách chưa khai xong. total vì vậy giữ nguyên 4,
+        // không giảm xuống 3.
         repo::update_link(&pool, &links[1], Some("booking-1"), "1", None)
             .await
             .expect("gắn phòng");
         let b = repo::undeclared_breakdown(&pool).await.expect("đếm");
         assert_eq!(
             (b.total, b.not_scanned, b.not_exported, b.held, b.awaiting),
-            (3, 1, 0, 1, 1),
-            "khách đã quét và đã gắn phòng chỉ được đếm một lần"
+            (4, 2, 0, 1, 1),
+            "link chưa verified không được trừ vào not_scanned — thà đếm thừa còn hơn giấu khách"
         );
 
-        // Lô fail: vẫn đếm (khách chưa được khai thật).
+        // Lô fail: vẫn đếm y hệt — fail không phải verified, not_scanned vẫn
+        // là 2 vì booking-1 chưa có khai báo nào thật sự khớp cổng.
         repo::set_batch_failed(&pool, &batch, 0).await.expect("fail");
-        assert_eq!(repo::undeclared_breakdown(&pool).await.expect("đếm").total, 3);
+        assert_eq!(repo::undeclared_breakdown(&pool).await.expect("đếm").total, 4);
 
-        // Đối soát khớp: khách rời ba nhóm link, nhưng vẫn là "đã quét" nên
-        // không quay lại not_scanned — guest-1 (khách PMS còn lại của
-        // booking-1, chưa từng được quét) vẫn giữ not_scanned ở 1.
+        // Đối soát khớp: link[1] giờ NẰM TRONG lô verified và gắn với
+        // booking-1, nên declared_count của booking-1 thành 1 — not_scanned
+        // giảm đúng 2 -> 1 (chỉ còn guest-1, khách PMS còn lại của booking-1,
+        // chưa từng được quét). Link[1] cũng rời ba nhóm link (không còn
+        // not_exported/held/awaiting), nên total giảm từ 4 xuống 2, không
+        // đếm thừa nữa vì giờ đã thật sự khai xong.
         repo::set_batch_verified(&pool, &batch, 1).await.expect("chốt");
         let b = repo::undeclared_breakdown(&pool).await.expect("đếm");
         assert_eq!(
             (b.total, b.not_scanned, b.not_exported, b.held, b.awaiting),
             (2, 1, 0, 1, 0)
+        );
+    }
+
+    /// Tình huống đã gây ra FINDING 1: `booking_guests` chỉ có đúng một dòng
+    /// cho một booking (không ai thêm khách vào booking đã tồn tại), nhưng
+    /// người vận hành có thể gắn NHIỀU link vào cùng một `stay_id` — ví dụ
+    /// ghép nhầm rồi ghép lại, hoặc khách đứng tên phòng đổi CCCD giữa lượt ở.
+    /// `declared_count` khi đó lớn hơn `guest_count`, và nếu không chặn ở 0
+    /// thì hiệu số ÂM của booking này sẽ CỘNG vào tổng `not_scanned` toàn hệ
+    /// thống, âm thầm che mất khách chưa quét của một booking KHÁC.
+    ///
+    /// Test dựng thêm `booking-2` (1 khách trong `booking_guests`) với HAI
+    /// link đã verified gắn vào `stay_id` của nó — `guest_count(1) -
+    /// declared_count(2)` phải bị chặn ở 0, không phải -1, và không được kéo
+    /// tổng `not_scanned` xuống dưới đúng số khách của `booking-1` (2, chưa
+    /// ai quét — xem `seeded_pool`).
+    #[tokio::test]
+    async fn an_overlinked_booking_does_not_swallow_other_bookings_not_scanned_count() {
+        let pool = seeded_pool().await;
+        use crate::declaration::repo;
+
+        sqlx::query(
+            "INSERT INTO rooms (
+                id, name, type, floor, has_balcony, base_price, max_guests, extra_person_fee, status
+             ) VALUES ('room-2', 'Phòng 6A', 'standard', 1, 0, 100000, 2, 0, 'occupied')",
+        )
+        .execute(&pool)
+        .await
+        .expect("seeds room 2");
+
+        sqlx::query(
+            "INSERT INTO guests (id, guest_type, full_name, doc_number, created_at)
+             VALUES ('guest-3', 'domestic', 'Khách đứng tên', 'DOC-2', '2026-07-26T09:00:00+07:00')",
+        )
+        .execute(&pool)
+        .await
+        .expect("seeds guest 3");
+
+        let check_in = chrono::Local::now().to_rfc3339();
+        sqlx::query(
+            "INSERT INTO bookings (
+                id, room_id, primary_guest_id, check_in_at, expected_checkout,
+                nights, total_price, status, created_at
+             ) VALUES ('booking-2', 'room-2', 'guest-3', ?, '2026-12-31', 1, 500000, 'active', ?)",
+        )
+        .bind(&check_in)
+        .bind(&check_in)
+        .execute(&pool)
+        .await
+        .expect("seeds booking 2");
+
+        sqlx::query("INSERT INTO booking_guests (booking_id, guest_id) VALUES ('booking-2', 'guest-3')")
+            .execute(&pool)
+            .await
+            .expect("seeds booking_guests 2 — chỉ MỘT dòng");
+
+        // Hai lần quét khác nhau, cả hai đều gắn vào ĐÚNG booking-2 rồi được
+        // khai xong (verified) — mô phỏng "ghép nhầm rồi ghép lại".
+        for (name, doc) in [("Khách Quét 1", "099900000001"), ("Khách Quét 2", "099900000002")] {
+            let identity = crate::declaration::model::Identity {
+                full_name: name.into(),
+                dob: "1990-01-01".into(),
+                gender: "M".into(),
+                nationality_iso3: "VNM".into(),
+                doc_no: Some(doc.into()),
+                ..Default::default()
+            };
+            repo::save_identity_ensuring_link(&pool, &identity, "qr_cccd", "verified")
+                .await
+                .expect("lưu khách quét");
+            let link_id = sqlx::query_scalar::<_, String>(
+                "SELECT dl.id FROM declaration_link dl
+                   JOIN declaration_identity di ON di.id = dl.identity_id
+                  WHERE di.doc_no = ?",
+            )
+            .bind(doc)
+            .fetch_one(&pool)
+            .await
+            .expect("đọc link vừa tạo");
+            repo::update_link(&pool, &link_id, Some("booking-2"), "1", None)
+                .await
+                .expect("gắn booking-2");
+            let batch = repo::insert_batch(&pool, "VN", "/tmp/overlink.xlsx", 1)
+                .await
+                .expect("lô");
+            repo::insert_entries(&pool, &batch, std::slice::from_ref(&link_id))
+                .await
+                .expect("dòng");
+            repo::set_batch_verified(&pool, &batch, 1).await.expect("chốt");
+        }
+
+        let b = repo::undeclared_breakdown(&pool).await.expect("đếm");
+        assert_eq!(
+            b.not_scanned, 2,
+            "booking-2 đếm-thừa (declared 2 > guest 1) bị chặn ở 0, không được trừ ngược vào \
+             booking-1 — hai khách chưa quét của booking-1 vẫn phải hiện đủ"
         );
     }
 

@@ -71,54 +71,69 @@ pub async fn load_stays_for_declaration(pool: &Pool<Sqlite>) -> Result<Vec<StayI
 #[derive(Debug, serde::Serialize)]
 pub struct UndeclaredBreakdown {
     pub total: i64,
-    /// Khách PMS đã check-in trong 48h mà CHƯA hề được quét vào module này —
-    /// báo động "khách đã tới, chưa ai đi khai". Ba trường dưới đếm link đã
-    /// quét; trường này đếm phía PMS, và trừ theo MỌI link (không chỉ
-    /// verified) để một khách vừa quét vừa còn trên booking không bị đếm hai
-    /// lần (xem `count_undeclared_within_48h`).
+    /// Khách PMS đã check-in trong 48h mà CHƯA có khai báo nào của họ được
+    /// đối soát khớp (`verified`) — báo động "khách đã tới, chưa ai đi khai
+    /// xong". Xem `count_undeclared_within_48h` để biết vì sao chỉ trừ theo
+    /// link `verified`, không trừ theo link đang quét dở.
     pub not_scanned: i64,
     pub not_exported: i64,
     pub held: i64,
     pub awaiting: i64,
 }
 
-/// Khách PMS chưa từng được quét vào module khai báo.
+/// Khách PMS chưa từng được khai báo XONG (đối soát khớp) trong 48h qua.
 ///
 /// Đây là báo động gốc trước khi có khái niệm "link": khách đã check-in mà
 /// chưa ai quét CCCD/hộ chiếu của họ thì badge phải kêu, kể cả khi người vận
 /// hành chưa quét ai — `undeclared_breakdown` phía dưới trước đây chỉ đếm
 /// link đã quét nên badge im lặng đúng lúc cần kêu nhất.
 ///
-/// Trừ theo TOÀN BỘ link gắn với lượt lưu trú (không chỉ `verified`): một
-/// khách đã được quét (link nào cũng được, kể cả đang chờ xuất/gác/chờ đối
-/// chiếu) thì đã nằm trong ba nhóm còn lại của `UndeclaredBreakdown` rồi,
-/// trừ hết mọi link tránh đếm họ thêm một lần nữa ở đây.
+/// CHỈ trừ theo link đã nằm trong một lô `verified` — KHÔNG trừ theo mọi link
+/// gắn với lượt lưu trú. Từng thử trừ theo mọi link để một khách vừa quét
+/// khỏi bị đếm hai lần, nhưng `booking_guests` chỉ có đúng một dòng cho
+/// booking đứng tên (ghi lúc tạo booking, không ai thêm khách vào một booking
+/// đã tồn tại, check-in cũng không re-link) — phòng đứng tên một người mà ba
+/// người ở, quét một người gán phòng là `declared_count` chạm luôn
+/// `guest_count`, hai người còn lại thành vô hình trên badge dù chưa hề được
+/// khai. Một khách legally-thiếu khai bị badge giấu đi là phạt hành chính
+/// treo lơ lửng; badge đếm cao hơn thực tế một chút chỉ là ồn — chấp nhận
+/// đếm-thừa trong lúc chờ đối soát, không bao giờ đếm-thiếu.
 async fn count_undeclared_within_48h(pool: &Pool<Sqlite>) -> Result<i64, String> {
     let rows = sqlx::query(
         "SELECT
             (SELECT COUNT(*) FROM booking_guests bg WHERE bg.booking_id = b.id) AS guest_count,
-            (SELECT COUNT(*) FROM declaration_link dl WHERE dl.stay_id = b.id) AS linked_count
+            (SELECT COUNT(*) FROM declaration_link dl
+               JOIN declaration_entry de  ON de.link_id = dl.id
+               JOIN declaration_batch dbt ON dbt.id     = de.batch_id
+              WHERE dl.stay_id = b.id AND dbt.status = 'verified') AS declared_count
            FROM bookings b
           WHERE b.status = 'active'
             AND julianday('now') - julianday(b.check_in_at) <= 2",
     )
     .fetch_all(pool)
     .await
-    .map_err(|e| format!("Không đếm được khách PMS chưa quét: {e}"))?;
+    .map_err(|e| format!("Không đếm được khách PMS chưa khai: {e}"))?;
 
     Ok(rows
         .iter()
         .map(|r| {
             let g: i64 = r.get("guest_count");
-            let l: i64 = r.get("linked_count");
-            (g - l).max(0)
+            let d: i64 = r.get("declared_count");
+            (g - d).max(0)
         })
         .sum())
 }
 
-/// Badge + dòng diễn giải. Bốn nguồn cộng lại, không chồng lấn:
-/// `not_scanned` (PMS, chưa quét) + `not_exported`/`held`/`awaiting` (link đã
-/// quét, chưa thuộc lô `verified`).
+/// Badge + dòng diễn giải. Bốn nguồn cộng lại, CÓ THỂ chồng lấn có chủ ý:
+/// `not_scanned` (PMS, chưa có khai báo verified) + `not_exported`/`held`/
+/// `awaiting` (link đã quét, chưa thuộc lô `verified`).
+///
+/// Một khách đã quét nhưng chưa đối soát khớp nằm trong CẢ HAI nhóm — vừa
+/// `not_scanned` (PMS chưa thấy khai xong) vừa một trong ba nhóm link — nên
+/// `total` đếm thừa trong cửa sổ đó. Đây là đánh đổi có chủ ý: đếm thừa chỉ
+/// gây badge đọc hơi cao, còn đếm thiếu nghĩa là giấu một khách chưa khai —
+/// mà thiếu một khách trong file nộp công an là bị phạt hành chính, nên thà
+/// badge ồn còn hơn badge im lặng sai lúc.
 pub async fn undeclared_breakdown(pool: &Pool<Sqlite>) -> Result<UndeclaredBreakdown, String> {
     let row = sqlx::query(
         "SELECT
