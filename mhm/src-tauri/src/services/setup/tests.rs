@@ -223,6 +223,41 @@ async fn complete_setup_without_app_lock_creates_a_default_user_ready_for_login(
 }
 
 #[tokio::test]
+async fn the_admin_provisioned_by_setup_can_log_in_with_the_pin_that_was_entered() {
+    let pool = test_pool().await;
+
+    complete_setup(&pool, sample_onboarding_request(true))
+        .await
+        .expect("complete_setup should succeed when app lock is enabled");
+
+    // Setup writes the hash and login reads it. They used to derive it from
+    // separate copies of the same four lines; this is the seam that would
+    // break silently, and it would look to the owner like a wrong PIN.
+    let user = crate::queries::auth::user_queries::load_active_user_by_pin_hash(
+        &pool,
+        &crate::domain::auth::credentials::pin_hash("1234"),
+    )
+    .await
+    .expect("the lookup should succeed")
+    .expect("the PIN entered during setup should find the provisioned admin");
+
+    assert_eq!(user.name, "Owner");
+    assert_eq!(user.role, "admin");
+    assert!(user.active);
+
+    assert!(
+        crate::queries::auth::user_queries::load_active_user_by_pin_hash(
+            &pool,
+            &crate::domain::auth::credentials::pin_hash("9999"),
+        )
+        .await
+        .expect("the lookup should succeed")
+        .is_none(),
+        "a different PIN must not find the admin"
+    );
+}
+
+#[tokio::test]
 async fn complete_setup_returns_locked_status_when_app_lock_is_enabled() {
     let pool = test_pool().await;
 
