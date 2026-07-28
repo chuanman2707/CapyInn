@@ -29,9 +29,10 @@ pub async fn calculate_stay_price_tx(
     check_in: &str,
     check_out: &str,
     pricing_type: &str,
+    guests: Option<i32>,
 ) -> BookingResult<crate::pricing::PricingResult> {
     let inputs =
-        load_stay_pricing_inputs_tx(tx, room_id, check_in, check_out, pricing_type).await?;
+        load_stay_pricing_inputs_tx(tx, room_id, check_in, check_out, pricing_type, guests).await?;
     calculate_from_loaded_inputs(&inputs)
 }
 
@@ -43,10 +44,17 @@ pub async fn calculate_price_preview(
     check_in: &str,
     check_out: &str,
     pricing_type: &str,
+    guests: Option<i32>,
 ) -> BookingResult<crate::pricing::PricingResult> {
-    let inputs =
-        load_stay_pricing_inputs_for_room_type(pool, room_type, check_in, check_out, pricing_type)
-            .await?;
+    let inputs = load_stay_pricing_inputs_for_room_type(
+        pool,
+        room_type,
+        check_in,
+        check_out,
+        pricing_type,
+        guests,
+    )
+    .await?;
     calculate_from_loaded_inputs(&inputs)
 }
 
@@ -207,14 +215,16 @@ mod tests {
         seed_room(&pool, "R-BASE", "derived", 620_000).await;
 
         for (room_id, room_type) in [("R-CONF", "configured"), ("R-BASE", "derived")] {
-            let preview = calculate_price_preview(&pool, room_type, CHECK_IN, CHECK_OUT, "nightly")
-                .await
-                .unwrap_or_else(|error| panic!("preview for {room_type}: {error}"));
+            let preview =
+                calculate_price_preview(&pool, room_type, CHECK_IN, CHECK_OUT, "nightly", None)
+                    .await
+                    .unwrap_or_else(|error| panic!("preview for {room_type}: {error}"));
 
             let mut tx = pool.begin().await.expect("begin");
-            let charged = calculate_stay_price_tx(&mut tx, room_id, CHECK_IN, CHECK_OUT, "nightly")
-                .await
-                .unwrap_or_else(|error| panic!("charge for {room_type}: {error}"));
+            let charged =
+                calculate_stay_price_tx(&mut tx, room_id, CHECK_IN, CHECK_OUT, "nightly", None)
+                    .await
+                    .unwrap_or_else(|error| panic!("charge for {room_type}: {error}"));
             tx.rollback().await.expect("rollback");
 
             assert_eq!(preview.total, charged.total, "total for {room_type}");
@@ -245,12 +255,14 @@ mod tests {
         let pool = migrated_pool().await;
         seed_room(&pool, "R-BASE", "derived", 350_000).await;
 
-        let house = calculate_price_preview(&pool, "no-such-type", CHECK_IN, CHECK_OUT, "nightly")
-            .await
-            .expect("house preview");
-        let derived = calculate_price_preview(&pool, "derived", CHECK_IN, CHECK_OUT, "nightly")
-            .await
-            .expect("derived preview");
+        let house =
+            calculate_price_preview(&pool, "no-such-type", CHECK_IN, CHECK_OUT, "nightly", None)
+                .await
+                .expect("house preview");
+        let derived =
+            calculate_price_preview(&pool, "derived", CHECK_IN, CHECK_OUT, "nightly", None)
+                .await
+                .expect("derived preview");
 
         // The house default *is* 350k, so a room priced at 350k must quote the same.
         assert_eq!(house.total, derived.total);
@@ -286,15 +298,17 @@ mod tests {
         seed_room(&pool, "R-BASE", "derived", 620_000).await;
 
         let configured =
-            calculate_price_preview(&pool, "configured", CHECK_IN, CHECK_OUT, "nightly")
+            calculate_price_preview(&pool, "configured", CHECK_IN, CHECK_OUT, "nightly", None)
                 .await
                 .expect("configured preview");
-        let derived = calculate_price_preview(&pool, "derived", CHECK_IN, CHECK_OUT, "nightly")
-            .await
-            .expect("derived preview");
-        let house = calculate_price_preview(&pool, "no-such-type", CHECK_IN, CHECK_OUT, "nightly")
-            .await
-            .expect("house preview");
+        let derived =
+            calculate_price_preview(&pool, "derived", CHECK_IN, CHECK_OUT, "nightly", None)
+                .await
+                .expect("derived preview");
+        let house =
+            calculate_price_preview(&pool, "no-such-type", CHECK_IN, CHECK_OUT, "nightly", None)
+                .await
+                .expect("house preview");
 
         assert_ne!(configured.total, derived.total);
         assert_ne!(derived.total, house.total);
@@ -306,7 +320,7 @@ mod tests {
         let pool = migrated_pool().await;
         seed_room(&pool, "R-SPECIAL", "derived", 500_000).await;
 
-        let plain = calculate_price_preview(&pool, "derived", CHECK_IN, CHECK_OUT, "nightly")
+        let plain = calculate_price_preview(&pool, "derived", CHECK_IN, CHECK_OUT, "nightly", None)
             .await
             .expect("plain preview");
 
@@ -320,9 +334,10 @@ mod tests {
             .await
             .expect("seed special date");
 
-        let uplifted = calculate_price_preview(&pool, "derived", CHECK_IN, CHECK_OUT, "nightly")
-            .await
-            .expect("uplifted preview");
+        let uplifted =
+            calculate_price_preview(&pool, "derived", CHECK_IN, CHECK_OUT, "nightly", None)
+                .await
+                .expect("uplifted preview");
 
         assert!(uplifted.surcharge_amount > plain.surcharge_amount);
         assert!(uplifted.total > plain.total);

@@ -243,6 +243,7 @@ pub async fn create_reservation_tx(
         &req.check_in_date,
         &req.check_out_date,
         "nightly",
+        None,
     )
     .await?;
     let total_price = pricing.total;
@@ -612,6 +613,7 @@ pub async fn confirm_reservation_tx(
         &today.format("%Y-%m-%d").to_string(),
         &effective_checkout,
         &reservation.pricing_type,
+        None,
     )
     .await?;
     let total_price = pricing.total;
@@ -761,6 +763,7 @@ pub async fn modify_reservation_tx(
         &req.new_check_in_date,
         &req.new_check_out_date,
         &reservation.pricing_type,
+        None,
     )
     .await?;
     let total_price = pricing.total;

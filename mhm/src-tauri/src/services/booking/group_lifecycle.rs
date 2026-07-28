@@ -452,6 +452,7 @@ async fn group_checkin_tx(
                 &booking_checkout_at
             },
             "nightly",
+            None,
         )
         .await?;
         let total_price = pricing.total;

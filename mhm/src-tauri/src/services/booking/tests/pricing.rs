@@ -15,6 +15,7 @@ async fn calculate_stay_price_tx_reads_uncommitted_pricing_rule() {
         "2026-04-15T10:00:00+07:00",
         "2026-04-17T10:00:00+07:00",
         "nightly",
+        None,
     )
     .await
     .unwrap();
@@ -37,6 +38,7 @@ async fn calculate_stay_price_tx_applies_special_date_uplift() {
         "2026-04-20T10:00:00+07:00",
         "2026-04-22T10:00:00+07:00",
         "nightly",
+        None,
     )
     .await
     .unwrap();
@@ -68,6 +70,7 @@ async fn calculate_stay_price_tx_returns_not_found_for_missing_room() {
         "2026-04-20T10:00:00+07:00",
         "2026-04-22T10:00:00+07:00",
         "nightly",
+        None,
     )
     .await
     .unwrap_err();
@@ -92,6 +95,7 @@ async fn calculate_stay_price_tx_returns_datetime_parse_for_invalid_check_in() {
         "not-a-datetime",
         "2026-04-22T10:00:00+07:00",
         "nightly",
+        None,
     )
     .await
     .unwrap_err();
@@ -123,6 +127,7 @@ async fn calculate_stay_price_tx_reads_uncommitted_room_base_price() {
         "2026-04-20T10:00:00+07:00",
         "2026-04-22T10:00:00+07:00",
         "nightly",
+        None,
     )
     .await
     .unwrap();
@@ -148,6 +153,7 @@ async fn calculate_stay_price_tx_reads_uncommitted_special_date() {
         "2026-04-20T10:00:00+07:00",
         "2026-04-22T10:00:00+07:00",
         "nightly",
+        None,
     )
     .await
     .unwrap();
