@@ -148,6 +148,132 @@ describe("ManualForm", () => {
       ),
     );
   });
+
+  // FINDING C2 — E02 và E04 chỉ gỡ được qua hai flag trên Identity, nhưng
+  // form sửa (mở ra khi bấm đúng finding đó trên thẻ) không có control nào
+  // cho chúng. Không có hai control này thì lời hứa "bấm để xác nhận" của
+  // catalog.ts (E02/E04) không có gì để giữ, và khách vừa nhập tay/sửa tay sẽ
+  // vĩnh viễn không xuất được.
+  it("tên một chữ: có ô tick để xác nhận và flag đó lên tới payload", async () => {
+    render(<ManualForm onSaved={vi.fn()} />);
+
+    fireEvent.change(screen.getByLabelText(/Họ và tên/i), {
+      target: { value: "Sukarno" },
+    });
+    fireEvent.change(screen.getByLabelText(/Ngày sinh/i), {
+      target: { value: "1980-05-02" },
+    });
+
+    const singleTokenCheckbox = screen.getByLabelText(/chỉ có một chữ/i);
+    fireEvent.click(singleTokenCheckbox);
+    fireEvent.click(screen.getByRole("button", { name: /^Lưu/i }));
+
+    await waitFor(() =>
+      expect(invokeCommand).toHaveBeenCalledWith(
+        "kbtt_save_identity",
+        expect.objectContaining({
+          identity: expect.objectContaining({ single_token_name_ok: true }),
+        }),
+      ),
+    );
+  });
+
+  it("khách nước ngoài: có ô xác nhận tên đọc từ hộ chiếu và flag đó lên tới payload", async () => {
+    render(<ManualForm onSaved={vi.fn()} />);
+
+    fireEvent.change(screen.getByLabelText(/Họ và tên/i), {
+      target: { value: "IVANOV IVAN" },
+    });
+    fireEvent.change(screen.getByLabelText(/Ngày sinh/i), {
+      target: { value: "1980-05-02" },
+    });
+    fireEvent.change(screen.getByLabelText(/Quốc tịch/i), {
+      target: { value: "RUS" },
+    });
+
+    const confirmCheckbox = screen.getByLabelText(/đối chiếu tên này/i);
+    fireEvent.click(confirmCheckbox);
+    fireEvent.click(screen.getByRole("button", { name: /^Lưu/i }));
+
+    await waitFor(() =>
+      expect(invokeCommand).toHaveBeenCalledWith(
+        "kbtt_save_identity",
+        expect.objectContaining({
+          identity: expect.objectContaining({ name_confirmed_by_human: true }),
+        }),
+      ),
+    );
+  });
+
+  it("hai ô xác nhận không hiện khi không liên quan (khách Việt, tên nhiều chữ)", () => {
+    render(<ManualForm onSaved={vi.fn()} />);
+
+    fireEvent.change(screen.getByLabelText(/Họ và tên/i), {
+      target: { value: "Nguyễn Văn A" },
+    });
+
+    expect(screen.queryByLabelText(/chỉ có một chữ/i)).not.toBeInTheDocument();
+    expect(screen.queryByLabelText(/đối chiếu tên này/i)).not.toBeInTheDocument();
+  });
+
+  it("ô xác nhận tên (E04) không hiện cho khách Việt dù tên một chữ", () => {
+    render(<ManualForm onSaved={vi.fn()} />);
+
+    fireEvent.change(screen.getByLabelText(/Họ và tên/i), {
+      target: { value: "Hà" },
+    });
+
+    expect(screen.getByLabelText(/chỉ có một chữ/i)).toBeInTheDocument();
+    expect(screen.queryByLabelText(/đối chiếu tên này/i)).not.toBeInTheDocument();
+  });
+
+  it("ô tên một chữ (E02) không hiện cho khách nước ngoài tên nhiều chữ", () => {
+    render(<ManualForm onSaved={vi.fn()} />);
+
+    fireEvent.change(screen.getByLabelText(/Họ và tên/i), {
+      target: { value: "IVANOV IVAN" },
+    });
+    fireEvent.change(screen.getByLabelText(/Quốc tịch/i), {
+      target: { value: "RUS" },
+    });
+
+    expect(screen.queryByLabelText(/chỉ có một chữ/i)).not.toBeInTheDocument();
+    expect(screen.getByLabelText(/đối chiếu tên này/i)).toBeInTheDocument();
+  });
+
+  it("sửa khách nước ngoài chưa xác nhận: prefill ô xác nhận từ initial, tick rồi lưu gửi lên payload", async () => {
+    invokeCommand.mockResolvedValue(undefined);
+    const onSaved = vi.fn();
+    render(
+      <ManualForm
+        initial={{
+          id: "i11",
+          full_name: "ZOLOCHEVSKAIA VERONIKA",
+          dob: "1990-03-08",
+          gender: "F",
+          nationality_iso3: "RUS",
+          passport_no: "777785671",
+          name_confirmed_by_human: false,
+        }}
+        onSaved={onSaved}
+      />,
+    );
+
+    const confirmCheckbox = screen.getByLabelText(/đối chiếu tên này/i) as HTMLInputElement;
+    expect(confirmCheckbox.checked).toBe(false);
+    fireEvent.click(confirmCheckbox);
+    fireEvent.click(screen.getByRole("button", { name: /lưu/i }));
+
+    await waitFor(() =>
+      expect(invokeCommand).toHaveBeenCalledWith(
+        "kbtt_update_identity",
+        expect.objectContaining({
+          identityId: "i11",
+          identity: expect.objectContaining({ name_confirmed_by_human: true }),
+        }),
+      ),
+    );
+  });
 });
 
 describe("DropZone", () => {

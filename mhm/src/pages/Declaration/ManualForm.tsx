@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useId, useState } from "react";
 import { toast } from "sonner";
 
 import { Button } from "@/components/ui/button";
@@ -37,6 +37,10 @@ interface FormState {
   passport_no: string;
   passport_expiry: string;
   visa_valid_until: string;
+  /** G5: MRZ dòng 1 không có checksum — chỉ có nghĩa cho khách nước ngoài. */
+  name_confirmed_by_human: boolean;
+  /** Gỡ chặn E02 cho tên đơn có thật (mononym). */
+  single_token_name_ok: boolean;
 }
 
 const EMPTY: FormState = {
@@ -53,6 +57,8 @@ const EMPTY: FormState = {
   passport_no: "",
   passport_expiry: "",
   visa_valid_until: "",
+  name_confirmed_by_human: false,
+  single_token_name_ok: false,
 };
 
 function orNull(value: string): string | null {
@@ -75,7 +81,14 @@ function fromIdentity(identity: DeclarationIdentity): FormState {
     passport_no: identity.passport_no ?? "",
     passport_expiry: identity.passport_expiry ?? "",
     visa_valid_until: identity.visa_valid_until ?? "",
+    name_confirmed_by_human: identity.name_confirmed_by_human,
+    single_token_name_ok: identity.single_token_name_ok ?? false,
   };
+}
+
+/** Đúng điều kiện E02 nổ: `full_name.split_whitespace().count() == 1`. */
+function isSingleToken(fullName: string): boolean {
+  return fullName.trim().split(/\s+/).filter(Boolean).length === 1;
 }
 
 /**
@@ -91,8 +104,16 @@ export default function ManualForm({ initial, onSaved, onCancel }: ManualFormPro
     initial ? fromIdentity(initial) : EMPTY,
   );
   const [saving, setSaving] = useState(false);
+  // Nhiều thẻ có thể mở form sửa cùng lúc (mỗi GuestCard tự quản lý
+  // `editing`) — id tĩnh sẽ đụng nhau giữa các form. `useId()` cho một tiền
+  // tố riêng theo từng instance để mọi input/label vẫn có accessible name
+  // đúng khi nhiều form cùng render.
+  const instanceId = useId();
 
   const foreign = isForeign(form.nationality_iso3);
+  // Đúng điều kiện E02/E04 của validator.rs — control chỉ hiện khi nó thật
+  // sự gỡ được lỗi tương ứng, không hiện tràn lan.
+  const singleTokenRelevant = isSingleToken(form.full_name);
   const canSave =
     form.full_name.trim().length > 0 && form.dob.trim().length > 0 && !saving;
 
@@ -117,12 +138,12 @@ export default function ManualForm({ initial, onSaved, onCancel }: ManualFormPro
       passport_no: foreign ? orNull(form.passport_no) : null,
       passport_expiry: foreign ? orNull(form.passport_expiry) : null,
       visa_valid_until: foreign ? orNull(form.visa_valid_until) : null,
-      // Khi sửa danh tính đã có, giữ nguyên các flags mà người dùng đã xác nhận
-      // để sửa số điện thoại không làm mất xác nhận về tên.
-      name_confirmed_by_human: initial
-        ? initial.name_confirmed_by_human
-        : false,
-      single_token_name_ok: initial ? (initial.single_token_name_ok ?? false) : false,
+      // FINDING C2: hai flag này gỡ chặn E02/E04 và giờ có control riêng
+      // trong chính form này (thay vì chỉ đọc từ `initial`), nên người vận
+      // hành nhập tay/sửa tay một khách vẫn xác nhận được — không còn kẹt
+      // vĩnh viễn ở thẻ đỏ mà form mở ra không có gì để bấm.
+      name_confirmed_by_human: form.name_confirmed_by_human,
+      single_token_name_ok: form.single_token_name_ok,
     };
 
     try {
@@ -171,6 +192,43 @@ export default function ManualForm({ initial, onSaved, onCancel }: ManualFormPro
             onChange={(e) => set("full_name", e.target.value)}
           />
         </div>
+
+        {singleTokenRelevant && (
+          <div className="col-span-2">
+            <label
+              htmlFor={`${instanceId}-single-token`}
+              className="flex items-center gap-2 text-sm text-slate-600"
+            >
+              <input
+                id={`${instanceId}-single-token`}
+                type="checkbox"
+                checked={form.single_token_name_ok}
+                onChange={(e) => set("single_token_name_ok", e.target.checked)}
+              />
+              Tên trên giấy tờ chỉ có một chữ, đúng như vậy
+            </label>
+          </div>
+        )}
+
+        {foreign && (
+          <div className="col-span-2">
+            <label
+              htmlFor={`${instanceId}-name-confirm`}
+              className="flex items-center gap-2 text-sm text-slate-600"
+            >
+              <input
+                id={`${instanceId}-name-confirm`}
+                type="checkbox"
+                checked={form.name_confirmed_by_human}
+                onChange={(e) =>
+                  set("name_confirmed_by_human", e.target.checked)
+                }
+              />
+              Tôi đã đối chiếu tên này với hộ chiếu trên tay — dòng 1 của MRZ
+              không có checksum bảo vệ
+            </label>
+          </div>
+        )}
 
         <div>
           <label htmlFor="kbtt-manual-dob" className={labelClass}>
