@@ -130,7 +130,7 @@ describe("Declaration page", () => {
   it("dòng diễn giải nói badge đếm cái gì", async () => {
     invokeCommand.mockImplementation((cmd: string) => {
       if (cmd === "kbtt_undeclared_breakdown")
-        return Promise.resolve({ total: 6, not_exported: 3, held: 1, awaiting: 2 });
+        return Promise.resolve({ total: 6, not_scanned: 0, not_exported: 3, held: 1, awaiting: 2 });
       if (cmd === "kbtt_pending_rows") return Promise.resolve([]);
       if (cmd === "kbtt_list_stays") return Promise.resolve([]);
       if (cmd === "kbtt_list_batches") return Promise.resolve([]);
@@ -140,6 +140,23 @@ describe("Declaration page", () => {
     await waitFor(() =>
       expect(
         screen.getByText(/6 khách chưa khai xong: 3 chưa xuất file · 2 chờ đối chiếu · 1 gác lại/),
+      ).toBeTruthy(),
+    );
+  });
+
+  it("dòng diễn giải thêm caveat khi có chồng lấn", async () => {
+    invokeCommand.mockImplementation((cmd: string) => {
+      if (cmd === "kbtt_undeclared_breakdown")
+        return Promise.resolve({ total: 4, not_scanned: 2, not_exported: 1, held: 0, awaiting: 1 });
+      if (cmd === "kbtt_pending_rows") return Promise.resolve([]);
+      if (cmd === "kbtt_list_stays") return Promise.resolve([]);
+      if (cmd === "kbtt_list_batches") return Promise.resolve([]);
+      return Promise.resolve(null);
+    });
+    render(<Declaration />);
+    await waitFor(() =>
+      expect(
+        screen.getByText(/4 khách chưa khai xong: 2 lưu trú chưa xác nhận · 1 chưa xuất file · 1 chờ đối chiếu, một số khách ghi nhận ở nhiều mục/),
       ).toBeTruthy(),
     );
   });

@@ -55,20 +55,26 @@ export default function Declaration() {
 
   // Dòng diễn giải badge sidebar: badge cộng bốn nguồn, có chủ ý đếm thừa
   // hơn đếm thiếu (xem `undeclared_breakdown` phía Rust). `not_scanned` là
-  // khách PMS mà chưa ai quét giấy tờ — bucket duy nhất còn khác 0 ngay lần
+  // lưu trú PMS chưa xác nhận khai báo — bucket duy nhất còn khác 0 ngay lần
   // mở app đầu tiên sau khi nâng cấp, lúc danh sách "Cần khai" còn trống.
   // Bỏ qua bucket = 0 để dòng không dài dòng vô ích.
   const breakdownParts: string[] = [];
-  if (breakdown?.not_scanned) breakdownParts.push(`${breakdown.not_scanned} chưa quét giấy tờ`);
+  if (breakdown?.not_scanned) breakdownParts.push(`${breakdown.not_scanned} lưu trú chưa xác nhận`);
   if (breakdown?.not_exported) breakdownParts.push(`${breakdown.not_exported} chưa xuất file`);
   if (breakdown?.awaiting) breakdownParts.push(`${breakdown.awaiting} chờ đối chiếu`);
   if (breakdown?.held) breakdownParts.push(`${breakdown.held} gác lại`);
+
+  // Caveat khi có overlap: một khách PMS có thể nằm ở cả not_scanned và một
+  // bucket link khác (chưa xuất, chờ đối chiếu, gác lại) nên số này có thể
+  // cao hơn số khách thực tế. Chỉ hiện caveat khi có thể overlap xảy ra.
+  const hasOverlap = breakdown && breakdown.not_scanned > 0 && (breakdown.not_exported > 0 || breakdown.awaiting > 0 || breakdown.held > 0);
+  const caveat = hasOverlap ? ", một số khách ghi nhận ở nhiều mục" : "";
 
   return (
     <div className="flex flex-col gap-6">
       {breakdown && breakdown.total > 0 && (
         <p className="text-sm text-brand-muted">
-          {breakdown.total} khách chưa khai xong: {breakdownParts.join(" · ")}
+          {breakdown.total} khách chưa khai xong: {breakdownParts.join(" · ")}{caveat}
         </p>
       )}
 
