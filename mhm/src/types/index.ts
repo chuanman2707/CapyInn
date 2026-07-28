@@ -176,6 +176,21 @@ export interface AvailabilityResult {
   max_nights: number | null;
 }
 
+export interface PricingLine {
+  label: string;
+  amount: MoneyVnd;
+}
+
+export interface PricingResult {
+  pricing_type: string;
+  base_amount: MoneyVnd;
+  surcharge_amount: MoneyVnd;
+  weekend_amount: MoneyVnd;
+  total: MoneyVnd;
+  breakdown: PricingLine[];
+  capped: boolean;
+}
+
 export interface EditableBooking {
   id: string;
   room_id: string;

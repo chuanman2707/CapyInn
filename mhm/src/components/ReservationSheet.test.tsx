@@ -341,6 +341,25 @@ describe("ReservationSheet", () => {
   });
 
   it("để người dùng chọn ngày đi và không còn ô số đêm", async () => {
+    // Dòng tổng tiền giờ đến từ engine (calculate_room_price_preview) chứ
+    // không còn tự nhân trong component — nạp một breakdown giả phản ánh
+    // đúng số đêm đã chọn, để chứng minh ngày tự suy ra số đêm mà không cần
+    // ô nhập riêng.
+    invoke.mockImplementation(async (command: string) => {
+      if (command === "calculate_room_price_preview") {
+        return {
+          pricing_type: "nightly",
+          base_amount: 1_500_000,
+          surcharge_amount: 0,
+          weekend_amount: 0,
+          total: 1_500_000,
+          capped: false,
+          breakdown: [{ label: "3 night(s) x 500.000", amount: 1_500_000 }],
+        };
+      }
+      return { available: true, conflicts: [], max_nights: null };
+    });
+
     render(<ReservationSheet open onOpenChange={vi.fn()} />);
 
     expect(screen.queryByLabelText(/số đêm/i)).not.toBeInTheDocument();
@@ -356,7 +375,7 @@ describe("ReservationSheet", () => {
     fireEvent.change(checkOut, { target: { value: "2026-08-09" } });
 
     await waitFor(() => {
-      expect(screen.getByText(/3 đêm/i)).toBeInTheDocument();
+      expect(screen.getByText(/3 night\(s\)/i)).toBeInTheDocument();
     });
   });
 
@@ -428,6 +447,35 @@ describe("ReservationSheet", () => {
     fireEvent.change(screen.getByLabelText(/^phòng$/i), { target: { value: "R102" } });
 
     await waitFor(() => expect(guests.value).toBe("5"));
+  });
+
+  it("hiện tổng tiền do engine trả về, kèm dòng phụ thu", async () => {
+    invoke.mockImplementation(async (command: string) => {
+      if (command === "calculate_room_price_preview") {
+        return {
+          pricing_type: "nightly",
+          base_amount: 1_000_000,
+          surcharge_amount: 0,
+          weekend_amount: 0,
+          total: 1_200_000,
+          capped: false,
+          breakdown: [
+            { label: "2 night(s) x 500.000", amount: 1_000_000 },
+            { label: "Phụ thu 2 khách", amount: 200_000 },
+          ],
+        };
+      }
+      return { available: true, conflicts: [], max_nights: null };
+    });
+
+    render(<ReservationSheet open onOpenChange={vi.fn()} />);
+    fireEvent.change(screen.getByLabelText(/^phòng$/i), { target: { value: "R101" } });
+    fireEvent.change(screen.getByLabelText(/số khách/i), { target: { value: "4" } });
+
+    await waitFor(() => {
+      expect(screen.getByText("Phụ thu 2 khách")).toBeInTheDocument();
+      expect(screen.getByText("1.200.000₫")).toBeInTheDocument();
+    });
   });
 
   it("một fetchRooms() không liên quan (mảng rooms mới, cùng dữ liệu) không được xoá số khách đã gõ tay", async () => {
