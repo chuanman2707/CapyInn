@@ -87,7 +87,7 @@ pub(crate) fn build_effective_pricing_rule(
 /// Trả 0 khi ngày đi không sau ngày đến — đúng lúc `calculate_price` cũng trả 0.
 fn nights_between(check_in: &str, check_out: &str) -> BookingResult<i64> {
     let parse = |value: &str| {
-        let head = &value[..value.len().min(10)];
+        let head = value.get(..10).unwrap_or(value);
         NaiveDate::parse_from_str(head, "%Y-%m-%d")
             .map_err(|error| BookingError::datetime_parse(error.to_string()))
     };
@@ -151,8 +151,8 @@ pub(crate) fn calculate_from_loaded_inputs(
 #[cfg(test)]
 mod tests {
     use super::{
-        build_effective_pricing_rule, calculate_from_loaded_inputs, StayPricingInputs,
-        StoredPricingRule,
+        build_effective_pricing_rule, calculate_from_loaded_inputs, nights_between,
+        StayPricingInputs, StoredPricingRule,
     };
     use crate::domain::booking::BookingError;
 
@@ -274,6 +274,16 @@ mod tests {
             error,
             BookingError::DateTimeParse(message) if message.contains("Invalid check-in datetime")
         ));
+    }
+
+    /// Byte 10 của chuỗi rơi giữa ký tự nhiều byte (emoji) — trước đây
+    /// `&value[..10]` panic "byte index 10 is not a char boundary"; nay
+    /// `get(..10)` trả `None` và hàm phải trả lỗi thay vì sập.
+    #[test]
+    fn nights_between_rejects_check_in_with_non_char_boundary_byte_ten_without_panicking() {
+        let error = nights_between("2026-04-2\u{1F600}x", "2026-04-22").unwrap_err();
+
+        assert!(matches!(error, BookingError::DateTimeParse(_)));
     }
 
     /// 500.000₫ × 2 đêm = 1.000.000₫, cộng 2 khách vượt mốc × 50.000₫ × 2 đêm.
