@@ -1,6 +1,8 @@
 use super::AppState;
+use crate::queries::booking::activity_queries::{
+    self, RecentCheckIn, RecentCheckOut, RecentHousekeeping,
+};
 use crate::{models::*, queries::booking::revenue_queries};
-use sqlx::Row;
 use tauri::State;
 
 // ─── A3: Get Analytics ───
@@ -33,105 +35,89 @@ pub async fn get_recent_activity(
     state: State<'_, AppState>,
     limit: i32,
 ) -> Result<Vec<ActivityItem>, String> {
-    let mut activities: Vec<ActivityItem> = vec![];
+    let check_ins = activity_queries::load_recent_check_ins(&state.db, limit)
+        .await
+        .map_err(|e| e.to_string())?;
+    let check_outs = activity_queries::load_recent_check_outs(&state.db, limit)
+        .await
+        .map_err(|e| e.to_string())?;
+    let housekeeping = activity_queries::load_recent_housekeeping(&state.db, limit)
+        .await
+        .map_err(|e| e.to_string())?;
 
-    // Recent check-ins
-    let checkins = sqlx::query(
-        "SELECT b.room_id, g.full_name, b.check_in_at
-         FROM bookings b JOIN guests g ON g.id = b.primary_guest_id
-         ORDER BY b.check_in_at DESC LIMIT ?",
-    )
-    .bind(limit)
-    .fetch_all(&state.db)
-    .await
-    .map_err(|e| e.to_string())?;
+    Ok(build_activity_feed(
+        check_ins,
+        check_outs,
+        housekeeping,
+        limit,
+    ))
+}
 
-    for r in &checkins {
-        let room_id: String = r.get("room_id");
-        let name: String = r.get("full_name");
-        let time_str: String = r.get("check_in_at");
-        let time = extract_time(&time_str);
+/// Turns the three activity reads into the dashboard feed.
+///
+/// Pure on purpose: everything below here is presentation — the icon, the
+/// Tailwind class, and the Vietnamese status label the dashboard renders — so
+/// it can be tested without a database.
+fn build_activity_feed(
+    check_ins: Vec<RecentCheckIn>,
+    check_outs: Vec<RecentCheckOut>,
+    housekeeping: Vec<RecentHousekeeping>,
+    limit: i32,
+) -> Vec<ActivityItem> {
+    let mut activities: Vec<ActivityItem> = Vec::new();
+
+    for row in check_ins {
         activities.push(ActivityItem {
             icon: "🟢".to_string(),
-            text: format!("Check-in {} → {}", name, room_id),
-            time,
+            text: format!("Check-in {} → {}", row.guest_name, row.room_id),
+            time: extract_time(&row.check_in_at),
             color: "bg-emerald-50".to_string(),
             kind: "check_in".to_string(),
-            room_id: Some(room_id),
-            guest_name: Some(name),
-            occurred_at: time_str,
+            room_id: Some(row.room_id),
+            guest_name: Some(row.guest_name),
+            occurred_at: row.check_in_at,
             status_label: "Đã check-in".to_string(),
         });
     }
 
-    // Recent check-outs
-    let checkouts = sqlx::query(
-        "SELECT b.room_id, g.full_name, b.actual_checkout
-         FROM bookings b JOIN guests g ON g.id = b.primary_guest_id
-         WHERE b.actual_checkout IS NOT NULL
-         ORDER BY b.actual_checkout DESC LIMIT ?",
-    )
-    .bind(limit)
-    .fetch_all(&state.db)
-    .await
-    .map_err(|e| e.to_string())?;
-
-    for r in &checkouts {
-        let room_id: String = r.get("room_id");
-        let name: String = r.get("full_name");
-        let time_str: String = r.get("actual_checkout");
-        let time = extract_time(&time_str);
+    for row in check_outs {
         activities.push(ActivityItem {
             icon: "🔴".to_string(),
-            text: format!("Check-out {} — Room {}", name, room_id),
-            time,
+            text: format!("Check-out {} — Room {}", row.guest_name, row.room_id),
+            time: extract_time(&row.actual_checkout),
             color: "bg-red-50".to_string(),
             kind: "check_out".to_string(),
-            room_id: Some(room_id),
-            guest_name: Some(name),
-            occurred_at: time_str,
+            room_id: Some(row.room_id),
+            guest_name: Some(row.guest_name),
+            occurred_at: row.actual_checkout,
             status_label: "Đã check-out".to_string(),
         });
     }
 
-    // Recent housekeeping
-    let hk = sqlx::query(
-        "SELECT room_id, status, triggered_at FROM housekeeping
-         ORDER BY triggered_at DESC LIMIT ?",
-    )
-    .bind(limit)
-    .fetch_all(&state.db)
-    .await
-    .map_err(|e| e.to_string())?;
-
-    for r in &hk {
-        let room_id: String = r.get("room_id");
-        let status: String = r.get("status");
-        let time_str: String = r.get("triggered_at");
-        let time = extract_time(&time_str);
-        let label = if status == "clean" {
+    for row in housekeeping {
+        let label = if row.status == "clean" {
             "Cleaned"
         } else {
             "Needs cleaning"
         };
         activities.push(ActivityItem {
             icon: "🧹".to_string(),
-            text: format!("{} — Room {}", label, room_id),
-            time,
+            text: format!("{} — Room {}", label, row.room_id),
+            time: extract_time(&row.triggered_at),
             color: "bg-amber-50".to_string(),
             kind: "housekeeping".to_string(),
-            room_id: Some(room_id),
+            room_id: Some(row.room_id),
             guest_name: None,
-            occurred_at: time_str,
+            occurred_at: row.triggered_at,
             status_label: label.to_string(),
         });
     }
 
     // Sort by full timestamp descending to keep cross-day ordering stable.
     activities.sort_by(|a, b| b.occurred_at.cmp(&a.occurred_at));
-    activities.truncate(limit as usize);
+    activities.truncate(limit.max(0) as usize);
 
-    Ok(activities)
+    activities
 }
 
 fn extract_time(datetime_str: &str) -> String {
@@ -149,4 +135,171 @@ fn extract_time(datetime_str: &str) -> String {
         }
     }
     datetime_str.to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{build_activity_feed, extract_time};
+    use crate::queries::booking::activity_queries::{
+        RecentCheckIn, RecentCheckOut, RecentHousekeeping,
+    };
+
+    fn check_in(room_id: &str, guest: &str, at: &str) -> RecentCheckIn {
+        RecentCheckIn {
+            room_id: room_id.to_string(),
+            guest_name: guest.to_string(),
+            check_in_at: at.to_string(),
+        }
+    }
+
+    fn check_out(room_id: &str, guest: &str, at: &str) -> RecentCheckOut {
+        RecentCheckOut {
+            room_id: room_id.to_string(),
+            guest_name: guest.to_string(),
+            actual_checkout: at.to_string(),
+        }
+    }
+
+    fn housekeeping(room_id: &str, status: &str, at: &str) -> RecentHousekeeping {
+        RecentHousekeeping {
+            room_id: room_id.to_string(),
+            status: status.to_string(),
+            triggered_at: at.to_string(),
+        }
+    }
+
+    #[test]
+    fn the_three_sources_interleave_newest_first() {
+        let feed = build_activity_feed(
+            vec![check_in("101", "An", "2026-04-10T14:00:00+07:00")],
+            vec![check_out("102", "Binh", "2026-04-10T12:00:00+07:00")],
+            vec![housekeeping("103", "clean", "2026-04-10T16:00:00+07:00")],
+            10,
+        );
+
+        let kinds: Vec<&str> = feed.iter().map(|item| item.kind.as_str()).collect();
+        assert_eq!(
+            kinds,
+            vec!["housekeeping", "check_in", "check_out"],
+            "the feed is ordered by the full timestamp, not by source"
+        );
+    }
+
+    #[test]
+    fn the_limit_applies_to_the_merged_feed_not_to_each_source() {
+        let feed = build_activity_feed(
+            vec![
+                check_in("101", "An", "2026-04-10T09:00:00+07:00"),
+                check_in("102", "Binh", "2026-04-10T08:00:00+07:00"),
+            ],
+            vec![check_out("103", "Cuong", "2026-04-10T10:00:00+07:00")],
+            vec![housekeeping("104", "dirty", "2026-04-10T11:00:00+07:00")],
+            2,
+        );
+
+        assert_eq!(feed.len(), 2);
+        assert_eq!(feed[0].room_id.as_deref(), Some("104"));
+        assert_eq!(feed[1].room_id.as_deref(), Some("103"));
+    }
+
+    #[test]
+    fn a_check_in_carries_its_presentation() {
+        let feed = build_activity_feed(
+            vec![check_in("101", "An", "2026-04-10T14:30:00+07:00")],
+            vec![],
+            vec![],
+            10,
+        );
+
+        let item = &feed[0];
+        assert_eq!(item.icon, "🟢");
+        assert_eq!(item.text, "Check-in An → 101");
+        assert_eq!(item.time, "14:30");
+        assert_eq!(item.color, "bg-emerald-50");
+        assert_eq!(item.status_label, "Đã check-in");
+        assert_eq!(item.guest_name.as_deref(), Some("An"));
+    }
+
+    #[test]
+    fn a_check_out_carries_its_presentation() {
+        let feed = build_activity_feed(
+            vec![],
+            vec![check_out("102", "Binh", "2026-04-10T11:05:00+07:00")],
+            vec![],
+            10,
+        );
+
+        let item = &feed[0];
+        assert_eq!(item.icon, "🔴");
+        assert_eq!(item.text, "Check-out Binh — Room 102");
+        assert_eq!(item.time, "11:05");
+        assert_eq!(item.color, "bg-red-50");
+        assert_eq!(item.status_label, "Đã check-out");
+    }
+
+    #[test]
+    fn housekeeping_reads_clean_against_everything_else() {
+        let feed = build_activity_feed(
+            vec![],
+            vec![],
+            vec![
+                housekeeping("103", "clean", "2026-04-10T16:00:00+07:00"),
+                housekeeping("104", "dirty", "2026-04-10T15:00:00+07:00"),
+                housekeeping("105", "cleaning", "2026-04-10T14:00:00+07:00"),
+            ],
+            10,
+        );
+
+        let labels: Vec<&str> = feed.iter().map(|i| i.status_label.as_str()).collect();
+        assert_eq!(
+            labels,
+            vec!["Cleaned", "Needs cleaning", "Needs cleaning"],
+            "only the literal 'clean' status reads as done"
+        );
+        assert!(feed.iter().all(|i| i.guest_name.is_none()));
+        assert_eq!(feed[0].text, "Cleaned — Room 103");
+    }
+
+    #[test]
+    fn ties_keep_check_in_before_check_out_before_housekeeping() {
+        let same = "2026-04-10T10:00:00+07:00";
+        let feed = build_activity_feed(
+            vec![check_in("101", "An", same)],
+            vec![check_out("102", "Binh", same)],
+            vec![housekeeping("103", "clean", same)],
+            10,
+        );
+
+        let kinds: Vec<&str> = feed.iter().map(|item| item.kind.as_str()).collect();
+        assert_eq!(kinds, vec!["check_in", "check_out", "housekeeping"]);
+    }
+
+    #[test]
+    fn an_empty_feed_survives_a_zero_or_negative_limit() {
+        assert!(build_activity_feed(vec![], vec![], vec![], 0).is_empty());
+        assert!(build_activity_feed(
+            vec![check_in("101", "An", "2026-04-10T10:00:00+07:00")],
+            vec![],
+            vec![],
+            -1,
+        )
+        .is_empty());
+    }
+
+    #[test]
+    fn extract_time_reads_hh_mm_from_every_shape_it_meets() {
+        assert_eq!(extract_time("2026-04-10T14:30:00+07:00"), "14:30");
+        assert_eq!(extract_time("2026-04-10 14:30:00"), "14:30");
+        assert_eq!(
+            extract_time("2026-04-10"),
+            "2026-04-10",
+            "no time component falls back to the raw string"
+        );
+        assert_eq!(
+            extract_time("2026-04-10T14"),
+            "2026-04-10T14",
+            "a truncated time component falls back rather than panicking"
+        );
+        assert_eq!(extract_time(""), "");
+    }
 }

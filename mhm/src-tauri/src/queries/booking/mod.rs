@@ -1,5 +1,7 @@
+pub mod activity_queries;
 pub mod audit_queries;
 pub mod billing_queries;
+pub mod booking_list_queries;
 pub mod ceo_read_queries;
 pub mod expense_queries;
 pub mod pricing_queries;
