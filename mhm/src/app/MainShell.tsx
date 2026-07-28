@@ -370,7 +370,10 @@ export function MainShell() {
               active={declarationActive}
               onActivate={() => setDeclarationReactivateSignal((n) => n + 1)}
             >
-              <Declaration reactivateSignal={declarationReactivateSignal} />
+              <Declaration
+                visible={declarationActive}
+                reactivateSignal={declarationReactivateSignal}
+              />
             </KeepMounted>
             {activeTab === "settings" && <Settings />}
           </div>

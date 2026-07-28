@@ -22,6 +22,13 @@ interface DeclarationProps {
    * server bên trong vẫn còn đúng — đây là hai việc tách bạch.
    */
   reactivateSignal?: number;
+  /**
+   * FINDING I2: có đang là tab đang xem hay không — cùng tín hiệu visibility
+   * với `reactivateSignal`, truyền tiếp xuống `DropZone` để listener
+   * `tauri://drag-drop` (đăng ký một lần, sống suốt phiên) không xử lý ảnh
+   * thả vào lúc trang này đang ẩn sau một tab khác.
+   */
+  visible?: boolean;
 }
 
 /**
@@ -32,7 +39,7 @@ interface DeclarationProps {
  * Vẫn không đụng gì tới luồng check-in đang chạy: không sửa `CheckinSheet`,
  * không đụng `watcher.rs` hay `Scans/`.
  */
-export default function Declaration({ reactivateSignal }: DeclarationProps) {
+export default function Declaration({ reactivateSignal, visible = true }: DeclarationProps) {
   const [reloadKey, setReloadKey] = useState(0);
   const [rows, setRows] = useState<DeclarationRow[]>([]);
   const [findings, setFindings] = useState<DeclarationFinding[]>([]);
@@ -108,7 +115,7 @@ export default function Declaration({ reactivateSignal }: DeclarationProps) {
         </p>
       )}
 
-      <DropZone onIdentitySaved={bump} />
+      <DropZone onIdentitySaved={bump} active={visible} />
 
       <GuestList
         reloadKey={reloadKey}

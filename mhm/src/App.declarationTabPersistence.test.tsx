@@ -17,9 +17,10 @@ import { useHotelStore } from "./stores/useHotelStore";
 // quay lại KHÔNG unmount trang — state phải còn nguyên, không reset về 0.
 let declarationMountCount = 0;
 interface DeclarationStubProps {
+  visible?: boolean;
   reactivateSignal?: number;
 }
-function DeclarationStub({ reactivateSignal }: DeclarationStubProps) {
+function DeclarationStub({ visible, reactivateSignal }: DeclarationStubProps) {
   useState(() => {
     declarationMountCount += 1;
     return null;
@@ -28,6 +29,7 @@ function DeclarationStub({ reactivateSignal }: DeclarationStubProps) {
   return (
     <div>
       <p>Declaration stub — unsaved: {unsavedCards}</p>
+      <p>visible: {String(visible)}</p>
       <p>reactivateSignal: {reactivateSignal ?? "none"}</p>
       <button onClick={() => setUnsavedCards((n) => n + 1)}>Thả ảnh giấy tờ (giả lập)</button>
     </div>
@@ -193,15 +195,16 @@ describe("MainShell báo cho trang khai báo biết khi nào cần tải lại",
     });
   });
 
-  it("lần đầu xem tab: reactivateSignal ở giá trị ban đầu (không tính là một lần quay lại)", async () => {
+  it("lần đầu xem tab: visible=true, reactivateSignal ở giá trị ban đầu (không tính là một lần quay lại)", async () => {
     const user = userEvent.setup();
     await renderReadyApp();
 
     await user.click(screen.getByRole("button", { name: /khai báo tạm trú/i }));
+    expect(screen.getByText(/visible: true/)).toBeInTheDocument();
     expect(screen.getByText(/reactivateSignal: 0/)).toBeInTheDocument();
   });
 
-  it("rời tab rồi quay lại đúng một lần: reactivateSignal tăng đúng 1", async () => {
+  it("rời tab rồi quay lại đúng một lần: reactivateSignal tăng đúng 1, visible quay về true", async () => {
     const user = userEvent.setup();
     await renderReadyApp();
 
@@ -209,8 +212,12 @@ describe("MainShell báo cho trang khai báo biết khi nào cần tải lại",
     expect(screen.getByText(/reactivateSignal: 0/)).toBeInTheDocument();
 
     await user.click(screen.getByRole("button", { name: /^dashboard$/i }));
+    // Ẩn nhưng vẫn mounted (FINDING D) — visible phải là false lúc này, đúng
+    // tín hiệu FINDING I2 dùng để chặn DropZone xử lý ảnh thả vào lúc ẩn.
+    expect(screen.getByText(/visible: false/)).toBeInTheDocument();
 
     await user.click(screen.getByRole("button", { name: /khai báo tạm trú/i }));
+    expect(screen.getByText(/visible: true/)).toBeInTheDocument();
     expect(screen.getByText(/reactivateSignal: 1/)).toBeInTheDocument();
   });
 

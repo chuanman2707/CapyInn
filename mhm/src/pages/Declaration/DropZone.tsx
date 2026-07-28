@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { ImagePlus, PencilLine } from "lucide-react";
 import { toast } from "sonner";
@@ -15,6 +15,17 @@ import { matchedExistingDeclarationMessage } from "./saveOutcome";
 interface DropZoneProps {
   /** Gọi khi một danh tính đã được lưu, để danh sách khách tự tải lại từ DB. */
   onIdentitySaved?: () => void;
+  /**
+   * FINDING I2: có đang là tab đang xem hay không. `DropZone` giờ sống suốt
+   * phiên (trang Declaration không unmount khi rời tab — xem `KeepMounted`),
+   * nên listener `tauri://drag-drop` đăng ký MỘT LẦN cũng sống suốt phiên.
+   * Không có cờ này, thả ảnh lúc đang ở tab Check-in/Rooms vẫn gọi
+   * `kbtt_extract_from_image` và thêm thẻ vào một trang không ai đang nhìn —
+   * lỗi thì hiện toast lạc trên màn hình khác, thành công thì không có gì
+   * báo cả. Mặc định `true` để dùng độc lập (test, hoặc nơi khác) vẫn hoạt
+   * động bình thường như trước.
+   */
+  active?: boolean;
 }
 
 interface DropPayload {
@@ -28,12 +39,20 @@ interface DropPayload {
  * Ảnh chỉ được đọc từ đường dẫn tạm rồi bỏ. Không copy vào storage của app,
  * không log đường dẫn (spec §12.3, §12.4).
  */
-export default function DropZone({ onIdentitySaved }: DropZoneProps) {
+export default function DropZone({ onIdentitySaved, active = true }: DropZoneProps) {
   const [cards, setCards] = useState<ExtractedIdentity[]>([]);
   const [busy, setBusy] = useState(false);
   const [manualOpen, setManualOpen] = useState(false);
   const [savingIndex, setSavingIndex] = useState<number | null>(null);
   const [lastError, setLastError] = useState<string | null>(null);
+
+  // FINDING I2: listener đăng ký MỘT LẦN (deps rỗng bên dưới) và sống suốt
+  // phiên — dùng ref để callback luôn đọc được giá trị `active` MỚI NHẤT tại
+  // thời điểm có sự kiện thả, không phải giá trị tại lúc đăng ký (closure cũ).
+  const activeRef = useRef(active);
+  useEffect(() => {
+    activeRef.current = active;
+  }, [active]);
 
   useEffect(() => {
     let cancelled = false;
@@ -59,6 +78,11 @@ export default function DropZone({ onIdentitySaved }: DropZoneProps) {
     };
 
     listen<DropPayload>("tauri://drag-drop", (event) => {
+      // FINDING I2: trang Declaration không unmount khi rời tab, nên listener
+      // này vẫn sống nếu đang ở Check-in/Rooms. Không xử lý gì khi đang ẩn —
+      // thất bại thì toast lạc trên màn khác, thành công thì thẻ nằm im
+      // không ai biết trên một trang không ai đang nhìn.
+      if (!activeRef.current) return;
       const payload = event.payload ?? {};
       if (payload.type && payload.type !== "drop") return;
       const paths = payload.paths ?? [];
