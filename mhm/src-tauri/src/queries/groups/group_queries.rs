@@ -14,7 +14,7 @@ const GROUP_BOOKINGS_SQL: &str =
             b.check_in_at, b.expected_checkout, b.actual_checkout, b.nights,
             b.total_price, b.paid_amount, b.status, b.source,
             b.booking_type, b.deposit_amount, b.scheduled_checkin, b.scheduled_checkout,
-            b.guest_phone
+            b.guest_phone, b.guests
      FROM bookings b
      JOIN rooms r ON r.id = b.room_id
      JOIN guests g ON g.id = b.primary_guest_id
@@ -144,6 +144,7 @@ fn map_group_booking(row: &sqlx::sqlite::SqliteRow) -> BookingWithGuest {
         scheduled_checkin: row.get("scheduled_checkin"),
         scheduled_checkout: row.get("scheduled_checkout"),
         guest_phone: row.get("guest_phone"),
+        guests: row.get("guests"),
     }
 }
 
@@ -201,6 +202,7 @@ mod tests {
             scheduled_checkin: None,
             scheduled_checkout: None,
             guest_phone: None,
+            guests: None,
         }
     }
 
