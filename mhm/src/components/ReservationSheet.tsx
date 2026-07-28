@@ -4,6 +4,7 @@ import { CalendarDays, User, Phone, CreditCard, AlertTriangle, FileText } from "
 import { Sheet, SheetContent, SheetHeader, SheetTitle } from "@/components/ui/sheet";
 import { Button } from "@/components/ui/button";
 import { useAvailability } from "@/hooks/useAvailability";
+import { usePricePreview } from "@/hooks/usePricePreview";
 import { useInvoiceDialog } from "@/hooks/useInvoiceDialog";
 import { formatAppError } from "@/lib/appError";
 import { createCorrelationId } from "@/lib/correlationId";
@@ -65,6 +66,13 @@ export default function ReservationSheet({ open, onOpenChange, preSelectedRoomId
         fromDate: checkInDate,
         toDate: checkOutDate,
         disabled: isEditMode,
+        debounceMs: 300,
+    });
+    const { preview, loading: pricing } = usePricePreview({
+        roomId,
+        checkIn: checkInDate,
+        checkOut: checkOutDate,
+        guests,
         debounceMs: 300,
     });
 
@@ -401,21 +409,31 @@ export default function ReservationSheet({ open, onOpenChange, preSelectedRoomId
                         />
                     </div>
 
-                    {/* Price Estimate */}
-                    {roomId && nights > 0 && (
+                    {/* Price Estimate — con số do engine tính, không phải phép nhân ở đây */}
+                    {roomId && datesValid && (
                         <div className="bg-blue-50 rounded-xl p-4 space-y-1">
-                            <div className="flex justify-between text-sm">
-                                <span className="text-slate-600">Giá phòng × {nights} đêm</span>
-                                <span className="font-bold text-slate-800">
-                                    {fmtNumber((rooms.find((r) => r.id === roomId)?.base_price || 0) * nights)}₫
-                                </span>
-                            </div>
-                            {deposit && parseFloat(deposit) > 0 && (
-                                <div className="flex justify-between text-sm">
-                                    <span className="text-slate-600">Tiền cọc</span>
-                                    <span className="font-semibold text-emerald-700">-{fmtNumber(parseFloat(deposit))}₫</span>
-                                </div>
-                            )}
+                            {pricing && !preview ? (
+                                <div className="text-sm text-slate-500">Đang tính giá...</div>
+                            ) : preview ? (
+                                <>
+                                    {preview.breakdown.map((line, i) => (
+                                        <div key={i} className="flex justify-between text-sm">
+                                            <span className="text-slate-600">{line.label}</span>
+                                            <span className="text-slate-700">{fmtNumber(line.amount)}₫</span>
+                                        </div>
+                                    ))}
+                                    <div className="flex justify-between text-sm pt-1 border-t border-blue-100">
+                                        <span className="text-slate-600">Tổng</span>
+                                        <span className="font-bold text-slate-800">{fmtNumber(preview.total)}₫</span>
+                                    </div>
+                                    {deposit && parseFloat(deposit) > 0 && (
+                                        <div className="flex justify-between text-sm">
+                                            <span className="text-slate-600">Tiền cọc</span>
+                                            <span className="font-semibold text-emerald-700">-{fmtNumber(parseFloat(deposit))}₫</span>
+                                        </div>
+                                    )}
+                                </>
+                            ) : null}
                         </div>
                     )}
 
