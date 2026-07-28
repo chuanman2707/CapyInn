@@ -112,6 +112,42 @@ describe("ManualForm", () => {
     );
     expect(onSaved).toHaveBeenCalledWith("i9", expect.objectContaining({ id: "i9" }));
   });
+
+  it("preserves name_confirmed_by_human when editing without changing the name", async () => {
+    invokeCommand.mockResolvedValue(undefined);
+    const onSaved = vi.fn();
+    render(
+      <ManualForm
+        initial={{
+          id: "i10",
+          full_name: "Nguyễn Văn B",
+          dob: "1985-03-15",
+          gender: "F",
+          nationality_iso3: "VNM",
+          doc_type_code: "1",
+          doc_no: "123456789",
+          name_confirmed_by_human: true,
+          single_token_name_ok: false,
+        }}
+        onSaved={onSaved}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: /lưu/i }));
+
+    await waitFor(() =>
+      expect(invokeCommand).toHaveBeenCalledWith(
+        "kbtt_update_identity",
+        expect.objectContaining({
+          identityId: "i10",
+          identity: expect.objectContaining({
+            name_confirmed_by_human: true,
+            single_token_name_ok: false,
+          }),
+        }),
+      ),
+    );
+  });
 });
 
 describe("DropZone", () => {

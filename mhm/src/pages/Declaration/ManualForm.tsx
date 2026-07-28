@@ -117,8 +117,12 @@ export default function ManualForm({ initial, onSaved, onCancel }: ManualFormPro
       passport_no: foreign ? orNull(form.passport_no) : null,
       passport_expiry: foreign ? orNull(form.passport_expiry) : null,
       visa_valid_until: foreign ? orNull(form.visa_valid_until) : null,
-      name_confirmed_by_human: false,
-      single_token_name_ok: false,
+      // Khi sửa danh tính đã có, giữ nguyên các flags mà người dùng đã xác nhận
+      // để sửa số điện thoại không làm mất xác nhận về tên.
+      name_confirmed_by_human: initial
+        ? initial.name_confirmed_by_human
+        : false,
+      single_token_name_ok: initial ? (initial.single_token_name_ok ?? false) : false,
     };
 
     try {
