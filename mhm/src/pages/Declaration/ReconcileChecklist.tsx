@@ -114,8 +114,7 @@ export default function ReconcileChecklist({
           <strong>Lô thất bại.</strong> Số trên cổng không khớp số đã xuất, nên
           {" "}{expected} khách vẫn giữ nguyên trên lô này (không quay lại danh
           sách chờ, để tránh xuất trùng) và badge tiếp tục đếm họ. Kiểm tra lại
-          file rồi upload lần nữa — hoặc nếu dữ liệu trong file sai, đưa khách
-          về danh sách để sửa rồi xuất lại.
+          file rồi upload lên cổng lần nữa.
         </p>
       )}
     </div>

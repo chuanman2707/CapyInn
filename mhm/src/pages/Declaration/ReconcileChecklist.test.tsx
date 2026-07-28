@@ -96,8 +96,12 @@ describe("ReconcileChecklist", () => {
       screen.getByText(/giữ nguyên trên lô này/i),
     ).toBeInTheDocument();
     expect(
-      screen.getByText(/đưa khách về danh sách để sửa/i),
+      screen.getByText(/upload lên cổng lần nữa/i),
     ).toBeInTheDocument();
+    // Không có nút "đưa khách về danh sách" trên màn này — đừng hứa hão.
+    expect(
+      screen.queryByText(/đưa khách về danh sách/i),
+    ).not.toBeInTheDocument();
     await waitFor(() => {
       expect(invokeCommand).toHaveBeenCalledWith("kbtt_reconcile", {
         batchId: "b1",
