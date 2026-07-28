@@ -30,6 +30,10 @@ export default function ReconcilePanel({ reloadKey, onSettled }: ReconcilePanelP
     invokeCommand<DeclarationBatch[]>("kbtt_list_batches")
       .then((data) =>
         setBatches(
+          // "verified" và "reopened" đã xong việc — không dựng thẻ cho chúng.
+          // Một lô "failed" được mở lại chuyển hẳn sang "reopened" (không còn
+          // "failed"), nên tự động rớt khỏi danh sách này, không kẹt lại
+          // thành thẻ ma.
           (data ?? []).filter((b) =>
             ["exported", "uploaded", "failed"].includes(b.status),
           ),

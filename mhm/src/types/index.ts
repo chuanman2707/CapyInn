@@ -448,7 +448,14 @@ export type DeclarationSource = "qr_cccd" | "mrz_td3" | "manual";
 export type DeclarationConfidence = "verified" | "needs_review";
 export type DeclarationBatchKind = "NNN" | "VN";
 export type DeclarationSeverity = "blocking" | "warning";
-export type DeclarationBatchStatus = "exported" | "uploaded" | "verified" | "failed";
+export type DeclarationBatchStatus =
+  | "exported"
+  | "uploaded"
+  | "verified"
+  | "failed"
+  /** Trạng thái chót: lô `failed` đã được mở lại, khách về danh sách để sửa.
+   * Không phải cửa quay vòng — một lô `reopened` không mở lại được lần hai. */
+  | "reopened";
 export type DeclarationDocTypeSource = "heuristic" | "human";
 
 export interface DeclarationIdentity {

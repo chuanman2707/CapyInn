@@ -776,16 +776,25 @@ pub async fn set_batch_failed(
     set_batch_outcome(pool, batch_id, "failed", seen).await
 }
 
-/// Mở lại một lô `failed`: gỡ entry để khách quay về danh sách chờ, giữ dòng
-/// lô làm lịch sử. Chỉ cho lô `failed` — `exported` phải qua đối chiếu trước,
-/// `verified` là bằng chứng đã khai.
+/// Mở lại một lô `failed`: gỡ entry để khách quay về danh sách chờ, đưa lô
+/// sang trạng thái chót `reopened`. Chỉ cho lô `failed` — `exported` phải qua
+/// đối chiếu trước, `verified` là bằng chứng đã khai, và `reopened` chính nó
+/// không mở lại lần hai được (không phải cửa quay vòng).
 ///
-/// Đọc trạng thái rồi xóa nằm chung một `pool.begin()` (như `delete_link` /
-/// `discard_link`): nếu tách hai câu lệnh, một lượt đối soát chen vào giữa có
-/// thể chốt lô này `verified` ngay sau khi ta vừa đọc "failed", và câu DELETE
-/// đứng riêng sẽ xóa mất entry của một lô giờ đã là bằng chứng đã khai. Gộp
-/// chung transaction thì SQLite giữ nguyên ảnh chụp lúc đọc cho tới khi
-/// commit — có tranh chấp ghi thật thì commit lỗi thay vì âm thầm xóa nhầm.
+/// `reopened` là trạng thái RIÊNG, không phải quay lại `failed`: nếu để
+/// nguyên `status = 'failed'` sau khi gỡ entry, `kbtt_list_batches` vẫn trả về
+/// lô này và `ReconcilePanel` vẫn dựng thẻ đỏ cho nó — một thẻ ma không bao
+/// giờ biến mất dù khách đã được sửa, xuất lại và đối chiếu khớp dưới một lô
+/// MỚI. `list_batches` xếp `reopened` chung nhóm với `verified` ở cuối danh
+/// sách vì cả hai đều đã xong việc.
+///
+/// Đọc trạng thái rồi xóa+cập nhật nằm chung một `pool.begin()` (như
+/// `delete_link` / `discard_link`): nếu tách câu lệnh, một lượt đối soát chen
+/// vào giữa có thể chốt lô này `verified` ngay sau khi ta vừa đọc "failed", và
+/// các câu ghi đứng riêng sẽ xóa mất entry của một lô giờ đã là bằng chứng đã
+/// khai. Gộp chung transaction thì SQLite giữ nguyên ảnh chụp lúc đọc cho tới
+/// khi commit — có tranh chấp ghi thật thì commit lỗi thay vì âm thầm xóa
+/// nhầm.
 pub async fn reopen_failed_batch(pool: &Pool<Sqlite>, batch_id: &str) -> Result<(), String> {
     let mut tx = pool
         .begin()
@@ -812,6 +821,12 @@ pub async fn reopen_failed_batch(pool: &Pool<Sqlite>, batch_id: &str) -> Result<
         .execute(&mut *tx)
         .await
         .map_err(|e| format!("Không gỡ được khách khỏi lô: {e}"))?;
+
+    sqlx::query("UPDATE declaration_batch SET status = 'reopened' WHERE id = ?")
+        .bind(batch_id)
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| format!("Không cập nhật được trạng thái lô: {e}"))?;
 
     tx.commit()
         .await
@@ -1023,7 +1038,9 @@ pub struct BatchSummary {
 }
 
 /// Lô chưa xong nổi lên đầu: `failed` rồi `exported`/`uploaded`, sau đó mới tới
-/// lô đã `verified`. Người vận hành cần thấy cái đang hỏng trước.
+/// lô đã xong việc — `verified` (đối chiếu khớp) và `reopened` (đã mở lại, khách
+/// về danh sách để sửa) — đều rơi vào nhánh `ELSE` bên dưới. Người vận hành cần
+/// thấy cái đang hỏng trước, không phải lô nào đã yên rồi.
 pub async fn list_batches(pool: &Pool<Sqlite>) -> Result<Vec<BatchSummary>, String> {
     let rows = sqlx::query(
         "SELECT id, kind, file_path, row_count, status,
@@ -1033,7 +1050,7 @@ pub async fn list_batches(pool: &Pool<Sqlite>) -> Result<Vec<BatchSummary>, Stri
                      WHEN 'failed'   THEN 0
                      WHEN 'exported' THEN 1
                      WHEN 'uploaded' THEN 1
-                     ELSE 2
+                     ELSE 2 -- 'verified' và 'reopened': lô đã xong việc
                    END,
                    created_at DESC",
     )
@@ -1929,11 +1946,16 @@ mod tests {
                 .fetch_one(&pool)
                 .await
                 .expect("đọc lô");
-        assert_eq!(status, "failed", "dòng lô ở lại làm lịch sử");
+        assert_eq!(
+            status, "reopened",
+            "lô phải chuyển sang trạng thái chót 'reopened', không kẹt ở 'failed' mãi \
+             (thẻ đối chiếu mới không lọc theo 'reopened' nên sẽ không mọc thẻ ma)"
+        );
     }
 
     /// Lô chưa fail thì không mở lại được — 'exported' phải đi qua đối chiếu
-    /// trước, 'verified' là bằng chứng.
+    /// trước, 'verified' là bằng chứng. Lô đã 'reopened' cũng không mở lại lần
+    /// hai được — đó là trạng thái chót, không phải cửa quay vòng.
     #[tokio::test]
     async fn only_failed_batches_can_be_reopened() {
         let pool = pool().await;
@@ -1947,6 +1969,22 @@ mod tests {
         assert!(reopen_failed_batch(&pool, &batch).await.is_err(), "exported: chưa được");
         set_batch_verified(&pool, &batch, 1).await.expect("chốt");
         assert!(reopen_failed_batch(&pool, &batch).await.is_err(), "verified: không bao giờ");
+
+        // Khách vừa verified giờ tạo lại một link mới (quay lại ở lượt sau),
+        // dùng nó để dựng một lô 'failed' -> 'reopened' độc lập.
+        save_identity_ensuring_link(&pool, &vn_identity(), "qr_cccd", "verified")
+            .await
+            .expect("lưu lại");
+        let link2 = pending_link_ids(&pool).await.expect("đọc")[0].clone();
+        let batch2 = insert_batch(&pool, "VN", "/tmp/y.xlsx", 1).await.expect("lô 2");
+        insert_entries(&pool, &batch2, std::slice::from_ref(&link2)).await.expect("dòng 2");
+        set_batch_failed(&pool, &batch2, 0).await.expect("fail");
+
+        reopen_failed_batch(&pool, &batch2).await.expect("mở lần đầu: được");
+        assert!(
+            reopen_failed_batch(&pool, &batch2).await.is_err(),
+            "reopened: không mở lại lần hai"
+        );
     }
 
     #[tokio::test]

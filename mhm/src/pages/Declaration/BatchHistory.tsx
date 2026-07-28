@@ -9,11 +9,13 @@ const STATUS_LABEL: Record<string, string> = {
   uploaded: "Đã upload, chưa đối chiếu",
   verified: "Đã đối chiếu khớp",
   failed: "Thất bại",
+  reopened: "Đã mở lại, khách về danh sách để sửa",
 };
 
 function statusTone(status: string): string {
   if (status === "verified") return "bg-emerald-50 text-emerald-900";
   if (status === "failed") return "bg-red-50 text-red-900";
+  if (status === "reopened") return "bg-slate-100 text-slate-700";
   return "bg-amber-50 text-amber-900";
 }
 
