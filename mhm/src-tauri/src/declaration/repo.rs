@@ -560,15 +560,29 @@ async fn live_stay_snapshot(pool: &Pool<Sqlite>, stay_id: &str) -> Result<Option
 /// TRƯỚC khi khai xong không kéo khai báo về rỗng khi booking rời khỏi
 /// `load_stays_for_declaration` (chỉ liệt kê `status = 'active'`).
 ///
-/// Ba nhánh:
+/// Bốn nhánh:
 /// - `stay_id = None` (bỏ chọn phòng): xóa cả snapshot — không còn phòng nào
 ///   để nhớ.
 /// - `stay_id = Some` và booking đó ĐANG active: ghi đè snapshot bằng giá trị
 ///   sống mới nhất (đổi phòng thì snapshot phải theo phòng mới, không giữ
 ///   phòng cũ).
-/// - `stay_id = Some` nhưng booking đó KHÔNG active lúc này (VD: người vận
-///   hành chỉ đổi lý do lưu trú sau khi khách đã trả phòng, `stay_id` gửi lên
-///   vẫn là id cũ) — GIỮ NGUYÊN snapshot đã có, không ghi đè bằng rỗng.
+/// - `stay_id = Some`, booking đó KHÔNG active, và `stay_id` KHÔNG đổi so với
+///   link hiện tại (VD: người vận hành chỉ đổi lý do lưu trú sau khi khách đã
+///   trả phòng, `stay_id` gửi lên vẫn là id cũ) — GIỮ NGUYÊN snapshot đã có,
+///   không ghi đè bằng rỗng.
+/// - `stay_id = Some`, booking đó KHÔNG active, và link ĐANG có sẵn một
+///   `stay_id` KHÁC (người vận hành đổi sang một lượt lưu trú khác, đã đóng —
+///   FINDING C1): TỪ CHỐI. Nhánh giữ-snapshot phía trên chỉ đúng khi tái
+///   khẳng định đúng lượt lưu trú đang gắn với link; áp dụng nó cho một
+///   `stay_id` khác sẽ ghi `stay_id` mới (khách B) cùng snapshot phòng/ngày CŨ
+///   (khách A) vào cùng một dòng — `load_rows_by_link_ids` không thấy gì rỗng
+///   nên không cảnh báo gì, và file xuất mang đúng id lượt lưu trú B nhưng
+///   phòng/ngày của A. Danh sách phòng phía client có thể đang cũ (liệt kê
+///   một phòng vừa hết active) — bắt tải lại thay vì âm thầm trộn hai lượt.
+///   KHÔNG áp dụng khi link CHƯA từng gắn phòng nào (`stay_id` hiện tại là
+///   `NULL`, v21): không có snapshot cũ nào để trộn nhầm, nên cứ gán —
+///   `load_rows_by_link_ids` sẽ trả phòng/ngày rỗng một cách trung thực và
+///   validator tự báo thiếu phòng.
 pub async fn update_link(
     pool: &Pool<Sqlite>,
     link_id: &str,
@@ -583,10 +597,36 @@ pub async fn update_link(
         );
     }
 
+    let current_stay_id: Option<String> =
+        sqlx::query_scalar::<_, Option<String>>("SELECT stay_id FROM declaration_link WHERE id = ?")
+            .bind(link_id)
+            .fetch_optional(pool)
+            .await
+            .map_err(|e| format!("Không đọc được khai báo hiện tại: {e}"))?
+            .ok_or_else(|| "Không tìm thấy khai báo cần sửa.".to_string())?;
+
     let fresh_snapshot = match stay_id {
         Some(id) => live_stay_snapshot(pool, id).await?,
         None => None,
     };
+
+    // FINDING C1: nhánh giữ-nguyên-snapshot (Some, None) chỉ hợp lệ khi
+    // `stay_id` không đổi so với link hiện tại — đúng ca "sửa lý do lưu trú
+    // sau khi khách đã trả phòng". Nếu link ĐANG gắn một `stay_id` khác (Some)
+    // và người vận hành chọn một `stay_id` khác nữa mà booking đó lại không
+    // active, đây không phải ca đó — giữ nguyên snapshot cũ sẽ gán nhầm
+    // phòng/ngày của lượt CŨ cho lượt MỚI. Link CHƯA từng gắn phòng
+    // (`current_stay_id` là `None`) thì không có gì để trộn nhầm — cứ cho gán.
+    if let (Some(id), None) = (stay_id, &fresh_snapshot) {
+        if let Some(current) = current_stay_id.as_deref() {
+            if current != id {
+                return Err(
+                    "Lượt lưu trú vừa chọn đã kết thúc — tải lại danh sách phòng và chọn lại."
+                        .into(),
+                );
+            }
+        }
+    }
 
     let result = match (stay_id, fresh_snapshot) {
         (None, _) => {

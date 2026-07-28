@@ -1242,6 +1242,97 @@ mod tests {
         );
     }
 
+    /// FINDING C1: nhánh "`stay_id` Some nhưng booking không active" chỉ được
+    /// GIỮ snapshot khi `stay_id` KHÔNG đổi (đúng ca của test phía trên — đổi
+    /// lý do lưu trú sau khi khách đã trả phòng). Ở đây người vận hành chọn
+    /// một `stay_id` KHÁC — booking-2, đã đóng — trong khi link đang gắn
+    /// booking-1. Trước fix, nhánh đó lặng lẽ giữ NGUYÊN snapshot cũ của
+    /// booking-1 (phòng 5B, ngày của A) trong khi `stay_id` bị ghi đè thành
+    /// booking-2 (khách B) — file xuất sẽ mang đúng id lượt lưu trú B nhưng
+    /// phòng/ngày của A. Phải từ chối, không âm thầm trộn hai lượt.
+    #[tokio::test]
+    async fn re_picking_a_different_closed_stay_is_refused_not_silently_mixed() {
+        let pool = seeded_pool().await;
+        use crate::declaration::repo;
+
+        // booking-2: phòng khác, ngày khác hẳn booking-1 — để lộ ngay nếu bị
+        // trộn.
+        sqlx::query(
+            "INSERT INTO rooms (
+                id, name, type, floor, has_balcony, base_price, max_guests, extra_person_fee, status
+             ) VALUES ('room-2', 'Phòng 9Z', 'standard', 1, 0, 100000, 2, 0, 'occupied')",
+        )
+        .execute(&pool)
+        .await
+        .expect("seeds room 2");
+        sqlx::query(
+            "INSERT INTO guests (id, guest_type, full_name, doc_number, created_at)
+             VALUES ('guest-3', 'domestic', 'Khách B', 'DOC-2', '2026-07-26T09:00:00+07:00')",
+        )
+        .execute(&pool)
+        .await
+        .expect("seeds guest 3");
+        sqlx::query(
+            "INSERT INTO bookings (
+                id, room_id, primary_guest_id, check_in_at, expected_checkout,
+                nights, total_price, status, created_at
+             ) VALUES ('booking-2', 'room-2', 'guest-3', '2026-01-01T00:00:00+07:00',
+                        '2026-01-02', 1, 500000, 'active', '2026-01-01T00:00:00+07:00')",
+        )
+        .execute(&pool)
+        .await
+        .expect("seeds booking 2");
+        sqlx::query("INSERT INTO booking_guests (booking_id, guest_id) VALUES ('booking-2', 'guest-3')")
+            .execute(&pool)
+            .await
+            .expect("seeds booking_guests 2");
+
+        repo::save_identity_ensuring_link(&pool, &snapshot_test_identity(), "qr_cccd", "verified")
+            .await
+            .expect("lưu");
+        let link_id = repo::pending_link_ids(&pool).await.expect("đọc")[0].clone();
+        repo::update_link(&pool, &link_id, Some("booking-1"), "1", None)
+            .await
+            .expect("gắn booking-1 (khách A)");
+
+        // booking-2 đóng TRƯỚC khi ai chọn nó cho link này.
+        sqlx::query("UPDATE bookings SET status = 'checked_out' WHERE id = 'booking-2'")
+            .execute(&pool)
+            .await
+            .expect("PMS đóng booking-2");
+
+        // Người vận hành (nhầm hoặc do dropdown cũ) chọn booking-2 cho link
+        // đang là booking-1.
+        let err = repo::update_link(&pool, &link_id, Some("booking-2"), "1", None)
+            .await
+            .expect_err("phải từ chối — stay_id đổi sang một booking đã đóng");
+        assert!(
+            err.contains("kết thúc") || err.contains("tải lại") || err.contains("chọn lại"),
+            "thông báo phải nói lượt lưu trú đã kết thúc và bảo tải lại danh sách: {err}"
+        );
+
+        // Snapshot VÀ stay_id phải còn nguyên của booking-1 — không bị trộn.
+        let row = sqlx::query(
+            "SELECT stay_id, snapshot_room_no, snapshot_check_in, snapshot_expected_out
+               FROM declaration_link WHERE id = ?",
+        )
+        .bind(&link_id)
+        .fetch_one(&pool)
+        .await
+        .expect("đọc lại link");
+        assert_eq!(row.get::<String, _>("stay_id"), "booking-1");
+        assert_eq!(
+            row.get::<Option<String>, _>("snapshot_room_no").as_deref(),
+            Some("5B"),
+            "không được lấy phòng của booking-2"
+        );
+        assert_eq!(
+            row.get::<Option<String>, _>("snapshot_expected_out").as_deref(),
+            Some("2026-12-31"),
+            "không được lấy ngày của booking-2"
+        );
+    }
+
     /// Booking vẫn active nhưng snapshot trên link đã cũ/sai (VD: đổi phòng
     /// sau khi snapshot đầu tiên) — giá trị SỐNG phải thắng, không được kẹt ở
     /// bản chụp cũ.
