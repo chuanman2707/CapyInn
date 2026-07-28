@@ -29,6 +29,7 @@ function row(over: Partial<DeclarationRow> = {}): DeclarationRow {
     passport_expiry: null,
     visa_valid_until: null,
     room_no: null,
+    stay_id: null,
     check_in_date: "2026-07-27",
     expected_check_out: "2026-07-28",
     stay_reason: "1",
@@ -109,4 +110,34 @@ describe("GuestCard", () => {
     // ManualForm prefill hiện tên khách trong input
     expect(screen.getByDisplayValue("Nguyễn Văn A")).toBeTruthy();
   });
+
+  // FINDING 1: link đã có stay_id thật (booking đã trả phòng nên không còn
+  // trong `stays` active) — đổi CHỈ lý do lưu trú không được gửi `stayId:
+  // null` đè lên liên kết phòng đó.
+  it("đổi lý do lưu trú không xóa mất stay_id đã hết active trong `stays`", async () => {
+    invokeCommand.mockResolvedValue(undefined);
+    const onChanged = vi.fn();
+    render(
+      <GuestCard
+        row={row({ stay_id: "gone-1", room_no: null })}
+        stays={stays}
+        findings={[]}
+        onChanged={onChanged}
+      />,
+    );
+
+    // Select "Phòng" hiện đúng stay_id cũ, không rơi về rỗng.
+    expect(screen.getByLabelText("Phòng")).toHaveValue("gone-1");
+    expect(screen.getByText(/phòng cũ/i)).toBeTruthy();
+
+    fireEvent.change(screen.getByLabelText(/lý do lưu trú/i), { target: { value: "20" } });
+
+    await waitFor(() =>
+      expect(invokeCommand).toHaveBeenCalledWith(
+        "kbtt_update_link",
+        expect.objectContaining({ linkId: "l1", stayId: "gone-1", stayReason: "20" }),
+      ),
+    );
+  });
+
 });

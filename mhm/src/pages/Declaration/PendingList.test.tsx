@@ -60,6 +60,7 @@ function row(over: Partial<DeclarationRow>): DeclarationRow {
     passport_expiry: null,
     visa_valid_until: null,
     room_no: "101",
+    stay_id: "b1",
     check_in_date: "2026-07-25",
     expected_check_out: "2026-07-28",
     stay_reason: "1",

@@ -60,15 +60,22 @@ export default function GuestCard({ row, stays, findings, onChanged }: GuestCard
       ? "border-amber-300"
       : "border-slate-200";
 
-  // Phòng hiện tại của link: so theo room_no. Sound vì `kbtt_list_stays`
-  // (load_stays_for_declaration) chỉ trả các booking status = 'active', và
-  // hệ thống booking chỉ cho một booking active trên mỗi room_id tại một thời
-  // điểm (xem các truy vấn "WHERE room_id = ? AND status = 'active' LIMIT 1"
-  // ở room_queries.rs) — nên room_no không lặp trong danh sách `stays` này,
-  // so theo room_no ở đây tương đương so theo stay_id. Khi row.room_no là
-  // null, không có stay nào khớp (rooms luôn có tên nên room_no trong `stays`
-  // không bao giờ null) và select rơi về STAY_NONE — đúng ý.
-  const currentStay = stays.find((s) => s.room_no === row.room_no)?.stay_id ?? STAY_NONE;
+  // Phòng hiện tại của link: đọc thẳng `row.stay_id`, KHÔNG đoán qua
+  // room_no. `kbtt_list_stays` (load_stays_for_declaration) chỉ trả các
+  // booking status = 'active' — nếu khách đã trả phòng/hủy trước khi khai
+  // xong, `row.stay_id` vẫn là booking thật đó nhưng nó không còn trong
+  // `stays`. Đoán qua room_no từng khiến chỗ này rơi về "chưa xác định
+  // phòng" trong đúng lúc đó, và đổi lý do lưu trú (không đụng ô phòng) sẽ
+  // gửi `stayId: null` xóa mất liên kết phòng có thật (FINDING 1).
+  const currentStay = row.stay_id ?? STAY_NONE;
+
+  // `row.stay_id` có giá trị nhưng không nằm trong `stays` đang active: booking
+  // đã bị trả phòng/hủy. Không có option nào khớp thì `<select>` hiện trống —
+  // người vận hành tưởng chưa chọn gì và dễ bấm sang ô khác làm mất giá trị.
+  // Thêm hẳn một option (khóa lại, không cho chọn) để trạng thái hiện đúng và
+  // được giữ nguyên cho tới khi người vận hành chủ động chọn phòng khác.
+  const staleStayId =
+    row.stay_id != null && !stays.some((s) => s.stay_id === row.stay_id) ? row.stay_id : null;
 
   // Di sản spec gốc §7: app chỉ XẾP THỨ TỰ theo độ giống tên, không tự chọn.
   const rankedStays = [...stays].sort(
@@ -143,6 +150,11 @@ export default function GuestCard({ row, stays, findings, onChanged }: GuestCard
             onChange={(e) => void updateLink(e.target.value, row.stay_reason, row.stay_reason_note)}
           >
             <option value={STAY_NONE}>Chưa xác định phòng</option>
+            {staleStayId && (
+              <option value={staleStayId} disabled>
+                Phòng cũ (khách đã trả phòng)
+              </option>
+            )}
             {rankedStays.map((s) => (
               <option key={s.stay_id} value={s.stay_id}>
                 {s.room_no ? `Phòng ${s.room_no}` : "Chưa có phòng"} · {s.guest_name ?? "—"} ·{" "}
@@ -175,6 +187,7 @@ export default function GuestCard({ row, stays, findings, onChanged }: GuestCard
             ))}
           </select>
         </div>
+
       </div>
 
       {findings.length > 0 && (

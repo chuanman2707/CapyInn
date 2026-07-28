@@ -510,6 +510,11 @@ export interface DeclarationRow {
   passport_expiry: string | null;
   visa_valid_until: string | null;
   room_no: string | null;
+  /** = bookings.id mà link đang trỏ tới. Có thể khác null dù room_no là null
+   * — booking đó đã trả phòng/hủy nên không còn trong `kbtt_list_stays`, mà
+   * link vẫn giữ liên kết. Đừng đoán stay hiện tại qua room_no, đọc thẳng
+   * trường này. */
+  stay_id: string | null;
   check_in_date: string;
   expected_check_out: string;
   stay_reason: string;

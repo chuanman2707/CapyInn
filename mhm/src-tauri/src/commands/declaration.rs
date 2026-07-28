@@ -55,6 +55,15 @@ pub struct DeclarationRowDto {
     pub visa_valid_until: Option<String>,
     /// `None` khi khai báo chưa gắn vào lượt lưu trú nào (chưa xác định phòng).
     pub room_no: Option<String>,
+    /// = `bookings.id` mà link đang trỏ tới, `None` khi chưa gắn phòng.
+    ///
+    /// KHÁC `room_no`: `room_no` rỗng khi booking không còn active (đã trả
+    /// phòng/hủy) HOẶC khi link chưa gắn gì cả — hai trường hợp đó không phân
+    /// biệt được nếu chỉ nhìn `room_no`. `stay_id` thì luôn phản ánh đúng
+    /// `declaration_link.stay_id` trong DB, kể cả khi booking đó đã bị PMS
+    /// checkout/hủy. Giao diện cần trường này để không đoán nhầm rồi gửi
+    /// `stayId: null` đè lên một liên kết phòng có thật (FINDING 1).
+    pub stay_id: Option<String>,
     pub check_in_date: String,
     pub expected_check_out: String,
     pub stay_reason: String,
@@ -89,6 +98,11 @@ impl DeclarationRowDto {
                 None
             } else {
                 Some(stay.room_no.clone())
+            },
+            stay_id: if stay.stay_id.trim().is_empty() {
+                None
+            } else {
+                Some(stay.stay_id.clone())
             },
             check_in_date: stay.check_in.clone(),
             expected_check_out: stay.expected_out.clone(),
@@ -573,5 +587,34 @@ mod tests {
         let dto = DeclarationRowDto::new(&row, false);
 
         assert_eq!(dto.room_no, None);
+        assert_eq!(dto.stay_id, None);
+    }
+
+    /// FINDING 1: booking đã bị checkout/hủy (không còn trong
+    /// `load_stays_for_declaration`) nhưng link vẫn giữ `stay_id` thật —
+    /// `load_rows_by_link_ids` trả về `StayInfo { stay_id, ..default }` cho
+    /// trường hợp này (repo.rs). DTO phải giữ nguyên `stay_id` đó dù `room_no`
+    /// rỗng, để giao diện không đoán nhầm "chưa có phòng" rồi gửi `null` đè
+    /// lên một liên kết phòng có thật.
+    #[test]
+    fn stay_id_survives_even_when_the_booking_is_no_longer_active() {
+        let mut row = sample_row();
+        row.stay = StayInfo {
+            stay_id: "s1".into(),
+            ..StayInfo::default()
+        };
+
+        let dto = DeclarationRowDto::new(&row, false);
+
+        assert_eq!(dto.stay_id.as_deref(), Some("s1"));
+        assert_eq!(dto.room_no, None);
+    }
+
+    /// Đường thường: link còn phòng active thì `stay_id` khớp với booking đó.
+    #[test]
+    fn stay_id_matches_the_active_booking() {
+        let dto = DeclarationRowDto::new(&sample_row(), false);
+
+        assert_eq!(dto.stay_id.as_deref(), Some("s1"));
     }
 }
