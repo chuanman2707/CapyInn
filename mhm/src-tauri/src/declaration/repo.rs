@@ -190,9 +190,18 @@ fn document_key(identity: &Identity) -> Option<String> {
 /// sai — nhưng người vận hành không còn đường nào đi tiếp. Chặn ngay từ đây rẻ
 /// hơn dọn ở cuối.
 ///
-/// Dữ liệu mới chỉ được ghi đè khi danh tính CHƯA nằm trong lô nào đã đối soát.
-/// Đã nộp cho công an rồi thì bản ghi đó là bằng chứng của cái đã nộp, không
-/// được sửa sau lưng.
+/// FINDING I1: dữ liệu mới chỉ được ghi đè khi danh tính CHƯA thuộc bất kỳ lô
+/// nào đang "mid-flight" hoặc đã xong việc — `exported` (đã ghi ra đĩa, đang
+/// hoặc sắp tải lên cổng), `uploaded` (đã trao tay cổng, chưa xác nhận),
+/// `verified` (cổng đã nhận đúng), và `failed` (đã tải lên, cổng báo lệch —
+/// người vận hành CHƯA bấm mở lại) đều tính. Bốn trạng thái này đều có một
+/// điểm chung: bản ghi hiện tại đã "rời khỏi máy" dưới hình hài đó — file
+/// XLSX/XML trên đĩa (hoặc trên cổng) đang mang đúng dữ liệu cũ, ghi đè ở đây
+/// sẽ làm DB và file lệch nhau mà không ai biết. Cố tình BỎ `reopened`:
+/// `reopen_failed_batch` đã XÓA entry của lô đó trước khi chuyển sang trạng
+/// thái này, nên không link nào của danh tính còn trỏ tới một lô `reopened`
+/// nữa — thêm nó vào danh sách này không đổi hành vi gì, chỉ gây hiểu lầm là
+/// "reopened vẫn khóa".
 ///
 /// KHÔNG có cột ảnh và KHÔNG có cột payload thô — xem §12.
 pub async fn insert_identity(
@@ -209,7 +218,8 @@ pub async fn insert_identity(
                               JOIN declaration_entry de  ON de.link_id = dl.id
                               JOIN declaration_batch dbt ON dbt.id     = de.batch_id
                              WHERE dl.identity_id = di.id
-                               AND dbt.status = 'verified') AS already_declared
+                               AND dbt.status IN ('exported', 'uploaded', 'verified', 'failed')
+                           ) AS in_flight
                FROM declaration_identity di
               WHERE redacted_at IS NULL
                 AND (doc_no = ? OR passport_no = ?)
@@ -224,7 +234,8 @@ pub async fn insert_identity(
 
         if let Some(row) = existing {
             let existing_id: String = row.get("id");
-            if row.get::<i64, _>("already_declared") == 0 {
+
+            if row.get::<i64, _>("in_flight") == 0 {
                 update_identity_fields(pool, &existing_id, identity, source, confidence).await?;
             }
             return Ok(existing_id);
@@ -272,6 +283,35 @@ pub async fn insert_identity(
     Ok(id)
 }
 
+/// Khai báo đang hoạt động mà một lần thả ảnh vừa khớp vào (không tạo dòng
+/// mới) hiện đang nằm ở đâu — FINDING I1 (nửa 2): frontend cần biết để nói
+/// đúng chỗ thay vì im lặng cùng một toast "Đã lưu" như lần tạo mới.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ExistingDeclarationLocation {
+    /// Chưa xuất file — nằm trong danh sách chờ khai bình thường.
+    Pending,
+    /// Đã xuất file (`exported`/`failed`), đang chờ người vận hành đối chiếu.
+    AwaitingReconciliation,
+}
+
+/// Kết quả của một lần lưu danh tính — FINDING I1 (nửa 2): trước đây
+/// `kbtt_save_identity` chỉ trả về id, nên frontend không phân biệt được
+/// "vừa tạo khai báo mới" với "khớp một khách đã có khai báo đang hoạt động,
+/// không tạo gì thêm". Toast "Đã lưu danh tính" giống hệt nhau ở cả hai
+/// trường hợp là thứ khiến việc quét lại một khách đã xuất file trông y hệt
+/// một lần lưu bình thường trong khi thực ra không có gì mới xảy ra.
+#[derive(Debug, serde::Serialize)]
+pub struct SaveIdentityOutcome {
+    pub identity_id: String,
+    pub link_id: String,
+    /// `true` = vừa tạo một khai báo (link) mới. `false` = khớp lại đúng
+    /// link đang hoạt động của danh tính đó, không tạo gì thêm.
+    pub created_new_link: bool,
+    /// Chỉ có giá trị khi `created_new_link == false`.
+    pub existing_location: Option<ExistingDeclarationLocation>,
+}
+
 /// Lưu danh tính VÀ bảo đảm nó có mặt trong danh sách chờ khai — "băng chuyền
 /// một chiều": thả ảnh xong là khách hiện ra, không có khu chờ trung gian.
 ///
@@ -284,26 +324,51 @@ pub async fn save_identity_ensuring_link(
     identity: &Identity,
     source: &str,
     confidence: &str,
-) -> Result<String, String> {
+) -> Result<SaveIdentityOutcome, String> {
     let identity_id = insert_identity(pool, identity, source, confidence).await?;
 
-    let active: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM declaration_link dl
+    let active_link: Option<String> = sqlx::query_scalar(
+        "SELECT dl.id FROM declaration_link dl
           WHERE dl.identity_id = ?
             AND NOT EXISTS (
                   SELECT 1 FROM declaration_entry de
                   JOIN declaration_batch b ON b.id = de.batch_id
-                 WHERE de.link_id = dl.id AND b.status = 'verified')",
+                 WHERE de.link_id = dl.id AND b.status = 'verified')
+          ORDER BY dl.created_at DESC
+          LIMIT 1",
     )
     .bind(&identity_id)
-    .fetch_one(pool)
+    .fetch_optional(pool)
     .await
     .map_err(|e| format!("Không kiểm được khai báo đang hoạt động: {e}"))?;
 
-    if active == 0 {
-        insert_link(pool, &identity_id, None, "1", None).await?;
+    if let Some(link_id) = active_link {
+        let has_entry: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM declaration_entry WHERE link_id = ?")
+                .bind(&link_id)
+                .fetch_one(pool)
+                .await
+                .map_err(|e| format!("Không kiểm được trạng thái khai báo: {e}"))?;
+        let existing_location = Some(if has_entry > 0 {
+            ExistingDeclarationLocation::AwaitingReconciliation
+        } else {
+            ExistingDeclarationLocation::Pending
+        });
+        return Ok(SaveIdentityOutcome {
+            identity_id,
+            link_id,
+            created_new_link: false,
+            existing_location,
+        });
     }
-    Ok(identity_id)
+
+    let link_id = insert_link(pool, &identity_id, None, "1", None).await?;
+    Ok(SaveIdentityOutcome {
+        identity_id,
+        link_id,
+        created_new_link: true,
+        existing_location: None,
+    })
 }
 
 /// Cập nhật một danh tính đã có bằng lần trích mới nhất.
@@ -1383,6 +1448,84 @@ mod tests {
         );
     }
 
+    /// FINDING I1: một danh tính đang nằm trong lô `exported` (đã ghi ra đĩa,
+    /// đang trên đường tới cổng công an, CHƯA verified) không được ghi đè khi
+    /// bị quét lại. Trước fix, `insert_identity` chỉ khóa khi lô đã
+    /// `verified`, nên đúng lúc file đang "mid-flight" tới cổng lại là lúc dữ
+    /// liệu KHÔNG được bảo vệ nhất — DB và file đã xuất lệch nhau mà không ai
+    /// biết.
+    #[tokio::test]
+    async fn rescanning_an_exported_but_unverified_identity_does_not_overwrite_it() {
+        let pool = pool().await;
+        let id = insert_identity(&pool, &vn_identity(), "qr_cccd", "verified")
+            .await
+            .expect("lưu danh tính");
+        let link = insert_link(&pool, &id, Some("booking-1"), "2", None)
+            .await
+            .expect("ghép");
+        let batch = insert_batch(&pool, "VN", "/tmp/x.xlsx", 1).await.expect("lô");
+        insert_entries(&pool, &batch, std::slice::from_ref(&link))
+            .await
+            .expect("dòng");
+        // Cố tình KHÔNG gọi set_batch_verified/set_batch_failed — lô vẫn
+        // 'exported', đúng khoảng đang tải lên cổng.
+
+        let mut rescanned = vn_identity();
+        rescanned.full_name = "TEN BI GHI DE".into();
+        let again = insert_identity(&pool, &rescanned, "qr_cccd", "verified")
+            .await
+            .expect("quét lại");
+
+        assert_eq!(again, id, "vẫn là cùng một người");
+        let name: String =
+            sqlx::query_scalar("SELECT full_name FROM declaration_identity WHERE id = ?")
+                .bind(&id)
+                .fetch_one(&pool)
+                .await
+                .expect("đọc tên");
+        assert_eq!(
+            name, "Phan Thị Mỹ Hà",
+            "lô đang mid-flight (exported, chưa verified) — không được ghi đè"
+        );
+    }
+
+    /// Tương tự cho lô `failed`: cổng báo lệch, người vận hành CHƯA bấm mở
+    /// lại (`kbtt_reopen_batch`) — dữ liệu vẫn là bằng chứng của lần xuất
+    /// fail đó cho tới khi họ chủ động sửa qua đúng đường `update_identity`.
+    #[tokio::test]
+    async fn rescanning_a_failed_batchs_identity_does_not_overwrite_it() {
+        let pool = pool().await;
+        let id = insert_identity(&pool, &vn_identity(), "qr_cccd", "verified")
+            .await
+            .expect("lưu danh tính");
+        let link = insert_link(&pool, &id, Some("booking-1"), "2", None)
+            .await
+            .expect("ghép");
+        let batch = insert_batch(&pool, "VN", "/tmp/x.xlsx", 1).await.expect("lô");
+        insert_entries(&pool, &batch, std::slice::from_ref(&link))
+            .await
+            .expect("dòng");
+        set_batch_failed(&pool, &batch, 0).await.expect("fail");
+
+        let mut rescanned = vn_identity();
+        rescanned.full_name = "TEN BI GHI DE".into();
+        let again = insert_identity(&pool, &rescanned, "qr_cccd", "verified")
+            .await
+            .expect("quét lại");
+
+        assert_eq!(again, id);
+        let name: String =
+            sqlx::query_scalar("SELECT full_name FROM declaration_identity WHERE id = ?")
+                .bind(&id)
+                .fetch_one(&pool)
+                .await
+                .expect("đọc tên");
+        assert_eq!(
+            name, "Phan Thị Mỹ Hà",
+            "lô failed vẫn là bằng chứng của lần xuất đó, không ghi đè"
+        );
+    }
+
     /// `UNIQUE(identity_id, stay_id)`: quét lại cùng một khách cho cùng một
     /// lượt lưu trú không được đẻ ra dòng thứ hai.
     #[tokio::test]
@@ -1664,13 +1807,72 @@ mod tests {
         assert_eq!(n, 1);
     }
 
+    /// FINDING I1 (nửa 2): quét lại một khách đã có khai báo đang hoạt động
+    /// không được đẻ thêm dòng NHƯNG cũng không được im lặng — người vận
+    /// hành bấm "Lưu" và thấy toast y hệt lần đầu, trong khi thực ra không
+    /// có gì mới được tạo và khách đó biến mất khỏi mọi nơi trên màn hình.
+    /// `save_identity_ensuring_link` phải trả đủ để tầng giao diện phân biệt
+    /// hai trường hợp và nói rõ khách đó đang ở đâu.
+    #[tokio::test]
+    async fn save_identity_reports_a_match_against_a_still_pending_declaration() {
+        let pool = pool().await;
+        let first = save_identity_ensuring_link(&pool, &vn_identity(), "qr_cccd", "verified")
+            .await
+            .expect("lần 1");
+        assert!(first.created_new_link, "lần đầu phải tạo khai báo mới");
+        assert_eq!(first.existing_location, None);
+
+        let second = save_identity_ensuring_link(&pool, &vn_identity(), "qr_cccd", "verified")
+            .await
+            .expect("lần 2");
+        assert!(
+            !second.created_new_link,
+            "khớp link đang hoạt động — không được tạo thêm dòng"
+        );
+        assert_eq!(second.identity_id, first.identity_id);
+        assert_eq!(
+            second.link_id, first.link_id,
+            "phải chỉ đúng khai báo đang chờ đó, không phải một link khác"
+        );
+        assert_eq!(
+            second.existing_location,
+            Some(ExistingDeclarationLocation::Pending),
+            "chưa xuất file — khách đang nằm trong danh sách chờ"
+        );
+    }
+
+    /// Cùng tình huống trên nhưng khai báo đã XUẤT FILE, đang chờ đối chiếu —
+    /// vị trí phải khác `Pending` để giao diện chỉ đúng chỗ (thẻ đối chiếu,
+    /// không phải danh sách chờ).
+    #[tokio::test]
+    async fn save_identity_reports_a_match_against_a_declaration_awaiting_reconciliation() {
+        let pool = pool().await;
+        let first = save_identity_ensuring_link(&pool, &vn_identity(), "qr_cccd", "verified")
+            .await
+            .expect("lần 1");
+        let batch = insert_batch(&pool, "VN", "/tmp/x.xlsx", 1).await.expect("lô");
+        insert_entries(&pool, &batch, std::slice::from_ref(&first.link_id))
+            .await
+            .expect("dòng");
+        // Cố tình KHÔNG verified/failed — đúng khoảng đang chờ đối chiếu.
+
+        let second = save_identity_ensuring_link(&pool, &vn_identity(), "qr_cccd", "verified")
+            .await
+            .expect("lần 2");
+        assert!(!second.created_new_link);
+        assert_eq!(
+            second.existing_location,
+            Some(ExistingDeclarationLocation::AwaitingReconciliation)
+        );
+    }
+
     /// Khách quay lại sau khi lượt trước ĐÃ khai xong: lần quét mới là lượt ở
     /// mới — phải có link mới, và `insert_link` phải trả về đúng link MỚI chứ
     /// không phải link cũ (hai link cùng identity + stay_id NULL cùng tồn tại).
     #[tokio::test]
     async fn a_returning_guest_gets_a_fresh_link_after_the_old_one_was_declared() {
         let pool = pool().await;
-        let id = save_identity_ensuring_link(&pool, &vn_identity(), "qr_cccd", "verified")
+        let first = save_identity_ensuring_link(&pool, &vn_identity(), "qr_cccd", "verified")
             .await
             .expect("lượt 1");
         let old_link = pending_link_ids(&pool).await.expect("đọc")[0].clone();
@@ -1680,10 +1882,17 @@ mod tests {
             .expect("dòng");
         set_batch_verified(&pool, &batch, 1).await.expect("đã khai xong");
 
-        let id2 = save_identity_ensuring_link(&pool, &vn_identity(), "qr_cccd", "verified")
+        let second = save_identity_ensuring_link(&pool, &vn_identity(), "qr_cccd", "verified")
             .await
             .expect("lượt 2");
-        assert_eq!(id, id2, "vẫn là cùng một con người");
+        assert_eq!(
+            first.identity_id, second.identity_id,
+            "vẫn là cùng một con người"
+        );
+        assert!(
+            second.created_new_link,
+            "lượt trước đã verified — lượt này phải là khai báo mới, không phải khớp lại"
+        );
 
         let pending = pending_link_ids(&pool).await.expect("đọc lại");
         assert_eq!(pending.len(), 1, "lượt ở mới phải chờ khai");
@@ -1827,7 +2036,8 @@ mod tests {
         let pool = pool().await;
         let id = save_identity_ensuring_link(&pool, &vn_identity(), "qr_cccd", "verified")
             .await
-            .expect("lượt 1");
+            .expect("lượt 1")
+            .identity_id;
         let old_link = pending_link_ids(&pool).await.expect("đọc")[0].clone();
         let batch = insert_batch(&pool, "VN", "/tmp/x.xlsx", 1).await.expect("lô");
         insert_entries(&pool, &batch, std::slice::from_ref(&old_link)).await.expect("dòng");
@@ -1877,7 +2087,8 @@ mod tests {
         };
         let id = save_identity_ensuring_link(&pool, &no_doc, "manual", "needs_review")
             .await
-            .expect("lưu");
+            .expect("lưu")
+            .identity_id;
 
         let mut fixed = no_doc.clone();
         fixed.phone = Some("0912345678".into());
@@ -1907,7 +2118,8 @@ mod tests {
         let pool = pool().await;
         let id = save_identity_ensuring_link(&pool, &vn_identity(), "qr_cccd", "verified")
             .await
-            .expect("lưu");
+            .expect("lưu")
+            .identity_id;
         let link = pending_link_ids(&pool).await.expect("đọc")[0].clone();
         let batch = insert_batch(&pool, "VN", "/tmp/x.xlsx", 1).await.expect("lô");
         insert_entries(&pool, &batch, std::slice::from_ref(&link)).await.expect("dòng");
@@ -1939,7 +2151,8 @@ mod tests {
         let pool = pool().await;
         let id = save_identity_ensuring_link(&pool, &vn_identity(), "qr_cccd", "verified")
             .await
-            .expect("lưu tháng 3");
+            .expect("lưu tháng 3")
+            .identity_id;
         let link = pending_link_ids(&pool).await.expect("đọc")[0].clone();
         let batch = insert_batch(&pool, "VN", "/tmp/x.xlsx", 1).await.expect("lô");
         insert_entries(&pool, &batch, std::slice::from_ref(&link)).await.expect("dòng");

@@ -185,7 +185,7 @@ pub async fn kbtt_save_identity(
     identity: Identity,
     source: String,
     confidence: String,
-) -> Result<String, String> {
+) -> Result<repo::SaveIdentityOutcome, String> {
     repo::save_identity_ensuring_link(&state.db, &identity, &source, &confidence).await
 }
 
@@ -507,6 +507,29 @@ mod tests {
         assert_eq!(
             actual, expected,
             "bộ khóa JSON phải trùng khít interface DeclarationRow bên TypeScript"
+        );
+    }
+
+    /// FINDING I1: `kbtt_save_identity` giờ trả `repo::SaveIdentityOutcome`
+    /// thay vì một chuỗi id trần — cùng nguy cơ trôi lệch với DTO ở trên, nên
+    /// khóa bằng cùng kiểu test.
+    #[test]
+    fn save_identity_outcome_matches_the_typescript_contract() {
+        let mut expected =
+            typescript_interface_fields(&types_index_ts(), "DeclarationSaveOutcome");
+        expected.sort();
+
+        let sample = repo::SaveIdentityOutcome {
+            identity_id: "i1".into(),
+            link_id: "l1".into(),
+            created_new_link: true,
+            existing_location: Some(repo::ExistingDeclarationLocation::Pending),
+        };
+        let actual = json_keys(&sample);
+
+        assert_eq!(
+            actual, expected,
+            "bộ khóa JSON phải trùng khít interface DeclarationSaveOutcome bên TypeScript"
         );
     }
 

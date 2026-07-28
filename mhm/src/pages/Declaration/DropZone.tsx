@@ -6,10 +6,11 @@ import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import { formatAppError } from "@/lib/appError";
 import { invokeCommand } from "@/lib/invokeCommand";
-import type { DeclarationIdentity, ExtractedIdentity } from "@/types";
+import type { DeclarationIdentity, DeclarationSaveOutcome, ExtractedIdentity } from "@/types";
 
 import IdentityCard from "./IdentityCard";
 import ManualForm from "./ManualForm";
+import { matchedExistingDeclarationMessage } from "./saveOutcome";
 
 interface DropZoneProps {
   /** Gọi khi một danh tính đã được lưu, để danh sách khách tự tải lại từ DB. */
@@ -87,12 +88,20 @@ export default function DropZone({ onIdentitySaved }: DropZoneProps) {
     if (!card) return;
     setSavingIndex(index);
     try {
-      await invokeCommand<string>("kbtt_save_identity", {
+      const outcome = await invokeCommand<DeclarationSaveOutcome>("kbtt_save_identity", {
         identity: card.identity,
         source: card.source,
         confidence: card.confidence,
       });
-      toast.success("Đã lưu danh tính");
+      // FINDING I1: khớp lại một khách đã có khai báo đang hoạt động không
+      // tạo dòng nào — toast phải nói khác lần tạo mới, không thì thao tác
+      // này trông y hệt một lần lưu bình thường trong khi thực ra không có
+      // gì mới xảy ra.
+      if (outcome.created_new_link) {
+        toast.success("Đã lưu danh tính");
+      } else {
+        toast.info(matchedExistingDeclarationMessage(outcome.existing_location));
+      }
       setCards((prev) => prev.filter((_, i) => i !== index));
       onIdentitySaved?.();
     } catch (e) {

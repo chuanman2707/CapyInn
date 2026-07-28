@@ -1,22 +1,36 @@
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
+import { emitTestEvent, resetEventMocks } from "@/__mocks__/tauri-event";
+
 const invokeCommand = vi.hoisted(() => vi.fn());
 const toastError = vi.hoisted(() => vi.fn());
 const toastSuccess = vi.hoisted(() => vi.fn());
+const toastInfo = vi.hoisted(() => vi.fn());
 
 vi.mock("@/lib/invokeCommand", () => ({ invokeCommand }));
 vi.mock("sonner", () => ({
-  toast: { error: toastError, success: toastSuccess },
+  toast: { error: toastError, success: toastSuccess, info: toastInfo },
 }));
 
 import DropZone from "./DropZone";
 import ManualForm from "./ManualForm";
 
+// FINDING I1: `kbtt_save_identity` giờ trả một outcome object, không phải id
+// trần — mock mặc định phải phản ánh đúng hình dạng thật (`created_new_link:
+// true` = đường thường, tạo khai báo mới) để các test dưới đây bắt được nếu
+// ai đó lỡ quay lại đọc `result` như một chuỗi.
+const NEW_DECLARATION_OUTCOME = {
+  identity_id: "new-id",
+  link_id: "link-new",
+  created_new_link: true,
+  existing_location: null,
+};
+
 describe("ManualForm", () => {
   beforeEach(() => {
     vi.clearAllMocks();
-    invokeCommand.mockResolvedValue("new-id");
+    invokeCommand.mockResolvedValue(NEW_DECLARATION_OUTCOME);
   });
 
   it("saves manual entries as needs_review", async () => {
@@ -39,6 +53,75 @@ describe("ManualForm", () => {
         }),
       );
     });
+  });
+
+  // FINDING I1 — trước fix, `kbtt_save_identity` chỉ trả một chuỗi id nên
+  // ManualForm không thể phân biệt "vừa tạo khai báo mới" với "khớp một
+  // khách đã có khai báo đang hoạt động, không tạo gì thêm" — toast thành
+  // công giống hệt nhau ở cả hai trường hợp.
+  it("báo thành công bình thường khi vừa tạo một khai báo mới", async () => {
+    const onSaved = vi.fn();
+    render(<ManualForm onSaved={onSaved} />);
+
+    fireEvent.change(screen.getByLabelText(/Họ và tên/i), {
+      target: { value: "Nguyễn Văn A" },
+    });
+    fireEvent.change(screen.getByLabelText(/Ngày sinh/i), {
+      target: { value: "1980-05-02" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: /^Lưu/i }));
+
+    await waitFor(() => expect(toastSuccess).toHaveBeenCalledWith("Đã lưu danh tính"));
+    expect(toastInfo).not.toHaveBeenCalled();
+    expect(onSaved).toHaveBeenCalledWith("new-id", expect.objectContaining({ full_name: "Nguyễn Văn A" }));
+  });
+
+  it("báo khách đã có khai báo đang chờ khi khớp lại một danh tính đang hoạt động, không phải toast thành công thường", async () => {
+    invokeCommand.mockResolvedValue({
+      identity_id: "existing-id",
+      link_id: "link-existing",
+      created_new_link: false,
+      existing_location: "pending",
+    });
+    const onSaved = vi.fn();
+    render(<ManualForm onSaved={onSaved} />);
+
+    fireEvent.change(screen.getByLabelText(/Họ và tên/i), {
+      target: { value: "Nguyễn Văn A" },
+    });
+    fireEvent.change(screen.getByLabelText(/Ngày sinh/i), {
+      target: { value: "1980-05-02" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: /^Lưu/i }));
+
+    await waitFor(() =>
+      expect(toastInfo).toHaveBeenCalledWith(expect.stringMatching(/danh sách chờ/i)),
+    );
+    expect(toastSuccess).not.toHaveBeenCalled();
+    // Phải trỏ đúng danh tính đã khớp, không phải một id mới bịa ra.
+    expect(onSaved).toHaveBeenCalledWith("existing-id", expect.anything());
+  });
+
+  it("báo khách đang chờ đối chiếu khi khớp lại một khai báo đã xuất file", async () => {
+    invokeCommand.mockResolvedValue({
+      identity_id: "existing-id",
+      link_id: "link-existing",
+      created_new_link: false,
+      existing_location: "awaiting_reconciliation",
+    });
+    render(<ManualForm onSaved={vi.fn()} />);
+
+    fireEvent.change(screen.getByLabelText(/Họ và tên/i), {
+      target: { value: "Nguyễn Văn A" },
+    });
+    fireEvent.change(screen.getByLabelText(/Ngày sinh/i), {
+      target: { value: "1980-05-02" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: /^Lưu/i }));
+
+    await waitFor(() =>
+      expect(toastInfo).toHaveBeenCalledWith(expect.stringMatching(/đối chiếu/i)),
+    );
   });
 
   // FINDING I4 — sửa xong một khách quét sạch từ QR/MRZ luôn stamp lại
@@ -317,6 +400,7 @@ describe("ManualForm", () => {
 describe("DropZone", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    resetEventMocks();
   });
 
   it("always offers a manual-entry route when extraction is impossible", async () => {
@@ -340,5 +424,58 @@ describe("DropZone", () => {
     fireEvent.click(screen.getByRole("button", { name: /Nhập tay/i }));
 
     expect(await screen.findByLabelText(/Họ và tên/i)).toBeInTheDocument();
+  });
+
+  // FINDING I1 — cùng lỗi với ManualForm nhưng ở đường quét ảnh: DropZone
+  // phải phân biệt "vừa tạo khai báo mới" với "khớp một khách đã có khai báo
+  // đang hoạt động, không tạo gì thêm" thay vì cùng một toast "Đã lưu".
+  it("báo khách đã có khai báo đang chờ khi thẻ vừa quét khớp một danh tính đang hoạt động", async () => {
+    const extracted = {
+      source: "qr_cccd",
+      confidence: "verified",
+      identity: {
+        id: "i1",
+        full_name: "Nguyễn Văn A",
+        dob: "1980-05-02",
+        gender: "M",
+        nationality_iso3: "VNM",
+        doc_no: "058195006173",
+        name_confirmed_by_human: false,
+      },
+      review_hints: [],
+      crop_data_url: null,
+    };
+    invokeCommand.mockImplementation((command: string) => {
+      if (command === "kbtt_extract_from_image") return Promise.resolve(extracted);
+      if (command === "kbtt_save_identity") {
+        return Promise.resolve({
+          identity_id: "existing-id",
+          link_id: "link-existing",
+          created_new_link: false,
+          existing_location: "pending",
+        });
+      }
+      return Promise.reject(new Error(`unexpected command ${command}`));
+    });
+
+    render(<DropZone />);
+    await emitTestEvent("tauri://drag-drop", { type: "drop", paths: ["/tmp/cccd.jpg"] });
+
+    const saveButton = await screen.findByRole("button", {
+      name: /Lưu danh tính và ghép khách/i,
+    });
+    fireEvent.click(saveButton);
+
+    await waitFor(() =>
+      expect(toastInfo).toHaveBeenCalledWith(expect.stringMatching(/danh sách chờ/i)),
+    );
+    expect(toastSuccess).not.toHaveBeenCalled();
+    // Không tạo dòng mới — thẻ vừa lưu phải biến mất khỏi khu "vừa quét",
+    // đúng như đường thường (onIdentitySaved vẫn được gọi để list tự tải lại).
+    await waitFor(() =>
+      expect(
+        screen.queryByRole("button", { name: /Lưu danh tính và ghép khách/i }),
+      ).not.toBeInTheDocument(),
+    );
   });
 });

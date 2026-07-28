@@ -4,7 +4,7 @@ import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import { formatAppError } from "@/lib/appError";
 import { invokeCommand } from "@/lib/invokeCommand";
-import type { DeclarationIdentity } from "@/types";
+import type { DeclarationIdentity, DeclarationSaveOutcome } from "@/types";
 
 import {
   DOC_TYPES,
@@ -15,6 +15,7 @@ import {
   VIETNAM_ISO3,
   isForeign,
 } from "./catalog";
+import { matchedExistingDeclarationMessage } from "./saveOutcome";
 
 interface ManualFormProps {
   /** Có giá trị = chế độ sửa: prefill và lưu theo id qua kbtt_update_identity. */
@@ -165,14 +166,21 @@ export default function ManualForm({ initial, onSaved, onCancel }: ManualFormPro
         toast.success("Đã sửa thông tin khách");
         onSaved?.(initial.id, { ...identity, id: initial.id });
       } else {
-        const identityId = await invokeCommand<string>("kbtt_save_identity", {
+        const outcome = await invokeCommand<DeclarationSaveOutcome>("kbtt_save_identity", {
           identity,
           source: "manual",
           confidence: "needs_review",
         });
-        toast.success("Đã lưu danh tính");
+        // FINDING I1: khớp lại một khách đã có khai báo đang hoạt động không
+        // tạo dòng nào — nói rõ điều đó thay vì lặp lại đúng toast của lần
+        // tạo mới.
+        if (outcome.created_new_link) {
+          toast.success("Đã lưu danh tính");
+        } else {
+          toast.info(matchedExistingDeclarationMessage(outcome.existing_location));
+        }
         setForm(EMPTY);
-        onSaved?.(identityId, { ...identity, id: identityId });
+        onSaved?.(outcome.identity_id, { ...identity, id: outcome.identity_id });
       }
     } catch (e) {
       toast.error(formatAppError(e));

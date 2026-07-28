@@ -564,3 +564,20 @@ export interface DeclarationUndeclaredBreakdown {
   held: number;
   awaiting: number;
 }
+
+/** Nơi một khai báo đang khớp lại (không tạo dòng mới) hiện đang nằm — xem
+ * `DeclarationSaveOutcome`. FINDING I1: giao diện cần trường này để chỉ đúng
+ * chỗ thay vì im lặng đúng một toast "Đã lưu" như lần tạo mới. */
+export type DeclarationExistingLocation = "pending" | "awaiting_reconciliation";
+
+/** Kết quả của `kbtt_save_identity` (FINDING I1). Trước đây lệnh này chỉ trả
+ * về id nên giao diện không phân biệt được "vừa tạo khai báo mới" với "khớp
+ * một khách đã có khai báo đang hoạt động, không tạo gì thêm" — quét lại một
+ * khách đã xuất file mid-flight tới cổng lặng lẽ không làm gì cả mà vẫn báo
+ * thành công. */
+export interface DeclarationSaveOutcome {
+  identity_id: string;
+  link_id: string;
+  created_new_link: boolean;
+  existing_location: DeclarationExistingLocation | null;
+}
