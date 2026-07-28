@@ -113,7 +113,10 @@ mod tests {
             Some("8 - Thẻ Căn Cước")
         );
         assert_eq!(c.display_for(CatalogList::GioiTinh, "F"), Some("F - Nữ"));
-        assert_eq!(c.display_for(CatalogList::LyDoCuTru, "1"), Some("1 - Du lịch"));
+        assert_eq!(
+            c.display_for(CatalogList::LyDoCuTru, "1"),
+            Some("1 - Du lịch")
+        );
         assert_eq!(
             c.display_for(CatalogList::LyDoCuTru, "20"),
             Some("20 - Mục đích khác")
@@ -133,11 +136,7 @@ mod tests {
     #[test]
     fn ward_to_province_relation_is_present() {
         let c = cat();
-        let nha_trang: Vec<_> = c
-            .phuong_xa
-            .iter()
-            .filter(|w| w.tinh == "511")
-            .collect();
+        let nha_trang: Vec<_> = c.phuong_xa.iter().filter(|w| w.tinh == "511").collect();
         assert!(!nha_trang.is_empty(), "Khánh Hòa 511 phải có phường");
     }
 

@@ -74,23 +74,31 @@ pub fn write_batch(
                 );
             }
             if let Some(v) = id.doc_type_name.as_deref() {
-                sheet.cell_mut(cell("G", row_no).as_str()).set_value_string(v);
+                sheet
+                    .cell_mut(cell("G", row_no).as_str())
+                    .set_value_string(v);
             }
             sheet
                 .cell_mut(cell("H", row_no).as_str())
                 .set_value_string(id.doc_no.as_deref().unwrap_or(""));
             if let Some(v) = id.phone.as_deref() {
-                sheet.cell_mut(cell("I", row_no).as_str()).set_value_string(v);
+                sheet
+                    .cell_mut(cell("I", row_no).as_str())
+                    .set_value_string(v);
             }
             if let Some(code) = id.residence_status.as_deref() {
                 if let Some(d) = catalog.display_for(CatalogList::NoiCuTru, code) {
-                    sheet.cell_mut(cell("J", row_no).as_str()).set_value_string(d);
+                    sheet
+                        .cell_mut(cell("J", row_no).as_str())
+                        .set_value_string(d);
                 }
             }
             // K, L để trống có chủ ý: danh mục hành chính đã đổi mà giấy tờ
             // thì chưa, và fuzzy-match tên phường tạo ra khai báo sai im lặng.
             if let Some(v) = id.address_detail.as_deref() {
-                sheet.cell_mut(cell("M", row_no).as_str()).set_value_string(v);
+                sheet
+                    .cell_mut(cell("M", row_no).as_str())
+                    .set_value_string(v);
             }
             sheet.cell_mut(cell("N", row_no).as_str()).set_value_string(
                 iso_to_portal(&r.stay.check_in)
@@ -111,7 +119,9 @@ pub fn write_batch(
                     .ok_or_else(|| format!("Lý do cư trú không có: {}", r.stay_reason))?,
             );
             if let Some(v) = r.stay_reason_note.as_deref() {
-                sheet.cell_mut(cell("R", row_no).as_str()).set_value_string(v);
+                sheet
+                    .cell_mut(cell("R", row_no).as_str())
+                    .set_value_string(v);
             }
         }
     }
@@ -219,7 +229,9 @@ pub fn verify_output(out: &Path, rows: &[DeclarationRow]) -> Result<(), String> 
     ] {
         let got = count_col(dm, col, upto);
         if got != want {
-            return Err(format!("Gate 5 fail: {name} còn {got} dòng, phải là {want}"));
+            return Err(format!(
+                "Gate 5 fail: {name} còn {got} dòng, phải là {want}"
+            ));
         }
     }
 
@@ -229,7 +241,9 @@ pub fn verify_output(out: &Path, rows: &[DeclarationRow]) -> Result<(), String> 
         .map_err(|_| "Gate 6 fail: mất sheet TINH_THANH".to_string())?;
     let tt_n = count_col(tt, "C", 35);
     if tt_n != 34 {
-        return Err(format!("Gate 6 fail: TINH_THANH còn {tt_n} dòng, phải là 34"));
+        return Err(format!(
+            "Gate 6 fail: TINH_THANH còn {tt_n} dòng, phải là 34"
+        ));
     }
     let px = book
         .sheet_by_name("PHUONG_XA")

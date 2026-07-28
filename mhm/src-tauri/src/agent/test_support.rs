@@ -1,5 +1,5 @@
 use serde_json::{Map, Number, Value};
-use sqlx::{Pool, Row, Sqlite, TypeInfo as _, ValueRef as _, sqlite::SqliteRow};
+use sqlx::{sqlite::SqliteRow, Pool, Row, Sqlite, TypeInfo as _, ValueRef as _};
 
 const ALLOWED_PHASE_ONE_AGENT_MUTATION_TABLES: &[&str] =
     &["agent_sessions", "agent_audit_events", "agent_digest_runs"];
@@ -105,7 +105,7 @@ fn quote_identifier(identifier: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use sqlx::{Pool, Sqlite, sqlite::SqlitePoolOptions};
+    use sqlx::{sqlite::SqlitePoolOptions, Pool, Sqlite};
 
     async fn test_pool() -> Pool<Sqlite> {
         let pool = SqlitePoolOptions::new()

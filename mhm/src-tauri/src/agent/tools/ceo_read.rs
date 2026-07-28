@@ -245,6 +245,9 @@ mod tests {
         )
         .await
         .expect_err("allowed no-arg tool must reject args");
-        assert_eq!(error.code, crate::app_error::codes::VALIDATION_INVALID_INPUT);
+        assert_eq!(
+            error.code,
+            crate::app_error::codes::VALIDATION_INVALID_INPUT
+        );
     }
 }

@@ -12,9 +12,7 @@ use sqlx::{Pool, Sqlite};
 
 use super::set_schema_version;
 
-pub(super) async fn migrate_v20_declaration_tables(
-    pool: &Pool<Sqlite>,
-) -> Result<(), sqlx::Error> {
+pub(super) async fn migrate_v20_declaration_tables(pool: &Pool<Sqlite>) -> Result<(), sqlx::Error> {
     let mut tx = pool.begin().await?;
 
     sqlx::query(
@@ -93,11 +91,9 @@ pub(super) async fn migrate_v20_declaration_tables(
         .execute(&mut *tx)
         .await?;
 
-    sqlx::query(
-        "CREATE INDEX IF NOT EXISTS idx_decl_entry_link ON declaration_entry(link_id)",
-    )
-    .execute(&mut *tx)
-    .await?;
+    sqlx::query("CREATE INDEX IF NOT EXISTS idx_decl_entry_link ON declaration_entry(link_id)")
+        .execute(&mut *tx)
+        .await?;
 
     sqlx::query(
         "CREATE INDEX IF NOT EXISTS idx_decl_batch_status ON declaration_batch(status, verified_at)",
@@ -213,11 +209,13 @@ mod tests {
         .expect("seeds booking");
 
         for guest in ["guest-1", "guest-2"] {
-            sqlx::query("INSERT INTO booking_guests (booking_id, guest_id) VALUES ('booking-1', ?)")
-                .bind(guest)
-                .execute(&pool)
-                .await
-                .expect("seeds booking guest");
+            sqlx::query(
+                "INSERT INTO booking_guests (booking_id, guest_id) VALUES ('booking-1', ?)",
+            )
+            .bind(guest)
+            .execute(&pool)
+            .await
+            .expect("seeds booking guest");
         }
 
         pool
@@ -295,10 +293,9 @@ mod tests {
         let id = crate::declaration::repo::insert_identity(&pool, &card, "qr_cccd", "verified")
             .await
             .expect("lưu danh tính");
-        let link =
-            crate::declaration::repo::insert_link(&pool, &id, Some("booking-1"), "2", None)
-                .await
-                .expect("ghép");
+        let link = crate::declaration::repo::insert_link(&pool, &id, Some("booking-1"), "2", None)
+            .await
+            .expect("ghép");
         let batch = crate::declaration::repo::insert_batch(&pool, "VN", "/tmp/x.xlsx", 1)
             .await
             .expect("lô");
@@ -311,9 +308,10 @@ mod tests {
 
         let mut misread = card.clone();
         misread.full_name = "TÊN ĐỌC SAI".into();
-        let again = crate::declaration::repo::insert_identity(&pool, &misread, "qr_cccd", "verified")
-            .await
-            .expect("thả lại");
+        let again =
+            crate::declaration::repo::insert_identity(&pool, &misread, "qr_cccd", "verified")
+                .await
+                .expect("thả lại");
 
         assert_eq!(again, id, "vẫn là cùng một người");
         let name: String =
@@ -343,10 +341,9 @@ mod tests {
         )
         .await
         .expect("danh tính");
-        let link =
-            crate::declaration::repo::insert_link(&pool, &id, Some("booking-1"), "2", None)
-                .await
-                .expect("ghép");
+        let link = crate::declaration::repo::insert_link(&pool, &id, Some("booking-1"), "2", None)
+            .await
+            .expect("ghép");
 
         // Đã xuất file nhưng chưa đối soát: vẫn gỡ được.
         let batch = crate::declaration::repo::insert_batch(&pool, "VN", "/tmp/x.xlsx", 1)
@@ -384,10 +381,9 @@ mod tests {
         )
         .await
         .expect("danh tính");
-        let link =
-            crate::declaration::repo::insert_link(&pool, &id, Some("booking-1"), "2", None)
-                .await
-                .expect("ghép");
+        let link = crate::declaration::repo::insert_link(&pool, &id, Some("booking-1"), "2", None)
+            .await
+            .expect("ghép");
         let batch = crate::declaration::repo::insert_batch(&pool, "VN", "/tmp/x.xlsx", 1)
             .await
             .expect("lô");
@@ -461,12 +457,10 @@ mod tests {
             .await
             .expect("ghép được dù chưa có phòng");
 
-        let rows = crate::declaration::repo::load_rows_by_link_ids(
-            &pool,
-            std::slice::from_ref(&link),
-        )
-        .await
-        .expect("đọc lại được dòng");
+        let rows =
+            crate::declaration::repo::load_rows_by_link_ids(&pool, std::slice::from_ref(&link))
+                .await
+                .expect("đọc lại được dòng");
 
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].identity.full_name, "Phạm Thị Minh Hiền");
@@ -497,12 +491,15 @@ mod tests {
         .expect("seeds link");
 
         // Chạy lại toàn bộ migration: v21 phải bỏ qua vì version đã là 21.
-        run_migrations(&pool).await.expect("migration chạy lại được");
-
-        let kept: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM declaration_link WHERE id='link-1'")
-            .fetch_one(&pool)
+        run_migrations(&pool)
             .await
-            .expect("đếm link");
+            .expect("migration chạy lại được");
+
+        let kept: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM declaration_link WHERE id='link-1'")
+                .fetch_one(&pool)
+                .await
+                .expect("đếm link");
         assert_eq!(kept, 1);
     }
 
@@ -637,9 +634,10 @@ mod tests {
         )
         .await
         .expect("lưu được danh tính");
-        let link = crate::declaration::repo::insert_link(&pool, &identity, Some("booking-1"), "2", None)
-            .await
-            .expect("lưu được link");
+        let link =
+            crate::declaration::repo::insert_link(&pool, &identity, Some("booking-1"), "2", None)
+                .await
+                .expect("lưu được link");
         let batch = crate::declaration::repo::insert_batch(&pool, "VN", "/tmp/x.xlsx", 1)
             .await
             .expect("lưu được lô");

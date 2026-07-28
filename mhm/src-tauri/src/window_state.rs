@@ -284,8 +284,10 @@ mod tests {
 
     #[test]
     fn growing_to_the_minimum_never_exceeds_the_work_area() {
-        let grown =
-            clamp_to_minimum(LogicalSize::new(600.0, 400.0), LogicalSize::new(1000.0, 600.0));
+        let grown = clamp_to_minimum(
+            LogicalSize::new(600.0, 400.0),
+            LogicalSize::new(1000.0, 600.0),
+        );
 
         assert_eq!(grown, Some(LogicalSize::new(1000.0, 600.0)));
     }
