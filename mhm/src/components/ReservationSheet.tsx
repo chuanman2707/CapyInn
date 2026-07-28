@@ -1,4 +1,4 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef } from "react";
 import { useHotelStore } from "../stores/useHotelStore";
 import { CalendarDays, User, Phone, CreditCard, AlertTriangle, FileText } from "lucide-react";
 import { Sheet, SheetContent, SheetHeader, SheetTitle } from "@/components/ui/sheet";
@@ -96,10 +96,29 @@ export default function ReservationSheet({ open, onOpenChange, preSelectedRoomId
         if (preSelectedRoomId) setRoomId(preSelectedRoomId);
     }, [preSelectedRoomId]);
 
+    // Tracks the room the guest count was last loaded for, so this effect only
+    // reloads on an actual room *change* — not merely because `rooms` got a
+    // new array identity (fetchRooms() re-`set`s a fresh array on every
+    // unrelated DB write; see useHotelStore.fetchRooms and the
+    // "db-updated"/"mcp_reservation_created" listeners in RuntimeStateProvider).
+    // Without this guard, any unrelated write elsewhere silently wipes out a
+    // guest count the user had just typed in this form.
+    const guestsLoadedForRoomId = useRef<string | null>(null);
+
     useEffect(() => {
-        if (isEditMode || !roomId) return;
+        if (isEditMode) return;
+        if (!roomId) {
+            // Cleared selection: forget what we loaded, so re-picking the same
+            // room later is treated as a fresh choice and reloads again.
+            guestsLoadedForRoomId.current = null;
+            return;
+        }
+        if (guestsLoadedForRoomId.current === roomId) return;
         const room = rooms.find((r) => r.id === roomId);
-        if (room) setGuests(room.max_guests);
+        if (room) {
+            setGuests(room.max_guests);
+            guestsLoadedForRoomId.current = roomId;
+        }
     }, [roomId, rooms, isEditMode]);
 
     async function handleSubmit() {
