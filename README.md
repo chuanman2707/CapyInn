@@ -231,7 +231,6 @@ CapyInn/
 │   ├── tests/              # Vitest suites and mocked desktop flows
 │   ├── public/             # Static assets
 │   └── models/             # OCR models
-├── PRD.md                  # Product requirements
 ├── CONTRIBUTING.md
 ├── SECURITY.md
 └── README.md
@@ -245,7 +244,6 @@ CapyInn/
 
 ## Additional docs
 
-- [PRD](PRD.md)
 - [Contributing guide](CONTRIBUTING.md)
 - [Release checklist](docs/release-checklist.md)
 - [Security policy](SECURITY.md)
