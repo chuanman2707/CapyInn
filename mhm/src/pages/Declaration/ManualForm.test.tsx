@@ -81,6 +81,37 @@ describe("ManualForm", () => {
 
     expect(screen.getByRole("button", { name: /^Lưu/i })).toBeDisabled();
   });
+
+  it("sửa khách đã có: prefill và lưu qua kbtt_update_identity, giữ nguyên id", async () => {
+    invokeCommand.mockResolvedValue(undefined);
+    const onSaved = vi.fn();
+    render(
+      <ManualForm
+        initial={{
+          id: "i9",
+          full_name: "Nguyễn Văn A",
+          dob: "1980-05-02",
+          gender: "M",
+          nationality_iso3: "VNM",
+          doc_type_code: "1",
+          doc_no: "058195006173",
+          name_confirmed_by_human: true,
+        }}
+        onSaved={onSaved}
+      />,
+    );
+
+    expect(screen.getByDisplayValue("Nguyễn Văn A")).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: /lưu/i }));
+
+    await waitFor(() =>
+      expect(invokeCommand).toHaveBeenCalledWith(
+        "kbtt_update_identity",
+        expect.objectContaining({ identityId: "i9" }),
+      ),
+    );
+    expect(onSaved).toHaveBeenCalledWith("i9", expect.objectContaining({ id: "i9" }));
+  });
 });
 
 describe("DropZone", () => {

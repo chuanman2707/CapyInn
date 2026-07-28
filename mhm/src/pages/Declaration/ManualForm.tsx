@@ -17,6 +17,8 @@ import {
 } from "./catalog";
 
 interface ManualFormProps {
+  /** Có giá trị = chế độ sửa: prefill và lưu theo id qua kbtt_update_identity. */
+  initial?: DeclarationIdentity | null;
   onSaved?: (identityId: string, identity: DeclarationIdentity) => void;
   onCancel?: () => void;
 }
@@ -58,6 +60,24 @@ function orNull(value: string): string | null {
   return trimmed.length > 0 ? trimmed : null;
 }
 
+function fromIdentity(identity: DeclarationIdentity): FormState {
+  return {
+    full_name: identity.full_name,
+    dob: identity.dob,
+    gender: identity.gender,
+    nationality_iso3: identity.nationality_iso3,
+    doc_type_code: identity.doc_type_code ?? "1",
+    doc_type_name: identity.doc_type_name ?? "",
+    doc_no: identity.doc_no ?? "",
+    phone: identity.phone ?? "",
+    residence_status: identity.residence_status ?? "1",
+    address_detail: identity.address_detail ?? "",
+    passport_no: identity.passport_no ?? "",
+    passport_expiry: identity.passport_expiry ?? "",
+    visa_valid_until: identity.visa_valid_until ?? "",
+  };
+}
+
 /**
  * Form nhập tay (spec §6.4). Dùng khi ảnh không có QR/MRZ (CMND cũ, giấy khai
  * sinh, GPLX), khi decode fail, hoặc khi người vận hành chủ động chọn.
@@ -66,8 +86,10 @@ function orNull(value: string): string | null {
  * và có người soi lại, và `doc_type_source = "human"` để `W06` KHÔNG nổ — người
  * tự chọn loại giấy tờ thì đó không còn là heuristic ngày cấp.
  */
-export default function ManualForm({ onSaved, onCancel }: ManualFormProps) {
-  const [form, setForm] = useState<FormState>(EMPTY);
+export default function ManualForm({ initial, onSaved, onCancel }: ManualFormProps) {
+  const [form, setForm] = useState<FormState>(
+    initial ? fromIdentity(initial) : EMPTY,
+  );
   const [saving, setSaving] = useState(false);
 
   const foreign = isForeign(form.nationality_iso3);
@@ -100,14 +122,25 @@ export default function ManualForm({ onSaved, onCancel }: ManualFormProps) {
     };
 
     try {
-      const identityId = await invokeCommand<string>("kbtt_save_identity", {
-        identity,
-        source: "manual",
-        confidence: "needs_review",
-      });
-      toast.success("Đã lưu danh tính nhập tay");
-      setForm(EMPTY);
-      onSaved?.(identityId, { ...identity, id: identityId });
+      if (initial?.id) {
+        await invokeCommand<void>("kbtt_update_identity", {
+          identityId: initial.id,
+          identity: { ...identity, id: initial.id },
+          source: "manual",
+          confidence: "needs_review",
+        });
+        toast.success("Đã sửa thông tin khách");
+        onSaved?.(initial.id, { ...identity, id: initial.id });
+      } else {
+        const identityId = await invokeCommand<string>("kbtt_save_identity", {
+          identity,
+          source: "manual",
+          confidence: "needs_review",
+        });
+        toast.success("Đã lưu danh tính");
+        setForm(EMPTY);
+        onSaved?.(identityId, { ...identity, id: identityId });
+      }
     } catch (e) {
       toast.error(formatAppError(e));
     } finally {
