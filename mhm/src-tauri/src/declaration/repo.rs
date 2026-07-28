@@ -245,11 +245,27 @@ fn dob_conflicts(existing_dob: &str, incoming_dob: &str) -> bool {
 /// `verified` khác ba trạng thái trên ở đúng một điểm: cái đã nộp công an
 /// tháng 3 được giữ bằng chứng ở file xuất trên đĩa CỘNG dòng
 /// `declaration_batch`/`declaration_entry` — dòng `declaration_identity` có
-/// thể đổi thì KHÔNG phải bằng chứng đó (đúng luận điểm doc-comment của
-/// `update_identity` đã dùng cho đường sửa tay — hai đường merge-lại-lúc-quét
-/// và sửa-tay giờ nhất quán). Một identity có link A đã verified VÀ link B
-/// đang exported/uploaded/failed thì vẫn chặn — chỉ verified một mình
-/// (không kèm link nào khác thật sự mid-flight) mới được bỏ qua.
+/// thể đổi thì KHÔNG phải bằng chứng đó. Một identity có link A đã verified
+/// VÀ link B đang exported/uploaded/failed thì vẫn chặn — chỉ verified một
+/// mình (không kèm link nào khác thật sự mid-flight) mới được bỏ qua.
+///
+/// **Đường này và `update_identity` KHÔNG đối xứng ở đúng ranh giới đó — có
+/// chủ ý, không phải một bên đồng bộ chưa tới.** Một danh tính chỉ còn
+/// đúng một link, đã verified: hàm này CHO ghi đè (đoạn trên); `update_identity`
+/// (sửa tay từ thẻ khách — xem doc-comment của nó) vẫn TỪ CHỐI cùng ca đó.
+/// Khác nhau vì hai đường kết thúc ở hai trạng thái khác nhau:
+/// `save_identity_ensuring_link` — hàm DUY NHẤT gọi `insert_identity` — LUÔN
+/// gắn ngay sau đó một link SỐNG cho danh tính (dùng lại link đang hoạt động
+/// nếu có, hoặc tạo link mới nếu mọi link cũ đều đã verified), nên dữ liệu
+/// vừa ghi đè lập tức trở thành nội dung của một khai báo MỚI, chưa nộp —
+/// "ghi đè rồi có link sống theo ngay" không khác gì "tạo khai báo mới với
+/// dữ liệu mới nhất". `update_identity` không có bảo đảm đó: nó được gọi
+/// thẳng từ form sửa một thẻ, và nếu danh tính chỉ còn link verified thì sau
+/// khi sửa vẫn KHÔNG có link sống nào cả — sửa ở đó chỉ đổi một dòng thuần
+/// túy là bằng chứng lịch sử, không kèm khai báo mới nào biện minh cho việc
+/// đổi. Gộp hai gate này vào một helper dùng chung sẽ xóa mất khác biệt
+/// này: hoặc khóa cứng `verified` ở đây (tái diễn đúng lỗi finding I1 vừa
+/// sửa), hoặc mở khóa nhầm một chỉnh sửa mà `update_identity` cố tình chặn.
 ///
 /// KHÔNG có cột ảnh và KHÔNG có cột payload thô — xem §12.
 pub async fn insert_identity(
@@ -1646,10 +1662,12 @@ mod tests {
     /// Đây KHÔNG phải một lô đang mid-flight: cái đã nộp công an tháng 3 được
     /// giữ bằng chứng ở file xuất trên đĩa cộng dòng
     /// `declaration_batch`/`declaration_entry` — dòng `declaration_identity`
-    /// có thể đổi thì KHÔNG phải bằng chứng đó (đúng luận điểm doc-comment
-    /// của `update_identity` đã dùng cho đường sửa tay). `verified` một mình
-    /// (không kèm link nào khác đang exported/uploaded/failed) không còn
-    /// chặn ghi đè — hai đường merge-lại-lúc-quét và sửa-tay giờ nhất quán.
+    /// có thể đổi thì KHÔNG phải bằng chứng đó. `verified` một mình (không
+    /// kèm link nào khác đang exported/uploaded/failed) không còn chặn ghi
+    /// đè ở ĐÂY. `update_identity` (đường sửa tay) vẫn từ chối đúng ca "chỉ
+    /// còn link verified" — có chủ ý, không phải hai đường chưa đồng bộ; xem
+    /// doc-comment của `insert_identity` để biết vì sao hai đường không đối
+    /// xứng ở đúng ranh giới này.
     #[tokio::test]
     async fn a_returning_guests_fresh_scan_overwrites_a_fully_verified_identity() {
         let pool = pool().await;
