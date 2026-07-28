@@ -1,7 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
 
-import { formatAppError } from "@/lib/appError";
 import { invokeCommand } from "@/lib/invokeCommand";
 import type {
   DeclarationFinding,
@@ -16,6 +15,7 @@ import {
   findingText,
   isForeign,
 } from "./catalog";
+import { declarationErrorMessage } from "./declarationError";
 import ManualForm from "./ManualForm";
 import { nameScore } from "./nameMatch";
 
@@ -102,7 +102,7 @@ export default function GuestCard({ row, stays, findings, onChanged }: GuestCard
       await fn();
       onChanged();
     } catch (e) {
-      toast.error(formatAppError(e));
+      toast.error(declarationErrorMessage(e));
     } finally {
       setBusy(false);
     }

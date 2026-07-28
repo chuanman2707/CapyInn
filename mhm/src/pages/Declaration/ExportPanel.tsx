@@ -2,11 +2,11 @@ import { useState } from "react";
 import { toast } from "sonner";
 
 import { Button } from "@/components/ui/button";
-import { formatAppError } from "@/lib/appError";
 import { invokeCommand } from "@/lib/invokeCommand";
 import type { DeclarationExportResult, DeclarationRow } from "@/types";
 
 import { EXCEL_WARNING_BODY, EXCEL_WARNING_HEAD, isForeign } from "./catalog";
+import { declarationErrorMessage } from "./declarationError";
 
 interface ExportPanelProps {
   eligible: DeclarationRow[];
@@ -64,7 +64,7 @@ export default function ExportPanel({
       setResults(done);
       onExported();
     } catch (e) {
-      toast.error(formatAppError(e));
+      toast.error(declarationErrorMessage(e));
       // File đã xuất xong trước lỗi vẫn hiện — người dùng cần biết cái gì đã ra.
       setResults(done);
       if (done.length > 0) onExported();

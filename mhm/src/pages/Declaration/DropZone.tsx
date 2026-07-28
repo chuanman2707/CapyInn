@@ -4,7 +4,6 @@ import { ImagePlus, PencilLine } from "lucide-react";
 import { toast } from "sonner";
 
 import { Button } from "@/components/ui/button";
-import { formatAppError } from "@/lib/appError";
 import { invokeCommand } from "@/lib/invokeCommand";
 import type { DeclarationIdentity, DeclarationSaveOutcome, ExtractedIdentity } from "@/types";
 
@@ -51,7 +50,7 @@ export default function DropZone({ onIdentitySaved }: DropZoneProps) {
           setLastError(null);
           setCards((prev) => [...prev, res]);
         } catch (e) {
-          const message = formatAppError(e);
+          const message = declarationErrorMessage(e);
           setLastError(message);
           toast.error(message);
         }

@@ -1,5 +1,6 @@
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { toast } from "sonner";
 
 import type { DeclarationRow } from "@/types";
 
@@ -100,5 +101,22 @@ describe("ExportPanel", () => {
     const button = screen.getByRole("button", { name: /xuất file/i });
     expect((button as HTMLButtonElement).disabled).toBe(true);
     expect(screen.getByText(/kiểm tra lỗi/i)).toBeTruthy();
+  });
+
+  // FINDING A: kbtt_export trả Err(String) thẳng, không qua registry AppError
+  // dùng chung. formatAppError() sẽ nuốt mất câu tiếng Việt thật và trả về
+  // "Có lỗi hệ thống, vui lòng thử lại" — đúng lúc người vận hành cần đọc rõ
+  // tại sao xuất file thất bại nhất. Toast phải giữ nguyên câu gốc.
+  it("lỗi Err(String) từ kbtt_export lên toast nguyên văn, không phải câu chung chung", async () => {
+    const raw = "Khách này đã có một khai báo cho lượt lưu trú đó rồi.";
+    invokeCommand.mockImplementation((cmd: string) => {
+      if (cmd === "kbtt_export") return Promise.reject(raw);
+      return Promise.resolve(null);
+    });
+    render(<ExportPanel eligible={[row({})]} blockedCount={0} onExported={() => {}} />);
+
+    fireEvent.click(screen.getByRole("button", { name: /xuất file cho 1 khách/i }));
+
+    await waitFor(() => expect(toast.error).toHaveBeenCalledWith(raw));
   });
 });

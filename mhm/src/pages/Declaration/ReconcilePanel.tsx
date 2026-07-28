@@ -2,9 +2,10 @@ import { useEffect, useState } from "react";
 import { toast } from "sonner";
 
 import { Button } from "@/components/ui/button";
-import { formatAppError } from "@/lib/appError";
 import { invokeCommand } from "@/lib/invokeCommand";
 import type { DeclarationBatch } from "@/types";
+
+import { declarationErrorMessage } from "./declarationError";
 
 interface ReconcilePanelProps {
   reloadKey: number;
@@ -91,7 +92,7 @@ function ReconcileCard({ batch, onSettled }: { batch: DeclarationBatch; onSettle
       }
       onSettled();
     } catch (e) {
-      toast.error(formatAppError(e));
+      toast.error(declarationErrorMessage(e));
     } finally {
       setBusy(false);
     }
@@ -104,7 +105,7 @@ function ReconcileCard({ batch, onSettled }: { batch: DeclarationBatch; onSettle
       toast.success("Khách của lô đã quay lại danh sách để sửa.");
       onSettled();
     } catch (e) {
-      toast.error(formatAppError(e));
+      toast.error(declarationErrorMessage(e));
     } finally {
       setBusy(false);
     }
@@ -114,7 +115,7 @@ function ReconcileCard({ batch, onSettled }: { batch: DeclarationBatch; onSettle
     try {
       await invokeCommand<void>("kbtt_open_export_dir", { batchId: batch.id });
     } catch (e) {
-      toast.error(formatAppError(e));
+      toast.error(declarationErrorMessage(e));
     }
   };
 
