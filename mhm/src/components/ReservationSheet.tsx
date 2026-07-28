@@ -68,7 +68,7 @@ export default function ReservationSheet({ open, onOpenChange, preSelectedRoomId
         disabled: isEditMode,
         debounceMs: 300,
     });
-    const { preview, loading: pricing } = usePricePreview({
+    const { preview, loading: pricing, error: pricingError } = usePricePreview({
         roomId,
         checkIn: checkInDate,
         checkOut: checkOutDate,
@@ -412,7 +412,11 @@ export default function ReservationSheet({ open, onOpenChange, preSelectedRoomId
                     {/* Price Estimate — con số do engine tính, không phải phép nhân ở đây */}
                     {roomId && datesValid && (
                         <div className="bg-blue-50 rounded-xl p-4 space-y-1">
-                            {pricing && !preview ? (
+                            {pricingError ? (
+                                <div className="text-sm text-red-600">
+                                    Không tính được giá — vui lòng thử lại.
+                                </div>
+                            ) : pricing && !preview ? (
                                 <div className="text-sm text-slate-500">Đang tính giá...</div>
                             ) : preview ? (
                                 <>
