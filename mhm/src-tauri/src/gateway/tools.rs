@@ -1407,6 +1407,7 @@ impl HotelTools {
             new_check_in_date: input.new_check_in_date,
             new_check_out_date: input.new_check_out_date,
             new_nights: input.new_nights,
+            new_guests: None,
         };
 
         match commands::do_modify_reservation(&self.pool, self.app_handle.as_ref(), &ctx, req).await

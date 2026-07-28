@@ -22,7 +22,7 @@ mod prelude {
         models::{
             AddGroupServiceRequest, CheckOutRequest, CheckoutSettlementMode,
             CheckoutSettlementPreviewRequest, CreateGuestRequest, CreateReservationRequest,
-            GroupCheckoutRequest,
+            GroupCheckoutRequest, ModifyReservationRequest,
         },
         money::MAX_TRANSPORT_SAFE_MONEY_VND,
         queries::booking::{audit_queries, billing_queries, revenue_queries},
