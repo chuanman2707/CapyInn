@@ -1,4 +1,4 @@
-import { render, screen, waitFor, within } from "@testing-library/react";
+import { render, screen, waitFor } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const invokeCommand = vi.hoisted(() => vi.fn());
@@ -30,44 +30,20 @@ describe("Declaration page", () => {
     });
   });
 
-  it("renders all four blocks", async () => {
+  it("trang rỗng: danh sách trống và nút xuất mờ", async () => {
+    invokeCommand.mockImplementation((cmd: string) => {
+      if (cmd === "kbtt_pending_rows") return Promise.resolve([]);
+      if (cmd === "kbtt_list_stays") return Promise.resolve([]);
+      if (cmd === "kbtt_validate") return Promise.resolve([]);
+      if (cmd === "kbtt_list_batches") return Promise.resolve([]);
+      return Promise.resolve(null);
+    });
     render(<Declaration />);
 
-    await waitFor(() => {
-      expect(screen.getByText(/Kéo ảnh giấy tờ vào đây/i)).toBeInTheDocument();
-    });
-    expect(screen.getByText(/Cần khai báo/i)).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: /Xuất file/i })).toBeInTheDocument();
-    expect(screen.getByText(/Lịch sử lô/i)).toBeInTheDocument();
-  });
-
-  it("always shows the Excel warning", async () => {
-    render(<Declaration />);
-
-    await waitFor(() => {
-      expect(
-        screen.getByText(/Không mở\/sửa file này bằng Excel trước khi upload/i),
-      ).toBeInTheDocument();
-    });
-    expect(
-      screen.getByText(
-        /Excel sẽ làm mất số 0 đầu của số giấy tờ và đổi định dạng ngày/i,
-      ),
-    ).toBeInTheDocument();
-    expect(
-      screen.getByText(/Cần sửa thì sửa trong CapyInn rồi xuất lại/i),
-    ).toBeInTheDocument();
-  });
-
-  it("gives the Excel warning no dismiss control", async () => {
-    const { container } = render(<Declaration />);
-
-    await waitFor(() => {
-      expect(container.querySelector("[data-excel-warning]")).not.toBeNull();
-    });
-
-    const warning = container.querySelector("[data-excel-warning]") as HTMLElement;
-    expect(within(warning).queryAllByRole("button")).toHaveLength(0);
-    expect(warning.querySelectorAll("button, [role='button'], input")).toHaveLength(0);
+    await waitFor(() =>
+      expect(screen.getByText(/chưa khai báo \(0\)/i)).toBeTruthy(),
+    );
+    const button = screen.getByRole("button", { name: /xuất file/i });
+    expect((button as HTMLButtonElement).disabled).toBe(true);
   });
 });

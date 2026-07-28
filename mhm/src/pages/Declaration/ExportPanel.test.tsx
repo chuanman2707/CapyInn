@@ -1,136 +1,88 @@
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-const invokeCommand = vi.hoisted(() => vi.fn());
-const toastError = vi.hoisted(() => vi.fn());
-const toastSuccess = vi.hoisted(() => vi.fn());
+import type { DeclarationRow } from "@/types";
 
+const invokeCommand = vi.hoisted(() => vi.fn());
 vi.mock("@/lib/invokeCommand", () => ({ invokeCommand }));
-vi.mock("sonner", () => ({
-  toast: { error: toastError, success: toastSuccess },
-}));
+vi.mock("sonner", () => ({ toast: { error: vi.fn(), success: vi.fn() } }));
 
 import ExportPanel from "./ExportPanel";
 
-function mockCommands(overrides: Record<string, unknown> = {}) {
-  invokeCommand.mockImplementation((command: string) => {
-    if (command in overrides) {
-      return Promise.resolve(overrides[command]);
-    }
-    switch (command) {
-      case "kbtt_validate":
-        return Promise.resolve([]);
-      case "kbtt_open_export_dir":
-        return Promise.resolve(undefined);
-      default:
-        return Promise.resolve([]);
-    }
-  });
+function row(over: Partial<DeclarationRow>): DeclarationRow {
+  return {
+    link_id: "l1", identity_id: "i1", full_name: "Nguyễn Văn A", dob: "1980-05-02",
+    gender: "M", nationality_iso3: "VNM", doc_type_code: "1", doc_type_name: null,
+    doc_no: "058195006173", phone: null, residence_status: null, address_detail: null,
+    passport_no: null, passport_expiry: null, visa_valid_until: null, room_no: "5A",
+    stay_id: null,
+    check_in_date: "2026-07-27", expected_check_out: "2026-07-28", stay_reason: "1",
+    stay_reason_note: null, name_confirmed_by_human: true, single_token_name_ok: false,
+    held: false,
+    ...over,
+  };
 }
-
-const exportButton = () => screen.getByRole("button", { name: /Xuất file/i });
 
 describe("ExportPanel", () => {
   beforeEach(() => {
     vi.clearAllMocks();
-    mockCommands();
   });
 
-  it("disables export while any blocking finding remains", async () => {
-    mockCommands({
-      kbtt_validate: [
-        { code: "E08", severity: "blocking", link_id: "l1", message: "x" },
-      ],
+  it("một cú bấm chia hai file theo quốc tịch", async () => {
+    invokeCommand.mockImplementation((cmd: string, args: { kind?: string }) => {
+      if (cmd === "kbtt_export") {
+        return Promise.resolve({
+          batch_id: args.kind === "VN" ? "b-vn" : "b-nnn",
+          file_path: args.kind === "VN" ? "/x/TBLT.xlsx" : "/x/KBTT.xml",
+          row_count: 1,
+          kind: args.kind,
+        });
+      }
+      return Promise.resolve(null);
     });
+    const onExported = vi.fn();
+    const eligible = [
+      row({}),
+      row({ link_id: "l2", identity_id: "i2", full_name: "JOHN SMITH", nationality_iso3: "USA" }),
+    ];
+    render(<ExportPanel eligible={eligible} blockedCount={0} onExported={onExported} />);
 
-    render(<ExportPanel linkIds={["l1"]} kind="NNN" />);
-    fireEvent.click(screen.getByRole("button", { name: /Kiểm tra/i }));
+    fireEvent.click(screen.getByRole("button", { name: /xuất file cho 2 khách/i }));
 
-    await waitFor(() => {
-      expect(exportButton()).toBeDisabled();
-    });
-    expect(await screen.findByText("E08")).toBeInTheDocument();
-  });
-
-  it("allows export when only warnings remain", async () => {
-    mockCommands({
-      kbtt_validate: [
-        { code: "W03", severity: "warning", link_id: "l1", message: "x" },
-      ],
-    });
-
-    render(<ExportPanel linkIds={["l1"]} kind="VN" />);
-    fireEvent.click(screen.getByRole("button", { name: /Kiểm tra/i }));
-
-    await waitFor(() => {
-      expect(exportButton()).toBeEnabled();
-    });
-  });
-
-  it("keeps export disabled without ever offering a bypass", async () => {
-    mockCommands({
-      kbtt_validate: [
-        { code: "E08", severity: "blocking", link_id: "l1", message: "x" },
-      ],
-    });
-
-    render(<ExportPanel linkIds={["l1"]} kind="NNN" />);
-
-    await waitFor(() => {
-      expect(exportButton()).toBeDisabled();
-    });
-
-    // không có nút nào bỏ qua lỗi chặn
-    const labels = screen.getAllByRole("button").map((b) => b.textContent ?? "");
-    expect(
-      labels.some((t) => /bỏ qua|xuất tạm|vẫn xuất|ép xuất|force/i.test(t)),
-    ).toBe(false);
-
-    fireEvent.click(exportButton());
-    await waitFor(() => {
-      expect(invokeCommand).not.toHaveBeenCalledWith(
+    await waitFor(() =>
+      expect(invokeCommand).toHaveBeenCalledWith(
         "kbtt_export",
-        expect.anything(),
-      );
-    });
+        expect.objectContaining({ kind: "VN", linkIds: ["l1"] }),
+      ),
+    );
+    expect(invokeCommand).toHaveBeenCalledWith(
+      "kbtt_export",
+      expect.objectContaining({ kind: "NNN", linkIds: ["l2"] }),
+    );
+    await waitFor(() => expect(screen.getByText(/TBLT\.xlsx/)).toBeTruthy());
+    expect(screen.getByText(/KBTT\.xml/)).toBeTruthy();
+    expect(screen.getByText(/không mở\/sửa file này bằng excel/i)).toBeTruthy();
+    expect(onExported).toHaveBeenCalled();
   });
 
-  it("shows the reconcile checklist after a successful export", async () => {
-    mockCommands({
-      kbtt_export: {
-        batch_id: "b1",
-        file_path: "/x/y.xlsx",
-        row_count: 3,
-        kind: "VN",
-      },
+  it("chỉ một loại khách thì chỉ gọi một lần", async () => {
+    invokeCommand.mockResolvedValue({
+      batch_id: "b-vn", file_path: "/x/TBLT.xlsx", row_count: 1, kind: "VN",
     });
-
-    render(<ExportPanel linkIds={["l1", "l2", "l3"]} kind="VN" />);
-
-    await waitFor(() => {
-      expect(exportButton()).toBeEnabled();
-    });
-    fireEvent.click(exportButton());
-
-    expect(
-      await screen.findByLabelText(/Số hồ sơ thấy trên cổng/i),
-    ).toBeInTheDocument();
-    await waitFor(() => {
-      expect(invokeCommand).toHaveBeenCalledWith("kbtt_export", {
-        kind: "VN",
-        linkIds: ["l1", "l2", "l3"],
-      });
-    });
-    expect(invokeCommand).toHaveBeenCalledWith("kbtt_open_export_dir", {
-      batchId: "b1",
-    });
+    render(<ExportPanel eligible={[row({})]} blockedCount={0} onExported={() => {}} />);
+    fireEvent.click(screen.getByRole("button", { name: /xuất file cho 1 khách/i }));
+    await waitFor(() => expect(invokeCommand).toHaveBeenCalledTimes(1));
   });
 
-  it("does nothing when there is nothing selected", async () => {
-    render(<ExportPanel linkIds={[]} kind="VN" />);
+  it("nút nói thật khi có khách bị lỗi chặn ở lại", () => {
+    render(<ExportPanel eligible={[row({})]} blockedCount={2} onExported={() => {}} />);
+    expect(screen.getByRole("button", { name: /xuất file cho 1 khách/i })).toBeTruthy();
+    expect(screen.getByText(/2 khách còn lỗi sẽ ở lại danh sách/)).toBeTruthy();
+  });
 
-    await waitFor(() => {
-      expect(exportButton()).toBeDisabled();
-    });
+  it("không còn ai đủ điều kiện thì nút mờ", () => {
+    render(<ExportPanel eligible={[]} blockedCount={1} onExported={() => {}} />);
+    const button = screen.getByRole("button", { name: /xuất file/i });
+    expect((button as HTMLButtonElement).disabled).toBe(true);
   });
 });
