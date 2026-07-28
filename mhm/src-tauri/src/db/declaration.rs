@@ -8,7 +8,7 @@
 //! cứng (§5.2). FK cứng sẽ làm việc xóa/dọn một booking trong PMS thất bại vì
 //! một module phụ.
 
-use sqlx::{Pool, Sqlite};
+use sqlx::{Pool, Row, Sqlite};
 
 use super::{execute_compat_alter, set_schema_version};
 
@@ -197,6 +197,120 @@ pub(super) async fn migrate_v22_conveyor(pool: &Pool<Sqlite>) -> Result<(), sqlx
     Ok(())
 }
 
+/// Migration v23 — snapshot phòng + ngày lên `declaration_link` lúc gán phòng
+/// (FINDING C2, spec 2026-07-28).
+///
+/// `load_stays_for_declaration` chỉ liệt kê booking `status = 'active'`. Khách
+/// trả phòng trước khi khai xong thì booking rời khỏi tập đó, còn link vẫn
+/// giữ đúng `stay_id` — nhưng `load_rows_by_link_ids` tra `stay_id` đó trong
+/// tập đã lọc, không thấy, và trả về `StayInfo` rỗng: phòng và cả hai ngày
+/// biến mất vĩnh viễn. Người vận hành chỉ còn "Xóa" (khách không bao giờ được
+/// khai — đúng thứ module này tồn tại để tránh) hoặc "Gác lại" (badge đếm
+/// khách đó mãi mãi).
+///
+/// Ba cột mới chụp lại đúng ba giá trị mà file xuất cần và không tự suy ra
+/// được nếu thiếu: số phòng, ngày đến, ngày đi dự kiến. Cả ba nullable vì
+/// một link chưa gắn phòng (v21) hợp lệ không có gì để chụp.
+///
+/// Additive nên chỉ cần ALTER — theo đúng hình dạng migration v22:
+/// `execute_compat_alter` để chạy lại an toàn nếu tiến trình chết giữa chừng
+/// (ALTER đã commit nhưng `schema_version` thì chưa), rồi mới backfill, rồi
+/// mới bump version — bump SAU CÙNG để một lần chạy dở không để lại DB ở
+/// version 23 mà thiếu backfill.
+pub(super) async fn migrate_v23_stay_snapshot(pool: &Pool<Sqlite>) -> Result<(), sqlx::Error> {
+    let mut tx = pool.begin().await?;
+    execute_compat_alter(
+        &mut tx,
+        "ALTER TABLE declaration_link ADD COLUMN snapshot_room_no TEXT",
+    )
+    .await?;
+    execute_compat_alter(
+        &mut tx,
+        "ALTER TABLE declaration_link ADD COLUMN snapshot_check_in TEXT",
+    )
+    .await?;
+    execute_compat_alter(
+        &mut tx,
+        "ALTER TABLE declaration_link ADD COLUMN snapshot_expected_out TEXT",
+    )
+    .await?;
+    tx.commit().await?;
+
+    backfill_stay_snapshots(pool).await?;
+
+    let mut tx = pool.begin().await?;
+    set_schema_version(&mut tx, 23).await?;
+    tx.commit().await?;
+    Ok(())
+}
+
+/// Chụp snapshot cho MỌI link đang trỏ vào một `stay_id` mà booking đó vẫn
+/// còn `active` lúc migration chạy — đây là dữ liệu duy nhất còn phục hồi
+/// được. Link trỏ vào một booking đã đóng/xóa TRƯỚC khi tính năng này tồn tại
+/// thì không còn nguồn nào để lấy lại phòng/ngày của nó — hạn chế đã biết,
+/// chấp nhận được vì đó là dữ liệu đã mất trước khi có snapshot, không phải
+/// dữ liệu bị migration làm mất.
+///
+/// Tách khỏi `migrate_v23_stay_snapshot` để test gọi lại được đúng code
+/// production (như `backfill_orphan_identities` của v22) — hàm idempotent nhờ
+/// điều kiện `snapshot_room_no IS NULL`.
+///
+/// Dùng chuẩn hóa của `normalizer` (không phải SQL thô) để khớp CHÍNH XÁC
+/// những gì `load_stays_for_declaration` sẽ tính — hai đường tính khác nhau
+/// cho cùng một booking sẽ lệch nhau đúng vào những ca hiếm mới lộ ra.
+///
+/// Nếu `bookings`/`rooms` chưa tồn tại lúc migration này chạy (đường nâng cấp
+/// bất thường — ví dụ nhảy thẳng vào một `schema_version` cũ mà bỏ qua v1) thì
+/// không có gì để backfill, không phải lỗi khởi động: bỏ qua êm thay vì chặn
+/// app không mở được, cùng triết lý với `execute_compat_alter`.
+pub(crate) async fn backfill_stay_snapshots(pool: &Pool<Sqlite>) -> Result<(), sqlx::Error> {
+    let rows = match sqlx::query(
+        "SELECT dl.id AS link_id, r.name AS room_name, b.check_in_at, b.expected_checkout
+           FROM declaration_link dl
+           JOIN bookings b ON b.id = dl.stay_id AND b.status = 'active'
+           JOIN rooms r   ON r.id = b.room_id
+          WHERE dl.stay_id IS NOT NULL
+            AND dl.snapshot_room_no IS NULL",
+    )
+    .fetch_all(pool)
+    .await
+    {
+        Ok(rows) => rows,
+        Err(error) if error.to_string().to_lowercase().contains("no such table") => {
+            return Ok(());
+        }
+        Err(error) => return Err(error),
+    };
+
+    for row in rows {
+        let link_id: String = row.get("link_id");
+        let room_name: String = row.get("room_name");
+        let check_in_at: String = row.get("check_in_at");
+        let expected_checkout: String = row.get("expected_checkout");
+
+        let room_no = crate::declaration::normalizer::strip_room_prefix(&room_name);
+        let check_in = crate::declaration::normalizer::booking_ts_to_iso_date(&check_in_at)
+            .unwrap_or_default();
+        let expected_out =
+            crate::declaration::normalizer::booking_ts_to_iso_date(&expected_checkout)
+                .unwrap_or_default();
+
+        sqlx::query(
+            "UPDATE declaration_link
+                SET snapshot_room_no = ?, snapshot_check_in = ?, snapshot_expected_out = ?
+              WHERE id = ?",
+        )
+        .bind(&room_no)
+        .bind(&check_in)
+        .bind(&expected_out)
+        .bind(&link_id)
+        .execute(pool)
+        .await?;
+    }
+
+    Ok(())
+}
+
 /// Tạo link mặc định cho mọi danh tính chưa có link nào.
 ///
 /// Tách khỏi `migrate_v22_conveyor` để test gọi được đúng code production:
@@ -227,7 +341,7 @@ pub(crate) async fn backfill_orphan_identities(pool: &Pool<Sqlite>) -> Result<()
 #[cfg(test)]
 mod tests {
     use crate::db::run_migrations;
-    use sqlx::SqlitePool;
+    use sqlx::{Row, SqlitePool};
 
     /// Hai hàm đọc PMS của `declaration::repo` được test Ở ĐÂY chứ không ở
     /// `repo.rs`, vì fixture phải `INSERT INTO bookings/rooms/...` — mà test
@@ -913,5 +1027,255 @@ mod tests {
                 .await
                 .expect("đọc lại");
         assert!(held.is_some());
+    }
+
+    // ─── v23 — snapshot phòng + ngày (FINDING C2) ──────────────────────────
+
+    #[tokio::test]
+    async fn v23_adds_nullable_snapshot_columns() {
+        let pool = seeded_pool().await;
+        sqlx::query(
+            "INSERT INTO declaration_identity (id, source, extract_confidence, full_name,
+                dob, gender, nationality_iso3, created_at)
+             VALUES ('id-snap', 'manual', 'needs_review', 'A', '1990-01-01', 'M', 'VNM', '2026-01-01')",
+        )
+        .execute(&pool)
+        .await
+        .expect("seed identity");
+
+        // Cột tồn tại và ghi/đọc được — đủ để chứng minh migration đã chạy.
+        sqlx::query(
+            "INSERT INTO declaration_link (
+                id, identity_id, stay_id, stay_reason,
+                snapshot_room_no, snapshot_check_in, snapshot_expected_out, created_at
+             ) VALUES ('l-snap', 'id-snap', 'booking-1', '1', '5B', '2026-07-27', '2026-12-31', '2026-01-01')",
+        )
+        .execute(&pool)
+        .await
+        .expect("ghi snapshot được");
+
+        let row = sqlx::query(
+            "SELECT snapshot_room_no, snapshot_check_in, snapshot_expected_out
+               FROM declaration_link WHERE id = 'l-snap'",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("đọc lại");
+
+        assert_eq!(row.get::<Option<String>, _>("snapshot_room_no").as_deref(), Some("5B"));
+        assert_eq!(
+            row.get::<Option<String>, _>("snapshot_check_in").as_deref(),
+            Some("2026-07-27")
+        );
+        assert_eq!(
+            row.get::<Option<String>, _>("snapshot_expected_out").as_deref(),
+            Some("2026-12-31")
+        );
+    }
+
+    /// Dữ liệu để lại từ trước v23: link có `stay_id` thật trỏ vào một booking
+    /// VẪN ACTIVE lúc migration chạy — đây là ca phục hồi được, backfill phải
+    /// chụp lại đúng phòng và ngày từ chính booking đó.
+    #[tokio::test]
+    async fn v23_backfills_snapshot_for_links_whose_booking_is_still_active() {
+        let pool = seeded_pool().await;
+        sqlx::query(
+            "INSERT INTO declaration_identity (id, source, extract_confidence, full_name,
+                dob, gender, nationality_iso3, created_at)
+             VALUES ('id-old', 'manual', 'needs_review', 'A', '1990-01-01', 'M', 'VNM', '2026-01-01')",
+        )
+        .execute(&pool)
+        .await
+        .expect("seed identity");
+        sqlx::query(
+            "INSERT INTO declaration_link (id, identity_id, stay_id, stay_reason, created_at)
+             VALUES ('l-old', 'id-old', 'booking-1', '1', '2026-01-01')",
+        )
+        .execute(&pool)
+        .await
+        .expect("seed link chưa có snapshot (giả lập dữ liệu trước v23)");
+
+        // Gọi ĐÚNG hàm production, không chép SQL sang test (như v22).
+        super::backfill_stay_snapshots(&pool)
+            .await
+            .expect("backfill chạy được");
+
+        let row = sqlx::query(
+            "SELECT snapshot_room_no, snapshot_expected_out
+               FROM declaration_link WHERE id = 'l-old'",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("đọc lại");
+        assert_eq!(row.get::<Option<String>, _>("snapshot_room_no").as_deref(), Some("5B"));
+        assert_eq!(
+            row.get::<Option<String>, _>("snapshot_expected_out").as_deref(),
+            Some("2026-12-31")
+        );
+
+        // Idempotent — gọi lại lần hai không lỗi, không đổi giá trị.
+        super::backfill_stay_snapshots(&pool)
+            .await
+            .expect("backfill chạy lại được");
+    }
+
+    /// Link trỏ vào một booking đã đóng hoặc không còn tồn tại TRƯỚC khi tính
+    /// năng snapshot ra đời: không còn nguồn nào để lấy lại phòng/ngày — hạn
+    /// chế đã biết. Backfill phải bỏ qua êm, không panic, không lỗi.
+    #[tokio::test]
+    async fn v23_leaves_a_link_to_an_unresolvable_booking_unrecovered() {
+        let pool = seeded_pool().await;
+        sqlx::query(
+            "INSERT INTO declaration_identity (id, source, extract_confidence, full_name,
+                dob, gender, nationality_iso3, created_at)
+             VALUES ('id-gone', 'manual', 'needs_review', 'A', '1990-01-01', 'M', 'VNM', '2026-01-01')",
+        )
+        .execute(&pool)
+        .await
+        .expect("seed identity");
+        sqlx::query(
+            "INSERT INTO declaration_link (id, identity_id, stay_id, stay_reason, created_at)
+             VALUES ('l-gone', 'id-gone', 'booking-khong-ton-tai', '1', '2026-01-01')",
+        )
+        .execute(&pool)
+        .await
+        .expect("seed link trỏ vào booking không tồn tại");
+
+        super::backfill_stay_snapshots(&pool)
+            .await
+            .expect("backfill không được lỗi dù không phục hồi được gì");
+
+        let room: Option<String> =
+            sqlx::query_scalar("SELECT snapshot_room_no FROM declaration_link WHERE id = 'l-gone'")
+                .fetch_one(&pool)
+                .await
+                .expect("đọc lại");
+        assert!(room.is_none(), "không có gì để phục hồi thì để NULL, không bịa dữ liệu");
+    }
+
+    // ─── FINDING C2 — snapshot qua repo::update_link / load_rows_by_link_ids ──
+
+    fn snapshot_test_identity() -> crate::declaration::model::Identity {
+        crate::declaration::model::Identity {
+            full_name: "Phan Thị Mỹ Hà".into(),
+            dob: "1995-07-28".into(),
+            gender: "F".into(),
+            nationality_iso3: "VNM".into(),
+            doc_type_code: Some("1".into()),
+            doc_type_source: Some("human".into()),
+            doc_no: Some("058195006173".into()),
+            phone: Some("0901234567".into()),
+            ..Default::default()
+        }
+    }
+
+    #[tokio::test]
+    async fn assigning_a_room_snapshots_it_onto_the_link() {
+        let pool = seeded_pool().await;
+        use crate::declaration::repo;
+
+        repo::save_identity_ensuring_link(&pool, &snapshot_test_identity(), "qr_cccd", "verified")
+            .await
+            .expect("lưu");
+        let link_id = repo::pending_link_ids(&pool).await.expect("đọc")[0].clone();
+
+        repo::update_link(&pool, &link_id, Some("booking-1"), "1", None)
+            .await
+            .expect("gắn phòng");
+
+        let row = sqlx::query(
+            "SELECT snapshot_room_no, snapshot_check_in, snapshot_expected_out
+               FROM declaration_link WHERE id = ?",
+        )
+        .bind(&link_id)
+        .fetch_one(&pool)
+        .await
+        .expect("đọc snapshot");
+
+        assert_eq!(row.get::<Option<String>, _>("snapshot_room_no").as_deref(), Some("5B"));
+        assert_eq!(
+            row.get::<Option<String>, _>("snapshot_expected_out").as_deref(),
+            Some("2026-12-31")
+        );
+        assert!(row.get::<Option<String>, _>("snapshot_check_in").is_some());
+    }
+
+    /// Đúng kịch bản FINDING C2: khách trả phòng trước khi khai xong (nhịp
+    /// "lúc nào rảnh thì làm" — có thể cách nhau nhiều ngày). Booking rời khỏi
+    /// `load_stays_for_declaration` (chỉ liệt kê active) nhưng snapshot đã chụp
+    /// lúc gán phòng phải giữ khai báo sống — không "Xóa", không kẹt vô hình
+    /// ở "Gác lại".
+    #[tokio::test]
+    async fn a_link_survives_its_booking_closing_before_the_declaration_is_done() {
+        let pool = seeded_pool().await;
+        use crate::declaration::repo;
+
+        repo::save_identity_ensuring_link(&pool, &snapshot_test_identity(), "qr_cccd", "verified")
+            .await
+            .expect("lưu");
+        let link_id = repo::pending_link_ids(&pool).await.expect("đọc")[0].clone();
+        repo::update_link(&pool, &link_id, Some("booking-1"), "1", None)
+            .await
+            .expect("gắn phòng");
+
+        // Khách trả phòng trước khi khai xong.
+        sqlx::query("UPDATE bookings SET status = 'checked_out' WHERE id = 'booking-1'")
+            .execute(&pool)
+            .await
+            .expect("PMS đóng booking");
+
+        let rows = repo::load_rows_by_link_ids(&pool, std::slice::from_ref(&link_id))
+            .await
+            .expect("đọc lại sau khi booking đóng");
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].stay.room_no, "5B", "phòng vẫn còn nhờ snapshot");
+        assert_eq!(rows[0].stay.expected_out, "2026-12-31");
+        assert!(!rows[0].stay.check_in.is_empty(), "ngày đến vẫn còn nhờ snapshot");
+
+        let catalog = crate::declaration::catalog::Catalog::load().expect("load catalog");
+        // today = đúng ngày đến để tránh W04 giả (không liên quan tới điều test này kiểm).
+        let today = rows[0].stay.check_in.clone();
+        let findings = crate::declaration::validator::validate(&rows, &catalog, &today);
+        assert!(
+            !crate::declaration::validator::has_blocking(&findings),
+            "phải khai được dù booking đã đóng: {findings:?}"
+        );
+    }
+
+    /// Booking vẫn active nhưng snapshot trên link đã cũ/sai (VD: đổi phòng
+    /// sau khi snapshot đầu tiên) — giá trị SỐNG phải thắng, không được kẹt ở
+    /// bản chụp cũ.
+    #[tokio::test]
+    async fn a_live_active_booking_still_wins_over_a_stale_snapshot() {
+        let pool = seeded_pool().await;
+        use crate::declaration::repo;
+
+        repo::save_identity_ensuring_link(&pool, &snapshot_test_identity(), "qr_cccd", "verified")
+            .await
+            .expect("lưu");
+        let link_id = repo::pending_link_ids(&pool).await.expect("đọc")[0].clone();
+        repo::update_link(&pool, &link_id, Some("booking-1"), "1", None)
+            .await
+            .expect("gắn phòng");
+
+        // Làm bẩn snapshot như thể nó được chụp trước một lần đổi phòng.
+        sqlx::query(
+            "UPDATE declaration_link
+                SET snapshot_room_no = '9Z', snapshot_expected_out = '2020-01-01'
+              WHERE id = ?",
+        )
+        .bind(&link_id)
+        .execute(&pool)
+        .await
+        .expect("làm bẩn snapshot");
+
+        let rows = repo::load_rows_by_link_ids(&pool, std::slice::from_ref(&link_id))
+            .await
+            .expect("đọc lại");
+        assert_eq!(
+            rows[0].stay.room_no, "5B",
+            "booking vẫn active — giá trị sống phải thắng snapshot cũ"
+        );
+        assert_eq!(rows[0].stay.expected_out, "2026-12-31");
     }
 }

@@ -411,7 +411,55 @@ async fn link_is_declared(pool: &Pool<Sqlite>, link_id: &str) -> Result<bool, St
     Ok(n > 0)
 }
 
+/// Lượt lưu trú ĐANG ACTIVE ứng đúng `stay_id` — dùng để chụp snapshot
+/// (FINDING C2) lúc một link được gán/đổi phòng. `None` khi `stay_id` đó
+/// không active lúc gọi (đã trả phòng/hủy) hoặc không tồn tại; gọi nơi dùng
+/// PHẢI coi `None` là "không chụp được lúc này", không phải "xóa phòng".
+///
+/// Cùng câu SELECT với `load_stays_for_declaration`, chỉ thêm `WHERE b.id = ?`
+/// — để hai đường tính ra cùng một kết quả cho cùng một booking.
+async fn live_stay_snapshot(pool: &Pool<Sqlite>, stay_id: &str) -> Result<Option<StayInfo>, String> {
+    let row = sqlx::query(
+        "SELECT r.name AS room_name, b.check_in_at, b.expected_checkout
+           FROM bookings b
+           JOIN rooms r ON r.id = b.room_id
+          WHERE b.id = ? AND b.status = 'active'",
+    )
+    .bind(stay_id)
+    .fetch_optional(pool)
+    .await
+    .map_err(|e| format!("Không đọc được lượt lưu trú: {e}"))?;
+
+    Ok(row.map(|r| {
+        let check_in_raw: String = r.get("check_in_at");
+        StayInfo {
+            stay_id: stay_id.to_string(),
+            room_no: strip_room_prefix(&r.get::<String, _>("room_name")),
+            check_in: booking_ts_to_iso_date(&check_in_raw).unwrap_or_default(),
+            expected_out: booking_ts_to_iso_date(&r.get::<String, _>("expected_checkout"))
+                .unwrap_or_default(),
+            actual_out: None,
+            check_in_raw,
+        }
+    }))
+}
+
 /// Sửa phòng / lý do / ghi chú của một khai báo tại chỗ (thẻ khách của UI mới).
+///
+/// FINDING C2: mỗi lần `stay_id` được gán, chụp lại số phòng + ngày đến +
+/// ngày đi dự kiến vào ba cột snapshot (migration v23) — để khách trả phòng
+/// TRƯỚC khi khai xong không kéo khai báo về rỗng khi booking rời khỏi
+/// `load_stays_for_declaration` (chỉ liệt kê `status = 'active'`).
+///
+/// Ba nhánh:
+/// - `stay_id = None` (bỏ chọn phòng): xóa cả snapshot — không còn phòng nào
+///   để nhớ.
+/// - `stay_id = Some` và booking đó ĐANG active: ghi đè snapshot bằng giá trị
+///   sống mới nhất (đổi phòng thì snapshot phải theo phòng mới, không giữ
+///   phòng cũ).
+/// - `stay_id = Some` nhưng booking đó KHÔNG active lúc này (VD: người vận
+///   hành chỉ đổi lý do lưu trú sau khi khách đã trả phòng, `stay_id` gửi lên
+///   vẫn là id cũ) — GIỮ NGUYÊN snapshot đã có, không ghi đè bằng rỗng.
 pub async fn update_link(
     pool: &Pool<Sqlite>,
     link_id: &str,
@@ -426,26 +474,70 @@ pub async fn update_link(
         );
     }
 
-    let affected = sqlx::query(
-        "UPDATE declaration_link
-            SET stay_id = ?, stay_reason = ?, stay_reason_note = ?
-          WHERE id = ?",
-    )
-    .bind(stay_id)
-    .bind(stay_reason)
-    .bind(note)
-    .bind(link_id)
-    .execute(pool)
-    .await
-    .map_err(|e| {
-        // UNIQUE(identity_id, stay_id): khách này đã có khai báo cho đúng phòng đó.
-        if e.to_string().contains("UNIQUE") {
-            "Khách này đã có một khai báo cho lượt lưu trú đó rồi.".to_string()
-        } else {
-            format!("Không sửa được khai báo: {e}")
+    let fresh_snapshot = match stay_id {
+        Some(id) => live_stay_snapshot(pool, id).await?,
+        None => None,
+    };
+
+    let result = match (stay_id, fresh_snapshot) {
+        (None, _) => {
+            sqlx::query(
+                "UPDATE declaration_link
+                    SET stay_id = NULL, stay_reason = ?, stay_reason_note = ?,
+                        snapshot_room_no = NULL, snapshot_check_in = NULL, snapshot_expected_out = NULL
+                  WHERE id = ?",
+            )
+            .bind(stay_reason)
+            .bind(note)
+            .bind(link_id)
+            .execute(pool)
+            .await
         }
-    })?
-    .rows_affected();
+        (Some(id), Some(stay)) => {
+            sqlx::query(
+                "UPDATE declaration_link
+                    SET stay_id = ?, stay_reason = ?, stay_reason_note = ?,
+                        snapshot_room_no = ?, snapshot_check_in = ?, snapshot_expected_out = ?
+                  WHERE id = ?",
+            )
+            .bind(id)
+            .bind(stay_reason)
+            .bind(note)
+            .bind(stay.room_no)
+            .bind(stay.check_in)
+            .bind(stay.expected_out)
+            .bind(link_id)
+            .execute(pool)
+            .await
+        }
+        (Some(id), None) => {
+            // Booking không active lúc này — giữ nguyên snapshot đã chụp trước
+            // đó, không ghi đè bằng rỗng chỉ vì người vận hành đổi lý do lưu
+            // trú sau khi khách đã trả phòng.
+            sqlx::query(
+                "UPDATE declaration_link
+                    SET stay_id = ?, stay_reason = ?, stay_reason_note = ?
+                  WHERE id = ?",
+            )
+            .bind(id)
+            .bind(stay_reason)
+            .bind(note)
+            .bind(link_id)
+            .execute(pool)
+            .await
+        }
+    };
+
+    let affected = result
+        .map_err(|e| {
+            // UNIQUE(identity_id, stay_id): khách này đã có khai báo cho đúng phòng đó.
+            if e.to_string().contains("UNIQUE") {
+                "Khách này đã có một khai báo cho lượt lưu trú đó rồi.".to_string()
+            } else {
+                format!("Không sửa được khai báo: {e}")
+            }
+        })?
+        .rows_affected();
 
     if affected == 0 {
         return Err("Không tìm thấy khai báo cần sửa.".into());
@@ -529,6 +621,12 @@ pub async fn set_link_held(pool: &Pool<Sqlite>, link_id: &str, held: bool) -> Re
 /// không đẻ thêm dòng, vì `UNIQUE(identity_id, stay_id)`.
 /// `stay_id = None` khi khai báo chưa gắn vào lượt lưu trú nào (chưa xác định
 /// phòng) — xem migration v21.
+///
+/// FINDING C2: khi `stay_id` gắn vào một booking đang active, chụp luôn số
+/// phòng + ngày vào ba cột snapshot (migration v23) — cùng lý do với
+/// `update_link`. Trên nhánh `ON CONFLICT` (ghép lại đúng cặp identity+stay),
+/// `COALESCE` giữ nguyên snapshot cũ nếu lần này không chụp lại được (booking
+/// vừa hết active), không ghi đè bằng rỗng.
 pub async fn insert_link(
     pool: &Pool<Sqlite>,
     identity_id: &str,
@@ -538,19 +636,35 @@ pub async fn insert_link(
 ) -> Result<String, String> {
     let id = uuid::Uuid::new_v4().to_string();
 
+    let snapshot = match stay_id {
+        Some(sid) => live_stay_snapshot(pool, sid).await?,
+        None => None,
+    };
+    let (room_no, check_in, expected_out) = match snapshot {
+        Some(s) => (Some(s.room_no), Some(s.check_in), Some(s.expected_out)),
+        None => (None, None, None),
+    };
+
     sqlx::query(
         "INSERT INTO declaration_link (
-            id, identity_id, stay_id, stay_reason, stay_reason_note, created_at
-         ) VALUES (?, ?, ?, ?, ?, ?)
+            id, identity_id, stay_id, stay_reason, stay_reason_note,
+            snapshot_room_no, snapshot_check_in, snapshot_expected_out, created_at
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(identity_id, stay_id) DO UPDATE SET
-            stay_reason      = excluded.stay_reason,
-            stay_reason_note = excluded.stay_reason_note",
+            stay_reason           = excluded.stay_reason,
+            stay_reason_note      = excluded.stay_reason_note,
+            snapshot_room_no      = COALESCE(excluded.snapshot_room_no, declaration_link.snapshot_room_no),
+            snapshot_check_in     = COALESCE(excluded.snapshot_check_in, declaration_link.snapshot_check_in),
+            snapshot_expected_out = COALESCE(excluded.snapshot_expected_out, declaration_link.snapshot_expected_out)",
     )
     .bind(&id)
     .bind(identity_id)
     .bind(stay_id)
     .bind(stay_reason)
     .bind(note)
+    .bind(room_no)
+    .bind(check_in)
+    .bind(expected_out)
     .bind(now())
     .execute(pool)
     .await
@@ -752,8 +866,16 @@ async fn set_batch_outcome(
 /// Dựng `DeclarationRow` đầy đủ: join `declaration_link` + `declaration_identity`,
 /// rồi ghép `StayInfo` tương ứng từ `load_stays_for_declaration`.
 ///
-/// Booking đã bị PMS xóa thì dòng vẫn trả về với `StayInfo` rỗng (chỉ có
-/// `stay_id`) — validator sẽ chặn, còn lịch sử lô thì không được biến mất.
+/// FINDING C2: booking đã rời khỏi trạng thái `active` (khách trả phòng
+/// TRƯỚC khi khai xong — nhịp "lúc nào rảnh thì làm" có thể cách nhau nhiều
+/// ngày) thì dòng vẫn trả về với phòng/ngày lấy từ snapshot chụp lúc gán
+/// phòng (migration v23), KHÔNG rỗng. Booking vẫn active thì giá trị sống
+/// luôn thắng — snapshot chỉ là lưới đỡ cho lúc booking không còn tra được,
+/// không phải nguồn sự thật khi vẫn tra được.
+///
+/// Chỉ khi cả live lẫn snapshot đều không có gì (booking đã bị PMS xóa TRƯỚC
+/// khi tính năng snapshot tồn tại) thì `StayInfo` mới thật sự rỗng — validator
+/// sẽ chặn, còn lịch sử lô thì không được biến mất.
 pub async fn load_rows_by_link_ids(
     pool: &Pool<Sqlite>,
     link_ids: &[String],
@@ -764,6 +886,7 @@ pub async fn load_rows_by_link_ids(
 
     let sql = format!(
         "SELECT dl.id AS link_id, dl.stay_id, dl.stay_reason, dl.stay_reason_note,
+                dl.snapshot_room_no, dl.snapshot_check_in, dl.snapshot_expected_out,
                 di.id AS identity_id, di.full_name, di.dob, di.gender, di.nationality_iso3,
                 di.doc_type_code, di.doc_type_source, di.doc_type_name, di.doc_no, di.phone,
                 di.residence_status, di.address_detail, di.passport_no, di.passport_expiry,
@@ -795,10 +918,30 @@ pub async fn load_rows_by_link_ids(
         // NULL = khai báo chưa gắn phòng (v21). Cũng rơi vào đây khi booking đã
         // bị PMS xóa — link cố ý không có FK cứng.
         let stay = match r.get::<Option<String>, _>("stay_id") {
-            Some(stay_id) => stays.get(&stay_id).cloned().unwrap_or(StayInfo {
-                stay_id,
-                ..Default::default()
-            }),
+            Some(stay_id) => match stays.get(&stay_id) {
+                // Booking vẫn active — giá trị sống luôn thắng, kể cả khi
+                // snapshot đang có (đổi phòng thì snapshot mới ghi đè ở
+                // update_link/insert_link, nhưng không có gì đảm bảo nó chạy
+                // TRƯỚC lần đọc này nếu có sửa PMS trực tiếp).
+                Some(live) => live.clone(),
+                // Booking không active nữa (trả phòng/hủy) — dùng lại đúng
+                // phòng + ngày đã chụp lúc gán (FINDING C2). Vẫn có thể rỗng
+                // nếu link được tạo trước khi tính năng snapshot tồn tại và
+                // chưa được backfill (booking đã đóng từ trước v23).
+                None => StayInfo {
+                    stay_id,
+                    room_no: r
+                        .get::<Option<String>, _>("snapshot_room_no")
+                        .unwrap_or_default(),
+                    check_in: r
+                        .get::<Option<String>, _>("snapshot_check_in")
+                        .unwrap_or_default(),
+                    expected_out: r
+                        .get::<Option<String>, _>("snapshot_expected_out")
+                        .unwrap_or_default(),
+                    ..Default::default()
+                },
+            },
             None => StayInfo::default(),
         };
 

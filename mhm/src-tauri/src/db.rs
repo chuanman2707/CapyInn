@@ -205,7 +205,7 @@ fn is_duplicate_column_error(error: &sqlx::Error) -> bool {
 /// Version schema hiện hành. Mọi assert trong test đọc hằng này —
 /// thêm migration mới thì chỉ bump ở đây.
 #[cfg(test)]
-pub(crate) const SCHEMA_VERSION: i32 = 22;
+pub(crate) const SCHEMA_VERSION: i32 = 23;
 
 pub(crate) async fn run_migrations(pool: &Pool<Sqlite>) -> Result<(), sqlx::Error> {
     let current = get_schema_version(pool).await?;
@@ -318,6 +318,11 @@ pub(crate) async fn run_migrations(pool: &Pool<Sqlite>) -> Result<(), sqlx::Erro
     // -- V22: băng chuyền một chiều — held_at + backfill danh tính mồ côi --
     if current < 22 {
         declaration::migrate_v22_conveyor(pool).await?;
+    }
+
+    // -- V23: snapshot phòng + ngày lên declaration_link lúc gán phòng --
+    if current < 23 {
+        declaration::migrate_v23_stay_snapshot(pool).await?;
     }
     Ok(())
 }
