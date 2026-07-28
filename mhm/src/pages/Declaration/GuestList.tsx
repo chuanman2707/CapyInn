@@ -24,12 +24,28 @@ export default function GuestList({ reloadKey, onStateChange }: GuestListProps) 
   const reload = useCallback(() => setLocalReload((k) => k + 1), []);
 
   useEffect(() => {
+    // Ngăn ngừa stale response bằng cách check cancelled trước mỗi setState
+    let cancelled = false;
+
     invokeCommand<DeclarationRow[]>("kbtt_pending_rows")
-      .then((data) => setRows(data ?? []))
-      .catch(() => setRows([]));
+      .then((data) => {
+        if (!cancelled) setRows(data ?? []);
+      })
+      .catch(() => {
+        if (!cancelled) setRows([]);
+      });
+
     invokeCommand<StayInfo[]>("kbtt_list_stays")
-      .then((data) => setStays(data ?? []))
-      .catch(() => setStays([]));
+      .then((data) => {
+        if (!cancelled) setStays(data ?? []);
+      })
+      .catch(() => {
+        if (!cancelled) setStays([]);
+      });
+
+    return () => {
+      cancelled = true;
+    };
   }, [reloadKey, localReload]);
 
   useEffect(() => {
