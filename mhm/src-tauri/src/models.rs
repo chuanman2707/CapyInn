@@ -509,6 +509,9 @@ pub struct ModifyReservationRequest {
     pub new_check_in_date: String,
     pub new_check_out_date: String,
     pub new_nights: i32,
+    /// `None` ⇒ giữ nguyên số khách đang lưu. Đây **không** phải lệnh xoá:
+    /// muốn bỏ phụ thu thì gửi số khách mới nhỏ hơn hoặc bằng `max_guests`.
+    pub new_guests: Option<i32>,
 }
 
 #[derive(Debug, Serialize)]

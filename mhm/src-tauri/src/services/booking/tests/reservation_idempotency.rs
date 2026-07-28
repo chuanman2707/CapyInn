@@ -474,6 +474,7 @@ async fn reservation_command_idempotency_modify_cancel_confirm_same_key_differen
             new_check_in_date: "2026-04-23".to_string(),
             new_check_out_date: "2026-04-25".to_string(),
             new_nights: 2,
+            new_guests: None,
         },
     )
     .await
@@ -486,6 +487,7 @@ async fn reservation_command_idempotency_modify_cancel_confirm_same_key_differen
             new_check_in_date: "2026-04-23".to_string(),
             new_check_out_date: "2026-04-25".to_string(),
             new_nights: 2,
+            new_guests: None,
         },
     )
     .await

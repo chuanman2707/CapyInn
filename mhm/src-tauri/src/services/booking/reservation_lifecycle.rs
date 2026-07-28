@@ -614,7 +614,7 @@ pub async fn confirm_reservation_tx(
         &today.format("%Y-%m-%d").to_string(),
         &effective_checkout,
         &reservation.pricing_type,
-        None,
+        reservation.guests,
     )
     .await?;
     let total_price = pricing.total;
@@ -758,20 +758,21 @@ pub async fn modify_reservation_tx(
         )));
     }
 
+    let effective_guests = req.new_guests.or(reservation.guests);
     let pricing = calculate_stay_price_tx(
         tx,
         &reservation.room_id,
         &req.new_check_in_date,
         &req.new_check_out_date,
         &reservation.pricing_type,
-        None,
+        effective_guests,
     )
     .await?;
     let total_price = pricing.total;
 
     let result = sqlx::query(
         "UPDATE bookings
-         SET check_in_at = ?, expected_checkout = ?, scheduled_checkin = ?, scheduled_checkout = ?, nights = ?, total_price = ?
+         SET check_in_at = ?, expected_checkout = ?, scheduled_checkin = ?, scheduled_checkout = ?, nights = ?, total_price = ?, guests = ?
          WHERE id = ? AND status = ? AND room_id = ?",
     )
     .bind(&req.new_check_in_date)
@@ -780,6 +781,7 @@ pub async fn modify_reservation_tx(
     .bind(&req.new_check_out_date)
     .bind(derived_nights)
     .bind(total_price)
+    .bind(effective_guests)
     .bind(&req.booking_id)
     .bind(status::booking::BOOKED)
     .bind(locked_room_id)
@@ -1049,7 +1051,7 @@ async fn load_booked_reservation(
     booking_id: &str,
 ) -> BookingResult<BookedReservation> {
     let row = sqlx::query(
-        "SELECT room_id, status, paid_amount, scheduled_checkout, pricing_type
+        "SELECT room_id, status, paid_amount, scheduled_checkout, pricing_type, guests
          FROM bookings
          WHERE id = ?",
     )
@@ -1079,6 +1081,7 @@ async fn load_booked_reservation(
         pricing_type: row
             .get::<Option<String>, _>("pricing_type")
             .unwrap_or_else(|| "nightly".to_string()),
+        guests: row.get("guests"),
     })
 }
 
@@ -1109,6 +1112,7 @@ struct BookedReservation {
     paid_amount: MoneyVnd,
     scheduled_checkout: String,
     pricing_type: String,
+    guests: Option<i32>,
 }
 
 fn parse_date(value: &str) -> BookingResult<NaiveDate> {

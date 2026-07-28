@@ -634,6 +634,7 @@ async fn modify_reservation_rejects_inconsistent_nights_input() {
             new_check_in_date: "2026-04-23".to_string(),
             new_check_out_date: "2026-04-26".to_string(),
             new_nights: 2,
+            new_guests: None,
         },
     )
     .await
@@ -772,6 +773,96 @@ async fn create_reservation_without_guests_prices_like_before() {
         .unwrap();
 
     assert_eq!(total, 1_000_000);
+
+    tx.rollback().await.unwrap();
+}
+
+#[tokio::test]
+async fn modify_reservation_keeps_the_extra_guest_charge() {
+    let pool = test_pool().await;
+    seed_room_with_guest_pricing(&pool, "R310", 500_000, 2, 50_000)
+        .await
+        .unwrap();
+
+    let mut tx = pool.begin().await.unwrap();
+    let booking_id = reservation_lifecycle::create_reservation_tx(
+        &mut tx,
+        CreateReservationRequest {
+            room_id: "R310".to_string(),
+            guest_name: "Nguyễn Nhật Huy".to_string(),
+            guest_phone: None,
+            guest_doc_number: None,
+            check_in_date: "2026-08-06".to_string(),
+            check_out_date: "2026-08-08".to_string(),
+            nights: 2,
+            deposit_amount: None,
+            source: None,
+            notes: None,
+            guests: Some(4),
+        },
+        None,
+    )
+    .await
+    .unwrap();
+
+    // Dời sang 3 đêm, không nói gì về số khách.
+    let booking = reservation_lifecycle::modify_reservation_tx(
+        &mut tx,
+        ModifyReservationRequest {
+            booking_id: booking_id.clone(),
+            new_check_in_date: "2026-08-10".to_string(),
+            new_check_out_date: "2026-08-13".to_string(),
+            new_nights: 3,
+            new_guests: None,
+        },
+        "R310",
+    )
+    .await
+    .unwrap();
+
+    // 600.000₫/đêm × 3 đêm — không tụt về 500.000₫.
+    assert_eq!(booking.total_price, 1_800_000);
+
+    tx.rollback().await.unwrap();
+}
+
+#[tokio::test]
+async fn confirm_reservation_keeps_the_extra_guest_charge() {
+    let pool = test_pool().await;
+    seed_room_with_guest_pricing(&pool, "R311", 500_000, 2, 50_000)
+        .await
+        .unwrap();
+
+    let today = Local::now().date_naive();
+    let check_in = today.format("%Y-%m-%d").to_string();
+    let check_out = (today + Duration::days(2)).format("%Y-%m-%d").to_string();
+
+    let mut tx = pool.begin().await.unwrap();
+    let booking_id = reservation_lifecycle::create_reservation_tx(
+        &mut tx,
+        CreateReservationRequest {
+            room_id: "R311".to_string(),
+            guest_name: "Nguyễn Nhật Huy".to_string(),
+            guest_phone: None,
+            guest_doc_number: None,
+            check_in_date: check_in,
+            check_out_date: check_out,
+            nights: 2,
+            deposit_amount: None,
+            source: None,
+            notes: None,
+            guests: Some(4),
+        },
+        None,
+    )
+    .await
+    .unwrap();
+
+    let booking = reservation_lifecycle::confirm_reservation_tx(&mut tx, &booking_id, "R311", None)
+        .await
+        .unwrap();
+
+    assert_eq!(booking.total_price, 1_200_000);
 
     tx.rollback().await.unwrap();
 }

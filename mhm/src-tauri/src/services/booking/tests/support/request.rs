@@ -56,6 +56,7 @@ pub fn reservation_modify_request(
         new_check_in_date: check_in.to_string(),
         new_check_out_date: check_out.to_string(),
         new_nights: nights,
+        new_guests: None,
     }
 }
 
