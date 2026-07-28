@@ -35,6 +35,18 @@ describe("ReconcilePanel", () => {
     expect(screen.getByText(/vì sao phải đếm tay/i)).toBeTruthy();
   });
 
+  // FINDING D: cảnh báo "đừng mở bằng Excel" từng chỉ sống trong thẻ kết quả
+  // tạm thời của ExportPanel — mất sạch khi chuyển tab rồi quay lại (thẻ đó
+  // không dựng lại từ đâu cả). Thẻ đối chiếu ở đây dựng từ `kbtt_list_batches`
+  // mỗi lần vào trang nên cảnh báo đặt ở đây sống được qua cả tắt/mở app,
+  // không chỉ qua một lần chuyển tab.
+  it("thẻ đối chiếu nhắc lại cảnh báo đừng mở bằng Excel — sống qua tắt/mở app vì dựng từ DB", async () => {
+    mockBatches([batch({})]);
+    render(<ReconcilePanel reloadKey={0} onSettled={() => {}} />);
+    await waitFor(() => expect(screen.getByText(/đối chiếu/i)).toBeTruthy());
+    expect(screen.getByText(/không mở\/sửa file này bằng excel/i)).toBeTruthy();
+  });
+
   it("gõ đúng số → kbtt_reconcile, báo xanh, gọi onSettled", async () => {
     mockBatches([batch({})]);
     invokeCommand.mockImplementation((cmd: string) => {

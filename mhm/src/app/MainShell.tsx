@@ -16,6 +16,7 @@ import {
 } from "lucide-react";
 
 import { AppToaster } from "@/app/AppToaster";
+import KeepMounted from "@/app/KeepMounted";
 import { useRuntimeState } from "@/app/RuntimeStateProvider";
 import { useSidebarCollapse } from "@/app/useSidebarCollapse";
 import AppUpdateBadge from "@/components/AppUpdateBadge";
@@ -346,7 +347,17 @@ export function MainShell() {
             {activeTab === "housekeeping" && <Housekeeping />}
             {activeTab === "analytics" && <Analytics />}
             {activeTab === "audit" && <NightAudit />}
-            {activeTab === "declaration" && <Declaration />}
+            {/*
+             * FINDING D: chuyển tab đi rồi quay lại KHÔNG được xóa sạch thẻ
+             * vừa quét chưa lưu của DropZone hay form ManualForm đang mở dở
+             * — cả hai chỉ sống trong state React, không có gì phía sau lưu
+             * lại chúng (cố ý: dữ liệu CHƯA XÁC NHẬN). `KeepMounted` giữ cây
+             * Declaration sống qua mọi lần chuyển tab trong cùng phiên, chỉ
+             * ẩn bằng CSS thay vì unmount. Xem KeepMounted.tsx.
+             */}
+            <KeepMounted active={activeTab === "declaration"}>
+              <Declaration />
+            </KeepMounted>
             {activeTab === "settings" && <Settings />}
           </div>
         </div>

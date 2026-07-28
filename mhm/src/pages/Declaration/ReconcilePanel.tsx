@@ -5,6 +5,7 @@ import { Button } from "@/components/ui/button";
 import { invokeCommand } from "@/lib/invokeCommand";
 import type { DeclarationBatch } from "@/types";
 
+import { EXCEL_WARNING_BODY, EXCEL_WARNING_HEAD } from "./catalog";
 import { declarationErrorMessage } from "./declarationError";
 
 interface ReconcilePanelProps {
@@ -132,6 +133,16 @@ function ReconcileCard({ batch, onSettled }: { batch: DeclarationBatch; onSettle
         Đối chiếu file {kindLabel} ({batch.row_count} khách)
       </h3>
       <code className="text-xs text-brand-muted">{fileName}</code>
+
+      {/*
+       * FINDING D: đây là nguồn sống-qua-tắt/mở-app của cảnh báo Excel — thẻ
+       * này dựng lại từ `kbtt_list_batches` mỗi lần vào trang (xem doc-comment
+       * đầu file), không phụ thuộc state phiên như thẻ kết quả tạm thời của
+       * ExportPanel.
+       */}
+      <p className="mt-2 rounded-lg border border-amber-300 bg-amber-50 p-2 text-xs text-amber-900">
+        <strong>{EXCEL_WARNING_HEAD}</strong> {EXCEL_WARNING_BODY}
+      </p>
 
       {failed && (
         <p className="mt-2 text-sm text-red-900">
