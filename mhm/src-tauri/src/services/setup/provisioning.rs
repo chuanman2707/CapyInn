@@ -180,7 +180,7 @@ async fn insert_initial_admin(
     tx: &mut Transaction<'_, Sqlite>,
     app_lock: &OnboardingAppLockInput,
 ) -> Result<User, String> {
-    use sha2::{Digest, Sha256};
+    use crate::domain::auth::credentials::pin_hash;
 
     let id = uuid::Uuid::new_v4().to_string();
     let name = app_lock
@@ -194,9 +194,7 @@ async fn insert_initial_admin(
         .clone()
         .unwrap_or_else(|| uuid::Uuid::new_v4().simple().to_string()[..4].to_string());
 
-    let mut hasher = Sha256::new();
-    hasher.update(pin_source.as_bytes());
-    let pin_hash = format!("{:x}", hasher.finalize());
+    let pin_hash = pin_hash(&pin_source);
     let now = chrono::Local::now().to_rfc3339();
 
     sqlx::query(
