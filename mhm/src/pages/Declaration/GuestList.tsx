@@ -125,13 +125,23 @@ export default function GuestList({ reloadKey, onStateChange }: GuestListProps) 
   const active = rows.filter((r) => !r.held);
   const held = rows.filter((r) => r.held);
 
+  // FINDING B: câu rỗng cũ ("Không còn ai chờ khai") giả định held rỗng —
+  // sai ngay lần mở app đầu tiên sau khi nâng cấp lên v22, khi migration gán
+  // "gác lại" cho các danh tính cũ (những bản scan có thể đã bị bỏ dở, cố ý
+  // không tự đưa vào một lượt xuất). Cùng một câu đó cũng đúng khi CHÍNH
+  // người vận hành tự gác một khách — không phân biệt được hai trường hợp từ
+  // phía client nên câu phải đúng cho cả hai, không suy đoán vì sao khu gác
+  // lại không rỗng.
+  const emptyActiveText =
+    held.length > 0
+      ? "Không có khách nào đang chờ khai ngay bây giờ. Vẫn còn khách trong khu gác lại bên dưới — xem để quyết định đưa lại hay để đó."
+      : "Không còn ai chờ khai. Thả ảnh giấy tờ vào ô trên để thêm khách.";
+
   return (
     <section className="rounded-2xl bg-white p-6 shadow-soft">
       <h2 className="text-lg font-bold">Chưa khai báo ({active.length})</h2>
       {active.length === 0 ? (
-        <p className="mt-2 text-sm text-brand-muted">
-          Không còn ai chờ khai. Thả ảnh giấy tờ vào ô trên để thêm khách.
-        </p>
+        <p className="mt-2 text-sm text-brand-muted">{emptyActiveText}</p>
       ) : (
         <div className="mt-3 space-y-3">
           {active.map((r) => (
@@ -147,10 +157,18 @@ export default function GuestList({ reloadKey, onStateChange }: GuestListProps) 
       )}
 
       {held.length > 0 && (
-        <details className="mt-4">
+        // Mở sẵn khi đây là nội dung duy nhất trên trang (không có ai đang
+        // chờ) — người vận hành không phải bấm thêm một cú để thấy khách
+        // thật của họ đang ở đâu.
+        <details className="mt-4" open={active.length === 0}>
           <summary className="cursor-pointer text-sm font-semibold text-slate-500">
             Đã gác lại ({held.length})
           </summary>
+          <p className="mt-2 text-xs text-brand-muted">
+            Khách gác lại không tính vào danh sách cần khai và không được đưa
+            vào lượt xuất file. Bấm &quot;Đưa lại&quot; trên một khách để đưa
+            họ về danh sách chờ.
+          </p>
           <div className="mt-3 space-y-3 opacity-80">
             {held.map((r) => (
               <GuestCard

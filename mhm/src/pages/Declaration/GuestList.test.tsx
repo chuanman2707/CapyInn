@@ -144,6 +144,43 @@ describe("GuestList", () => {
     );
   });
 
+  // FINDING B: sau khi nâng cấp lên v22, migration gán "gác lại" cho các
+  // danh tính cũ — người vận hành mở app lần đầu thấy danh sách "Chưa khai
+  // báo" trống trong khi có khách thật đang nằm trong khu gác lại. Câu rỗng
+  // cũ ("Không còn ai chờ khai") nói dối trong tình huống này; khu gác lại
+  // phải tự giải thích nó là gì và cách đưa khách trở lại, đồng thời phải mở
+  // sẵn vì nó là nội dung duy nhất trên trang.
+  it("danh sách chính rỗng nhưng có khách gác lại: câu rỗng không nói 'không còn ai chờ', khu gác lại tự mở và tự giải thích", async () => {
+    mockBackend([row({ held: true })]);
+    render(<GuestList reloadKey={0} onStateChange={() => {}} />);
+
+    await waitFor(() => expect(screen.getByText("Nguyễn Văn A")).toBeTruthy());
+    expect(screen.getByText(/chưa khai báo \(0\)/i)).toBeTruthy();
+    expect(screen.queryByText(/không còn ai chờ khai/i)).toBeNull();
+
+    // Khu gác lại giải thích nó là gì và cách đưa khách trở lại.
+    expect(screen.getByText(/không tính vào danh sách cần khai/i)).toBeTruthy();
+    expect(screen.getByText(/"Đưa lại"/i)).toBeTruthy();
+
+    // Là nội dung duy nhất trên trang nên phải mở sẵn, không cần bấm.
+    const details = document.querySelector("details");
+    expect(details).not.toBeNull();
+    expect((details as HTMLDetailsElement).open).toBe(true);
+  });
+
+  it("có khách đang chờ và có khách gác lại: khu gác lại đóng mặc định", async () => {
+    mockBackend([
+      row({}),
+      row({ link_id: "l2", identity_id: "i2", full_name: "Trần Thị B", held: true }),
+    ]);
+    render(<GuestList reloadKey={0} onStateChange={() => {}} />);
+
+    await waitFor(() => expect(screen.getByText("Nguyễn Văn A")).toBeTruthy());
+    const details = document.querySelector("details");
+    expect(details).not.toBeNull();
+    expect((details as HTMLDetailsElement).open).toBe(false);
+  });
+
   it("khách vừa thả vào chưa có kết quả kiểm tra: không báo lên cha là đã kiểm xong", async () => {
     let resolveValidate: ((data: unknown[]) => void) | undefined;
     invokeCommand.mockImplementation((cmd: string) => {
