@@ -86,6 +86,39 @@ describe("ReconcilePanel", () => {
     );
   });
 
+  it("phản ứng không bị ảnh hưởng nếu phản hồi cũ đến sau phản hồi mới", async () => {
+    let resolveFirstRequest: ((data: DeclarationBatch[]) => void) = () => {};
+    let resolveSecondRequest: ((data: DeclarationBatch[]) => void) = () => {};
+
+    const firstRequestPromise = new Promise<DeclarationBatch[]>((resolve) => {
+      resolveFirstRequest = resolve;
+    });
+    const secondRequestPromise = new Promise<DeclarationBatch[]>((resolve) => {
+      resolveSecondRequest = resolve;
+    });
+
+    let requestCount = 0;
+    invokeCommand.mockImplementation((cmd: string) => {
+      if (cmd === "kbtt_list_batches") {
+        requestCount++;
+        if (requestCount === 1) return firstRequestPromise;
+        if (requestCount === 2) return secondRequestPromise;
+      }
+      return Promise.resolve(null);
+    });
+
+    const { rerender } = render(<ReconcilePanel reloadKey={0} onSettled={() => {}} />);
+    rerender(<ReconcilePanel reloadKey={1} onSettled={() => {}} />);
+
+    // Phản hồi MỚI về trước: lô "b-new" (khác lô cũ) vẫn còn dở.
+    resolveSecondRequest([batch({ id: "b-new", file_path: "/x/NEW.xlsx" })]);
+    // Phản hồi CŨ về sau: lô "b-old" — phải bị bỏ qua, không được đè lên state mới.
+    resolveFirstRequest([batch({ id: "b-old", file_path: "/x/OLD.xlsx" })]);
+
+    await waitFor(() => expect(screen.getByText("NEW.xlsx")).toBeTruthy());
+    expect(screen.queryByText("OLD.xlsx")).toBeFalsy();
+  });
+
   it("không còn lô dở thì panel biến mất", async () => {
     mockBatches([batch({ id: "b9", status: "verified" })]);
     const { container } = render(<ReconcilePanel reloadKey={0} onSettled={() => {}} />);

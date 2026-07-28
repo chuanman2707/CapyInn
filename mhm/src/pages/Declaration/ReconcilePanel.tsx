@@ -27,8 +27,14 @@ export default function ReconcilePanel({ reloadKey, onSettled }: ReconcilePanelP
   const [localReload, setLocalReload] = useState(0);
 
   useEffect(() => {
+    // Ngăn ngừa stale response: hai lượt gọi dồn dập (vd. reloadKey đổi ngay
+    // sau khi localReload vừa đổi) có thể để phản hồi CŨ về sau phản hồi MỚI,
+    // ghi đè mất thẻ người vận hành vừa chốt/mở lại.
+    let cancelled = false;
+
     invokeCommand<DeclarationBatch[]>("kbtt_list_batches")
-      .then((data) =>
+      .then((data) => {
+        if (cancelled) return;
         setBatches(
           // "verified" và "reopened" đã xong việc — không dựng thẻ cho chúng.
           // Một lô "failed" được mở lại chuyển hẳn sang "reopened" (không còn
@@ -37,9 +43,15 @@ export default function ReconcilePanel({ reloadKey, onSettled }: ReconcilePanelP
           (data ?? []).filter((b) =>
             ["exported", "uploaded", "failed"].includes(b.status),
           ),
-        ),
-      )
-      .catch(() => setBatches([]));
+        );
+      })
+      .catch(() => {
+        if (!cancelled) setBatches([]);
+      });
+
+    return () => {
+      cancelled = true;
+    };
   }, [reloadKey, localReload]);
 
   if (batches.length === 0) return null;
