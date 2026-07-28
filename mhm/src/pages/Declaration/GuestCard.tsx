@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { toast } from "sonner";
 
 import { formatAppError } from "@/lib/appError";
@@ -52,6 +52,14 @@ function findingLine(f: DeclarationFinding): string {
 export default function GuestCard({ row, stays, findings, onChanged }: GuestCardProps) {
   const [editing, setEditing] = useState(false);
   const [busy, setBusy] = useState(false);
+  const [noteDraft, setNoteDraft] = useState(row.stay_reason_note ?? "");
+
+  // Đồng bộ lại khi đổi khách (link khác) hoặc khi note được nạp lại từ
+  // server (ví dụ sau khi một thẻ khác kích hoạt reload) — KHÔNG chạy khi
+  // người dùng đang gõ dở, vì lúc đó `row.stay_reason_note` chưa đổi.
+  useEffect(() => {
+    setNoteDraft(row.stay_reason_note ?? "");
+  }, [row.link_id, row.stay_reason_note]);
 
   const blocking = findings.some((f) => f.severity === "blocking");
   const border = blocking
@@ -188,6 +196,29 @@ export default function GuestCard({ row, stays, findings, onChanged }: GuestCard
           </select>
         </div>
 
+        {row.stay_reason === STAY_REASON_OTHER && (
+          <div className="col-span-2">
+            <label
+              htmlFor={`reason-note-${row.link_id}`}
+              className="mb-1 block text-xs text-slate-600"
+            >
+              Lý do cụ thể
+            </label>
+            <input
+              id={`reason-note-${row.link_id}`}
+              className="w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm"
+              value={noteDraft}
+              disabled={busy}
+              onChange={(e) => setNoteDraft(e.target.value)}
+              onBlur={() => {
+                const trimmed = noteDraft.trim();
+                if (trimmed !== (row.stay_reason_note ?? "")) {
+                  void updateLink(currentStay, row.stay_reason, trimmed === "" ? null : trimmed);
+                }
+              }}
+            />
+          </div>
+        )}
       </div>
 
       {findings.length > 0 && (
@@ -227,6 +258,7 @@ export default function GuestCard({ row, stays, findings, onChanged }: GuestCard
           <button
             type="button"
             disabled={busy}
+            aria-label={`Đưa lại ${row.full_name}`}
             className="text-slate-500 underline hover:text-slate-800"
             onClick={() => void call(() => invokeCommand<void>("kbtt_release", { linkId: row.link_id }))}
           >
@@ -236,6 +268,7 @@ export default function GuestCard({ row, stays, findings, onChanged }: GuestCard
           <button
             type="button"
             disabled={busy}
+            aria-label={`Gác lại ${row.full_name}`}
             className="text-slate-500 underline hover:text-slate-800"
             onClick={() => void call(() => invokeCommand<void>("kbtt_hold", { linkId: row.link_id }))}
           >

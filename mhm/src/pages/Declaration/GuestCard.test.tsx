@@ -140,4 +140,43 @@ describe("GuestCard", () => {
     );
   });
 
+  // FINDING 2: "Mục đích khác" không có ô nhập lý do nào — E12 không thể
+  // được gỡ. Ô nhập chỉ hiện khi lý do là "20", và lưu qua kbtt_update_link.
+  it("chọn 'Mục đích khác' hiện ô nhập lý do, lưu khi rời ô", async () => {
+    invokeCommand.mockResolvedValue(undefined);
+    const { rerender } = render(
+      <GuestCard row={row()} stays={stays} findings={[]} onChanged={() => {}} />,
+    );
+
+    expect(screen.queryByLabelText(/lý do cụ thể/i)).toBeNull();
+
+    fireEvent.change(screen.getByLabelText(/lý do lưu trú/i), { target: { value: "20" } });
+    await waitFor(() =>
+      expect(invokeCommand).toHaveBeenCalledWith(
+        "kbtt_update_link",
+        expect.objectContaining({ linkId: "l1", stayReason: "20", note: null }),
+      ),
+    );
+    invokeCommand.mockClear();
+
+    // Server nạp lại dòng với lý do mới — ô nhập lý do cụ thể xuất hiện.
+    rerender(
+      <GuestCard row={row({ stay_reason: "20" })} stays={stays} findings={[]} onChanged={() => {}} />,
+    );
+
+    const noteInput = screen.getByLabelText(/lý do cụ thể/i);
+    fireEvent.change(noteInput, { target: { value: "Thăm người thân ốm" } });
+    fireEvent.blur(noteInput);
+
+    await waitFor(() =>
+      expect(invokeCommand).toHaveBeenCalledWith(
+        "kbtt_update_link",
+        expect.objectContaining({
+          linkId: "l1",
+          stayReason: "20",
+          note: "Thăm người thân ốm",
+        }),
+      ),
+    );
+  });
 });
