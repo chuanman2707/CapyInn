@@ -103,14 +103,34 @@ export default function GuestCard({ row, stays, findings, onChanged }: GuestCard
       nameScore(row.full_name, a.guest_name ?? ""),
   );
 
+  // FINDING 1: một số lỗi từ `kbtt_update_link` (VD: "lượt lưu trú vừa chọn
+  // đã kết thúc") chỉ đúng vì danh sách phòng phía client đang cũ — cách
+  // duy nhất để người vận hành thật sự sửa được là danh sách đó được tải
+  // lại. Trước đây `onChanged()` chỉ chạy khi `fn()` thành công, nên gặp
+  // đúng lỗi này thẻ vẫn hiện y nguyên danh sách phòng cũ, người vận hành
+  // chọn lại đúng cái phòng vẫn đang hiện trong danh sách đó và nhận lại
+  // đúng lỗi — màn hình không có nút "tải lại" nào khác để bấm.
+  //
+  // Chọn tải lại vô điều kiện ở MỌI lỗi của `call()` (đưa `onChanged()` vào
+  // `finally`), không chỉ khớp riêng câu lỗi này bằng string-match. Rust trả
+  // lỗi dạng chuỗi trần (không có mã lỗi), nên match theo nội dung câu sẽ vỡ
+  // âm thầm nếu câu đổi chữ sau này — không có gì báo cho biết nhánh "tải
+  // lại khi lỗi" đã ngừng khớp. Xét từng lệnh `call()` đang bọc (đổi
+  // phòng/lý do/ghi chú, Gác lại, Đưa lại, Xóa): tất cả các lỗi còn lại của
+  // chúng — "đã nằm trong lô đã đối soát", "không tìm thấy khai báo cần
+  // sửa", lỗi đọc DB — đều là những ca mà tải lại đưa màn hình về đúng
+  // trạng thái server (thẻ biến mất nếu link không còn, hoặc y nguyên nếu
+  // vẫn còn) chứ không có ca nào tải lại làm mất thêm gì. Cái giá là một
+  // lượt gọi `kbtt_pending_rows`/`kbtt_list_stays` thừa mỗi lần lỗi — rẻ hơn
+  // nhiều so với một thẻ kẹt cứng.
   const call = async (fn: () => Promise<unknown>) => {
     setBusy(true);
     try {
       await fn();
-      onChanged();
     } catch (e) {
       toast.error(declarationErrorMessage(e));
     } finally {
+      onChanged();
       setBusy(false);
     }
   };

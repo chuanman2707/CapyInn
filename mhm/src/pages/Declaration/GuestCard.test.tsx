@@ -1,5 +1,6 @@
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
+import { toast } from "sonner";
 
 import type { DeclarationFinding, DeclarationRow, StayInfo } from "@/types";
 
@@ -222,6 +223,23 @@ describe("GuestCard", () => {
         expect.objectContaining({ linkId: "l1", stayId: "gone-1", stayReason: "20" }),
       ),
     );
+  });
+
+  // FINDING 1: `kbtt_update_link` từ chối vì lượt lưu trú vừa chọn đã kết
+  // thúc (danh sách phòng phía client cũ) — trước fix, thẻ giữ nguyên danh
+  // sách phòng cũ đó và người vận hành không có cách nào tự sửa được từ màn
+  // hình. Giờ mọi lỗi của `call()` đều kéo `onChanged()` để cha tải lại
+  // danh sách khách + danh sách phòng, kể cả khi lệnh thất bại.
+  it("đổi phòng thất bại vẫn gọi onChanged để tải lại danh sách phòng đang cũ", async () => {
+    const err = "Lượt lưu trú vừa chọn đã kết thúc — danh sách phòng đã tự tải lại, chọn phòng khác cho khách này.";
+    invokeCommand.mockRejectedValue(err);
+    const onChanged = vi.fn();
+    render(<GuestCard row={row()} stays={stays} findings={[]} onChanged={onChanged} />);
+
+    fireEvent.change(screen.getByLabelText(/phòng/i), { target: { value: "b1" } });
+
+    await waitFor(() => expect(toast.error).toHaveBeenCalledWith(err));
+    expect(onChanged).toHaveBeenCalled();
   });
 
   // FINDING 2: "Mục đích khác" không có ô nhập lý do nào — E12 không thể

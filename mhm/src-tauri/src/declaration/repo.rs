@@ -634,8 +634,18 @@ pub async fn update_link(
     if let (Some(id), None) = (stay_id, &fresh_snapshot) {
         if let Some(current) = current_stay_id.as_deref() {
             if current != id {
+                // FINDING 1: câu cũ bảo "tải lại danh sách phòng và chọn
+                // lại" nhưng màn hình không có nút tải lại nào — người vận
+                // hành chỉ có đúng cái danh sách phòng cũ (chứa booking vừa
+                // đóng) để chọn lại, nên bấm lại đúng phòng cũ và nhận lại
+                // đúng lỗi này. `GuestCard.call()` (frontend) giờ tự gọi
+                // `onChanged()` (tải lại danh sách khách + danh sách phòng)
+                // ngay cả khi lệnh này lỗi, nên tới lúc người vận hành đọc
+                // được câu này thì danh sách phòng ĐÃ tải lại rồi — câu chỉ
+                // cần nói đúng việc còn lại: chọn phòng khác.
                 return Err(
-                    "Lượt lưu trú vừa chọn đã kết thúc — tải lại danh sách phòng và chọn lại."
+                    "Lượt lưu trú vừa chọn đã kết thúc — danh sách phòng đã tự tải lại, \
+                     chọn phòng khác cho khách này."
                         .into(),
                 );
             }
