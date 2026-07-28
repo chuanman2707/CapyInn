@@ -6,11 +6,12 @@ Thanks for contributing.
 
 - `mhm/` is the current implementation path for the CapyInn PMS application. It is rename debt, not the product name.
 - `docs/architecture/core-pms-boundaries.md` is the canonical guardrail for core PMS, experimental runtime, command safety, and the postponed `mhm/` rename.
-- `docs/plans/` contains public implementation plans and release prep notes when present.
+- `docs/superpowers/specs/` contains published design specs, and `docs/superpowers/plans/` contains the matching implementation plans, when present.
+- `docs/release-checklist.md` and `docs/release-signing.md` cover the release preflight, signing, and updater manifest details.
 
 ## Prerequisites
 
-- macOS 12 or newer
+- macOS 12 or newer for local development; Windows and Linux bundles are produced by the release workflow, not by the documented local setup
 - Node.js 20 or newer
 - Rust stable via `rustup`
 - Xcode Command Line Tools
@@ -47,6 +48,12 @@ If you changed Rust code, also run:
 
 ```bash
 cargo clippy --all-targets -- -D warnings
+```
+
+If you touched a core PMS lifecycle — reservations, stays, groups, or backup — run the smoke gate from `mhm/`:
+
+```bash
+npm run verify:full
 ```
 
 ## Coding Conventions

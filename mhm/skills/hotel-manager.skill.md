@@ -49,6 +49,11 @@ Retention: raw prompts, raw responses, raw tool outputs, and raw provider errors
 | `get_hotel_info` | Hotel settings by key | Guest asks hotel name/address/rules |
 | `calculate_price` | Price estimate | Guest asks "how much for X nights?" |
 | `get_invoice` | Latest issued invoice | Guest asks for an existing invoice summary |
+| `list_command_recovery_queue` | Command recovery rows needing operator attention | Operator asks what is stuck |
+| `inspect_command_recovery` | One recovery row and its safe recovery history | Operator drills into a single stuck command |
+
+The two command recovery tools are read-only. They do not retry, dismiss, or mark a
+row terminal; recovery actions stay with a human operator in the desktop app.
 
 ### Action Tools (Write)
 

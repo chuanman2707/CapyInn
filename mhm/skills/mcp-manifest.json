@@ -281,6 +281,30 @@
             }
         },
         {
+            "name": "list_command_recovery_queue",
+            "description": "List command recovery rows needing operator attention. Read-only: this does not retry, dismiss, or mark terminal.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {}
+            }
+        },
+        {
+            "name": "inspect_command_recovery",
+            "description": "Inspect one command recovery row and its safe recovery history. Read-only: this does not retry, dismiss, or mark terminal.",
+            "inputSchema": {
+                "type": "object",
+                "required": [
+                    "command_idempotency_id"
+                ],
+                "properties": {
+                    "command_idempotency_id": {
+                        "type": "integer",
+                        "description": "Command ledger row id to inspect."
+                    }
+                }
+            }
+        },
+        {
             "name": "create_reservation",
             "description": "Create a new reservation (booking with status 'booked'). The reservation must be confirmed by hotel staff before check-in.",
             "inputSchema": {
