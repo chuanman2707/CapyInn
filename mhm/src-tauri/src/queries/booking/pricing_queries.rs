@@ -24,6 +24,14 @@ const ROOM_TYPE_SQL: &str = "SELECT type FROM rooms WHERE id = ? LIMIT 1";
 
 const FALLBACK_BASE_PRICE_SQL: &str = "SELECT base_price FROM rooms WHERE LOWER(type) = ? LIMIT 1";
 
+const ROOM_GUEST_PRICING_SQL: &str = "SELECT COALESCE(max_guests, 2) AS max_guests,
+            COALESCE(extra_person_fee, 0) AS extra_person_fee
+     FROM rooms WHERE id = ?";
+
+const ROOM_GUEST_PRICING_BY_TYPE_SQL: &str = "SELECT COALESCE(max_guests, 2) AS max_guests,
+            COALESCE(extra_person_fee, 0) AS extra_person_fee
+     FROM rooms WHERE LOWER(type) = ? LIMIT 1";
+
 const SPECIAL_UPLIFT_SQL: &str =
     "SELECT CAST(uplift_pct AS REAL) FROM special_dates WHERE date = ?";
 
@@ -69,6 +77,61 @@ fn date_key(date_str: &str) -> &str {
     }
 }
 
+/// Mốc tính giá của một phòng. Phòng không tìm thấy thì dùng mặc định của schema
+/// (`max_guests` mặc định 2, `extra_person_fee` mặc định 0) — tức không phụ thu.
+struct RoomGuestPricing {
+    base_guests: i32,
+    extra_person_fee: MoneyVnd,
+}
+
+impl Default for RoomGuestPricing {
+    fn default() -> Self {
+        Self {
+            base_guests: 2,
+            extra_person_fee: 0,
+        }
+    }
+}
+
+fn room_guest_pricing_from_row(row: &sqlx::sqlite::SqliteRow) -> RoomGuestPricing {
+    RoomGuestPricing {
+        base_guests: row.get("max_guests"),
+        extra_person_fee: get_money_vnd(row, "extra_person_fee"),
+    }
+}
+
+async fn load_room_guest_pricing_tx(
+    tx: &mut Transaction<'_, Sqlite>,
+    room_id: &str,
+) -> BookingResult<RoomGuestPricing> {
+    let row = sqlx::query(ROOM_GUEST_PRICING_SQL)
+        .bind(room_id)
+        .fetch_optional(&mut **tx)
+        .await
+        .map_err(database_error)?;
+
+    Ok(row
+        .as_ref()
+        .map(room_guest_pricing_from_row)
+        .unwrap_or_default())
+}
+
+async fn load_room_guest_pricing_for_type(
+    pool: &Pool<Sqlite>,
+    room_type: &str,
+) -> BookingResult<RoomGuestPricing> {
+    let row = sqlx::query(ROOM_GUEST_PRICING_BY_TYPE_SQL)
+        .bind(room_type.to_lowercase())
+        .fetch_optional(pool)
+        .await
+        .map_err(database_error)?;
+
+    Ok(row
+        .as_ref()
+        .map(room_guest_pricing_from_row)
+        .unwrap_or_default())
+}
+
 pub(crate) fn stored_rule_from_row(row: &sqlx::sqlite::SqliteRow) -> StoredPricingRule {
     StoredPricingRule {
         room_type: row.get("room_type"),
@@ -91,6 +154,7 @@ pub(crate) async fn load_stay_pricing_inputs_tx(
     check_in: &str,
     check_out: &str,
     pricing_type: &str,
+    guests: Option<i32>,
 ) -> BookingResult<StayPricingInputs> {
     let room_type = load_room_type_tx(tx, room_id).await?;
     let stored_rule = load_stored_pricing_rule_tx(tx, &room_type).await?;
@@ -100,6 +164,7 @@ pub(crate) async fn load_stay_pricing_inputs_tx(
         None
     };
     let special_uplift_pct = load_special_uplift_tx(tx, check_in).await?;
+    let guest_pricing = load_room_guest_pricing_tx(tx, room_id).await?;
 
     Ok(StayPricingInputs {
         room_type,
@@ -109,6 +174,9 @@ pub(crate) async fn load_stay_pricing_inputs_tx(
         check_in: check_in.to_string(),
         check_out: check_out.to_string(),
         pricing_type: pricing_type.to_string(),
+        guests,
+        base_guests: guest_pricing.base_guests,
+        extra_person_fee: guest_pricing.extra_person_fee,
     })
 }
 
@@ -126,6 +194,7 @@ pub(crate) async fn load_stay_pricing_inputs_for_room_type(
     check_in: &str,
     check_out: &str,
     pricing_type: &str,
+    guests: Option<i32>,
 ) -> BookingResult<StayPricingInputs> {
     let stored_rule = load_stored_pricing_rule(pool, room_type).await?;
     let fallback_base_price = if stored_rule.is_none() {
@@ -134,6 +203,7 @@ pub(crate) async fn load_stay_pricing_inputs_for_room_type(
         None
     };
     let special_uplift_pct = load_special_uplift(pool, check_in).await.unwrap_or(0.0);
+    let guest_pricing = load_room_guest_pricing_for_type(pool, room_type).await?;
 
     Ok(StayPricingInputs {
         room_type: room_type.to_string(),
@@ -143,6 +213,9 @@ pub(crate) async fn load_stay_pricing_inputs_for_room_type(
         check_in: check_in.to_string(),
         check_out: check_out.to_string(),
         pricing_type: pricing_type.to_string(),
+        guests,
+        base_guests: guest_pricing.base_guests,
+        extra_person_fee: guest_pricing.extra_person_fee,
     })
 }
 
@@ -314,7 +387,13 @@ mod tests {
             .unwrap();
 
         pool.execute(
-            "CREATE TABLE rooms (id TEXT PRIMARY KEY, type TEXT NOT NULL, base_price INTEGER)",
+            "CREATE TABLE rooms (
+                id TEXT PRIMARY KEY,
+                type TEXT NOT NULL,
+                base_price INTEGER,
+                max_guests INTEGER NOT NULL DEFAULT 2,
+                extra_person_fee INTEGER NOT NULL DEFAULT 0
+            )",
         )
         .await
         .unwrap();
@@ -347,9 +426,16 @@ mod tests {
         let pool = setup_loader_pool().await;
 
         pool.execute("DROP TABLE rooms").await.unwrap();
-        pool.execute("CREATE TABLE rooms (id TEXT PRIMARY KEY, type TEXT NOT NULL)")
-            .await
-            .unwrap();
+        pool.execute(
+            "CREATE TABLE rooms (
+                id TEXT PRIMARY KEY,
+                type TEXT NOT NULL,
+                max_guests INTEGER NOT NULL DEFAULT 2,
+                extra_person_fee INTEGER NOT NULL DEFAULT 0
+            )",
+        )
+        .await
+        .unwrap();
         sqlx::query("INSERT INTO rooms (id, type) VALUES (?, ?)")
             .bind("room-1")
             .bind("deluxe")
@@ -391,6 +477,7 @@ mod tests {
             "2026-04-20T14:00:00+07:00",
             "2026-04-21T12:00:00+07:00",
             "nightly",
+            None,
         )
         .await
         .unwrap();
@@ -422,6 +509,7 @@ mod tests {
             "2026-04-21T14:00:00+07:00",
             "2026-04-22T12:00:00+07:00",
             "nightly",
+            None,
         )
         .await
         .unwrap();

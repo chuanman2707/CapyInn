@@ -100,9 +100,16 @@ pub async fn do_calculate_price_preview(
     check_out: &str,
     pricing_type: &str,
 ) -> Result<crate::pricing::PricingResult, String> {
-    pricing_service::calculate_price_preview(pool, room_type, check_in, check_out, pricing_type)
-        .await
-        .map_err(|error| error.to_string())
+    pricing_service::calculate_price_preview(
+        pool,
+        room_type,
+        check_in,
+        check_out,
+        pricing_type,
+        None,
+    )
+    .await
+    .map_err(|error| error.to_string())
 }
 
 #[tauri::command]

@@ -321,6 +321,7 @@ async fn check_in_tx(
         &check_in_at,
         &expected_checkout,
         &pricing_type,
+        None,
     )
     .await?;
     let total_price = pricing.total;
@@ -683,6 +684,7 @@ async fn preview_checkout_settlement_tx(
                 &check_in_at,
                 &settlement_boundary,
                 &pricing_type,
+                None,
             )
             .await?;
             (settled_nights, pricing.total)
@@ -1077,6 +1079,7 @@ async fn extend_stay_tx(
         &old_expected_checkout,
         &new_expected.to_rfc3339(),
         &pricing_type,
+        None,
     )
     .await?;
     let incremental_total = incremental_pricing.total;

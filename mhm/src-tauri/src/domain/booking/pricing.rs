@@ -8,6 +8,7 @@
 
 use super::{BookingError, BookingResult};
 use crate::money::MoneyVnd;
+use chrono::NaiveDate;
 
 /// Everything the pricing rules need, already read out of the database.
 #[derive(Debug, Clone)]
@@ -19,6 +20,13 @@ pub(crate) struct StayPricingInputs {
     pub(crate) check_in: String,
     pub(crate) check_out: String,
     pub(crate) pricing_type: String,
+    /// Số khách trên booking. `None` là booking chưa khai số khách — booking cũ,
+    /// hoặc một nơi gọi không quan tâm — và có nghĩa là không phụ thu.
+    pub(crate) guests: Option<i32>,
+    /// `rooms.max_guests`: số khách đã nằm trong giá base.
+    pub(crate) base_guests: i32,
+    /// `rooms.extra_person_fee`: phụ thu mỗi khách vượt mốc, mỗi đêm.
+    pub(crate) extra_person_fee: MoneyVnd,
 }
 
 /// A row of `pricing_rules`, decoded but not yet interpreted.
@@ -75,19 +83,69 @@ pub(crate) fn build_effective_pricing_rule(
     }
 }
 
+/// Số đêm giữa hai mốc, chấp nhận cả `YYYY-MM-DD` lẫn RFC3339 (cắt 10 ký tự đầu).
+/// Trả 0 khi ngày đi không sau ngày đến — đúng lúc `calculate_price` cũng trả 0.
+fn nights_between(check_in: &str, check_out: &str) -> BookingResult<i64> {
+    let parse = |value: &str| {
+        let head = &value[..value.len().min(10)];
+        NaiveDate::parse_from_str(head, "%Y-%m-%d")
+            .map_err(|error| BookingError::datetime_parse(error.to_string()))
+    };
+    Ok((parse(check_out)? - parse(check_in)?).num_days().max(0))
+}
+
+/// Phụ thu thêm người: khoản phẳng theo đêm.
+///
+/// Cố ý **không** đi qua `percentage_money_line` và cố ý nằm ngoài `base_amount`,
+/// nên uplift cuối tuần / ngày lễ không nhân lên nó. Thêm một người là thêm một
+/// khoản cố định, giải thích với khách được và dò ngược trên hoá đơn được.
+fn extra_guest_charge(inputs: &StayPricingInputs, nights: i64) -> BookingResult<(i64, MoneyVnd)> {
+    let Some(guests) = inputs.guests else {
+        return Ok((0, 0));
+    };
+    let extra_guests = i64::from(guests.saturating_sub(inputs.base_guests)).max(0);
+    if extra_guests == 0 || inputs.extra_person_fee <= 0 || nights <= 0 {
+        return Ok((0, 0));
+    }
+
+    let amount = inputs
+        .extra_person_fee
+        .checked_mul(extra_guests)
+        .and_then(|per_night| per_night.checked_mul(nights))
+        .ok_or_else(|| {
+            BookingError::validation("extra guest charge overflowed MoneyVnd".to_string())
+        })?;
+
+    Ok((extra_guests, amount))
+}
+
 pub(crate) fn calculate_from_loaded_inputs(
     inputs: &StayPricingInputs,
 ) -> BookingResult<crate::pricing::PricingResult> {
     let rule = build_effective_pricing_rule(inputs);
 
-    crate::pricing::calculate_price(
+    let mut result = crate::pricing::calculate_price(
         &rule,
         &inputs.check_in,
         &inputs.check_out,
         &inputs.pricing_type,
         inputs.special_uplift_pct,
     )
-    .map_err(BookingError::datetime_parse)
+    .map_err(BookingError::datetime_parse)?;
+
+    let nights = nights_between(&inputs.check_in, &inputs.check_out)?;
+    let (extra_guests, extra_amount) = extra_guest_charge(inputs, nights)?;
+    if extra_amount > 0 {
+        result.breakdown.push(crate::pricing::PricingLine {
+            label: format!("Phụ thu {} khách", extra_guests),
+            amount: extra_amount,
+        });
+        result.total = result.total.checked_add(extra_amount).ok_or_else(|| {
+            BookingError::validation("stay total overflowed MoneyVnd".to_string())
+        })?;
+    }
+
+    Ok(result)
 }
 
 #[cfg(test)]
@@ -107,6 +165,9 @@ mod tests {
             check_in: "2026-04-20".to_string(),
             check_out: "2026-04-22".to_string(),
             pricing_type: "nightly".to_string(),
+            guests: None,
+            base_guests: 2,
+            extra_person_fee: 0,
         }
     }
 
@@ -213,5 +274,86 @@ mod tests {
             error,
             BookingError::DateTimeParse(message) if message.contains("Invalid check-in datetime")
         ));
+    }
+
+    /// 500.000₫ × 2 đêm = 1.000.000₫, cộng 2 khách vượt mốc × 50.000₫ × 2 đêm.
+    /// Đây đúng con số người dùng mô tả: 600.000₫/đêm cho 4 khách.
+    #[test]
+    fn calculate_from_loaded_inputs_adds_flat_extra_guest_line() {
+        let mut inputs = sample_inputs();
+        inputs.fallback_base_price = Some(500_000);
+        inputs.guests = Some(4);
+        inputs.base_guests = 2;
+        inputs.extra_person_fee = 50_000;
+
+        let pricing = calculate_from_loaded_inputs(&inputs).unwrap();
+
+        assert_eq!(pricing.base_amount, 1_000_000);
+        assert_eq!(pricing.total, 1_200_000);
+        assert_eq!(pricing.breakdown.len(), 2);
+        assert_eq!(pricing.breakdown[1].label, "Phụ thu 2 khách");
+        assert_eq!(pricing.breakdown[1].amount, 200_000);
+    }
+
+    #[test]
+    fn calculate_from_loaded_inputs_charges_nothing_within_base_guests() {
+        let mut inputs = sample_inputs();
+        inputs.fallback_base_price = Some(500_000);
+        inputs.guests = Some(2);
+        inputs.base_guests = 2;
+        inputs.extra_person_fee = 50_000;
+
+        let pricing = calculate_from_loaded_inputs(&inputs).unwrap();
+
+        assert_eq!(pricing.total, 1_000_000);
+        assert_eq!(pricing.breakdown.len(), 1);
+    }
+
+    /// Booking cũ: cột `guests` rỗng ⇒ giá y hệt trước khi có tính năng này.
+    /// Phòng chưa khai phụ thu ⇒ số khách bao nhiêu cũng không đổi giá.
+    #[test]
+    fn calculate_from_loaded_inputs_charges_nothing_when_fee_is_zero() {
+        let mut inputs = sample_inputs();
+        inputs.fallback_base_price = Some(500_000);
+        inputs.guests = Some(6);
+        inputs.base_guests = 2;
+        inputs.extra_person_fee = 0;
+
+        let pricing = calculate_from_loaded_inputs(&inputs).unwrap();
+
+        assert_eq!(pricing.total, 1_000_000);
+        assert_eq!(pricing.breakdown.len(), 1);
+    }
+
+    #[test]
+    fn calculate_from_loaded_inputs_ignores_extra_fee_when_guests_unknown() {
+        let mut inputs = sample_inputs();
+        inputs.fallback_base_price = Some(500_000);
+        inputs.guests = None;
+        inputs.extra_person_fee = 50_000;
+
+        let pricing = calculate_from_loaded_inputs(&inputs).unwrap();
+
+        assert_eq!(pricing.total, 1_000_000);
+        assert_eq!(pricing.breakdown.len(), 1);
+    }
+
+    /// Phụ thu là khoản phẳng: uplift ngày lễ chỉ ăn vào `base_amount`,
+    /// không nhân lên phần thêm người.
+    #[test]
+    fn extra_guest_line_is_not_multiplied_by_uplift() {
+        let mut inputs = sample_inputs();
+        inputs.fallback_base_price = Some(500_000);
+        inputs.special_uplift_pct = 10.0;
+        inputs.guests = Some(3);
+        inputs.base_guests = 2;
+        inputs.extra_person_fee = 50_000;
+
+        let pricing = calculate_from_loaded_inputs(&inputs).unwrap();
+
+        assert_eq!(pricing.base_amount, 1_000_000);
+        assert_eq!(pricing.surcharge_amount, 100_000);
+        assert_eq!(pricing.total, 1_200_000);
+        assert_eq!(pricing.breakdown[2].amount, 100_000);
     }
 }
