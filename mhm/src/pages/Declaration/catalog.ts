@@ -11,6 +11,8 @@
  * hằng dưới đây bằng dữ liệu nạp từ đó.
  */
 
+import type { DeclarationFinding } from "@/types";
+
 export interface CatalogOption {
   code: string;
   label: string;
@@ -89,3 +91,36 @@ export const EXCEL_WARNING_HEAD =
   "Không mở/sửa file này bằng Excel trước khi upload.";
 export const EXCEL_WARNING_BODY =
   "Excel sẽ làm mất số 0 đầu của số giấy tờ và đổi định dạng ngày. Cần sửa thì sửa trong CapyInn rồi xuất lại.";
+
+/**
+ * Câu tiếng người cho từng mã của validator (spec UX §4.2). Validator giữ
+ * message kỹ thuật của nó; đây là lớp dịch cho người vận hành, kèm hướng sửa.
+ * Mã không có trong bảng thì dùng message gốc — không bao giờ hiện rỗng.
+ */
+const FINDING_TEXT: Record<string, string> = {
+  E01: "Thiếu thông tin bắt buộc — bấm để bổ sung.",
+  E02: "Tên chỉ có một chữ — nếu giấy tờ đúng như vậy, bấm để xác nhận.",
+  E03: "Tên khách nước ngoài phải viết HOA không dấu — bấm để sửa.",
+  E04: "Chưa ai xác nhận tên đọc từ hộ chiếu — bấm để xác nhận.",
+  E05: "Mã quốc tịch sai dạng (phải là 3 chữ HOA) — bấm để sửa.",
+  E06: "Mã danh mục không hợp lệ — bấm để chọn lại.",
+  E07: "Ngày đi dự kiến sớm hơn ngày đến — kiểm tra lại phòng đã ghép.",
+  E08: "Thiếu thời hạn tạm trú (visa) — bấm để nhập.",
+  E09: "Thời hạn tạm trú hết trước ngày đi dự kiến — khách sẽ quá hạn.",
+  E10: "Thời hạn tạm trú trùng ngày hết hạn hộ chiếu — nghi nhập nhầm, bấm để sửa.",
+  E11: "Chọn 'Giấy Tờ Khác' thì phải ghi tên giấy tờ — bấm để nhập.",
+  E12: "Chọn 'Mục đích khác' thì phải ghi lý do cụ thể — bấm để nhập.",
+  E13: "Số giấy tờ rỗng hoặc có ký tự lạ — bấm để sửa.",
+  E14: "Trùng hồ sơ: cùng số giấy tờ, cùng ngày đến — xóa bớt một thẻ.",
+  W01: "Chưa chọn phòng — vẫn xuất được, nhưng nên chọn.",
+  W02: "Thiếu số điện thoại — vẫn xuất được.",
+  W03: "Lý do vẫn là mặc định 'Du lịch' — đổi nếu không đúng.",
+  W04: "Khách đến đã quá 24h mà chưa khai xong.",
+  W05: "Thông tin trích từ ảnh cần người xem lại — bấm để kiểm.",
+  W06: "Loại giấy tờ do máy đoán — bấm để xác nhận.",
+  W07: "Quốc tịch này không có trong danh mục của cổng — kiểm tra lại sau khi nộp.",
+};
+
+export function findingText(f: DeclarationFinding): string {
+  return FINDING_TEXT[f.code] ?? f.message;
+}
