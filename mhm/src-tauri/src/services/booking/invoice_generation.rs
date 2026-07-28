@@ -50,37 +50,8 @@ pub async fn generate_invoice_tx(
             .fetch_optional(&mut **tx)
             .await
             .map_err(|e| e.to_string())?;
-    let (hotel_name, hotel_address, hotel_phone) = match hotel_info {
-        Some(json_str) => {
-            if let Ok(v) = serde_json::from_str::<serde_json::Value>(&json_str) {
-                (
-                    v.get("name")
-                        .and_then(|s| s.as_str())
-                        .unwrap_or(crate::app_identity::APP_NAME)
-                        .to_string(),
-                    v.get("address")
-                        .and_then(|s| s.as_str())
-                        .unwrap_or("")
-                        .to_string(),
-                    v.get("phone")
-                        .and_then(|s| s.as_str())
-                        .unwrap_or("")
-                        .to_string(),
-                )
-            } else {
-                (
-                    crate::app_identity::APP_NAME.to_string(),
-                    String::new(),
-                    String::new(),
-                )
-            }
-        }
-        None => (
-            crate::app_identity::APP_NAME.to_string(),
-            String::new(),
-            String::new(),
-        ),
-    };
+    let hotel = crate::domain::hotel_info::HotelInfo::from_settings_json(hotel_info.as_deref());
+    let (hotel_name, hotel_address, hotel_phone) = (hotel.name, hotel.address, hotel.phone);
 
     let room_name: String = b.get("room_name");
     let room_type: String = b.get("room_type");
