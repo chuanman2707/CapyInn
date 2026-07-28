@@ -225,17 +225,31 @@ fn dob_conflicts(existing_dob: &str, incoming_dob: &str) -> bool {
 /// cách vô hình với người vận hành).
 ///
 /// FINDING I1: dữ liệu mới chỉ được ghi đè khi danh tính CHƯA thuộc bất kỳ lô
-/// nào đang "mid-flight" hoặc đã xong việc — `exported` (đã ghi ra đĩa, đang
-/// hoặc sắp tải lên cổng), `uploaded` (đã trao tay cổng, chưa xác nhận),
-/// `verified` (cổng đã nhận đúng), và `failed` (đã tải lên, cổng báo lệch —
-/// người vận hành CHƯA bấm mở lại) đều tính. Bốn trạng thái này đều có một
-/// điểm chung: bản ghi hiện tại đã "rời khỏi máy" dưới hình hài đó — file
-/// XLSX/XML trên đĩa (hoặc trên cổng) đang mang đúng dữ liệu cũ, ghi đè ở đây
-/// sẽ làm DB và file lệch nhau mà không ai biết. Cố tình BỎ `reopened`:
-/// `reopen_failed_batch` đã XÓA entry của lô đó trước khi chuyển sang trạng
-/// thái này, nên không link nào của danh tính còn trỏ tới một lô `reopened`
-/// nữa — thêm nó vào danh sách này không đổi hành vi gì, chỉ gây hiểu lầm là
-/// "reopened vẫn khóa".
+/// nào đang THẬT SỰ mid-flight — `exported` (đã ghi ra đĩa, đang hoặc sắp tải
+/// lên cổng), `uploaded` (đã trao tay cổng, chưa xác nhận), và `failed` (đã
+/// tải lên, cổng báo lệch — người vận hành CHƯA bấm mở lại) đều tính. Ba
+/// trạng thái này có một điểm chung: bản ghi hiện tại đã "rời khỏi máy" dưới
+/// hình hài đó — file XLSX/XML trên đĩa (hoặc trên cổng) đang mang đúng dữ
+/// liệu cũ, ghi đè ở đây sẽ làm DB và file lệch nhau mà không ai biết. Cố
+/// tình BỎ `reopened`: `reopen_failed_batch` đã XÓA entry của lô đó trước khi
+/// chuyển sang trạng thái này, nên không link nào của danh tính còn trỏ tới
+/// một lô `reopened` nữa — thêm nó vào danh sách này không đổi hành vi gì,
+/// chỉ gây hiểu lầm là "reopened vẫn khóa".
+///
+/// **`verified` một mình KHÔNG chặn** — sửa từ luật cũ hơn (coi verified như
+/// mid-flight) sau khi finding I1 chỉ ra hậu quả: khách quay lại (đã khai
+/// tháng 3, verified, quay lại tháng 7 mang visa mới/địa chỉ mới) bị giữ
+/// nguyên dữ liệu THÁNG 3, và `save_identity_ensuring_link` (gọi ngay sau) vẫn
+/// tạo đúng link MỚI cho lượt tháng 7 — nhưng link đó lại mang dữ liệu cũ,
+/// trong khi UI báo "Đã lưu danh tính" như thể dữ liệu mới nhất đã được dùng.
+/// `verified` khác ba trạng thái trên ở đúng một điểm: cái đã nộp công an
+/// tháng 3 được giữ bằng chứng ở file xuất trên đĩa CỘNG dòng
+/// `declaration_batch`/`declaration_entry` — dòng `declaration_identity` có
+/// thể đổi thì KHÔNG phải bằng chứng đó (đúng luận điểm doc-comment của
+/// `update_identity` đã dùng cho đường sửa tay — hai đường merge-lại-lúc-quét
+/// và sửa-tay giờ nhất quán). Một identity có link A đã verified VÀ link B
+/// đang exported/uploaded/failed thì vẫn chặn — chỉ verified một mình
+/// (không kèm link nào khác thật sự mid-flight) mới được bỏ qua.
 ///
 /// KHÔNG có cột ảnh và KHÔNG có cột payload thô — xem §12.
 pub async fn insert_identity(
@@ -252,7 +266,7 @@ pub async fn insert_identity(
                               JOIN declaration_entry de  ON de.link_id = dl.id
                               JOIN declaration_batch dbt ON dbt.id     = de.batch_id
                              WHERE dl.identity_id = di.id
-                               AND dbt.status IN ('exported', 'uploaded', 'verified', 'failed')
+                               AND dbt.status IN ('exported', 'uploaded', 'failed')
                            ) AS in_flight
                FROM declaration_identity di
               WHERE redacted_at IS NULL
@@ -1607,6 +1621,120 @@ mod tests {
         assert_eq!(
             name, "Phan Thị Mỹ Hà",
             "lô failed vẫn là bằng chứng của lần xuất đó, không ghi đè"
+        );
+    }
+
+    /// FINDING I1: khách quay lại (VD: đã khai tháng 3, `verified`, quay lại
+    /// tháng 7) mang giấy tờ mới — visa gia hạn, địa chỉ mới, tên đọc đúng
+    /// hơn lần trước. Trước fix, `verified` nằm trong tập "in-flight" giống
+    /// hệt `exported`/`uploaded`/`failed`, nên `insert_identity` giữ nguyên dữ
+    /// liệu THÁNG 3 — `save_identity_ensuring_link` (gọi ngay sau) vẫn tạo
+    /// đúng một link MỚI (lượt trước đã verified), nhưng link mới đó lại mang
+    /// theo dữ liệu CŨ, và người vận hành thấy toast "Đã lưu danh tính" dù dữ
+    /// liệu mới nhất từ máy quét vừa bị bỏ đi.
+    ///
+    /// Đây KHÔNG phải một lô đang mid-flight: cái đã nộp công an tháng 3 được
+    /// giữ bằng chứng ở file xuất trên đĩa cộng dòng
+    /// `declaration_batch`/`declaration_entry` — dòng `declaration_identity`
+    /// có thể đổi thì KHÔNG phải bằng chứng đó (đúng luận điểm doc-comment
+    /// của `update_identity` đã dùng cho đường sửa tay). `verified` một mình
+    /// (không kèm link nào khác đang exported/uploaded/failed) không còn
+    /// chặn ghi đè — hai đường merge-lại-lúc-quét và sửa-tay giờ nhất quán.
+    #[tokio::test]
+    async fn a_returning_guests_fresh_scan_overwrites_a_fully_verified_identity() {
+        let pool = pool().await;
+        let id = insert_identity(&pool, &vn_identity(), "qr_cccd", "verified")
+            .await
+            .expect("lưu danh tính tháng 3");
+        let link = insert_link(&pool, &id, Some("booking-1"), "1", None)
+            .await
+            .expect("ghép");
+        let batch = insert_batch(&pool, "VN", "/tmp/thang3.xlsx", 1)
+            .await
+            .expect("lô");
+        insert_entries(&pool, &batch, std::slice::from_ref(&link))
+            .await
+            .expect("dòng");
+        set_batch_verified(&pool, &batch, 1).await.expect("verified");
+        // Danh tính giờ CHỈ có một link, và link đó đã verified — đúng ca
+        // "khách quay lại" trước khi save_identity_ensuring_link kịp tạo link
+        // mới cho lượt ở tháng 7.
+
+        let mut rescanned = vn_identity();
+        rescanned.full_name = "Phan Thị Mỹ Hà".into(); // tên vẫn đúng, đọc lại
+        rescanned.address_detail = Some("Địa chỉ mới, Quận 1, TP.HCM".into());
+        rescanned.visa_valid_until = Some("2028-01-01".into());
+        let again = insert_identity(&pool, &rescanned, "qr_cccd", "verified")
+            .await
+            .expect("quét lại tháng 7");
+
+        assert_eq!(again, id, "vẫn là cùng một người — tái dùng dòng danh tính");
+        let row = sqlx::query("SELECT address_detail, visa_valid_until FROM declaration_identity WHERE id = ?")
+            .bind(&id)
+            .fetch_one(&pool)
+            .await
+            .expect("đọc lại");
+        assert_eq!(
+            row.get::<Option<String>, _>("address_detail").as_deref(),
+            Some("Địa chỉ mới, Quận 1, TP.HCM"),
+            "dữ liệu quét tháng 7 phải ghi đè — tháng 3 đã có bằng chứng riêng ở file xuất"
+        );
+        assert_eq!(
+            row.get::<Option<String>, _>("visa_valid_until").as_deref(),
+            Some("2028-01-01"),
+            "hạn visa mới phải được dùng cho lượt khai tháng 7, không phải hạn cũ"
+        );
+    }
+
+    /// Đối chứng cho test trên: nếu identity có MỘT link khác đang thật sự
+    /// mid-flight (`exported`, chưa verified) bên cạnh link đã verified,
+    /// vẫn phải chặn — verified một mình mới được bỏ qua, không phải "có bất
+    /// kỳ link verified nào thì luôn cho ghi đè".
+    #[tokio::test]
+    async fn a_verified_link_does_not_excuse_a_second_link_still_mid_flight() {
+        let pool = pool().await;
+        let id = insert_identity(&pool, &vn_identity(), "qr_cccd", "verified")
+            .await
+            .expect("lưu danh tính lượt 1");
+        let link1 = insert_link(&pool, &id, Some("booking-1"), "1", None)
+            .await
+            .expect("ghép lượt 1");
+        let batch1 = insert_batch(&pool, "VN", "/tmp/lot1.xlsx", 1)
+            .await
+            .expect("lô 1");
+        insert_entries(&pool, &batch1, std::slice::from_ref(&link1))
+            .await
+            .expect("dòng lô 1");
+        set_batch_verified(&pool, &batch1, 1).await.expect("verified lô 1");
+
+        // Lượt 2 cùng identity, đã xuất file, CHƯA verified — mid-flight thật.
+        let link2 = insert_link(&pool, &id, Some("booking-2"), "1", None)
+            .await
+            .expect("ghép lượt 2");
+        let batch2 = insert_batch(&pool, "VN", "/tmp/lot2.xlsx", 1)
+            .await
+            .expect("lô 2");
+        insert_entries(&pool, &batch2, std::slice::from_ref(&link2))
+            .await
+            .expect("dòng lô 2");
+        // Cố tình KHÔNG verified/failed lô 2 — đang trên đường tới cổng.
+
+        let mut rescanned = vn_identity();
+        rescanned.full_name = "TEN BI GHI DE".into();
+        let again = insert_identity(&pool, &rescanned, "qr_cccd", "verified")
+            .await
+            .expect("quét lại");
+
+        assert_eq!(again, id);
+        let name: String =
+            sqlx::query_scalar("SELECT full_name FROM declaration_identity WHERE id = ?")
+                .bind(&id)
+                .fetch_one(&pool)
+                .await
+                .expect("đọc tên");
+        assert_eq!(
+            name, "Phan Thị Mỹ Hà",
+            "lô 2 vẫn mid-flight (exported, chưa verified) — không được ghi đè dù lô 1 đã verified"
         );
     }
 

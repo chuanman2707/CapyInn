@@ -452,10 +452,18 @@ mod tests {
         assert_ne!(a, b);
     }
 
-    /// Đã nộp cho công an rồi thì bản ghi là bằng chứng của cái đã nộp — lần
-    /// thả sau không được sửa nó sau lưng.
+    /// FINDING I1 (đã sửa lại kỳ vọng — xem `repo.rs`,
+    /// `a_returning_guests_fresh_scan_overwrites_a_fully_verified_identity`):
+    /// đã nộp cho công an rồi thì cái đã nộp có bằng chứng RIÊNG ở file xuất
+    /// trên đĩa cộng dòng `declaration_batch`/`declaration_entry` — dòng
+    /// `declaration_identity` không phải bằng chứng đó, đổi được. Test này
+    /// TỪNG khẳng định ngược lại (`verified` một mình chặn ghi đè); giữ
+    /// nguyên kịch bản (một link, đã verified) nhưng đổi kỳ vọng theo đúng
+    /// luật mới — dữ liệu lần thả sau (đúng hơn) phải được dùng, vì đây chính
+    /// là hình dạng của "khách quay lại mang giấy tờ mới" trước khi
+    /// `save_identity_ensuring_link` kịp tạo link mới cho lượt ở tiếp theo.
     #[tokio::test]
-    async fn a_declared_identity_is_not_rewritten_by_a_later_scan() {
+    async fn a_later_scan_overwrites_a_declared_identity_once_every_link_is_verified() {
         let pool = seeded_pool().await;
 
         let card = crate::declaration::model::Identity {
@@ -483,11 +491,12 @@ mod tests {
             .await
             .expect("đối soát xong");
 
-        let mut misread = card.clone();
-        misread.full_name = "TÊN ĐỌC SAI".into();
-        let again = crate::declaration::repo::insert_identity(&pool, &misread, "qr_cccd", "verified")
-            .await
-            .expect("thả lại");
+        let mut rescanned = card.clone();
+        rescanned.full_name = "Phạm Thị Minh Hiền (đọc lại)".into();
+        let again =
+            crate::declaration::repo::insert_identity(&pool, &rescanned, "qr_cccd", "verified")
+                .await
+                .expect("thả lại");
 
         assert_eq!(again, id, "vẫn là cùng một người");
         let name: String =
@@ -496,7 +505,10 @@ mod tests {
                 .fetch_one(&pool)
                 .await
                 .expect("đọc tên");
-        assert_eq!(name, "Phạm Thị Minh Hiền", "tên đã khai không được ghi đè");
+        assert_eq!(
+            name, "Phạm Thị Minh Hiền (đọc lại)",
+            "lô đã verified — cái đã nộp có bằng chứng riêng ở file xuất, dòng danh tính đổi được"
+        );
     }
 
     /// Ghép nhầm thì phải gỡ được — nếu không, một dòng thừa chặn cả lô.
