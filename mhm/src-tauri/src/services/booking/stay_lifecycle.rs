@@ -645,7 +645,7 @@ async fn preview_checkout_settlement_tx(
 ) -> BookingResult<CheckoutSettlementComputation> {
     let booking = sqlx::query(
         "SELECT room_id, check_in_at, nights, total_price, paid_amount,
-                COALESCE(pricing_type, 'nightly') AS pricing_type, status
+                COALESCE(pricing_type, 'nightly') AS pricing_type, guests, status
          FROM bookings WHERE id = ?",
     )
     .bind(&req.booking_id)
@@ -671,6 +671,7 @@ async fn preview_checkout_settlement_tx(
     let pricing_type: String = booking.get("pricing_type");
     let original_nights: i32 = booking.get("nights");
     let original_total = read_money_vnd_or_zero(&booking, "total_price");
+    let guests: Option<i32> = booking.get("guests");
     let already_paid = read_money_vnd_or_zero(&booking, "paid_amount");
     let actual_nights = actual_nights_for_checkout(&check_in_at, now)?;
 
@@ -684,7 +685,7 @@ async fn preview_checkout_settlement_tx(
                 &check_in_at,
                 &settlement_boundary,
                 &pricing_type,
-                None,
+                guests,
             )
             .await?;
             (settled_nights, pricing.total)
@@ -1010,7 +1011,7 @@ async fn extend_stay_tx(
     origin_key: Option<String>,
 ) -> BookingResult<Booking> {
     let booking = sqlx::query(
-        "SELECT room_id, nights, total_price, expected_checkout, pricing_type, status
+        "SELECT room_id, nights, total_price, expected_checkout, pricing_type, guests, status
          FROM bookings WHERE id = ?",
     )
     .bind(booking_id)
@@ -1040,6 +1041,7 @@ async fn extend_stay_tx(
     let pricing_type = booking
         .get::<Option<String>, _>("pricing_type")
         .unwrap_or_else(|| "nightly".to_string());
+    let guests: Option<i32> = booking.get("guests");
 
     let old_expected = parse_booking_datetime(&old_expected_checkout)?;
     let new_expected = old_expected + Duration::days(1);
@@ -1079,7 +1081,7 @@ async fn extend_stay_tx(
         &old_expected_checkout,
         &new_expected.to_rfc3339(),
         &pricing_type,
-        None,
+        guests,
     )
     .await?;
     let incremental_total = incremental_pricing.total;

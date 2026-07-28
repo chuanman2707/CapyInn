@@ -40,6 +40,43 @@ async fn check_out_booking_at(
 }
 
 #[tokio::test]
+async fn actual_nights_settlement_keeps_the_guest_charge() {
+    let pool = test_pool().await;
+    seed_room_with_guest_pricing(&pool, "R330", 500_000, 2, 50_000)
+        .await
+        .unwrap();
+    // Zero out the weekend uplift the fallback pricing rule would otherwise
+    // apply — without this, the assertion below is only correct on days whose
+    // check-in date (today minus 2) does not land on a Sat/Sun.
+    seed_pricing_rule(&pool, "standard", 500_000).await.unwrap();
+    let booking_id = uuid::Uuid::new_v4().to_string();
+    seed_active_booking(&pool, &booking_id, "R330").await.unwrap();
+
+    let check_in = Local::now() - Duration::days(2);
+    sqlx::query(
+        "UPDATE bookings SET guests = 4, nights = 3, total_price = 1800000, check_in_at = ? WHERE id = ?",
+    )
+    .bind(check_in.to_rfc3339())
+    .bind(&booking_id)
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    let settlement = stay_lifecycle::preview_checkout_settlement(
+        &pool,
+        CheckoutSettlementPreviewRequest {
+            booking_id: booking_id.clone(),
+            settlement_mode: CheckoutSettlementMode::ActualNights,
+        },
+    )
+    .await
+    .unwrap();
+
+    // Ở 2 đêm thật × 600.000₫, không phải × 500.000₫.
+    assert_eq!(settlement.recommended_total, 1_200_000);
+}
+
+#[tokio::test]
 async fn check_out_settles_same_day_actual_nights_to_minimum_one_night() {
     let pool = test_pool().await;
     seed_room(&pool, "R410").await.unwrap();
