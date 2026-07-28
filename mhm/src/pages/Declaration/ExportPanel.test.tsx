@@ -103,6 +103,39 @@ describe("ExportPanel", () => {
     expect(screen.getByText(/kiểm tra lỗi/i)).toBeTruthy();
   });
 
+  // FINDING 2: trang giờ sống qua tab switch và tải lại dữ liệu khi quay
+  // lại (Declaration/index.tsx) — banner "đã xuất N khách" mô tả đúng MỘT
+  // lần xuất cụ thể và phải biến mất khi trang tải lại vì lý do KHÁC lần
+  // xuất đó, nếu không "Mở thư mục" trỏ vào một lô không còn khớp màn hình.
+  it("banner xuất cũ biến mất khi trang tải lại vì lý do khác (không phải chính lần xuất này)", async () => {
+    invokeCommand.mockResolvedValue({
+      batch_id: "b-vn", file_path: "/x/TBLT.xlsx", row_count: 1, kind: "VN",
+    });
+    const onExported = vi.fn();
+    const { rerender } = render(
+      <ExportPanel eligible={[row({})]} blockedCount={0} onExported={onExported} reloadKey={0} />,
+    );
+    fireEvent.click(screen.getByRole("button", { name: /xuất file cho 1 khách/i }));
+    await waitFor(() => expect(screen.getByText(/TBLT\.xlsx/)).toBeTruthy());
+
+    // reloadKey đổi ngay sau xuất là hệ quả TRỰC TIẾP của chính lần xuất
+    // này (cha bump theo onExported) — banner phải còn nguyên.
+    rerender(
+      <ExportPanel eligible={[]} blockedCount={0} onExported={onExported} reloadKey={1} />,
+    );
+    expect(screen.getByText(/TBLT\.xlsx/)).toBeTruthy();
+
+    // reloadKey đổi TIẾP THEO không đi kèm một lần xuất mới nào (đổi tab
+    // quay lại, thả ảnh mới, đối soát xong ở ReconcilePanel...) — banner
+    // của lần xuất trước phải biến mất, không còn nút "Mở thư mục" nào cho
+    // một lô đã không còn khớp danh sách đang xem.
+    rerender(
+      <ExportPanel eligible={[]} blockedCount={0} onExported={onExported} reloadKey={2} />,
+    );
+    expect(screen.queryByText(/TBLT\.xlsx/)).toBeNull();
+    expect(screen.queryByRole("button", { name: /mở thư mục/i })).toBeNull();
+  });
+
   // FINDING A: kbtt_export trả Err(String) thẳng, không qua registry AppError
   // dùng chung. formatAppError() sẽ nuốt mất câu tiếng Việt thật và trả về
   // "Có lỗi hệ thống, vui lòng thử lại" — đúng lúc người vận hành cần đọc rõ

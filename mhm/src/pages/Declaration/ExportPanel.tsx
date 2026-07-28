@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
 
 import { Button } from "@/components/ui/button";
@@ -20,6 +20,15 @@ interface ExportPanelProps {
   checkFailed?: boolean;
   /** Số khách đang hoạt động mà lần kiểm tra chưa xong — không phải lỗi. */
   pendingCount?: number;
+  /**
+   * FINDING 2: trang không unmount khi đổi tab (`KeepMounted`) và tự tải
+   * lại dữ liệu khi quay lại — `reloadKey` đổi giá trị là tín hiệu DUY NHẤT
+   * báo điều đó (xem `Declaration/index.tsx`). Banner kết quả xuất bên dưới
+   * mô tả đúng MỘT lần xuất cụ thể; nếu không dọn theo, người vận hành rời
+   * tab, quay lại thấy danh sách khách đã tải lại nhưng banner cũ (kèm nút
+   * "Mở thư mục") vẫn còn, trỏ vào một lô không còn khớp màn hình.
+   */
+  reloadKey?: number;
 }
 
 /**
@@ -34,9 +43,28 @@ export default function ExportPanel({
   onExported,
   checkFailed = false,
   pendingCount = 0,
+  reloadKey = 0,
 }: ExportPanelProps) {
   const [exporting, setExporting] = useState(false);
   const [results, setResults] = useState<DeclarationExportResult[]>([]);
+
+  // FINDING 2: `onExported()` (gọi bên dưới, cả nhánh thành công lẫn nhánh
+  // lỗi-có-kết-quả-riêng) khiến CHA cũng bump `reloadKey` — lần đổi đó là hệ
+  // quả trực tiếp của chính lần xuất vừa xong nên KHÔNG được dọn banner của
+  // chính nó. `justExportedRef` đánh dấu đúng một lần đổi `reloadKey` sắp
+  // tới là do vậy, bỏ qua; mọi lần đổi `reloadKey` KHÁC (đổi tab quay lại,
+  // thả ảnh mới, đối soát xong ở ReconcilePanel...) đều dọn — không có lần
+  // xuất mới nào vừa xảy ra để banner còn mô tả đúng.
+  const justExportedRef = useRef(false);
+
+  useEffect(() => {
+    if (justExportedRef.current) {
+      justExportedRef.current = false;
+      return;
+    }
+    setResults([]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [reloadKey]);
 
   const vn = eligible.filter((r) => !isForeign(r.nationality_iso3));
   const foreign = eligible.filter((r) => isForeign(r.nationality_iso3));
@@ -62,12 +90,16 @@ export default function ExportPanel({
         );
       }
       setResults(done);
+      justExportedRef.current = true;
       onExported();
     } catch (e) {
       toast.error(declarationErrorMessage(e));
       // File đã xuất xong trước lỗi vẫn hiện — người dùng cần biết cái gì đã ra.
       setResults(done);
-      if (done.length > 0) onExported();
+      if (done.length > 0) {
+        justExportedRef.current = true;
+        onExported();
+      }
     } finally {
       setExporting(false);
     }

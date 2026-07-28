@@ -133,6 +133,7 @@ export default function Declaration({ reactivateSignal, visible = true }: Declar
         pendingCount={pending.length}
         checkFailed={checkFailed}
         onExported={bump}
+        reloadKey={reloadKey}
       />
 
       <ReconcilePanel reloadKey={reloadKey} onSettled={bump} />
