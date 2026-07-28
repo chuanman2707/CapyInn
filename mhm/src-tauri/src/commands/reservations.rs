@@ -706,6 +706,7 @@ mod tests {
             deposit_amount: Some(500_000),
             source: Some("zalo".to_string()),
             notes: Some("Khách thích tầng cao".to_string()),
+            guests: None,
         }
     }
 

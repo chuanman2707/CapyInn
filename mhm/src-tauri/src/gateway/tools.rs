@@ -1322,6 +1322,7 @@ impl HotelTools {
             deposit_amount,
             source: input.source.or(Some("ai-agent".to_string())),
             notes: input.notes,
+            guests: None,
         };
 
         match commands::do_create_reservation(&self.pool, self.app_handle.as_ref(), &ctx, req).await

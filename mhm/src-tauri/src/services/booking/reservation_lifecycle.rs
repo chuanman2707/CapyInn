@@ -243,7 +243,7 @@ pub async fn create_reservation_tx(
         &req.check_in_date,
         &req.check_out_date,
         "nightly",
-        None,
+        req.guests,
     )
     .await?;
     let total_price = pricing.total;
@@ -264,8 +264,8 @@ pub async fn create_reservation_tx(
             id, room_id, primary_guest_id, check_in_at, expected_checkout, actual_checkout,
             nights, total_price, paid_amount, status, source, notes, created_by,
             booking_type, pricing_type, deposit_amount, guest_phone, scheduled_checkin,
-            scheduled_checkout, pricing_snapshot, created_at
-         ) VALUES (?, ?, ?, ?, ?, NULL, ?, ?, 0, ?, ?, ?, NULL, 'reservation', 'nightly', ?, ?, ?, ?, NULL, ?)",
+            scheduled_checkout, pricing_snapshot, guests, created_at
+         ) VALUES (?, ?, ?, ?, ?, NULL, ?, ?, 0, ?, ?, ?, NULL, 'reservation', 'nightly', ?, ?, ?, ?, NULL, ?, ?)",
     )
     .bind(&booking_id)
     .bind(&req.room_id)
@@ -281,6 +281,7 @@ pub async fn create_reservation_tx(
     .bind(req.guest_phone.as_deref())
     .bind(&req.check_in_date)
     .bind(&req.check_out_date)
+    .bind(req.guests)
     .bind(&now)
     .execute(&mut **tx)
     .await

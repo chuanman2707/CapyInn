@@ -310,6 +310,11 @@ pub(crate) async fn run_migrations(pool: &Pool<Sqlite>) -> Result<(), sqlx::Erro
     if current < 21 {
         declaration::migrate_v21_optional_stay(pool).await?;
     }
+
+    // -- V22: số khách trên booking, để tính phụ thu thêm người --
+    if current < 22 {
+        core_extensions::migrate_v22_booking_guest_count(pool).await?;
+    }
     Ok(())
 }
 
@@ -793,6 +798,16 @@ mod tests {
     }
 
     async fn create_legacy_billing_tables_for_partial_upgrade(pool: &SqlitePool) {
+        // Minimal shape: v22 ALTERs `bookings` directly (like v9's group columns
+        // before it), so a partial-upgrade fixture starting past v9 needs the
+        // table to exist even though this fixture never runs the real v1 schema.
+        // No money columns here on purpose — money_migration's table/column
+        // guards already skip tables that don't carry the columns it converts.
+        sqlx::query("CREATE TABLE bookings (id TEXT PRIMARY KEY)")
+            .execute(pool)
+            .await
+            .expect("creates legacy bookings table");
+
         sqlx::query(
             "CREATE TABLE transactions (
                 id          TEXT PRIMARY KEY,
@@ -837,7 +852,7 @@ mod tests {
             .expect("reads final schema version")
             .get("version");
 
-        assert_eq!(version, 21);
+        assert_eq!(version, 22);
     }
 
     #[tokio::test]
@@ -851,7 +866,7 @@ mod tests {
             .await
             .expect("reads final schema version");
 
-        assert_eq!(version, 21);
+        assert_eq!(version, 22);
 
         assert_table_group_exists(&pool, "PMS core", PMS_CORE_TABLES).await;
         assert_table_group_exists(&pool, "command safety", COMMAND_SAFETY_TABLES).await;
@@ -872,7 +887,7 @@ mod tests {
             .expect("reads version")
             .get("version");
 
-        assert_eq!(version, 21);
+        assert_eq!(version, 22);
         assert_money_columns_are_integer(&pool).await;
     }
 
@@ -1160,7 +1175,7 @@ mod tests {
             .expect("reads final schema version")
             .get("version");
 
-        assert_eq!(version, 21);
+        assert_eq!(version, 22);
     }
 
     #[tokio::test]
@@ -1227,7 +1242,7 @@ mod tests {
             .expect("reads final schema version")
             .get("version");
 
-        assert_eq!(version, 21);
+        assert_eq!(version, 22);
     }
 
     #[tokio::test]
@@ -1307,7 +1322,7 @@ mod tests {
         );
 
         let version = get_schema_version(&pool).await.expect("schema version");
-        assert_eq!(version, 21);
+        assert_eq!(version, 22);
     }
 
     #[tokio::test]
@@ -1347,7 +1362,7 @@ mod tests {
 
         assert_outbox_shape(&pool).await;
         let version = get_schema_version(&pool).await.expect("schema version");
-        assert_eq!(version, 21);
+        assert_eq!(version, 22);
     }
 
     #[tokio::test]
@@ -1365,7 +1380,7 @@ mod tests {
 
         assert_outbox_shape(&pool).await;
         let version = get_schema_version(&pool).await.expect("schema version");
-        assert_eq!(version, 21);
+        assert_eq!(version, 22);
     }
 
     #[tokio::test]
@@ -1395,7 +1410,7 @@ mod tests {
             1
         );
         let version = get_schema_version(&pool).await.expect("schema version");
-        assert_eq!(version, 21);
+        assert_eq!(version, 22);
     }
 
     #[tokio::test]
@@ -1408,7 +1423,7 @@ mod tests {
 
         assert_agent_safety_shape(&pool).await;
         let version = get_schema_version(&pool).await.expect("schema version");
-        assert_eq!(version, 21);
+        assert_eq!(version, 22);
     }
 
     #[tokio::test]
@@ -1441,7 +1456,7 @@ mod tests {
 
         assert_agent_digest_runs_shape(&pool).await;
         let version = get_schema_version(&pool).await.expect("schema version");
-        assert_eq!(version, 21);
+        assert_eq!(version, 22);
     }
 
     #[tokio::test]
@@ -1465,7 +1480,7 @@ mod tests {
 
         assert_agent_safety_shape(&pool).await;
         let version = get_schema_version(&pool).await.expect("schema version");
-        assert_eq!(version, 21);
+        assert_eq!(version, 22);
     }
 
     #[tokio::test]

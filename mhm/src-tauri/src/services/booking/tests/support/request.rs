@@ -41,6 +41,7 @@ pub fn minimal_reservation_request(room_id: &str) -> CreateReservationRequest {
         deposit_amount: Some(50_000),
         source: Some("phone".to_string()),
         notes: Some("test reservation".to_string()),
+        guests: None,
     }
 }
 

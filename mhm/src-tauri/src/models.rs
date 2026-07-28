@@ -498,6 +498,9 @@ pub struct CreateReservationRequest {
     pub deposit_amount: Option<MoneyVnd>,
     pub source: Option<String>,
     pub notes: Option<String>,
+    /// Số khách ở thực tế. `None` ⇒ không phụ thu, giá giữ nguyên như cũ.
+    /// Kiểu `Option` để gateway và agent không phải sửa theo.
+    pub guests: Option<i32>,
 }
 
 #[derive(Debug, Deserialize)]

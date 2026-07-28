@@ -79,6 +79,7 @@ pub async fn test_pool() -> Pool<Sqlite> {
             is_master_room INTEGER NOT NULL DEFAULT 0,
             is_audited INTEGER NOT NULL DEFAULT 0,
             pricing_snapshot TEXT,
+            guests INTEGER,
             created_at TEXT NOT NULL
         )",
     )

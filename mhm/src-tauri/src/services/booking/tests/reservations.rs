@@ -54,6 +54,7 @@ async fn create_reservation_rejects_inconsistent_nights_input() {
             deposit_amount: Some(50_000),
             source: Some("phone".to_string()),
             notes: Some("test reservation".to_string()),
+            guests: None,
         },
     )
     .await
@@ -87,6 +88,7 @@ async fn reservation_lifecycle_smoke_covers_confirm_and_cancel_paths() {
             deposit_amount: Some(50_000),
             source: Some("phone".to_string()),
             notes: Some("reservation smoke".to_string()),
+            guests: None,
         }
     };
 
@@ -693,4 +695,83 @@ async fn do_modify_reservation_returns_service_booking_without_app_handle() {
     assert_eq!(booking.total_price, 1_200_000);
 
     assert_calendar_rows(&pool, "B167", "booked", 2).await;
+}
+
+#[tokio::test]
+async fn create_reservation_charges_extra_guests() {
+    let pool = test_pool().await;
+    seed_room_with_guest_pricing(&pool, "R300", 500_000, 2, 50_000)
+        .await
+        .unwrap();
+
+    let mut tx = pool.begin().await.unwrap();
+    let booking_id = reservation_lifecycle::create_reservation_tx(
+        &mut tx,
+        CreateReservationRequest {
+            room_id: "R300".to_string(),
+            guest_name: "Nguyễn Nhật Huy".to_string(),
+            guest_phone: None,
+            guest_doc_number: None,
+            check_in_date: "2026-08-06".to_string(),
+            check_out_date: "2026-08-08".to_string(),
+            nights: 2,
+            deposit_amount: None,
+            source: Some("phone".to_string()),
+            notes: None,
+            guests: Some(4),
+        },
+        None,
+    )
+    .await
+    .unwrap();
+
+    let row = sqlx::query("SELECT total_price, guests FROM bookings WHERE id = ?")
+        .bind(&booking_id)
+        .fetch_one(&mut *tx)
+        .await
+        .unwrap();
+
+    assert_eq!(row.get::<i64, _>("total_price"), 1_200_000);
+    assert_eq!(row.get::<Option<i32>, _>("guests"), Some(4));
+
+    tx.rollback().await.unwrap();
+}
+
+#[tokio::test]
+async fn create_reservation_without_guests_prices_like_before() {
+    let pool = test_pool().await;
+    seed_room_with_guest_pricing(&pool, "R301", 500_000, 2, 50_000)
+        .await
+        .unwrap();
+
+    let mut tx = pool.begin().await.unwrap();
+    let booking_id = reservation_lifecycle::create_reservation_tx(
+        &mut tx,
+        CreateReservationRequest {
+            room_id: "R301".to_string(),
+            guest_name: "Khách cũ".to_string(),
+            guest_phone: None,
+            guest_doc_number: None,
+            check_in_date: "2026-08-06".to_string(),
+            check_out_date: "2026-08-08".to_string(),
+            nights: 2,
+            deposit_amount: None,
+            source: None,
+            notes: None,
+            guests: None,
+        },
+        None,
+    )
+    .await
+    .unwrap();
+
+    let total: i64 = sqlx::query_scalar("SELECT total_price FROM bookings WHERE id = ?")
+        .bind(&booking_id)
+        .fetch_one(&mut *tx)
+        .await
+        .unwrap();
+
+    assert_eq!(total, 1_000_000);
+
+    tx.rollback().await.unwrap();
 }
