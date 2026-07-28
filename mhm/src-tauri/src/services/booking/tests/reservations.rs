@@ -866,3 +866,126 @@ async fn confirm_reservation_keeps_the_extra_guest_charge() {
 
     tx.rollback().await.unwrap();
 }
+
+#[tokio::test]
+async fn modify_reservation_prefers_explicit_new_guests_over_stored_count() {
+    let pool = test_pool().await;
+    seed_room_with_guest_pricing(&pool, "R320", 500_000, 2, 50_000)
+        .await
+        .unwrap();
+
+    let mut tx = pool.begin().await.unwrap();
+    let booking_id = reservation_lifecycle::create_reservation_tx(
+        &mut tx,
+        CreateReservationRequest {
+            room_id: "R320".to_string(),
+            guest_name: "Trần Thị Mai".to_string(),
+            guest_phone: None,
+            guest_doc_number: None,
+            check_in_date: "2026-08-06".to_string(),
+            check_out_date: "2026-08-08".to_string(),
+            nights: 2,
+            deposit_amount: None,
+            source: None,
+            notes: None,
+            // Stored count starts within max_guests (2), so no extra-person fee applies yet.
+            guests: Some(2),
+        },
+        None,
+    )
+    .await
+    .unwrap();
+
+    // Explicit new_guests (4) differs from the stored count (2). If `.or()` were
+    // reversed to `reservation.guests.or(req.new_guests)`, the stored 2 would win
+    // and the total would stay at 1_000_000 instead of reflecting the caller's 4.
+    let booking = reservation_lifecycle::modify_reservation_tx(
+        &mut tx,
+        ModifyReservationRequest {
+            booking_id: booking_id.clone(),
+            new_check_in_date: "2026-08-10".to_string(),
+            new_check_out_date: "2026-08-12".to_string(),
+            new_nights: 2,
+            new_guests: Some(4),
+        },
+        "R320",
+    )
+    .await
+    .unwrap();
+
+    // (500.000₫ base + 2 khách vượt mốc × 50.000₫)/đêm × 2 đêm = 1.200.000₫.
+    assert_eq!(booking.total_price, 1_200_000);
+
+    let row = sqlx::query("SELECT total_price, guests FROM bookings WHERE id = ?")
+        .bind(&booking_id)
+        .fetch_one(&mut *tx)
+        .await
+        .unwrap();
+    assert_eq!(row.get::<i64, _>("total_price"), 1_200_000);
+    assert_eq!(row.get::<Option<i32>, _>("guests"), Some(4));
+
+    tx.rollback().await.unwrap();
+}
+
+#[tokio::test]
+async fn modify_reservation_keeps_null_guests_null() {
+    let pool = test_pool().await;
+    seed_room_with_guest_pricing(&pool, "R321", 500_000, 2, 50_000)
+        .await
+        .unwrap();
+
+    let mut tx = pool.begin().await.unwrap();
+    let booking_id = reservation_lifecycle::create_reservation_tx(
+        &mut tx,
+        CreateReservationRequest {
+            room_id: "R321".to_string(),
+            guest_name: "Lê Văn Nam".to_string(),
+            guest_phone: None,
+            guest_doc_number: None,
+            check_in_date: "2026-08-06".to_string(),
+            check_out_date: "2026-08-08".to_string(),
+            nights: 2,
+            deposit_amount: None,
+            source: None,
+            notes: None,
+            guests: None,
+        },
+        None,
+    )
+    .await
+    .unwrap();
+
+    let created_row = sqlx::query("SELECT total_price, guests FROM bookings WHERE id = ?")
+        .bind(&booking_id)
+        .fetch_one(&mut *tx)
+        .await
+        .unwrap();
+    assert_eq!(created_row.get::<i64, _>("total_price"), 1_000_000);
+    assert_eq!(created_row.get::<Option<i32>, _>("guests"), None);
+
+    let booking = reservation_lifecycle::modify_reservation_tx(
+        &mut tx,
+        ModifyReservationRequest {
+            booking_id: booking_id.clone(),
+            new_check_in_date: "2026-08-10".to_string(),
+            new_check_out_date: "2026-08-12".to_string(),
+            new_nights: 2,
+            new_guests: None,
+        },
+        "R321",
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(booking.total_price, 1_000_000);
+
+    let row = sqlx::query("SELECT total_price, guests FROM bookings WHERE id = ?")
+        .bind(&booking_id)
+        .fetch_one(&mut *tx)
+        .await
+        .unwrap();
+    assert_eq!(row.get::<i64, _>("total_price"), 1_000_000);
+    assert_eq!(row.get::<Option<i32>, _>("guests"), None);
+
+    tx.rollback().await.unwrap();
+}
