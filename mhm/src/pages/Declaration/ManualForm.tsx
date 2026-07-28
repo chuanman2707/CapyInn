@@ -95,9 +95,13 @@ function isSingleToken(fullName: string): boolean {
  * Form nhập tay (spec §6.4). Dùng khi ảnh không có QR/MRZ (CMND cũ, giấy khai
  * sinh, GPLX), khi decode fail, hoặc khi người vận hành chủ động chọn.
  *
- * Luôn lưu với `source = "manual"` / `confidence = "needs_review"` để `W05` nổ
- * và có người soi lại, và `doc_type_source = "human"` để `W06` KHÔNG nổ — người
- * tự chọn loại giấy tờ thì đó không còn là heuristic ngày cấp.
+ * Luôn lưu với `source = "manual"` và `doc_type_source = "human"` (để `W06`
+ * KHÔNG nổ — người tự chọn loại giấy tờ thì đó không còn là heuristic ngày
+ * cấp). `confidence` thì KHÁC nhau theo chế độ (FINDING I4): tạo mới gửi
+ * "needs_review" vì chưa ai soi cả — `W05` phải nổ. Sửa thì gửi "verified":
+ * bản thân việc mở form này ra và bấm lưu ĐÃ LÀ một người vừa xem lại, nên
+ * giữ "needs_review" ở đây sẽ khiến `W05` nổ lại ngay trên một hồ sơ vừa
+ * được xác nhận — viền vàng không bao giờ tắt được.
  */
 export default function ManualForm({ initial, onSaved, onCancel }: ManualFormProps) {
   const [form, setForm] = useState<FormState>(
@@ -152,7 +156,11 @@ export default function ManualForm({ initial, onSaved, onCancel }: ManualFormPro
           identityId: initial.id,
           identity: { ...identity, id: initial.id },
           source: "manual",
-          confidence: "needs_review",
+          // FINDING I4: sửa = định nghĩa của "đã có người xem lại". Gửi
+          // "needs_review" ở đây từng khiến kbtt_validate stamp lại W05 ngay
+          // sau khi người vận hành vừa tự tay kiểm xong, kể cả trên một hồ
+          // sơ quét sạch từ QR/MRZ — viền vàng không bao giờ tắt được.
+          confidence: "verified",
         });
         toast.success("Đã sửa thông tin khách");
         onSaved?.(initial.id, { ...identity, id: initial.id });

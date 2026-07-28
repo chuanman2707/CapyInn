@@ -41,6 +41,44 @@ describe("ManualForm", () => {
     });
   });
 
+  // FINDING I4 — sửa xong một khách quét sạch từ QR/MRZ luôn stamp lại
+  // confidence: "needs_review", nên W05 nổ lên NGAY trên một hồ sơ vừa được
+  // người xem lại. Edit mode = định nghĩa của "đã có người xem lại", nên nó
+  // phải gửi "verified" để W05 tắt. Create mode (nhập tay từ đầu, chưa ai
+  // soi) vẫn phải là "needs_review" — xem test "saves manual entries as
+  // needs_review" ở trên.
+  it("sửa xong một khách gửi confidence đã xem lại (verified), không phải needs_review", async () => {
+    invokeCommand.mockResolvedValue(undefined);
+    render(
+      <ManualForm
+        initial={{
+          id: "i20",
+          full_name: "Nguyễn Văn A",
+          dob: "1980-05-02",
+          gender: "M",
+          nationality_iso3: "VNM",
+          doc_type_code: "1",
+          doc_no: "058195006173",
+          phone: null,
+          name_confirmed_by_human: true,
+        }}
+        onSaved={vi.fn()}
+      />,
+    );
+
+    fireEvent.change(screen.getByLabelText(/Điện thoại/i), {
+      target: { value: "0901234567" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: /^Lưu/i }));
+
+    await waitFor(() =>
+      expect(invokeCommand).toHaveBeenCalledWith(
+        "kbtt_update_identity",
+        expect.objectContaining({ confidence: "verified" }),
+      ),
+    );
+  });
+
   it("marks the document type as chosen by a human, not a heuristic", async () => {
     render(<ManualForm onSaved={vi.fn()} />);
 
