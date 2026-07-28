@@ -219,6 +219,69 @@ pub(crate) async fn load_stay_pricing_inputs_for_room_type(
     })
 }
 
+/// Bản xem trước theo **mã phòng**. Khác `..._for_room_type` ở chỗ phụ thu thêm
+/// người là thuộc tính của từng phòng, nên phòng đã chọn rồi thì phải đọc đúng
+/// phòng đó — hai phòng cùng loại có thể đặt phụ thu khác nhau.
+///
+/// Đọc lệnh với ngày đặc biệt giống bản theo loại phòng: lỗi thì coi như 0%,
+/// vì đây là xem trước chứ chưa thu tiền.
+pub(crate) async fn load_stay_pricing_inputs_for_room(
+    pool: &Pool<Sqlite>,
+    room_id: &str,
+    check_in: &str,
+    check_out: &str,
+    pricing_type: &str,
+    guests: Option<i32>,
+) -> BookingResult<StayPricingInputs> {
+    let room_type = load_room_type(pool, room_id).await?;
+    let stored_rule = load_stored_pricing_rule(pool, &room_type).await?;
+    let fallback_base_price = if stored_rule.is_none() {
+        load_fallback_base_price(pool, &room_type).await?
+    } else {
+        None
+    };
+    let special_uplift_pct = load_special_uplift(pool, check_in).await.unwrap_or(0.0);
+    let guest_pricing = load_room_guest_pricing(pool, room_id).await?;
+
+    Ok(StayPricingInputs {
+        room_type,
+        stored_rule,
+        fallback_base_price,
+        special_uplift_pct,
+        check_in: check_in.to_string(),
+        check_out: check_out.to_string(),
+        pricing_type: pricing_type.to_string(),
+        guests,
+        base_guests: guest_pricing.base_guests,
+        extra_person_fee: guest_pricing.extra_person_fee,
+    })
+}
+
+async fn load_room_type(pool: &Pool<Sqlite>, room_id: &str) -> BookingResult<String> {
+    sqlx::query_scalar::<_, String>(ROOM_TYPE_SQL)
+        .bind(room_id)
+        .fetch_optional(pool)
+        .await
+        .map_err(database_error)?
+        .ok_or_else(|| room_not_found(room_id))
+}
+
+async fn load_room_guest_pricing(
+    pool: &Pool<Sqlite>,
+    room_id: &str,
+) -> BookingResult<RoomGuestPricing> {
+    let row = sqlx::query(ROOM_GUEST_PRICING_SQL)
+        .bind(room_id)
+        .fetch_optional(pool)
+        .await
+        .map_err(database_error)?;
+
+    Ok(row
+        .as_ref()
+        .map(room_guest_pricing_from_row)
+        .unwrap_or_default())
+}
+
 async fn load_stored_pricing_rule(
     pool: &Pool<Sqlite>,
     room_type: &str,
