@@ -243,11 +243,18 @@ fn dob_conflicts(existing_dob: &str, incoming_dob: &str) -> bool {
 /// tạo đúng link MỚI cho lượt tháng 7 — nhưng link đó lại mang dữ liệu cũ,
 /// trong khi UI báo "Đã lưu danh tính" như thể dữ liệu mới nhất đã được dùng.
 /// `verified` khác ba trạng thái trên ở đúng một điểm: cái đã nộp công an
-/// tháng 3 được giữ bằng chứng ở file xuất trên đĩa CỘNG dòng
-/// `declaration_batch`/`declaration_entry` — dòng `declaration_identity` có
-/// thể đổi thì KHÔNG phải bằng chứng đó. Một identity có link A đã verified
-/// VÀ link B đang exported/uploaded/failed thì vẫn chặn — chỉ verified một
-/// mình (không kèm link nào khác thật sự mid-flight) mới được bỏ qua.
+/// tháng 3 được giữ bằng chứng ở FILE XUẤT TRÊN ĐĨA — DUY NHẤT nó, không có
+/// gì khác. `declaration_batch`/`declaration_entry` không giữ giá trị của
+/// một trường dữ liệu nào cả: `declaration_batch` chỉ có loại/khoảng
+/// ngày/đường dẫn file/số dòng/trạng thái/mốc thời gian, còn
+/// `declaration_entry` chỉ là `(batch_id, link_id, row_index)` — cả hai nói
+/// "có một lô đã xuất, xuất khi nào, ở đâu, gồm những dòng nào", không nói
+/// "trường X của khách Y lúc đó là gì". Dòng `declaration_identity` có thể
+/// đổi thì KHÔNG phải bằng chứng đó — bằng chứng nằm trong nội dung file,
+/// nằm ở một thư mục người vận hành có thể đổi cấu hình bất cứ lúc nào. Một
+/// identity có link A đã verified VÀ link B đang exported/uploaded/failed
+/// thì vẫn chặn — chỉ verified một mình (không kèm link nào khác thật sự
+/// mid-flight) mới được bỏ qua.
 ///
 /// **Đường này và `update_identity` KHÔNG đối xứng ở đúng ranh giới đó — có
 /// chủ ý, không phải một bên đồng bộ chưa tới.** Một danh tính chỉ còn
@@ -497,9 +504,14 @@ async fn update_identity_fields(
 /// `insert_identity` sẽ đẻ dòng mới thay vì sửa dòng cũ.
 ///
 /// **Luật hẹp, không phải "có link verified nào thì chặn hết":** cái đã nộp
-/// công an được giữ bằng chứng ở file xuất trên đĩa cộng dòng
-/// `declaration_batch`/`declaration_entry` — dòng `declaration_identity` có
-/// thể đổi thì KHÔNG phải bằng chứng đó. Khách nước ngoài ở tháng 3 (đã khai,
+/// công an được giữ bằng chứng ở FILE XUẤT TRÊN ĐĨA — DUY NHẤT nó.
+/// `declaration_batch`/`declaration_entry` không giữ giá trị trường dữ liệu
+/// nào (`declaration_batch` chỉ có loại/khoảng ngày/đường dẫn/số dòng/trạng
+/// thái/mốc thời gian; `declaration_entry` chỉ là `(batch_id, link_id,
+/// row_index)`) — chúng nói CÓ một lô đã xuất và Ở ĐÂU, không nói trường nào
+/// của khách đó lúc ấy là gì. Dòng `declaration_identity` có thể đổi thì
+/// KHÔNG phải bằng chứng đó — bằng chứng nằm trong nội dung file, ở một thư
+/// mục người vận hành có thể đổi cấu hình. Khách nước ngoài ở tháng 3 (đã khai,
 /// đã verified) quay lại tháng 7 với visa mới thì tái sử dụng đúng dòng danh
 /// tính, còn hạn visa cũ vẫn nằm đó và validator chặn E09 — đường sửa duy nhất
 /// là "bấm lỗi → sửa form → lưu", tức gọi đúng hàm này. Vì vậy chỉ chặn khi
@@ -1660,11 +1672,14 @@ mod tests {
     /// liệu mới nhất từ máy quét vừa bị bỏ đi.
     ///
     /// Đây KHÔNG phải một lô đang mid-flight: cái đã nộp công an tháng 3 được
-    /// giữ bằng chứng ở file xuất trên đĩa cộng dòng
-    /// `declaration_batch`/`declaration_entry` — dòng `declaration_identity`
-    /// có thể đổi thì KHÔNG phải bằng chứng đó. `verified` một mình (không
-    /// kèm link nào khác đang exported/uploaded/failed) không còn chặn ghi
-    /// đè ở ĐÂY. `update_identity` (đường sửa tay) vẫn từ chối đúng ca "chỉ
+    /// giữ bằng chứng ở FILE XUẤT TRÊN ĐĨA — DUY NHẤT nó.
+    /// `declaration_batch`/`declaration_entry` không giữ giá trị trường dữ
+    /// liệu nào (chỉ path/số dòng/trạng thái ở bảng batch, chỉ
+    /// `(batch_id, link_id, row_index)` ở bảng entry) — dòng
+    /// `declaration_identity` có thể đổi thì KHÔNG phải bằng chứng đó.
+    /// `verified` một mình (không kèm link nào khác đang
+    /// exported/uploaded/failed) không còn chặn ghi đè ở ĐÂY.
+    /// `update_identity` (đường sửa tay) vẫn từ chối đúng ca "chỉ
     /// còn link verified" — có chủ ý, không phải hai đường chưa đồng bộ; xem
     /// doc-comment của `insert_identity` để biết vì sao hai đường không đối
     /// xứng ở đúng ranh giới này.
