@@ -22,6 +22,9 @@ export function usePricePreview({
 }: UsePricePreviewOptions) {
     const [preview, setPreview] = useState<PricingResult | null>(null);
     const [loading, setLoading] = useState(false);
+    // Simple boolean, no error taxonomy — the box only needs to know whether
+    // the last lookup failed so it can stop rendering an empty/misleading box.
+    const [error, setError] = useState(false);
     const requestIdRef = useRef(0);
 
     useEffect(() => {
@@ -29,6 +32,7 @@ export function usePricePreview({
             requestIdRef.current += 1;
             setPreview(null);
             setLoading(false);
+            setError(false);
             return;
         }
 
@@ -38,6 +42,7 @@ export function usePricePreview({
 
         const run = async () => {
             setLoading(true);
+            setError(false);
             try {
                 const result = await invoke<PricingResult>("calculate_room_price_preview", {
                     roomId,
@@ -52,6 +57,7 @@ export function usePricePreview({
             } catch {
                 if (active && requestIdRef.current === requestId) {
                     setPreview(null);
+                    setError(true);
                 }
             } finally {
                 if (active && requestIdRef.current === requestId) {
@@ -73,5 +79,5 @@ export function usePricePreview({
         };
     }, [checkIn, checkOut, debounceMs, guests, roomId]);
 
-    return { preview, loading };
+    return { preview, loading, error };
 }

@@ -478,6 +478,92 @@ describe("ReservationSheet", () => {
     });
   });
 
+  it("hiện đúng preview.total do engine trả về, không phải tổng cộng dồn breakdown khi bị cap", async () => {
+    // total (1.000.000) cố tình khác xa tổng breakdown (2.000.000 + 3.000.000
+    // = 5.000.000) — mô phỏng một trường hợp bị cap/rounding ở engine. Nếu
+    // component lỡ tự cộng dồn breakdown thay vì dùng preview.total, test này
+    // phải bắt được ngay vì hai con số cách nhau rất xa.
+    invoke.mockImplementation(async (command: string) => {
+      if (command === "calculate_room_price_preview") {
+        return {
+          pricing_type: "nightly",
+          base_amount: 2_000_000,
+          surcharge_amount: 3_000_000,
+          weekend_amount: 0,
+          total: 1_000_000,
+          capped: true,
+          breakdown: [
+            { label: "2 night(s) x 1.000.000", amount: 2_000_000 },
+            { label: "Phụ thu 3 khách", amount: 3_000_000 },
+          ],
+        };
+      }
+      return { available: true, conflicts: [], max_nights: null };
+    });
+
+    render(<ReservationSheet open onOpenChange={vi.fn()} />);
+    fireEvent.change(screen.getByLabelText(/^phòng$/i), { target: { value: "R101" } });
+    fireEvent.change(screen.getByLabelText(/ngày đến/i), {
+      target: { value: "2026-08-06" },
+    });
+    fireEvent.change(screen.getByLabelText(/ngày đi/i), {
+      target: { value: "2026-08-08" },
+    });
+
+    await waitFor(() => {
+      expect(screen.getByText("1.000.000₫")).toBeInTheDocument();
+    });
+    expect(screen.queryByText("5.000.000₫")).not.toBeInTheDocument();
+  });
+
+  it("báo lỗi rõ ràng khi tính giá thất bại, và không còn hiện giá cũ bên cạnh thông báo lỗi", async () => {
+    let calls = 0;
+    invoke.mockImplementation(async (command: string) => {
+      if (command === "calculate_room_price_preview") {
+        calls += 1;
+        if (calls === 1) {
+          return {
+            pricing_type: "nightly",
+            base_amount: 500_000,
+            surcharge_amount: 100_000,
+            weekend_amount: 0,
+            total: 600_000,
+            capped: false,
+            breakdown: [
+              { label: "1 night(s) x 500.000", amount: 500_000 },
+              { label: "Phụ thu 1 khách", amount: 100_000 },
+            ],
+          };
+        }
+        throw new Error("IPC lỗi giả lập");
+      }
+      return { available: true, conflicts: [], max_nights: null };
+    });
+
+    render(<ReservationSheet open onOpenChange={vi.fn()} />);
+    fireEvent.change(screen.getByLabelText(/^phòng$/i), { target: { value: "R101" } });
+    fireEvent.change(screen.getByLabelText(/ngày đến/i), {
+      target: { value: "2026-08-06" },
+    });
+    fireEvent.change(screen.getByLabelText(/ngày đi/i), {
+      target: { value: "2026-08-07" },
+    });
+
+    // Lượt gọi đầu tiên thành công — giá hiện lên bình thường.
+    await waitFor(() => {
+      expect(screen.getByText("600.000₫")).toBeInTheDocument();
+    });
+
+    // Đổi số khách để kích hoạt một lượt gọi mới, lượt này thất bại.
+    fireEvent.change(screen.getByLabelText(/số khách/i), { target: { value: "4" } });
+
+    await waitFor(() => {
+      expect(screen.getByText(/không tính được giá/i)).toBeInTheDocument();
+    });
+    expect(screen.queryByText("600.000₫")).not.toBeInTheDocument();
+    expect(screen.queryByText("Tổng")).not.toBeInTheDocument();
+  });
+
   it("một fetchRooms() không liên quan (mảng rooms mới, cùng dữ liệu) không được xoá số khách đã gõ tay", async () => {
     const { rerender } = render(<ReservationSheet open onOpenChange={vi.fn()} />);
 
