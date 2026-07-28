@@ -124,6 +124,28 @@ describe("ManualForm", () => {
     );
   });
 
+  // FINDING I2 — lệnh kbtt_save_identity trả Err(String) trần khi số giấy tờ
+  // đã thuộc về một khách khác. `formatAppError` (registry AppError dùng
+  // chung) sẽ nuốt mất chuỗi này thành "Có lỗi hệ thống..."; toast phải hiện
+  // đúng nguyên văn để người vận hành biết khách nào đang giữ số đó.
+  it("hiện nguyên văn lỗi 'số giấy tờ đã thuộc về khách khác' thay vì thông báo hệ thống chung chung", async () => {
+    const backendMessage =
+      "Số giấy tờ 058195006173 đang thuộc về một khách khác trong hệ thống: " +
+      "Phan Thị Mỹ Hà (sinh 1995-07-28). Kiểm tra lại số giấy tờ vừa nhập — có thể đã gõ nhầm.";
+    invokeCommand.mockRejectedValue(backendMessage);
+    render(<ManualForm onSaved={vi.fn()} />);
+
+    fireEvent.change(screen.getByLabelText(/Họ và tên/i), {
+      target: { value: "Nguyễn Văn B" },
+    });
+    fireEvent.change(screen.getByLabelText(/Ngày sinh/i), {
+      target: { value: "1970-01-01" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: /^Lưu/i }));
+
+    await waitFor(() => expect(toastError).toHaveBeenCalledWith(backendMessage));
+  });
+
   // FINDING I4 — sửa xong một khách quét sạch từ QR/MRZ luôn stamp lại
   // confidence: "needs_review", nên W05 nổ lên NGAY trên một hồ sơ vừa được
   // người xem lại. Edit mode = định nghĩa của "đã có người xem lại", nên nó

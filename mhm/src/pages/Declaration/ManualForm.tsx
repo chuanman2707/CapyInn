@@ -2,7 +2,6 @@ import { useId, useState } from "react";
 import { toast } from "sonner";
 
 import { Button } from "@/components/ui/button";
-import { formatAppError } from "@/lib/appError";
 import { invokeCommand } from "@/lib/invokeCommand";
 import type { DeclarationIdentity, DeclarationSaveOutcome } from "@/types";
 
@@ -15,6 +14,7 @@ import {
   VIETNAM_ISO3,
   isForeign,
 } from "./catalog";
+import { declarationErrorMessage } from "./declarationError";
 import { matchedExistingDeclarationMessage } from "./saveOutcome";
 
 interface ManualFormProps {
@@ -183,7 +183,7 @@ export default function ManualForm({ initial, onSaved, onCancel }: ManualFormPro
         onSaved?.(outcome.identity_id, { ...identity, id: outcome.identity_id });
       }
     } catch (e) {
-      toast.error(formatAppError(e));
+      toast.error(declarationErrorMessage(e));
     } finally {
       setSaving(false);
     }

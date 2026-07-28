@@ -182,6 +182,35 @@ fn document_key(identity: &Identity) -> Option<String> {
         .map(str::to_string)
 }
 
+/// FINDING I2: `doc_no`/`passport_no` trùng không đủ để kết luận cùng một
+/// người — gõ nhầm số của khách A khi nhập khách B là chuyện có thật, và nếu
+/// cứ merge theo số giấy tờ thì khách A biến mất khỏi mọi nơi (danh sách chờ,
+/// badge, thẻ) mà không một tiếng cảnh báo nào.
+///
+/// Chỉ dùng NGÀY SINH để chặn — dù họ tên cũng là một "candidate" hiển
+/// nhiên, `full_name` KHÔNG ổn định qua nguồn nên không dùng được:
+/// - MRZ trả tên KHÔNG DẤU, đảo "HỌ<<TÊN" (`Td3::full_name`,
+///   `extractor/mrz.rs`), còn QR/nhập tay giữ dấu và thứ tự tự nhiên
+///   (`extractor/qr_cccd.rs`, `ManualForm.tsx`) — cùng một người có thể ra
+///   hai chuỗi tên khác hẳn nhau tùy lần quét dùng nguồn nào.
+/// - Test `a_declared_identity_is_not_rewritten_by_a_later_scan`
+///   (`db/declaration.rs`) còn cố tình dựng một lần "quét lại" với tên ĐỌC
+///   SAI trên CÙNG một tấm giấy tờ (cùng doc_no, cùng dob) và vẫn phải merge
+///   — coi tên khác là "khác người" sẽ phá chính hành vi đã có test bảo vệ.
+///
+/// Ngày sinh thì ngược lại: BẮT BUỘC có ở cả ba nguồn nên luôn so sánh được —
+/// QR trả nguyên trường số từ payload, không qua OCR (`qr_cccd.rs`); MRZ nằm
+/// trong 5 check digit ở dòng 2, có checksum bảo vệ
+/// (`Td3::checksum_score`/`extractor/mrz.rs`); và form nhập tay chặn nút Lưu
+/// khi thiếu ngày sinh (`ManualForm.tsx` — `canSave`). Đây là tín hiệu chắc
+/// chắn nhất còn lại để phân biệt hai người khác nhau lỡ chung một số giấy
+/// tờ do gõ nhầm.
+fn dob_conflicts(existing_dob: &str, incoming_dob: &str) -> bool {
+    let a = existing_dob.trim();
+    let b = incoming_dob.trim();
+    !a.is_empty() && !b.is_empty() && a != b
+}
+
 /// Lưu một danh tính đã trích. Trả về id (uuid TEXT).
 ///
 /// **Thả trùng một tấm giấy tờ thì dùng lại dòng cũ, không đẻ dòng mới.** Mỗi
@@ -189,6 +218,11 @@ fn document_key(identity: &Identity) -> Option<String> {
 /// cùng ngày đến, và validator chặn bằng E14 — đúng, vì nộp trùng lên cổng là
 /// sai — nhưng người vận hành không còn đường nào đi tiếp. Chặn ngay từ đây rẻ
 /// hơn dọn ở cuối.
+///
+/// FINDING I2: nhưng trước khi merge, `dob_conflicts` phải đồng ý đây là
+/// cùng một người — xem doc-comment của nó. Nếu không, trả lỗi thay vì ghi đè
+/// HAY đẻ dòng mới cùng số giấy tờ (dòng mới đó sẽ tự đụng E14 sau này một
+/// cách vô hình với người vận hành).
 ///
 /// FINDING I1: dữ liệu mới chỉ được ghi đè khi danh tính CHƯA thuộc bất kỳ lô
 /// nào đang "mid-flight" hoặc đã xong việc — `exported` (đã ghi ra đĩa, đang
@@ -212,7 +246,7 @@ pub async fn insert_identity(
 ) -> Result<String, String> {
     if let Some(key) = document_key(identity) {
         let existing = sqlx::query(
-            "SELECT id,
+            "SELECT id, full_name, dob,
                     EXISTS (SELECT 1
                               FROM declaration_link dl
                               JOIN declaration_entry de  ON de.link_id = dl.id
@@ -234,6 +268,16 @@ pub async fn insert_identity(
 
         if let Some(row) = existing {
             let existing_id: String = row.get("id");
+            let existing_name: String = row.get("full_name");
+            let existing_dob: String = row.get("dob");
+
+            if dob_conflicts(&existing_dob, &identity.dob) {
+                return Err(format!(
+                    "Số giấy tờ {key} đang thuộc về một khách khác trong hệ thống: \
+                     {existing_name} (sinh {existing_dob}). Kiểm tra lại số giấy tờ vừa \
+                     nhập — có thể đã gõ nhầm."
+                ));
+            }
 
             if row.get::<i64, _>("in_flight") == 0 {
                 update_identity_fields(pool, &existing_id, identity, source, confidence).await?;
@@ -1524,6 +1568,81 @@ mod tests {
             name, "Phan Thị Mỹ Hà",
             "lô failed vẫn là bằng chứng của lần xuất đó, không ghi đè"
         );
+    }
+
+    /// FINDING I2: số giấy tờ trùng do gõ nhầm không được coi là cùng một
+    /// người. Ngày sinh khác nhau là bằng chứng đủ để từ chối — không ghi
+    /// đè, và KHÔNG đẻ thêm dòng mới cùng số giấy tờ (sẽ tự đụng E14 sau này
+    /// một cách vô hình với người vận hành). Trả lỗi để họ sửa lại số ngay.
+    #[tokio::test]
+    async fn insert_identity_refuses_to_merge_two_different_people_sharing_a_document_number() {
+        let pool = pool().await;
+        let a = insert_identity(&pool, &vn_identity(), "qr_cccd", "verified")
+            .await
+            .expect("khách A");
+
+        let mut typo = vn_identity();
+        typo.full_name = "Nguyễn Văn B".into();
+        typo.dob = "1970-01-01".into(); // rõ khác 1995-07-28 của khách A
+                                         // giữ nguyên doc_no — mô phỏng gõ nhầm đúng số khách A
+
+        let err = insert_identity(&pool, &typo, "manual", "needs_review")
+            .await
+            .expect_err("phải từ chối, không lặng lẽ merge hay đẻ dòng mới");
+        assert!(
+            err.contains("058195006173") || err.contains("khách khác"),
+            "thông báo phải nói rõ số giấy tờ đã thuộc về ai: {err}"
+        );
+
+        let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM declaration_identity")
+            .fetch_one(&pool)
+            .await
+            .expect("đếm");
+        assert_eq!(count, 1, "không được đẻ thêm dòng thứ hai cùng số giấy tờ");
+
+        let name: String =
+            sqlx::query_scalar("SELECT full_name FROM declaration_identity WHERE id = ?")
+                .bind(&a)
+                .fetch_one(&pool)
+                .await
+                .expect("đọc lại khách A");
+        assert_eq!(
+            name, "Phan Thị Mỹ Hà",
+            "khách A không được ghi đè bởi khách B gõ nhầm số"
+        );
+    }
+
+    /// Nhập tay hợp lệ có thể thiếu hẳn điện thoại/địa chỉ/loại giấy tờ so
+    /// với một lần quét QR trước đó — thiếu vậy không được coi là "khác
+    /// người". Cùng ngày sinh + cùng số giấy tờ vẫn phải merge như cũ.
+    #[tokio::test]
+    async fn a_sparse_hand_entered_identity_still_merges_with_its_own_earlier_scan() {
+        let pool = pool().await;
+        let scanned_id = insert_identity(&pool, &vn_identity(), "qr_cccd", "verified")
+            .await
+            .expect("quét QR đầy đủ");
+
+        let sparse = Identity {
+            full_name: "Phan Thị Mỹ Hà".into(),
+            dob: "1995-07-28".into(),
+            gender: "F".into(),
+            nationality_iso3: "VNM".into(),
+            doc_no: Some("058195006173".into()),
+            // Không phone, không address_detail, không doc_type_code — sparse
+            // hơn hẳn bản quét QR.
+            ..Default::default()
+        };
+
+        let merged_id = insert_identity(&pool, &sparse, "manual", "needs_review")
+            .await
+            .expect("phải merge được dù thiếu trường");
+
+        assert_eq!(merged_id, scanned_id);
+        let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM declaration_identity")
+            .fetch_one(&pool)
+            .await
+            .expect("đếm");
+        assert_eq!(count, 1);
     }
 
     /// `UNIQUE(identity_id, stay_id)`: quét lại cùng một khách cho cùng một

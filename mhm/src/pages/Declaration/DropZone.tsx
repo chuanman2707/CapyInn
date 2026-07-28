@@ -8,6 +8,7 @@ import { formatAppError } from "@/lib/appError";
 import { invokeCommand } from "@/lib/invokeCommand";
 import type { DeclarationIdentity, DeclarationSaveOutcome, ExtractedIdentity } from "@/types";
 
+import { declarationErrorMessage } from "./declarationError";
 import IdentityCard from "./IdentityCard";
 import ManualForm from "./ManualForm";
 import { matchedExistingDeclarationMessage } from "./saveOutcome";
@@ -105,7 +106,7 @@ export default function DropZone({ onIdentitySaved }: DropZoneProps) {
       setCards((prev) => prev.filter((_, i) => i !== index));
       onIdentitySaved?.();
     } catch (e) {
-      toast.error(formatAppError(e));
+      toast.error(declarationErrorMessage(e));
     } finally {
       setSavingIndex(null);
     }
