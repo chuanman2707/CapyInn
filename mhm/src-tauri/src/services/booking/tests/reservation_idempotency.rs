@@ -174,6 +174,7 @@ async fn reservation_command_idempotency_create_hashes_deposit_as_integer_vnd_un
         source: Some("phone".to_string()),
         notes: None,
         deposit_amount: Some(500_000),
+        guests: None,
     };
 
     reservation_lifecycle::create_reservation_idempotent(&pool, &ctx, request)

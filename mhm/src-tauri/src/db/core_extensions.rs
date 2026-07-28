@@ -128,3 +128,20 @@ pub(super) async fn migrate_v9_group_booking_system(
     tx.commit().await?;
     Ok(())
 }
+
+/// Số khách trên booking. Là **số đếm, không phải tiền** — cố ý đứng ngoài
+/// `money_migration`, và tên cột cố ý không chứa từ khoá tiền tệ nào.
+///
+/// Cho phép NULL: booking tạo trước phiên bản này không khai số khách, và NULL
+/// có nghĩa là không phụ thu, nên giá của chúng không đổi.
+pub(super) async fn migrate_v22_booking_guest_count(
+    pool: &Pool<Sqlite>,
+) -> Result<(), sqlx::Error> {
+    let mut tx = pool.begin().await?;
+
+    execute_compat_alter(&mut tx, "ALTER TABLE bookings ADD COLUMN guests INTEGER").await?;
+
+    set_schema_version(&mut tx, 22).await?;
+    tx.commit().await?;
+    Ok(())
+}

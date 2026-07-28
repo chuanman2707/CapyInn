@@ -449,3 +449,29 @@ pub async fn seed_booked_reservation_with_price(
     seed_booked_reservation(pool, booking_id, room_id).await?;
     Ok(())
 }
+
+/// Phòng có mốc tính giá theo số khách: `max_guests` là số khách nằm trong giá
+/// base, `extra_person_fee` là phụ thu mỗi khách vượt mốc mỗi đêm.
+pub async fn seed_room_with_guest_pricing(
+    pool: &Pool<Sqlite>,
+    room_id: &str,
+    base_price: MoneyVnd,
+    max_guests: i32,
+    extra_person_fee: MoneyVnd,
+) -> BookingResult<()> {
+    sqlx::query(
+        "INSERT INTO rooms (id, name, type, floor, has_balcony, base_price, max_guests, extra_person_fee, status)
+         VALUES (?, ?, ?, ?, 0, ?, ?, ?, 'vacant')",
+    )
+    .bind(room_id)
+    .bind(format!("Room {}", room_id))
+    .bind("standard")
+    .bind(1_i32)
+    .bind(base_price)
+    .bind(max_guests)
+    .bind(extra_person_fee)
+    .execute(pool)
+    .await?;
+
+    Ok(())
+}
