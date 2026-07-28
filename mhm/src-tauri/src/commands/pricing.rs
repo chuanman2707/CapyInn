@@ -124,6 +124,27 @@ pub async fn calculate_price_preview(
 }
 
 #[tauri::command]
+pub async fn calculate_room_price_preview(
+    state: State<'_, AppState>,
+    room_id: String,
+    check_in: String,
+    check_out: String,
+    pricing_type: String,
+    guests: Option<i32>,
+) -> Result<crate::pricing::PricingResult, String> {
+    pricing_service::calculate_room_price_preview(
+        &state.db,
+        &room_id,
+        &check_in,
+        &check_out,
+        &pricing_type,
+        guests,
+    )
+    .await
+    .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
 pub async fn get_special_dates(
     state: State<'_, AppState>,
 ) -> Result<Vec<serde_json::Value>, String> {

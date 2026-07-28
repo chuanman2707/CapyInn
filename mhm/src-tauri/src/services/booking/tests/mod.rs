@@ -36,7 +36,7 @@ mod prelude {
             record_payment_idempotent, record_payment_returning_id_tx, record_payment_tx,
             record_payment_with_origin_tx,
         },
-        group_lifecycle, group_service_management, guest_service,
+        group_lifecycle, group_service_management, guest_service, pricing_service,
         pricing_service::calculate_stay_price_tx,
         reservation_lifecycle, stay_lifecycle,
     };

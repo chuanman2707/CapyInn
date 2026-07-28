@@ -17,7 +17,8 @@ use crate::domain::booking::pricing::calculate_from_loaded_inputs;
 use crate::domain::booking::BookingResult;
 use crate::money::{validate_non_negative_money_vnd, MoneyVnd};
 use crate::queries::booking::pricing_queries::{
-    load_stay_pricing_inputs_for_room_type, load_stay_pricing_inputs_tx,
+    load_stay_pricing_inputs_for_room, load_stay_pricing_inputs_for_room_type,
+    load_stay_pricing_inputs_tx,
 };
 use crate::repositories::booking::pricing_repository::{self, PricingRuleUpsert};
 
@@ -49,6 +50,28 @@ pub async fn calculate_price_preview(
     let inputs = load_stay_pricing_inputs_for_room_type(
         pool,
         room_type,
+        check_in,
+        check_out,
+        pricing_type,
+        guests,
+    )
+    .await?;
+    calculate_from_loaded_inputs(&inputs)
+}
+
+/// Bản xem trước mà form đặt phòng dùng: keyed theo phòng đã chọn, nên con số
+/// nó trả về đúng bằng con số `calculate_stay_price_tx` sẽ tính khi ghi sổ.
+pub async fn calculate_room_price_preview(
+    pool: &Pool<Sqlite>,
+    room_id: &str,
+    check_in: &str,
+    check_out: &str,
+    pricing_type: &str,
+    guests: Option<i32>,
+) -> BookingResult<crate::pricing::PricingResult> {
+    let inputs = load_stay_pricing_inputs_for_room(
+        pool,
+        room_id,
         check_in,
         check_out,
         pricing_type,

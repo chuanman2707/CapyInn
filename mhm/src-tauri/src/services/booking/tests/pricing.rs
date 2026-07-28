@@ -138,6 +138,29 @@ async fn calculate_stay_price_tx_reads_uncommitted_room_base_price() {
 }
 
 #[tokio::test]
+async fn room_price_preview_matches_what_the_reservation_will_be_charged() {
+    let pool = test_pool().await;
+    seed_room_with_guest_pricing(&pool, "R340", 500_000, 2, 50_000)
+        .await
+        .unwrap();
+
+    let preview = pricing_service::calculate_room_price_preview(
+        &pool,
+        "R340",
+        "2026-08-06",
+        "2026-08-08",
+        "nightly",
+        Some(4),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(preview.total, 1_200_000);
+    assert_eq!(preview.breakdown.len(), 2);
+    assert_eq!(preview.breakdown[1].label, "Phụ thu 2 khách");
+}
+
+#[tokio::test]
 async fn calculate_stay_price_tx_reads_uncommitted_special_date() {
     let pool = test_pool().await;
     seed_room_with_price(&pool, "R152", 600_000).await.unwrap();
