@@ -1,6 +1,6 @@
 use crate::backup::{
+    storage::{prune_old_backups, sqlite_string_literal, sync_directory, BackupReservation},
     BackupError, BackupOutcome, BackupReason,
-    storage::{BackupReservation, prune_old_backups, sqlite_string_literal, sync_directory},
 };
 use chrono::{NaiveDateTime, Utc};
 use std::{fs, path::Path, time::Duration};
@@ -72,7 +72,7 @@ mod tests {
     use super::*;
     use crate::backup::{
         build_backup_filename, is_managed_backup_file,
-        test_support::{BackupFixture, backup_file_name},
+        test_support::{backup_file_name, BackupFixture},
     };
     use chrono::Duration as ChronoDuration;
     use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};

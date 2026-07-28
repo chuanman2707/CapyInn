@@ -1,12 +1,12 @@
 use async_stream::stream;
 use axum::{
-    Json,
     extract::{Query, State},
     http::{HeaderMap, StatusCode},
     response::{
-        IntoResponse,
         sse::{Event, KeepAlive, Sse},
+        IntoResponse,
     },
+    Json,
 };
 use futures_util::Stream;
 use serde::{Deserialize, Serialize};
@@ -345,7 +345,7 @@ fn observer_error_event(error: ObserverError) -> Event {
 
 #[cfg(test)]
 mod tests {
-    use super::{ObserverErrorCode, parse_cursor};
+    use super::{parse_cursor, ObserverErrorCode};
     use axum::http::{HeaderMap, HeaderValue};
 
     #[test]
@@ -427,9 +427,9 @@ mod tests {
 
 #[cfg(test)]
 mod db_tests {
-    use super::{ObserverErrorCode, load_observer_events_after, resolve_start_after_event_id};
+    use super::{load_observer_events_after, resolve_start_after_event_id, ObserverErrorCode};
     use serde_json::json;
-    use sqlx::{Pool, Sqlite, sqlite::SqlitePoolOptions};
+    use sqlx::{sqlite::SqlitePoolOptions, Pool, Sqlite};
 
     async fn test_pool() -> Pool<Sqlite> {
         let pool = SqlitePoolOptions::new()

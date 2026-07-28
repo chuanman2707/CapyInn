@@ -24,7 +24,8 @@ pub fn escape(s: &str) -> String {
 
 fn record(seq: usize, r: &DeclarationRow) -> Result<String, String> {
     let id = &r.identity;
-    let dob = iso_to_portal(&id.dob).ok_or_else(|| format!("Ngày sinh không hợp lệ: {}", id.dob))?;
+    let dob =
+        iso_to_portal(&id.dob).ok_or_else(|| format!("Ngày sinh không hợp lệ: {}", id.dob))?;
     let check_in = iso_to_portal(&r.stay.check_in)
         .ok_or_else(|| format!("Ngày đến không hợp lệ: {}", r.stay.check_in))?;
     let expected = iso_to_portal(&r.stay.expected_out)
@@ -38,7 +39,10 @@ fn record(seq: usize, r: &DeclarationRow) -> Result<String, String> {
     let mut s = String::new();
     s.push_str("    <THONG_TIN_KHACH>\n");
     s.push_str(&format!("        <so_thu_tu>{seq}</so_thu_tu>\n"));
-    s.push_str(&format!("        <ho_ten>{}</ho_ten>\n", escape(&id.full_name)));
+    s.push_str(&format!(
+        "        <ho_ten>{}</ho_ten>\n",
+        escape(&id.full_name)
+    ));
     s.push_str(&format!("        <ngay_sinh>{dob}</ngay_sinh>\n"));
     // v1 chỉ xuất khách có ngày sinh đủ, nên luôn là D
     s.push_str("        <ngay_sinh_dung_den>D</ngay_sinh_dung_den>\n");
@@ -65,7 +69,9 @@ fn record(seq: usize, r: &DeclarationRow) -> Result<String, String> {
     ));
     // F9: bỏ hẳn tag nếu khách chưa trả phòng
     if let Some(actual) = r.stay.actual_out.as_deref().and_then(iso_to_portal) {
-        s.push_str(&format!("        <ngay_tra_phong>{actual}</ngay_tra_phong>\n"));
+        s.push_str(&format!(
+            "        <ngay_tra_phong>{actual}</ngay_tra_phong>\n"
+        ));
     }
     s.push_str(&format!(
         "        <thoi_han_tam_tru>{visa}</thoi_han_tam_tru>\n"

@@ -10,7 +10,9 @@ use serde::Serialize;
 use tauri::State;
 
 use crate::declaration::catalog::Catalog;
-use crate::declaration::model::{Confidence, DeclarationRow, Finding, Identity, Severity, StayInfo};
+use crate::declaration::model::{
+    Confidence, DeclarationRow, Finding, Identity, Severity, StayInfo,
+};
 use crate::declaration::{repo, validator, writer};
 use crate::AppState;
 
@@ -134,9 +136,8 @@ pub async fn kbtt_extract_from_image(path: String) -> Result<ExtractedDto, Strin
             .and_then(|ocr| MrzExtractor::new(ocr, current_year()).try_extract(&img))
     });
 
-    let res = result.ok_or_else(|| {
-        "Không đọc được QR hay MRZ trong ảnh. Dùng form nhập tay.".to_string()
-    })?;
+    let res = result
+        .ok_or_else(|| "Không đọc được QR hay MRZ trong ảnh. Dùng form nhập tay.".to_string())?;
 
     let crop_data_url = res.crop_for_review.as_ref().and_then(|c| {
         use base64::Engine;
@@ -195,9 +196,7 @@ pub async fn kbtt_link(
 /// Danh tính đã lưu nhưng chưa ghép — nguồn sự thật là DB, không phải state của
 /// React, nên đổi tab không làm mất.
 #[tauri::command]
-pub async fn kbtt_unlinked_identities(
-    state: State<'_, AppState>,
-) -> Result<Vec<Identity>, String> {
+pub async fn kbtt_unlinked_identities(state: State<'_, AppState>) -> Result<Vec<Identity>, String> {
     repo::list_unlinked_identities(&state.db).await
 }
 
@@ -238,8 +237,7 @@ pub async fn kbtt_validate(
 
     let confidence = repo::confidence_by_link(&state.db, &link_ids).await?;
     for row in &rows {
-        if confidence.get(&row.link_id).map(String::as_str)
-            == Some(Confidence::NeedsReview.as_db())
+        if confidence.get(&row.link_id).map(String::as_str) == Some(Confidence::NeedsReview.as_db())
         {
             findings.push(Finding::warning(
                 "W05",
@@ -277,7 +275,10 @@ pub async fn kbtt_export(
             .collect();
         codes.sort_unstable();
         codes.dedup();
-        return Err(format!("Còn lỗi chặn, không xuất được: {}", codes.join(", ")));
+        return Err(format!(
+            "Còn lỗi chặn, không xuất được: {}",
+            codes.join(", ")
+        ));
     }
 
     let dir = repo::export_dir(pool).await?;
@@ -303,13 +304,8 @@ pub async fn kbtt_export(
         other => return Err(format!("Loại lô không hợp lệ: {other}")),
     };
 
-    let batch_id = repo::insert_batch(
-        pool,
-        &kind,
-        &file_path.to_string_lossy(),
-        rows.len() as i64,
-    )
-    .await?;
+    let batch_id =
+        repo::insert_batch(pool, &kind, &file_path.to_string_lossy(), rows.len() as i64).await?;
     repo::insert_entries(pool, &batch_id, &link_ids).await?;
 
     Ok(BatchDto {
@@ -413,8 +409,7 @@ mod tests {
             .join("src")
             .join("types")
             .join("index.ts");
-        std::fs::read_to_string(&path)
-            .unwrap_or_else(|e| panic!("đọc {}: {e}", path.display()))
+        std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("đọc {}: {e}", path.display()))
     }
 
     fn sample_row() -> DeclarationRow {

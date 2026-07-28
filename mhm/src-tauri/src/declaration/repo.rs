@@ -351,7 +351,10 @@ pub async fn list_unlinked_identities(pool: &Pool<Sqlite>) -> Result<Vec<Identit
 ///
 /// Chỉ xóa được khi chưa có link nào trỏ tới: đã ghép thì đó là bằng chứng đã
 /// khai báo, phải đi đường thu hồi (§12.5) chứ không xóa thẳng.
-pub async fn delete_unlinked_identity(pool: &Pool<Sqlite>, identity_id: &str) -> Result<(), String> {
+pub async fn delete_unlinked_identity(
+    pool: &Pool<Sqlite>,
+    identity_id: &str,
+) -> Result<(), String> {
     let affected = sqlx::query(
         "DELETE FROM declaration_identity
           WHERE id = ?
@@ -459,13 +462,15 @@ pub async fn insert_entries(
         .map_err(|e| format!("Không mở được giao dịch: {e}"))?;
 
     for (index, link_id) in link_ids.iter().enumerate() {
-        sqlx::query("INSERT INTO declaration_entry (batch_id, link_id, row_index) VALUES (?, ?, ?)")
-            .bind(batch_id)
-            .bind(link_id)
-            .bind(index as i64)
-            .execute(&mut *tx)
-            .await
-            .map_err(|e| format!("Không lưu được dòng của lô: {e}"))?;
+        sqlx::query(
+            "INSERT INTO declaration_entry (batch_id, link_id, row_index) VALUES (?, ?, ?)",
+        )
+        .bind(batch_id)
+        .bind(link_id)
+        .bind(index as i64)
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| format!("Không lưu được dòng của lô: {e}"))?;
     }
 
     tx.commit()
@@ -972,9 +977,15 @@ mod tests {
         let first = insert_link(&pool, &identity_id, Some("booking-1"), "1", None)
             .await
             .expect("ghép lần đầu");
-        let second = insert_link(&pool, &identity_id, Some("booking-1"), "20", Some("Đi công tác"))
-            .await
-            .expect("ghép lại");
+        let second = insert_link(
+            &pool,
+            &identity_id,
+            Some("booking-1"),
+            "20",
+            Some("Đi công tác"),
+        )
+        .await
+        .expect("ghép lại");
 
         assert_eq!(first, second, "phải là cùng một link");
         let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM declaration_link")
@@ -997,9 +1008,15 @@ mod tests {
                 .await
                 .expect("lưu danh tính");
             links.push(
-                insert_link(&pool, &identity_id, Some(&format!("booking-{n}")), "1", None)
-                    .await
-                    .expect("ghép link"),
+                insert_link(
+                    &pool,
+                    &identity_id,
+                    Some(&format!("booking-{n}")),
+                    "1",
+                    None,
+                )
+                .await
+                .expect("ghép link"),
             );
         }
         links.reverse();
@@ -1028,14 +1045,17 @@ mod tests {
 
         assert_eq!(batch_row_count(&pool, &batch).await.unwrap(), 1);
 
-        let status: String = sqlx::query_scalar("SELECT status FROM declaration_batch WHERE id = ?")
-            .bind(&batch)
-            .fetch_one(&pool)
-            .await
-            .expect("đọc trạng thái");
+        let status: String =
+            sqlx::query_scalar("SELECT status FROM declaration_batch WHERE id = ?")
+                .bind(&batch)
+                .fetch_one(&pool)
+                .await
+                .expect("đọc trạng thái");
         assert_eq!(status, "exported", "xuất file chưa phải là đã khai");
 
-        set_batch_verified(&pool, &batch, 1).await.expect("verified");
+        set_batch_verified(&pool, &batch, 1)
+            .await
+            .expect("verified");
         let (status, seen): (String, i64) =
             sqlx::query_as("SELECT status, verified_count FROM declaration_batch WHERE id = ?")
                 .bind(&batch)
@@ -1058,7 +1078,9 @@ mod tests {
         assert_eq!(seen, 0);
 
         assert!(
-            set_batch_verified(&pool, "khong-co-lo-nay", 1).await.is_err(),
+            set_batch_verified(&pool, "khong-co-lo-nay", 1)
+                .await
+                .is_err(),
             "lô không tồn tại phải báo lỗi chứ không im lặng"
         );
     }
@@ -1116,7 +1138,9 @@ mod tests {
             .expect("lưu dòng");
 
         // Lô mới đối chiếu xong hôm nay: chưa đến hạn che.
-        set_batch_verified(&pool, &batch, 1).await.expect("verified");
+        set_batch_verified(&pool, &batch, 1)
+            .await
+            .expect("verified");
         assert_eq!(redact_old_identities(&pool, 90).await.unwrap(), 0);
 
         // Đẩy ngày đối chiếu lùi 200 ngày.

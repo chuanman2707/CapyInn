@@ -22,7 +22,7 @@ jobs:
       - name: Setup Rust toolchain
         uses: dtolnay/rust-toolchain@stable
         with:
-          components: clippy
+          components: clippy, rustfmt
 
       - name: Cache Rust dependencies
         uses: Swatinem/rust-cache@v2
@@ -54,6 +54,10 @@ jobs:
       - name: Run clippy
         working-directory: mhm/src-tauri
         run: cargo clippy --all-targets -- -D warnings
+
+      - name: Check formatting
+        working-directory: mhm/src-tauri
+        run: cargo fmt -- --check
 
   verify-wave1:
     runs-on: macos-latest
