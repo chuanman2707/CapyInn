@@ -1201,6 +1201,45 @@ mod tests {
         assert_eq!(conf.get(&link_id).map(String::as_str), Some("verified"));
     }
 
+    /// FINDING C1 — đường THẬT, không phải struct dựng tay: khách vừa quét,
+    /// `stay_id = NULL` (v21, cố ý cho phép). Trước khi sửa, thẻ này bị E01
+    /// chặn với "thiếu ngày đến, ngày đi dự kiến" — bấm vào mở ManualForm,
+    /// form đó không có ô ngày nào để sửa, và W01 ngay bên dưới nói "vẫn xuất
+    /// được", mâu thuẫn với nút xuất đã tắt. Test này lái đúng cặp
+    /// `insert_link` (stay_id None) → `load_rows_by_link_ids` →
+    /// `validator::validate` để chứng minh finding trả về đúng như lời hứa
+    /// mới trên thẻ: E16 (chặn, chỉ vào ô Phòng), không E01, không W01.
+    #[tokio::test]
+    async fn a_freshly_scanned_guest_without_a_room_gets_the_cards_promised_finding() {
+        let pool = pool().await;
+
+        let identity_id = insert_identity(&pool, &vn_identity(), "qr_cccd", "verified")
+            .await
+            .expect("lưu danh tính");
+        let link_id = insert_link(&pool, &identity_id, None, "1", None)
+            .await
+            .expect("ghép link, chưa có phòng");
+
+        let rows = load_rows_by_link_ids(&pool, std::slice::from_ref(&link_id))
+            .await
+            .expect("đọc dòng");
+
+        let catalog = crate::declaration::catalog::Catalog::load().expect("load catalog");
+        let findings = crate::declaration::validator::validate(&rows, &catalog, "2026-07-28");
+        let codes: Vec<&str> = findings.iter().map(|f| f.code.as_str()).collect();
+
+        assert!(codes.contains(&"E16"), "phải báo chưa chọn phòng: {codes:?}");
+        assert!(
+            !codes.contains(&"E01"),
+            "danh tính đủ — không được đổ lỗi thiếu ngày cho danh tính: {codes:?}"
+        );
+        assert!(!codes.contains(&"W01"), "W01 không còn tồn tại: {codes:?}");
+        assert!(
+            crate::declaration::validator::has_blocking(&findings),
+            "chưa chọn phòng phải chặn xuất file"
+        );
+    }
+
     /// `UNIQUE(identity_id, stay_id)`: quét lại cùng một khách cho cùng một
     /// lượt lưu trú không được đẻ ra dòng thứ hai.
     #[tokio::test]

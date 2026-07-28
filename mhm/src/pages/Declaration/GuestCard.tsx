@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
 
 import { formatAppError } from "@/lib/appError";
@@ -53,6 +53,10 @@ export default function GuestCard({ row, stays, findings, onChanged }: GuestCard
   const [editing, setEditing] = useState(false);
   const [busy, setBusy] = useState(false);
   const [noteDraft, setNoteDraft] = useState(row.stay_reason_note ?? "");
+  // FINDING C1: E16 ("chưa chọn phòng") trỏ vào chính ô Phòng trên thẻ này,
+  // không mở ManualForm — form đó không có ô ngày đến/ngày đi nào để sửa,
+  // vì hai ngày đó đến từ lượt lưu trú chứ không phải danh tính.
+  const roomSelectRef = useRef<HTMLSelectElement>(null);
 
   // Đồng bộ lại khi đổi khách (link khác) hoặc khi note được nạp lại từ
   // server (ví dụ sau khi một thẻ khác kích hoạt reload) — KHÔNG chạy khi
@@ -152,6 +156,7 @@ export default function GuestCard({ row, stays, findings, onChanged }: GuestCard
           </label>
           <select
             id={`room-${row.link_id}`}
+            ref={roomSelectRef}
             className="w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm"
             value={currentStay}
             disabled={busy}
@@ -223,20 +228,27 @@ export default function GuestCard({ row, stays, findings, onChanged }: GuestCard
 
       {findings.length > 0 && (
         <ul className="mt-3 space-y-1">
-          {findings.map((f) => (
-            <li key={`${f.code}-${f.field ?? ""}`}>
-              <button
-                type="button"
-                onClick={() => setEditing(true)}
-                className={`text-left text-sm underline-offset-2 hover:underline ${
-                  f.severity === "blocking" ? "text-red-700" : "text-amber-700"
-                }`}
-              >
-                {f.severity === "blocking" ? "⛔" : "⚠"} {findingLine(f)}{" "}
-                <span className="font-mono text-[10px] text-slate-400">{f.code}</span>
-              </button>
-            </li>
-          ))}
+          {findings.map((f) => {
+            // FINDING C1: E16 ("chưa chọn phòng") không có gì để sửa trong
+            // ManualForm — cái nó cần đã nằm ngay trên thẻ này, ô Phòng.
+            const isRoomMissing = f.code === "E16";
+            return (
+              <li key={`${f.code}-${f.field ?? ""}`}>
+                <button
+                  type="button"
+                  onClick={() =>
+                    isRoomMissing ? roomSelectRef.current?.focus() : setEditing(true)
+                  }
+                  className={`text-left text-sm underline-offset-2 hover:underline ${
+                    f.severity === "blocking" ? "text-red-700" : "text-amber-700"
+                  }`}
+                >
+                  {f.severity === "blocking" ? "⛔" : "⚠"} {findingLine(f)}{" "}
+                  <span className="font-mono text-[10px] text-slate-400">{f.code}</span>
+                </button>
+              </li>
+            );
+          })}
         </ul>
       )}
 

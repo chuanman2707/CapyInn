@@ -111,6 +111,49 @@ describe("GuestCard", () => {
     expect(screen.getByDisplayValue("Nguyễn Văn A")).toBeTruthy();
   });
 
+  // FINDING C1: khách vừa quét, chưa gắn phòng — E16 phải chặn với câu nói
+  // đúng nguyên nhân, không còn W01 mâu thuẫn ("vẫn xuất được"), và bấm vào
+  // đó phải đưa người vận hành tới ô Phòng chứ không mở ManualForm (form đó
+  // không có ô ngày để sửa cho lỗi này).
+  it("thẻ chưa chọn phòng không hiện chữ 'vẫn xuất được', bấm vào lỗi thì focus ô Phòng chứ không mở form", () => {
+    const findings: DeclarationFinding[] = [
+      { code: "E16", severity: "blocking", link_id: "l1", message: "x" },
+    ];
+    render(
+      <GuestCard
+        row={row({ room_no: null, stay_id: null })}
+        stays={stays}
+        findings={findings}
+        onChanged={() => {}}
+      />,
+    );
+
+    expect(screen.queryByText(/vẫn xuất được/)).toBeNull();
+
+    fireEvent.click(screen.getByRole("button", { name: /chưa chọn phòng/i }));
+
+    expect(screen.getByLabelText("Phòng")).toHaveFocus();
+    expect(screen.queryByText("Nhập tay danh tính")).toBeNull();
+  });
+
+  // Khách ĐÃ có phòng nhưng còn thiếu field danh tính thật (E01) phải giữ
+  // nguyên hành vi cũ: bấm mở được ManualForm.
+  it("E01 khi đã có phòng vẫn bấm mở được form sửa", () => {
+    const findings: DeclarationFinding[] = [
+      { code: "E01", severity: "blocking", link_id: "l1", message: "Thiếu field bắt buộc: ngày sinh" },
+    ];
+    render(
+      <GuestCard
+        row={row({ room_no: "5A", stay_id: "b1" })}
+        stays={stays}
+        findings={findings}
+        onChanged={() => {}}
+      />,
+    );
+    fireEvent.click(screen.getByRole("button", { name: /thiếu thông tin bắt buộc/i }));
+    expect(screen.getByDisplayValue("Nguyễn Văn A")).toBeTruthy();
+  });
+
   // FINDING 1: link đã có stay_id thật (booking đã trả phòng nên không còn
   // trong `stays` active) — đổi CHỈ lý do lưu trú không được gửi `stayId:
   // null` đè lên liên kết phòng đó.

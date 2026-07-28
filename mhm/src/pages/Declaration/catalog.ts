@@ -112,7 +112,11 @@ const FINDING_TEXT: Record<string, string> = {
   E12: "Chọn 'Mục đích khác' thì phải ghi lý do cụ thể — bấm để nhập.",
   E13: "Số giấy tờ rỗng hoặc có ký tự lạ — bấm để sửa.",
   E14: "Trùng hồ sơ: cùng số giấy tờ, cùng ngày đến — xóa bớt một thẻ.",
-  W01: "Chưa chọn phòng — vẫn xuất được, nhưng nên chọn.",
+  // FINDING C1: thay cho W01 cũ ("vẫn xuất được, nhưng nên chọn") — chưa
+  // chọn phòng thì KHÔNG xuất được, vì ngày đến/ngày đi lấy từ đó. Câu này
+  // trỏ thẳng vào ô Phòng ngay trên thẻ; bấm vào finding này KHÔNG mở
+  // ManualForm (xem GuestCard) vì form đó không có gì để sửa cho lỗi này.
+  E16: "Chưa chọn phòng — chọn ở ô Phòng phía trên để xuất được, ngày đến và ngày đi lấy từ đó.",
   W02: "Thiếu số điện thoại — vẫn xuất được.",
   W03: "Lý do vẫn là mặc định 'Du lịch' — đổi nếu không đúng.",
   W04: "Khách đến đã quá 24h mà chưa khai xong.",

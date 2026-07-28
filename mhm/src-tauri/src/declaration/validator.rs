@@ -44,6 +44,13 @@ pub fn validate(rows: &[DeclarationRow], catalog: &Catalog, today: &str) -> Vec<
         let link = row.link_id.as_str();
         let is_vn = id.is_vietnamese();
 
+        // FINDING C1: chưa chọn phòng thì `check_in`/`expected_out` LUÔN rỗng —
+        // hai ngày đó lấy từ lượt lưu trú, không phải từ danh tính. Đổ chúng
+        // vào E01 khiến thẻ chỉ đường sai (mở ManualForm, form đó không có ô
+        // ngày nào) trong khi nguyên nhân thật là chưa chọn phòng. E16 dưới
+        // đây nói đúng nguyên nhân đó; ở đây chỉ còn xét ngày khi ĐÃ có phòng.
+        let missing_room = row.stay.room_no.trim().is_empty();
+
         // E01 — field bắt buộc theo từng định dạng
         let mut missing: Vec<&str> = Vec::new();
         if id.full_name.trim().is_empty() {
@@ -58,11 +65,13 @@ pub fn validate(rows: &[DeclarationRow], catalog: &Catalog, today: &str) -> Vec<
         if id.nationality_iso3.trim().is_empty() {
             missing.push("quốc tịch");
         }
-        if row.stay.check_in.trim().is_empty() {
-            missing.push("ngày đến");
-        }
-        if row.stay.expected_out.trim().is_empty() {
-            missing.push("ngày đi dự kiến");
+        if !missing_room {
+            if row.stay.check_in.trim().is_empty() {
+                missing.push("ngày đến");
+            }
+            if row.stay.expected_out.trim().is_empty() {
+                missing.push("ngày đi dự kiến");
+            }
         }
         if row.stay_reason.trim().is_empty() {
             missing.push("lý do lưu trú");
@@ -83,6 +92,21 @@ pub fn validate(rows: &[DeclarationRow], catalog: &Catalog, today: &str) -> Vec<
                 link,
                 None,
                 &format!("Thiếu field bắt buộc: {}", missing.join(", ")),
+            ));
+        }
+
+        // E16 — FINDING C1: một khai báo được PHÉP tồn tại chưa gắn phòng
+        // (v21 — khách vừa tới, booking chưa tạo), nhưng KHÔNG xuất được nếu
+        // vậy, vì ngày đến/ngày đi mà file nộp cần lấy từ lượt lưu trú đó.
+        // Đây là finding CHẶN riêng, tách khỏi E01, để thẻ nói đúng nguyên
+        // nhân và trỏ đúng vào ô Phòng — không mở ManualForm, vì form đó
+        // không có gì để sửa cho lỗi này.
+        if missing_room {
+            out.push(Finding::blocking(
+                "E16",
+                link,
+                None,
+                "Chưa chọn phòng — ngày đến, ngày đi dự kiến lấy từ lượt lưu trú nên không xuất được.",
             ));
         }
 
@@ -247,9 +271,11 @@ pub fn validate(rows: &[DeclarationRow], catalog: &Catalog, today: &str) -> Vec<
         // dữ liệu để kiểm. TODO v2 nếu sau này cho chọn tay.
 
         // Cảnh báo — KHÔNG BAO GIỜ được làm has_blocking() trả true.
-        if row.stay.room_no.trim().is_empty() {
-            out.push(Finding::warning("W01", link, None, "Thiếu số phòng."));
-        }
+        //
+        // Không còn W01 ("Thiếu số phòng — vẫn xuất được"): FINDING C1 cho
+        // thấy đó là lời nói dối — thiếu phòng thì KHÔNG xuất được, vì ngày
+        // đến/ngày đi lấy từ lượt lưu trú. E16 ở trên đã chặn đúng chỗ đó;
+        // giữ thêm W01 sẽ mâu thuẫn ngay trên cùng một thẻ.
         if is_vn && id.phone.as_deref().unwrap_or("").is_empty() {
             out.push(Finding::warning(
                 "W02",
@@ -505,17 +531,57 @@ mod tests {
     #[test]
     fn warnings_do_not_block_export() {
         let mut r = vn_row();
-        r.stay.room_no = String::new();
         r.identity.phone = None;
         r.stay_reason = "1".into(); // vẫn là mặc định
         r.identity.doc_type_source = Some("heuristic".into());
         let f = validate(&[r], &cat(), "2026-07-26");
         let c = codes(&f);
-        assert!(c.contains(&"W01".to_string()));
         assert!(c.contains(&"W02".to_string()));
         assert!(c.contains(&"W03".to_string()));
         assert!(c.contains(&"W06".to_string()));
         assert!(!has_blocking(&f), "cảnh báo không được chặn xuất file");
+    }
+
+    /// FINDING C1 — trước khi sửa: mọi khách vừa quét (chưa gắn phòng) rơi
+    /// vào E01 với thông báo "thiếu ngày đến, ngày đi dự kiến", bấm vào mở
+    /// ManualForm (không có ô ngày nào), còn W01 nói "vẫn xuất được" ngay bên
+    /// dưới — mâu thuẫn với nút xuất đã tắt. Sau khi sửa: nguyên nhân thật
+    /// (chưa chọn phòng) phải lộ ra ở đúng một finding, E01 im lặng vì danh
+    /// tính ở đây đã đủ, và W01 biến mất hẳn.
+    #[test]
+    fn e16_blocks_a_roomless_link_instead_of_e01_blaming_the_dates() {
+        let mut r = vn_row();
+        r.stay = StayInfo::default(); // chưa gắn phòng — v21
+        let f = validate(&[r], &cat(), "2026-07-26");
+        let c = codes(&f);
+        assert!(c.contains(&"E16".to_string()), "phải chặn vì chưa chọn phòng: {c:?}");
+        assert!(
+            !c.contains(&"E01".to_string()),
+            "danh tính đầy đủ — E01 không được đổ lỗi thiếu ngày cho danh tính: {c:?}"
+        );
+        assert!(
+            !c.contains(&"W01".to_string()),
+            "W01 phải biến mất — nó từng nói 'vẫn xuất được', mâu thuẫn với E16: {c:?}"
+        );
+        assert!(has_blocking(&f), "chưa chọn phòng phải chặn xuất file");
+    }
+
+    #[test]
+    fn e16_stays_silent_once_a_room_is_chosen() {
+        let f = validate(&[vn_row()], &cat(), "2026-07-26");
+        assert!(!codes(&f).contains(&"E16".to_string()));
+    }
+
+    /// Khách CÓ phòng nhưng thiếu field danh tính thật (không phải ngày
+    /// tháng) vẫn phải giữ nguyên hành vi cũ của E01 — bấm mở được form sửa.
+    #[test]
+    fn e01_still_blocks_on_a_real_missing_identity_field_when_a_room_is_assigned() {
+        let mut r = vn_row();
+        r.identity.dob = String::new();
+        let f = validate(&[r], &cat(), "2026-07-26");
+        let c = codes(&f);
+        assert!(c.contains(&"E01".to_string()));
+        assert!(!c.contains(&"E16".to_string()), "đã có phòng — E16 không được nổ");
     }
 
     #[test]
