@@ -123,10 +123,17 @@ Mỗi lô đã xuất mà chưa chốt hiện một thẻ:
 
 ### 4.4 Badge và dòng diễn giải
 
-- Badge menu = **số khách chưa khai xong** = số link đang hoạt động chưa nằm
-  trong lô `verified` (một biểu thức duy nhất — tự nhiên gồm cả "chưa xuất",
-  "gác lại", "chờ đối chiếu" lẫn khách trong lô `failed`). Về 0 thì badge ẩn.
-  (`kbtt_undeclared_count` sửa theo công thức này.)
+- Badge menu = **số khách chưa khai xong**, gồm **bốn** nhóm:
+  `not_scanned` (khách đã check-in trong PMS mà chưa ai chụp giấy tờ) +
+  `not_exported` + `held` (gác lại) + `awaiting` (đã xuất, chờ đối chiếu — kể
+  cả lô `failed`). Ba nhóm sau đếm `declaration_link` chưa nằm trong lô
+  `verified`. Về 0 thì badge ẩn.
+  (`kbtt_undeclared_count` trả `total`; `kbtt_undeclared_breakdown` trả cả bốn.)
+- **Chấp nhận đếm dư, không chấp nhận đếm sót** (quyết định 2026-07-28): khách
+  vừa chụp mà chưa đối chiếu xong bị tính cả ở `not_scanned` lẫn một nhóm link,
+  nên badge đọc cao hơn thực tế trong quãng đó. Đổi lại, không bao giờ có
+  chuyện một người ở thật mà badge im lặng — sót người trên tờ khai là phạt
+  hành chính, badge cao chỉ là nhiễu.
 - Dưới tiêu đề trang có dòng diễn giải: ví dụ *"6 khách chưa khai xong:
   3 chưa xuất file · 2 chờ đối chiếu · 1 gác lại"*.
 - Lịch sử xuất file thu gọn thành một dòng cuối trang, bấm mới xổ.
@@ -183,11 +190,23 @@ Mỗi hành vi mới một test, đặt tên theo hành vi:
 - `kbtt_discard` từ chối khi lô đã chốt; xóa sạch khi chưa.
 - Test hợp đồng TS↔Rust hiện có giữ nguyên vai trò gác cổng.
 
-## 6. Trình tự triển khai — 3 PR, app chạy được sau mỗi PR
+## 6. Trình tự triển khai — 3 PR
+
+**Sửa ngày 2026-07-28 sau review toàn nhánh PR 1.** Bản đầu của mục này viết
+"app chạy được sau mỗi PR". **Điều đó sai** và phải ghi lại cho đúng: PR 1 làm
+`kbtt_save_identity` tự tạo link, nên `list_unlinked_identities` vĩnh viễn rỗng
+và khu "chờ ghép" của màn cũ — nơi chứa ô chọn phòng và lý do — không bao giờ
+hiện nữa. Người vận hành chụp ảnh xong không có cách nào chọn phòng cho tới khi
+PR 2 lên.
+
+Vì vậy: **PR 1 và PR 2 phải về đích cùng nhau.** Không cắt bản cài cho người
+vận hành sau PR 1. PR 3 vẫn có thể đi riêng — sau PR 2 app đã dùng được, PR 3
+chỉ thêm thẻ đối chiếu bền và dọn code cũ.
 
 1. **Nền dữ liệu**: migration v22 + backfill, lệnh mới, sửa
-   `kbtt_save_identity` / `kbtt_undeclared_count`. UI cũ vẫn chạy trên lệnh
-   cũ (lệnh cũ chỉ gỡ ở PR 3).
+   `kbtt_save_identity` / `kbtt_undeclared_count`. Kéo thêm `kbtt_reopen_batch`
+   từ PR 3 lên, vì nếu không, một lô đối chiếu lệch sẽ nhốt khách vĩnh viễn
+   ngoài danh sách. **Không ship riêng.**
 2. **Danh sách hợp nhất + xuất một cú**: `GuestList`/`GuestCard`, bỏ nút
    Kiểm tra, bỏ toggle VN/NN, lỗi tiếng người.
 3. **Đối chiếu ①②③ + badge + dọn dẹp**: thẻ đối chiếu bền, dòng diễn giải,
