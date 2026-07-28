@@ -124,7 +124,10 @@ function ReconcileCard({ batch, onSettled }: { batch: DeclarationBatch; onSettle
         failed ? "border-red-300 bg-red-50" : "border-slate-200 bg-white"
       }`}
     >
-      <h3 className="font-semibold">
+      <h3
+        className="font-semibold"
+        aria-label={`Đối chiếu file ${kindLabel} (${batch.row_count} khách) — ${fileName}`}
+      >
         Đối chiếu file {kindLabel} ({batch.row_count} khách)
       </h3>
       <code className="text-xs text-brand-muted">{fileName}</code>
@@ -168,11 +171,20 @@ function ReconcileCard({ batch, onSettled }: { batch: DeclarationBatch; onSettle
           />
         </div>
         <span className="pb-2 text-sm text-brand-muted">hồ sơ (file này có {batch.row_count})</span>
-        <Button onClick={() => void submit()} disabled={seen === "" || busy}>
+        <Button
+          onClick={() => void submit()}
+          disabled={seen === "" || busy}
+          aria-label={`Chốt ${fileName}`}
+        >
           Chốt
         </Button>
         {failed && (
-          <Button variant="secondary" disabled={busy} onClick={() => void reopen()}>
+          <Button
+            variant="secondary"
+            disabled={busy}
+            onClick={() => void reopen()}
+            aria-label={`Đưa khách về danh sách để sửa ${fileName}`}
+          >
             Đưa khách về danh sách để sửa
           </Button>
         )}

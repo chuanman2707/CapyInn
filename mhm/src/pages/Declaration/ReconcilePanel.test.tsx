@@ -119,6 +119,29 @@ describe("ReconcilePanel", () => {
     expect(screen.queryByText("OLD.xlsx")).toBeFalsy();
   });
 
+  it("nhiều thẻ cùng lúc: tên trợ năng của nút/tiêu đề phân biệt được theo file", async () => {
+    mockBatches([
+      batch({ id: "b1", status: "failed", verified_count: 0, file_path: "/x/AAA.xlsx" }),
+      batch({ id: "b2", status: "failed", verified_count: 0, file_path: "/x/BBB.xlsx" }),
+    ]);
+    render(<ReconcilePanel reloadKey={0} onSettled={() => {}} />);
+    await waitFor(() => expect(screen.getAllByText(/khách việt nam/i)).toHaveLength(2));
+
+    // Hai thẻ có nút "Chốt", nút "Đưa khách về danh sách" và tiêu đề cùng chữ
+    // — tên trợ năng phải phân biệt được theo file, không thì điều hướng bằng
+    // role trên screen reader không biết đang ở thẻ nào.
+    expect(screen.getByRole("button", { name: /chốt.*AAA\.xlsx/i })).toBeTruthy();
+    expect(screen.getByRole("button", { name: /chốt.*BBB\.xlsx/i })).toBeTruthy();
+    expect(
+      screen.getByRole("button", { name: /đưa khách về danh sách.*AAA\.xlsx/i }),
+    ).toBeTruthy();
+    expect(
+      screen.getByRole("button", { name: /đưa khách về danh sách.*BBB\.xlsx/i }),
+    ).toBeTruthy();
+    expect(screen.getByRole("heading", { name: /AAA\.xlsx/i })).toBeTruthy();
+    expect(screen.getByRole("heading", { name: /BBB\.xlsx/i })).toBeTruthy();
+  });
+
   it("không còn lô dở thì panel biến mất", async () => {
     mockBatches([batch({ id: "b9", status: "verified" })]);
     const { container } = render(<ReconcilePanel reloadKey={0} onSettled={() => {}} />);
