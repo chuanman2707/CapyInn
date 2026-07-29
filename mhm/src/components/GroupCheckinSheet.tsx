@@ -1,4 +1,4 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useMemo } from "react";
 import { useHotelStore } from "../stores/useHotelStore";
 import {
     Sheet,
@@ -10,11 +10,13 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { FormField, FormFieldSelect } from "@/components/shared/FormField";
+import { sumRoomPrices, useStayPrices } from "@/hooks/useStayPrices";
 import { formatAppError } from "@/lib/appError";
 import { fmtMoney } from "@/lib/format";
+import { isReservationDate, localToday } from "@/lib/stayQuote";
 import { toast } from "sonner";
 import { Sparkles, Hand, Check, ChevronLeft, ChevronRight, Users, Star, CalendarClock } from "lucide-react";
-import type { CheckInGuestInput, RoomAssignment } from "@/types";
+import type { CheckInGuestInput, Room, RoomAssignment } from "@/types";
 
 const STEPS = ["Thông tin đoàn", "Chọn phòng", "Thông tin khách", "Xác nhận"];
 
@@ -38,13 +40,14 @@ export default function GroupCheckinSheet() {
     const [roomType, setRoomType] = useState("all");
     const [nights, setNights] = useState(1);
     const [source, setSource] = useState("walk-in");
-    const [checkInDate, setCheckInDate] = useState(() => {
-        const d = new Date();
-        return d.toISOString().split("T")[0];
-    });
+    const [checkInDate, setCheckInDate] = useState(() => localToday());
 
-    const todayStr = new Date().toISOString().split("T")[0];
-    const isReservation = checkInDate > todayStr;
+    // Local, not UTC. The backend decides `is_reservation` against its own
+    // `Local::now()`, so a `toISOString()` day disagreed with it either side of
+    // midnight: picking the real today looked like a reservation here while the
+    // backend performed a walk-in, and the two priced from different dates.
+    const todayStr = localToday();
+    const isReservation = isReservationDate(checkInDate) && checkInDate > todayStr;
 
     // Step 2: Room selection
     const [selectedRooms, setSelectedRooms] = useState<string[]>([]);
@@ -70,7 +73,7 @@ export default function GroupCheckinSheet() {
             setRoomType("all");
             setNights(1);
             setSource("walk-in");
-            setCheckInDate(new Date().toISOString().split("T")[0]);
+            setCheckInDate(localToday());
             setSelectedRooms([]);
             setMasterRoomId("");
             setAssignMode("auto");
@@ -101,10 +104,28 @@ export default function GroupCheckinSheet() {
         );
     };
 
-    const totalPrice = selectedRooms.reduce((sum, id) => {
-        const room = rooms.find((r) => r.id === id);
-        return sum + (room ? room.base_price * nights : 0);
-    }, 0);
+    // Asked of the backend, not multiplied here: group check-in prices every room
+    // through the same engine a single check-in does, so `base_price × nights`
+    // misses the configured rate, the weekend uplift and any holiday surcharge.
+    const selectedRoomData = useMemo(
+        () => selectedRooms.map((id) => rooms.find((r) => r.id === id)).filter(Boolean) as Room[],
+        [rooms, selectedRooms],
+    );
+    const quotedTypes = useMemo(
+        () => Array.from(new Set(selectedRoomData.map((room) => room.type))),
+        [selectedRoomData],
+    );
+    const {
+        byType: priceByType,
+        loading: pricesLoading,
+        failed: pricesFailed,
+    } = useStayPrices({
+        roomTypes: quotedTypes,
+        nights,
+        checkInDate: isReservation ? checkInDate : undefined,
+        disabled: !isGroupCheckinOpen || selectedRoomData.length === 0,
+    });
+    const totalPrice = sumRoomPrices(selectedRoomData, priceByType);
 
     const handleSubmit = async () => {
         try {
@@ -384,17 +405,40 @@ export default function GroupCheckinSheet() {
                                 <hr className="border-slate-200" />
                                 {selectedRooms.map((id) => {
                                     const room = rooms.find((r) => r.id === id);
+                                    const roomPrice = room ? priceByType[room.type] : undefined;
                                     return (
                                         <div key={id} className="flex justify-between text-sm">
                                             <span>{room?.name || id}</span>
-                                            <span className="font-medium">{fmtMoney((room?.base_price || 0) * nights)}</span>
+                                            <span className="font-medium">
+                                                {pricesFailed
+                                                    ? "—"
+                                                    : roomPrice
+                                                      ? fmtMoney(roomPrice.total)
+                                                      : "…"}
+                                            </span>
                                         </div>
                                     );
                                 })}
                                 <hr className="border-slate-200" />
                                 <div className="flex justify-between text-base font-bold">
                                     <span>Tổng cộng</span>
-                                    <span className="text-brand-primary">{fmtMoney(totalPrice)}</span>
+                                    {pricesFailed ? (
+                                        <span
+                                            data-testid="group-price-error"
+                                            className="text-xs font-semibold text-amber-600"
+                                        >
+                                            Chưa tính được giá
+                                        </span>
+                                    ) : (
+                                        <span
+                                            data-testid="group-price-total"
+                                            className="text-brand-primary tabular-nums"
+                                        >
+                                            {pricesLoading || totalPrice === null
+                                                ? "…"
+                                                : fmtMoney(totalPrice)}
+                                        </span>
+                                    )}
                                 </div>
                             </div>
 

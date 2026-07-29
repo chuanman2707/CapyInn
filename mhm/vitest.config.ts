@@ -36,5 +36,12 @@ export default defineConfig({
     include: ["tests/**/*.test.{ts,tsx}", "src/**/*.test.{ts,tsx}"],
     css: false,
     reporters: ["verbose"],
+    // Pinned because several tests exist precisely to prove the app reads the
+    // *local* calendar day rather than a UTC-converted one. CI runs at UTC,
+    // where those two are the same string and the tests quietly stop
+    // discriminating. This is the product's own timezone.
+    env: {
+      TZ: "Asia/Ho_Chi_Minh",
+    },
   },
 });
