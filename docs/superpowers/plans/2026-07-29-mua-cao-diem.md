@@ -22,7 +22,7 @@
 - **Cắt chuỗi ngày bằng `get(..10)`**, không bao giờ `&s[..10]` — cắt theo byte sẽ panic với ký tự nhiều byte.
 - **Chặn đầu vào nằm ở service**, trả `CommandError::user(codes::VALIDATION_INVALID_INPUT, …)` với thông điệp tiếng Việt.
 - **Trần:** khoảng ≤ 366 ngày; `0 <= uplift_pct <= 500`.
-- **Test Rust khẳng định trên `surcharge_amount`**, không phải `total`, và fixture phải đặt `weekend_uplift_pct = 0` — xem Task 2 Bước 1.
+- **Test Rust khẳng định trên `surcharge_amount`**, không phải `total`, và fixture phải đặt `weekend_uplift_pct = 0` — xem Task 2 Bước 1. **Một ngoại lệ duy nhất:** test `a_holiday_that_falls_on_a_weekend_still_charges_both` cố ý bật 20% và cố ý khẳng định `total`, vì thứ nó khoá chính là việc hai phụ thu cộng dồn.
 - **Chạy `cargo fmt` trước mỗi lần commit backend.** CI gác `cargo fmt --check` nhưng `verify:full` không chạy nó.
 
 ---
@@ -505,17 +505,14 @@ async fn load_special_days(
     check_in: &str,
     check_out: &str,
 ) -> BookingResult<Vec<SpecialDay>> {
-    let rows: Vec<(String, f64)> = sqlx::query_as(SPECIAL_DAYS_IN_RANGE_SQL)
+    let rows = sqlx::query_as(SPECIAL_DAYS_IN_RANGE_SQL)
         .bind(date_key(check_in))
         .bind(date_key(check_out))
         .fetch_all(pool)
         .await
         .map_err(database_error)?;
 
-    Ok(rows
-        .into_iter()
-        .map(|(date, uplift_pct)| SpecialDay { date, uplift_pct })
-        .collect())
+    Ok(special_days_from_rows(rows))
 }
 
 async fn load_special_days_tx(
@@ -523,17 +520,22 @@ async fn load_special_days_tx(
     check_in: &str,
     check_out: &str,
 ) -> BookingResult<Vec<SpecialDay>> {
-    let rows: Vec<(String, f64)> = sqlx::query_as(SPECIAL_DAYS_IN_RANGE_SQL)
+    let rows = sqlx::query_as(SPECIAL_DAYS_IN_RANGE_SQL)
         .bind(date_key(check_in))
         .bind(date_key(check_out))
         .fetch_all(&mut **tx)
         .await
         .map_err(database_error)?;
 
-    Ok(rows
-        .into_iter()
+    Ok(special_days_from_rows(rows))
+}
+
+/// Bản pool và bản transaction chỉ khác nhau ở chỗ chạy câu lệnh. Dùng chung
+/// một bộ ánh xạ để hai đường không thể hiểu khác nhau về cùng một hàng.
+fn special_days_from_rows(rows: Vec<(String, f64)>) -> Vec<SpecialDay> {
+    rows.into_iter()
         .map(|(date, uplift_pct)| SpecialDay { date, uplift_pct })
-        .collect())
+        .collect()
 }
 ```
 
@@ -1824,17 +1826,9 @@ range, so the display can show one line without the schema changing."
 
 - [ ] **Bước 1: Mở đường cho hạ tầng test trước, nếu không sẽ đỏ vì lý do sai**
 
-Trong `src/__mocks__/tauri-core.ts`, thêm vào object `defaults`:
+`src/__mocks__/tauri-core.ts` **không cần sửa**: `get_special_dates: []` đã có sẵn ở `:117`, và hai lệnh ghi mới không cần mặc định vì test dưới đây mock thẳng `@/lib/invokeCommand` — đúng lối `PricingSection.test.tsx` đang làm. Đừng thêm gì vào file ấy.
 
-```ts
-        get_special_dates: [],
-        save_special_date_range: undefined,
-        delete_special_dates: undefined,
-```
-
-(`get_special_dates` đã có sẵn ở `:117` — chỉ thêm hai dòng mới.) File này **ném lỗi** với mọi lệnh chưa đăng ký, nên thiếu là mọi test của component sẽ chết.
-
-Trong `tests/frontend-invoke-wrapper-guardrails.test.ts`, thêm vào `RAW_INVOKE_ALLOWED_COMMANDS`, giữ đúng thứ tự chữ cái:
+Chỉ sửa `tests/frontend-invoke-wrapper-guardrails.test.ts`: thêm vào `RAW_INVOKE_ALLOWED_COMMANDS`, giữ đúng thứ tự chữ cái:
 
 ```ts
   get_special_dates: "read-only peak-season lookup",
@@ -1844,7 +1838,9 @@ Test ở `:260-290` đỏ với bất kỳ `invoke` trần nào không có trong
 
 - [ ] **Bước 2: Viết test đỏ cho component**
 
-Tạo `src/pages/settings/SpecialDatesSection.test.tsx`. Mở một file test sẵn có trong cùng thư mục (ví dụ `PricingSection.test.tsx`) và chép đúng cách nó dựng mock và render — đừng tự nghĩ ra lối mới.
+Tạo `src/pages/settings/SpecialDatesSection.test.tsx`.
+
+Lối mock dưới đây là chép từ `PricingSection.test.tsx` — `vi.hoisted` rồi `vi.mock` cho ba module. File ấy còn thay các nguyên hàm shadcn (`Button`, `Input`, `Label`) bằng thẻ HTML trần. **Nếu** một khẳng định dưới đây tìm không ra nút hay ô nhập vì component thật cư xử lạ trong jsdom, chép luôn khối thay nguyên hàm ấy sang; đừng nới lỏng khẳng định.
 
 ```tsx
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
