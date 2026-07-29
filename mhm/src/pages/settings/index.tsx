@@ -3,6 +3,7 @@ import {
   BedDouble,
   Bot,
   Building2,
+  CalendarDays,
   Camera,
   Clock,
   Database,
@@ -28,6 +29,7 @@ import OcrConfigSection from "./OcrConfigSection";
 import PricingSection from "./PricingSection";
 import RoomConfigSection from "./RoomConfigSection";
 import SoftwareUpdateSection from "./SoftwareUpdateSection";
+import SpecialDatesSection from "./SpecialDatesSection";
 import UserManagement from "./UserManagement";
 
 type SettingsSectionKey =
@@ -42,6 +44,7 @@ type SettingsSectionKey =
   | "ceo-agent"
   | "updates"
   | "pricing"
+  | "peak-season"
   | "users";
 
 export default function SettingsPage() {
@@ -68,6 +71,7 @@ export default function SettingsPage() {
     ...(isCurrentAdmin
       ? [
         { key: "pricing" as const, label: "Pricing", icon: DollarSign },
+        { key: "peak-season" as const, label: "Peak Season", icon: CalendarDays },
         { key: "users" as const, label: "Users", icon: Users },
       ]
       : []),
@@ -130,6 +134,7 @@ export default function SettingsPage() {
             <CeoAgentSection />
           )}
         {activeSection === "pricing" && isCurrentAdmin && <PricingSection />}
+        {activeSection === "peak-season" && isCurrentAdmin && <SpecialDatesSection />}
         {activeSection === "users" && isCurrentAdmin && <UserManagement />}
       </Card>
     </div>

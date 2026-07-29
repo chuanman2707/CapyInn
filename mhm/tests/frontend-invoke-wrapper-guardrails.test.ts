@@ -50,6 +50,7 @@ const RAW_INVOKE_ALLOWED_COMMANDS: Record<string, string> = {
   get_rooms: "read-only room list lookup",
   get_rooms_availability: "read-only room availability lookup",
   get_settings: "read-only settings lookup",
+  get_special_dates: "read-only peak-season lookup",
   get_stay_info_text: "read-only stay info lookup",
   logout: "auth runtime action excluded from PMS write wrapper scope",
   mark_crash_report_dismissed: "diagnostics lifecycle action",
