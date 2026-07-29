@@ -1,4 +1,4 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useMemo } from "react";
 import { useHotelStore } from "../stores/useHotelStore";
 import {
     Sheet,
@@ -12,6 +12,8 @@ import { Label } from "@/components/ui/label";
 import { FormField, FormFieldSelect } from "@/components/shared/FormField";
 import { formatAppError } from "@/lib/appError";
 import { fmtMoney } from "@/lib/format";
+import { addDays, addDaysIso, localDateIso, localRfc3339 } from "@/lib/timelineSelection";
+import { sumRoomPrices, useRoomPrices } from "@/hooks/useRoomPrices";
 import { toast } from "sonner";
 import { Sparkles, Hand, Check, ChevronLeft, ChevronRight, Users, Star, CalendarClock } from "lucide-react";
 import type { CheckInGuestInput, RoomAssignment } from "@/types";
@@ -38,12 +40,12 @@ export default function GroupCheckinSheet() {
     const [roomType, setRoomType] = useState("all");
     const [nights, setNights] = useState(1);
     const [source, setSource] = useState("walk-in");
-    const [checkInDate, setCheckInDate] = useState(() => {
-        const d = new Date();
-        return d.toISOString().split("T")[0];
-    });
+    // Ngày địa phương. `toISOString()` trả ngày UTC, mà trước 07:00 giờ Việt Nam
+    // vẫn còn là hôm qua — đủ để mặc định sai ngày nhận phòng và để
+    // `isReservation` phán nhầm chế độ ngay trong ca đêm.
+    const [checkInDate, setCheckInDate] = useState(() => localDateIso(new Date()));
 
-    const todayStr = new Date().toISOString().split("T")[0];
+    const todayStr = localDateIso(new Date());
     const isReservation = checkInDate > todayStr;
 
     // Step 2: Room selection
@@ -101,10 +103,41 @@ export default function GroupCheckinSheet() {
         );
     };
 
-    const totalPrice = selectedRooms.reduce((sum, id) => {
-        const room = rooms.find((r) => r.id === id);
-        return sum + (room ? room.base_price * nights : 0);
-    }, 0);
+    // `group_lifecycle.rs` tính tiền cho đặt trước bằng ngày trần, còn khách vãng
+    // lai bằng `Local::now()` và `now + nights`. Bản xem trước phải hỏi đúng cặp
+    // mốc mà nhánh tương ứng sẽ dùng, nếu không con số báo cho khách là của một
+    // kỳ nghỉ khác.
+    const { quoteCheckIn, quoteCheckOut } = useMemo(() => {
+        if (isReservation) {
+            return {
+                quoteCheckIn: checkInDate,
+                quoteCheckOut: addDaysIso(checkInDate, Math.max(nights, 0)),
+            };
+        }
+        const now = new Date();
+        return {
+            quoteCheckIn: localRfc3339(now),
+            quoteCheckOut: localRfc3339(addDays(now, Math.max(nights, 0))),
+        };
+    }, [checkInDate, isReservation, nights]);
+
+    const {
+        byRoomId: priceByRoom,
+        loading: priceLoading,
+        failed: priceFailed,
+    } = useRoomPrices({
+        roomIds: selectedRooms,
+        checkIn: quoteCheckIn,
+        checkOut: quoteCheckOut,
+        // `group_lifecycle.rs` charges with `None`, so the group is not billed an
+        // extra-person fee. Quoting one would show more than the desk collects.
+        guests: null,
+        disabled: !isGroupCheckinOpen,
+    });
+
+    // `null` khi còn phòng chưa có giá — thà không hiện tổng còn hơn hiện một
+    // tổng thiếu mất một phòng.
+    const totalPrice = sumRoomPrices(selectedRooms, priceByRoom);
 
     const handleSubmit = async () => {
         try {
@@ -267,8 +300,10 @@ export default function GroupCheckinSheet() {
                                                 }`}
                                         >
                                             <p className="font-bold text-sm">{room.name}</p>
+                                            {/* Không in `base_price`: giá gắn với loại
+                                                phòng, nên con số theo từng phòng đặt
+                                                cạnh tổng đã báo giá là số không ai thu. */}
                                             <p className="text-xs text-brand-muted">{room.type} • T{room.floor}</p>
-                                            <p className="text-xs font-semibold text-brand-primary mt-1">{fmtMoney(room.base_price)}</p>
                                             {selectedRooms.includes(room.id) && (
                                                 <Check size={14} className="text-brand-primary mt-1" />
                                             )}
@@ -387,14 +422,30 @@ export default function GroupCheckinSheet() {
                                     return (
                                         <div key={id} className="flex justify-between text-sm">
                                             <span>{room?.name || id}</span>
-                                            <span className="font-medium">{fmtMoney((room?.base_price || 0) * nights)}</span>
+                                            <span className="font-medium tabular-nums">
+                                                {priceByRoom[id] ? fmtMoney(priceByRoom[id].total) : "—"}
+                                            </span>
                                         </div>
                                     );
                                 })}
                                 <hr className="border-slate-200" />
                                 <div className="flex justify-between text-base font-bold">
                                     <span>Tổng cộng</span>
-                                    <span className="text-brand-primary">{fmtMoney(totalPrice)}</span>
+                                    {priceFailed ? (
+                                        <span
+                                            data-testid="group-price-error"
+                                            className="text-amber-600 text-sm"
+                                        >
+                                            Chưa tính được giá
+                                        </span>
+                                    ) : (
+                                        <span
+                                            data-testid="group-price-total"
+                                            className="text-brand-primary tabular-nums"
+                                        >
+                                            {priceLoading || totalPrice == null ? "…" : fmtMoney(totalPrice)}
+                                        </span>
+                                    )}
                                 </div>
                             </div>
 

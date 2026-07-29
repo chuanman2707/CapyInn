@@ -36,5 +36,10 @@ export default defineConfig({
     include: ["tests/**/*.test.{ts,tsx}", "src/**/*.test.{ts,tsx}"],
     css: false,
     reporters: ["verbose"],
+    // Pinned because the app is a Vietnamese PMS and CI runs at UTC, where the
+    // local-vs-UTC calendar-day tests stop discriminating: at +00:00 a
+    // `toISOString()` day and a local day are the same string, so a test that
+    // exists to catch that confusion would pass against the bug.
+    env: { TZ: "Asia/Ho_Chi_Minh" },
   },
 });

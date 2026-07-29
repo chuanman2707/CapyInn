@@ -303,7 +303,10 @@ export default function ReservationSheet({ open, onOpenChange, preSelectedRoomId
                             <option value="">— Chọn phòng —</option>
                             {vacantRooms.map((r) => (
                                 <option key={r.id} value={r.id}>
-                                    {r.name} ({r.type}) — {fmtNumber(r.base_price)}₫/đêm
+                                    {/* Không kèm `base_price`: giá gắn với loại phòng,
+                                        nên con số theo từng phòng đứng cạnh tổng do
+                                        engine tính là số không ai thu. */}
+                                    {r.name} ({r.type})
                                 </option>
                             ))}
                         </select>

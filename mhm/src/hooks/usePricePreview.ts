@@ -7,7 +7,10 @@ interface UsePricePreviewOptions {
     roomId: string;
     checkIn: string;
     checkOut: string;
-    guests: number;
+    /// `null` asks the backend the way a walk-in check-in charges — with no
+    /// guest count, so no extra-person fee. `stay_lifecycle::check_in` passes
+    /// `None`; sending a count here would quote above what the desk collects.
+    guests: number | null;
     debounceMs?: number;
 }
 
