@@ -179,7 +179,12 @@ export default function Reservations() {
             .filter(b => b.room_id === roomId && b.status !== "cancelled")
             .flatMap((b): BookingBar[] => {
                 const checkIn = parseDate(b.scheduled_checkin || b.check_in_at);
-                const checkOut = parseDate(b.scheduled_checkout || b.expected_checkout);
+                // Booking đã trả: bar dừng đúng lúc trả phòng thực tế, kể cả khi trước đó lỡ extend.
+                const checkOut = parseDate(
+                    b.status === "checked_out" && b.actual_checkout
+                        ? b.actual_checkout
+                        : b.scheduled_checkout || b.expected_checkout,
+                );
                 const startDay = DAYS[0].dateObj;
 
                 const rawStart = differenceInCalendarDays(checkIn, startDay) + HALF_DAY;
