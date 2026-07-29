@@ -38,6 +38,13 @@ function addDays(date: string, days: number): string {
     return d.toISOString().split("T")[0];
 }
 
+// Trần số đêm cho một đặt phòng. Trước đây ngày đi chỉ đọc được, suy ra từ
+// một ô số đêm mang `max={90}` — 90 đêm là trần cứng theo cấu trúc. Ô đó bị
+// xoá để cho gõ tay ngày đi trực tiếp, và không gì thay thế trần cũ ở đây:
+// một lỗi gõ năm (2036 thay vì 2026) tạo ra một đặt phòng khoảng 3650 đêm.
+// Đây là khôi phục lại trần cũ, không phải đặt ra chính sách mới.
+const MAX_RESERVATION_NIGHTS = 90;
+
 export default function ReservationSheet({ open, onOpenChange, preSelectedRoomId, editBooking }: Props) {
     const { rooms, fetchRooms } = useHotelStore();
     const [roomId, setRoomId] = useState(preSelectedRoomId || "");
@@ -47,6 +54,11 @@ export default function ReservationSheet({ open, onOpenChange, preSelectedRoomId
     const [checkInDate, setCheckInDate] = useState("");
     const [checkOutDate, setCheckOutDate] = useState("");
     const [guests, setGuests] = useState(2);
+    // Chỉ có ý nghĩa ở edit mode: người dùng đã đụng vào ô số khách trong lần
+    // sửa này chưa. Dùng để phân biệt "chưa đụng tới" (giữ nguyên số đã lưu,
+    // kể cả khi số đã lưu là NULL) với "đã chọn một số khách mới" — xem
+    // handleSubmit và effect nạp placeholder bên dưới.
+    const [guestsTouched, setGuestsTouched] = useState(false);
     const nights = nightsBetween(checkInDate, checkOutDate);
     const datesValid = nights > 0;
     const [deposit, setDeposit] = useState("");
@@ -90,7 +102,13 @@ export default function ReservationSheet({ open, onOpenChange, preSelectedRoomId
                 setCheckOutDate(cout);
                 setDeposit(editBooking.deposit_amount ? String(editBooking.deposit_amount) : "");
                 setSource(editBooking.source || "phone");
-                setGuests(editBooking.guests ?? 2);
+                // Giá trị tạm: nếu `editBooking.guests` là NULL (booking cũ,
+                // chưa khai số khách), placeholder trung tính đúng đắn là
+                // `max_guests` của phòng — effect bên dưới sẽ nạp lại ngay khi
+                // `rooms` có phòng này. `?? 1` chỉ là chỗ giữ chỗ tối thiểu
+                // (input có `min={1}`) cho khoảnh khắc trước khi effect đó chạy.
+                setGuests(editBooking.guests ?? 1);
+                setGuestsTouched(false);
             } else {
                 // Mặc định: nhận phòng ngày mai, ở 1 đêm.
                 const tomorrow = addDays(new Date().toISOString().split("T")[0], 1);
@@ -129,6 +147,20 @@ export default function ReservationSheet({ open, onOpenChange, preSelectedRoomId
         }
     }, [roomId, rooms, isEditMode]);
 
+    // Edit mode, riêng trường hợp booking cũ (guests NULL): hiện max_guests
+    // của phòng làm placeholder trung tính, chứ không phải số 2 hardcode.
+    // Vô hại về giá — chỉ hiện lên, không tự gửi: handleSubmit chỉ gửi giá
+    // trị này khi `guestsTouched`, còn không thì gửi `null` để giữ nguyên
+    // NULL đã lưu. Chỉ chạy khi thực sự cần: guests đã lưu là NULL và người
+    // dùng chưa đụng vào ô này trong lần sửa này.
+    useEffect(() => {
+        if (!isEditMode || !editBooking) return;
+        if (editBooking.guests != null) return;
+        if (guestsTouched) return;
+        const room = rooms.find((r) => r.id === editBooking.room_id);
+        if (room) setGuests(room.max_guests);
+    }, [isEditMode, editBooking, rooms, guestsTouched]);
+
     async function handleSubmit() {
         if (!roomId || !checkInDate || !checkOutDate) {
             toast.error("Vui lòng điền đầy đủ thông tin");
@@ -136,6 +168,12 @@ export default function ReservationSheet({ open, onOpenChange, preSelectedRoomId
         }
         if (nights <= 0) {
             toast.error("Ngày đi phải sau ngày đến");
+            return;
+        }
+        if (nights > MAX_RESERVATION_NIGHTS) {
+            // Ô ngày đi cho gõ tay trực tiếp, nên `max` trên input không chặn
+            // được — chặn ở đây để một lỗi gõ năm không khoá phòng cả thập kỷ.
+            toast.error(`Số đêm không được vượt quá ${MAX_RESERVATION_NIGHTS} đêm`);
             return;
         }
         if (!isEditMode && !guestName) {
@@ -150,13 +188,21 @@ export default function ReservationSheet({ open, onOpenChange, preSelectedRoomId
         try {
             const correlationId = createCorrelationId();
             if (isEditMode && editBooking) {
+                // Booking cũ (guests NULL) mà người dùng chưa đụng vào ô số
+                // khách trong lần sửa này: gửi `null`, không phải một số bịa
+                // ra. Backend đọc `new_guests: null` là "giữ nguyên số đã
+                // lưu" (modify_reservation_tx: `req.new_guests.or(reservation.guests)`),
+                // nên NULL vẫn ở lại NULL và giá không đổi. Người dùng có gõ
+                // một số khách mới thì gửi đúng số đó.
+                const newGuests =
+                    editBooking.guests == null && !guestsTouched ? null : guests;
                 await invokeWriteCommand("modify_reservation", {
                     req: {
                         booking_id: editBooking.id,
                         new_check_in_date: checkInDate,
                         new_check_out_date: checkOutDate,
                         new_nights: nights,
-                        new_guests: guests,
+                        new_guests: newGuests,
                     },
                 }, {
                     correlationId,
@@ -214,6 +260,7 @@ export default function ReservationSheet({ open, onOpenChange, preSelectedRoomId
         setSource("phone");
         setNotes("");
         setGuests(2);
+        setGuestsTouched(false);
         resetAvailability();
     }
 
@@ -277,6 +324,7 @@ export default function ReservationSheet({ open, onOpenChange, preSelectedRoomId
                                 className="w-full h-10 px-3 rounded-xl border border-slate-200 bg-slate-50 text-sm focus:outline-none focus:ring-2 focus:ring-blue-200"
                                 value={checkOutDate}
                                 min={checkInDate ? addDays(checkInDate, 1) : undefined}
+                                max={checkInDate ? addDays(checkInDate, MAX_RESERVATION_NIGHTS) : undefined}
                                 onChange={(e) => setCheckOutDate(e.target.value)}
                             />
                         </div>
@@ -291,7 +339,10 @@ export default function ReservationSheet({ open, onOpenChange, preSelectedRoomId
                             min={1}
                             className="w-full h-10 px-3 rounded-xl border border-slate-200 bg-slate-50 text-sm focus:outline-none focus:ring-2 focus:ring-blue-200"
                             value={guests}
-                            onChange={(e) => setGuests(Math.max(1, parseInt(e.target.value) || 1))}
+                            onChange={(e) => {
+                                setGuests(Math.max(1, parseInt(e.target.value) || 1));
+                                setGuestsTouched(true);
+                            }}
                         />
                     </div>
 

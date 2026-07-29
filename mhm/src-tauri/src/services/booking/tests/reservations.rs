@@ -66,6 +66,62 @@ async fn create_reservation_rejects_inconsistent_nights_input() {
     ));
 }
 
+/// Trước đây ngày đi chỉ đọc được, suy từ một ô số đêm mang `max={90}` — 90
+/// đêm là trần cứng theo cấu trúc. Ô đó bị xoá để cho gõ tay ngày đi, và
+/// không gì thay thế trần cũ ở tầng service: một lỗi gõ năm (`2036` thay vì
+/// `2026`) tạo ra một đặt phòng khoảng 3650 đêm, khoá phòng đó cả thập kỷ.
+/// Test này khôi phục kỳ vọng: vượt trần phải bị từ chối, bất kể ai gọi vào
+/// (form, gateway, agent).
+#[tokio::test]
+async fn create_reservation_rejects_nights_beyond_the_ceiling() {
+    let pool = test_pool().await;
+    seed_room_with_price(&pool, "R160B", 600_000).await.unwrap();
+
+    let error = reservation_lifecycle::create_reservation(
+        &pool,
+        CreateReservationRequest {
+            room_id: "R160B".to_string(),
+            guest_name: "Nguyen Van C".to_string(),
+            guest_phone: Some("0900000002".to_string()),
+            guest_doc_number: Some("079000000002".to_string()),
+            check_in_date: "2026-08-08".to_string(),
+            check_out_date: "2036-08-08".to_string(), // ~3650 đêm — lỗi gõ năm
+            nights: 3653,
+            deposit_amount: None,
+            source: Some("phone".to_string()),
+            notes: None,
+            guests: None,
+        },
+    )
+    .await
+    .unwrap_err();
+
+    assert!(matches!(
+        error,
+        crate::domain::booking::BookingError::Validation(_)
+    ));
+}
+
+#[tokio::test]
+async fn modify_reservation_rejects_nights_beyond_the_ceiling() {
+    let pool = test_pool().await;
+    seed_booked_reservation_with_price(&pool, "B166B", "R166B", 600_000)
+        .await
+        .unwrap();
+
+    let error = reservation_lifecycle::modify_reservation(
+        &pool,
+        reservation_modify_request("B166B", "2026-08-08", "2036-08-08", 3653),
+    )
+    .await
+    .unwrap_err();
+
+    assert!(matches!(
+        error,
+        crate::domain::booking::BookingError::Validation(_)
+    ));
+}
+
 #[tokio::test]
 async fn reservation_lifecycle_smoke_covers_confirm_and_cancel_paths() {
     let pool = test_pool().await;
