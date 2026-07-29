@@ -116,10 +116,20 @@ pub(crate) async fn load_stay_pricing_inputs_tx(
 /// preview supply a room *type* directly — there is no booking or room yet — so
 /// this skips the room lookup and is otherwise identical.
 ///
-/// The special-date read is deliberately lenient: a failure prices the stay at a
-/// 0% uplift rather than failing the preview, which is the behaviour the
-/// preview command has always had. The lifecycle path, which actually charges
-/// money, propagates the error instead.
+/// Every read here propagates, exactly as the transactional twin does. The
+/// special-date read used to be lenient — a failure priced the stay at a 0%
+/// uplift instead of failing the preview — so on a holiday the quote could come
+/// out below what the lifecycle path would charge, silently.
+///
+/// How often that read can actually fail is not the point, and the honest answer
+/// is *rarely*: the pool opens WAL with a 5s `busy_timeout` (`db.rs`), so a plain
+/// `SELECT` does not block behind a writer. The point is that guessing 0% is the
+/// wrong response to not knowing. A preview that cannot read the prices should
+/// say so rather than quote low.
+///
+/// Note this path has no equivalent of the twin's room lookup: an unknown room
+/// type previews at the house default where a check-in would fail. See
+/// `the_house_default_only_applies_to_types_with_no_rooms`.
 pub(crate) async fn load_stay_pricing_inputs_for_room_type(
     pool: &Pool<Sqlite>,
     room_type: &str,
@@ -133,7 +143,7 @@ pub(crate) async fn load_stay_pricing_inputs_for_room_type(
     } else {
         None
     };
-    let special_uplift_pct = load_special_uplift(pool, check_in).await.unwrap_or(0.0);
+    let special_uplift_pct = load_special_uplift(pool, check_in).await?;
 
     Ok(StayPricingInputs {
         room_type: room_type.to_string(),
@@ -267,7 +277,10 @@ async fn load_special_uplift_tx(
 
 #[cfg(test)]
 mod tests {
-    use super::{load_stay_pricing_inputs_tx, stored_rule_from_row};
+    use super::{
+        load_stay_pricing_inputs_for_room_type, load_stay_pricing_inputs_tx, stored_rule_from_row,
+        BookingError,
+    };
     use sqlx::{sqlite::SqlitePoolOptions, Connection, Executor, SqliteConnection};
 
     #[tokio::test]
@@ -432,5 +445,70 @@ mod tests {
         assert_eq!(inputs.special_uplift_pct, 0.0);
 
         tx.rollback().await.unwrap();
+    }
+
+    const HOLIDAY_CHECK_IN: &str = "2026-04-20T14:00:00+07:00";
+    const HOLIDAY_CHECK_OUT: &str = "2026-04-21T12:00:00+07:00";
+
+    async fn pool_with_a_holiday() -> sqlx::SqlitePool {
+        let pool = setup_loader_pool().await;
+        sqlx::query("INSERT INTO rooms (id, type, base_price) VALUES (?, ?, ?)")
+            .bind("room-3")
+            .bind("deluxe")
+            .bind(600000)
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO special_dates (date, uplift_pct) VALUES (?, ?)")
+            .bind("2026-04-20")
+            .bind(10.0)
+            .execute(&pool)
+            .await
+            .unwrap();
+        pool
+    }
+
+    async fn preview_uplift(pool: &sqlx::SqlitePool) -> super::BookingResult<f64> {
+        load_stay_pricing_inputs_for_room_type(
+            pool,
+            "deluxe",
+            HOLIDAY_CHECK_IN,
+            HOLIDAY_CHECK_OUT,
+            "nightly",
+        )
+        .await
+        .map(|inputs| inputs.special_uplift_pct)
+    }
+
+    /// The preview used to end its special-date read with `.unwrap_or(0.0)`, so a
+    /// failed read quoted the stay with no holiday surcharge while the lifecycle
+    /// path still charged one. Dropping the table is the cheapest way to make that
+    /// read fail; the realistic cause is a transient lock, not a missing table.
+    ///
+    /// Paired with the happy path on purpose: a preview that errors on *everything*
+    /// would also pass the first assertion alone.
+    ///
+    /// Asserts the error *variant*, not its text. The message here is SQLite's
+    /// `no such table`, which only this artificial `DROP` produces; a real lock
+    /// says `database is locked` and names no table. Matching on the string would
+    /// pin an accident of the test setup.
+    #[tokio::test]
+    async fn a_failed_special_date_read_fails_the_preview_instead_of_quoting_no_uplift() {
+        let pool = pool_with_a_holiday().await;
+        assert_eq!(
+            preview_uplift(&pool).await.unwrap(),
+            10.0,
+            "precondition: the preview reads the uplift when the read works"
+        );
+
+        pool.execute("DROP TABLE special_dates").await.unwrap();
+
+        let error = preview_uplift(&pool)
+            .await
+            .expect_err("an unreadable special_dates must not be quoted as 0% uplift");
+        assert!(
+            matches!(error, BookingError::Database(_)),
+            "a failed read is a database error, not a price: {error:?}"
+        );
     }
 }

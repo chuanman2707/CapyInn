@@ -167,6 +167,19 @@ mod tests {
         .expect("seed room");
     }
 
+    async fn seed_special_date(pool: &Pool<Sqlite>, date: &str, uplift_pct: f64) {
+        sqlx::query(
+            "INSERT INTO special_dates (id, date, label, uplift_pct, created_at)
+             VALUES (?, ?, 'Lễ', ?, '2026-04-01T00:00:00+07:00')",
+        )
+        .bind(format!("sd-{date}"))
+        .bind(date)
+        .bind(uplift_pct)
+        .execute(pool)
+        .await
+        .expect("seed special date");
+    }
+
     /// The point of routing both paths through this module: the quote the UI
     /// shows and the amount charged at check-in must agree.
     ///
@@ -176,9 +189,15 @@ mod tests {
     /// lifecycle path starts from a room id, so that room's own type always
     /// supplies a base price. `the_house_default_only_applies_to_types_with_no_rooms`
     /// covers that branch on the preview side.
+    ///
+    /// The check-in date is also seeded as a special date, so the comparison runs
+    /// with a holiday uplift in play. That input is the one the two paths
+    /// disagreed on longest: the preview used to swallow a failed `special_dates`
+    /// read and quote a 0% uplift while the charge propagated the error.
     #[tokio::test]
     async fn the_preview_and_the_lifecycle_charge_agree_on_every_reachable_rule_source() {
         let pool = migrated_pool().await;
+        seed_special_date(&pool, "2026-04-20", 10.0).await;
 
         // 1. configured rule
         seed_room(&pool, "R-CONF", "configured", 400_000).await;
@@ -310,15 +329,7 @@ mod tests {
             .await
             .expect("plain preview");
 
-        sqlx::query("INSERT INTO special_dates (id, date, label, uplift_pct, created_at) VALUES (?, ?, ?, ?, ?)")
-            .bind("sd-1")
-            .bind("2026-04-20")
-            .bind("Lễ")
-            .bind(10.0)
-            .bind("2026-04-01T00:00:00+07:00")
-            .execute(&pool)
-            .await
-            .expect("seed special date");
+        seed_special_date(&pool, "2026-04-20", 10.0).await;
 
         let uplifted = calculate_price_preview(&pool, "derived", CHECK_IN, CHECK_OUT, "nightly")
             .await
