@@ -11,6 +11,7 @@ import { createCorrelationId } from "@/lib/correlationId";
 import { fmtNumber } from "@/lib/format";
 import { invokeWriteCommand } from "@/lib/invokeCommand";
 import { optionalMoneyVnd } from "@/lib/money";
+import { nightsBetween } from "@/lib/timelineSelection";
 import { toast } from "sonner";
 import InvoiceDialog from "./InvoiceDialog";
 import type { EditableBooking } from "@/types";
@@ -21,16 +22,6 @@ interface Props {
     preSelectedRoomId?: string;
     editBooking?: EditableBooking;
     prefillDates?: { checkIn: string; checkOut: string };
-}
-
-function nightsBetween(checkIn: string, checkOut: string): number {
-    if (!checkIn || !checkOut) return 0;
-    // Ngày dạng "YYYY-MM-DD" (không có giờ) được JS phân giải theo UTC — dùng
-    // nguyên dạng đó (không thêm "T00:00:00") để tránh lệch ngày ở múi giờ
-    // dương như Asia/Ho_Chi_Minh (UTC+7) khi quy đổi qua toISOString().
-    const ms = new Date(checkOut).getTime() - new Date(checkIn).getTime();
-    if (Number.isNaN(ms)) return 0;
-    return Math.round(ms / 86_400_000);
 }
 
 function addDays(date: string, days: number): string {

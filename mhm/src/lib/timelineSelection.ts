@@ -26,6 +26,18 @@ export function addDaysIso(date: string, days: number): string {
     return localDateIso(new Date(y, m - 1, d + days));
 }
 
+// Ngày dạng "YYYY-MM-DD" (không giờ) được JS phân giải theo UTC — dùng nguyên
+// dạng đó (không thêm "T00:00:00") để tránh lệch ngày ở múi giờ dương như
+// Asia/Ho_Chi_Minh khi quy đổi qua toISOString(). Dùng chung cho
+// BackfillSheet.tsx và ReservationSheet.tsx — trước đây mỗi nơi tự giữ một
+// bản sao y hệt, giờ chỉ còn một chỗ để sửa nếu logic múi giờ đổi.
+export function nightsBetween(checkIn: string, checkOut: string): number {
+    if (!checkIn || !checkOut) return 0;
+    const ms = new Date(checkOut).getTime() - new Date(checkIn).getTime();
+    if (Number.isNaN(ms)) return 0;
+    return Math.round(ms / 86_400_000);
+}
+
 /** Mỗi ô được chọn = một đêm ở; ngày ra = ngày bắt đầu + số ô. */
 export function resolveSelection(
     range: TimelineSelectionRange,

@@ -3,12 +3,14 @@ import { useHotelStore } from "../stores/useHotelStore";
 import { History } from "lucide-react";
 import { Sheet, SheetContent, SheetHeader, SheetTitle } from "@/components/ui/sheet";
 import { Button } from "@/components/ui/button";
+import { FormField, FormFieldSelect } from "@/components/shared/FormField";
 import { usePricePreview } from "@/hooks/usePricePreview";
 import { formatAppError } from "@/lib/appError";
 import { createCorrelationId } from "@/lib/correlationId";
 import { invokeWriteCommand } from "@/lib/invokeCommand";
 import { getRoomTypeLabel } from "@/lib/constants";
 import { fmtNumber } from "@/lib/format";
+import { addDaysIso, localDateIso, nightsBetween } from "@/lib/timelineSelection";
 import { toast } from "sonner";
 
 export interface BackfillPrefill {
@@ -24,23 +26,19 @@ interface Props {
     prefill?: BackfillPrefill;
 }
 
-// Ngày dạng "YYYY-MM-DD" (không giờ) được JS phân giải theo UTC — dùng nguyên
-// dạng đó (không thêm "T00:00:00") để tránh lệch ngày ở múi giờ dương như
-// Asia/Ho_Chi_Minh khi quy đổi qua toISOString(). Cùng cách làm với
-// ReservationSheet.tsx.
-function nightsBetween(checkIn: string, checkOut: string): number {
-    if (!checkIn || !checkOut) return 0;
-    const ms = new Date(checkOut).getTime() - new Date(checkIn).getTime();
-    if (Number.isNaN(ms)) return 0;
-    return Math.round(ms / 86_400_000);
-}
-
 export default function BackfillSheet({ open, onOpenChange, prefill }: Props) {
     const { rooms, fetchRooms } = useHotelStore();
     const [roomId, setRoomId] = useState("");
     const [guestName, setGuestName] = useState("");
     const [guestPhone, setGuestPhone] = useState("");
     const [guestDoc, setGuestDoc] = useState("");
+    // Feed thẳng vào danh sách khai báo tạm trú nộp công an — không được bịa,
+    // nên có input thật (giá trị dưới đây chỉ là gợi ý ban đầu trong ô, chủ
+    // thấy và có thể sửa; những gì gửi đi là những gì chủ thực sự nhập).
+    const [guestDob, setGuestDob] = useState("");
+    const [guestGender, setGuestGender] = useState("Nam");
+    const [guestNationality, setGuestNationality] = useState("Việt Nam");
+    const [guestAddress, setGuestAddress] = useState("");
     const [checkInDate, setCheckInDate] = useState("");
     const [checkOutDate, setCheckOutDate] = useState("");
     const [stillStaying, setStillStaying] = useState(false);
@@ -67,6 +65,10 @@ export default function BackfillSheet({ open, onOpenChange, prefill }: Props) {
         setGuestName("");
         setGuestPhone("");
         setGuestDoc("");
+        setGuestDob("");
+        setGuestGender("Nam");
+        setGuestNationality("Việt Nam");
+        setGuestAddress("");
         setTotal(0);
         setTotalDirty(false);
         setPaid(0);
@@ -97,14 +99,33 @@ export default function BackfillSheet({ open, onOpenChange, prefill }: Props) {
     }, [preview, totalDirty]);
 
     // Khách đã trả phòng: mặc định đã thu đủ, cho tới khi chủ sửa tay.
-    // Khách còn ở: không giả định đã thu đủ (khách chưa trả phòng).
+    // Khách còn ở: mặc định 0 — khách chưa trả phòng nên không giả định đã
+    // thu đủ. Guard cũ là `!paidDirty && !stillStaying`: đúng chiều untick
+    // (còn ở → đã trả) nhưng bỏ sót chiều tick (đã trả → còn ở) vì điều kiện
+    // hoá false ngay khi stillStaying thành true, nên "Đã thu" bị kẹt ở giá
+    // trị total cũ và gửi đi paid_amount sai cho một khách chưa trả phòng.
     useEffect(() => {
-        if (!paidDirty && !stillStaying) setPaid(total);
+        if (!paidDirty) setPaid(stillStaying ? 0 : total);
     }, [total, paidDirty, stillStaying]);
 
     // Khách còn ở chỉ ghi bù được vào phòng đang trống — backend enforce lại
     // rule này, đây chỉ là phản ánh lên danh sách chọn cho khỏi chọn nhầm.
     const selectableRooms = stillStaying ? rooms.filter((r) => r.status === "vacant") : rooms;
+
+    // Bật "Khách còn ở" có thể lọc mất phòng đang chọn (không còn vacant) —
+    // <select> khi đó không có option khớp và hiện trống, nhưng state vẫn giữ
+    // (và vẫn gửi đi) roomId đó nếu không xoá ở đây.
+    useEffect(() => {
+        if (roomId && !selectableRooms.some((r) => r.id === roomId)) {
+            setRoomId("");
+        }
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [stillStaying, rooms]);
+
+    // Backend vẫn validate lại — đây chỉ là rào chắn trong form cho khỏi chọn
+    // nhầm một ngày rõ ràng vô lý (ghi bù mà ngày vào ở tương lai, hoặc ngày
+    // ra "đã trả phòng" lại nằm sau hôm nay).
+    const todayIso = localDateIso(new Date());
 
     const paidTooHigh = paid > total;
     const paidNegative = paid < 0;
@@ -133,10 +154,10 @@ export default function BackfillSheet({ open, onOpenChange, prefill }: Props) {
                                 full_name: guestName,
                                 doc_number: guestDoc,
                                 phone: guestPhone,
-                                dob: "",
-                                gender: "Nam",
-                                nationality: "Việt Nam",
-                                address: "",
+                                dob: guestDob,
+                                gender: guestGender,
+                                nationality: guestNationality,
+                                address: guestAddress,
                             },
                         ],
                         check_in_date: checkInDate,
@@ -211,6 +232,7 @@ export default function BackfillSheet({ open, onOpenChange, prefill }: Props) {
                                 type="date"
                                 className="w-full h-10 px-3 rounded-xl border border-slate-200 bg-slate-50 text-sm focus:outline-none focus:ring-2 focus:ring-amber-200"
                                 value={checkInDate}
+                                max={todayIso}
                                 onChange={(e) => setCheckInDate(e.target.value)}
                             />
                         </div>
@@ -223,6 +245,8 @@ export default function BackfillSheet({ open, onOpenChange, prefill }: Props) {
                                 type="date"
                                 className="w-full h-10 px-3 rounded-xl border border-slate-200 bg-slate-50 text-sm focus:outline-none focus:ring-2 focus:ring-amber-200"
                                 value={checkOutDate}
+                                min={stillStaying ? addDaysIso(todayIso, 1) : undefined}
+                                max={stillStaying ? undefined : todayIso}
                                 onChange={(e) => setCheckOutDate(e.target.value)}
                             />
                         </div>
@@ -256,6 +280,22 @@ export default function BackfillSheet({ open, onOpenChange, prefill }: Props) {
                                 onChange={(e) => setGuestDoc(e.target.value)}
                             />
                         </div>
+                        {/* Feed thẳng vào khai báo tạm trú nộp công an — cùng bộ
+                            trường và cách dùng FormField/FormFieldSelect như chế
+                            độ "Đầy đủ" của CheckinSheet.tsx, cho hai form cùng một
+                            "cảm giác sản phẩm". Giá trị mặc định chỉ là gợi ý ban
+                            đầu trong ô; chủ thấy và có thể sửa trước khi gửi. */}
+                        <div className="grid grid-cols-2 gap-3">
+                            <FormField label="Ngày sinh" value={guestDob} onChange={setGuestDob} />
+                            <FormFieldSelect
+                                label="Giới tính"
+                                value={guestGender}
+                                options={["Nam", "Nữ"]}
+                                onChange={setGuestGender}
+                            />
+                            <FormField label="Quốc tịch" value={guestNationality} onChange={setGuestNationality} />
+                            <FormField label="Địa chỉ" value={guestAddress} onChange={setGuestAddress} />
+                        </div>
                     </div>
 
                     <div className="grid grid-cols-2 gap-3">
@@ -266,6 +306,7 @@ export default function BackfillSheet({ open, onOpenChange, prefill }: Props) {
                             <input
                                 id="backfill-total"
                                 type="number"
+                                step="1"
                                 className="w-full h-10 px-3 rounded-xl border border-slate-200 bg-slate-50 text-sm focus:outline-none focus:ring-2 focus:ring-amber-200"
                                 value={total}
                                 onChange={(e) => {
@@ -287,6 +328,7 @@ export default function BackfillSheet({ open, onOpenChange, prefill }: Props) {
                             <input
                                 id="backfill-paid"
                                 type="number"
+                                step="1"
                                 className="w-full h-10 px-3 rounded-xl border border-slate-200 bg-slate-50 text-sm focus:outline-none focus:ring-2 focus:ring-amber-200"
                                 value={paid}
                                 onChange={(e) => {
