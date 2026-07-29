@@ -1,0 +1,139 @@
+import { renderHook, waitFor } from "@testing-library/react";
+import { beforeEach, describe, expect, it } from "vitest";
+
+import { clearMockResponses, invoke, setMockResponse } from "@test-mocks/tauri-core";
+import type { PricingResult } from "@/types";
+
+import { sumRoomPrices, useRoomPrices } from "./useRoomPrices";
+
+function pricingResult(total: number): PricingResult {
+  return {
+    pricing_type: "nightly",
+    base_amount: total,
+    surcharge_amount: 0,
+    weekend_amount: 0,
+    total,
+    breakdown: [],
+    capped: false,
+  };
+}
+
+const WINDOW = { checkIn: "2026-04-20", checkOut: "2026-04-22" };
+
+describe("useRoomPrices", () => {
+  beforeEach(() => {
+    clearMockResponses();
+    invoke.mockClear();
+  });
+
+  it("quotes every room and keys the answers by room id", async () => {
+    setMockResponse("calculate_room_price_preview", (args) =>
+      pricingResult(args?.roomId === "R101" ? 600_000 : 800_000),
+    );
+
+    const { result } = renderHook(() =>
+      useRoomPrices({ roomIds: ["R101", "R202"], ...WINDOW, guests: null }),
+    );
+
+    await waitFor(() => expect(Object.keys(result.current.byRoomId)).toHaveLength(2));
+    expect(result.current.byRoomId.R101.total).toBe(600_000);
+    expect(result.current.byRoomId.R202.total).toBe(800_000);
+    expect(result.current.failed).toBe(false);
+  });
+
+  /// Room ids are operator-entered free text. An earlier version of this idea
+  /// round-tripped the list through a space-delimited string, which tore
+  /// `"Phòng 5A"` into two ids that do not exist — and each fragment still
+  /// *priced*, at the house default, so nothing reported an error.
+  it("survives a room id containing a space", async () => {
+    setMockResponse("calculate_room_price_preview", () => pricingResult(500_000));
+
+    const { result } = renderHook(() =>
+      useRoomPrices({ roomIds: ["Phòng 5A"], ...WINDOW, guests: null }),
+    );
+
+    await waitFor(() => expect(result.current.byRoomId["Phòng 5A"]).toBeDefined());
+    const asked = invoke.mock.calls
+      .filter(([command]) => command === "calculate_room_price_preview")
+      .map(([, args]) => (args as { roomId: string }).roomId);
+    expect(asked).toEqual(["Phòng 5A"]);
+  });
+
+  /// `roomIds` is a fresh array on every render. Keying the effect on the array
+  /// itself would re-quote forever; keying on nothing would never re-quote.
+  it("does not re-quote when the same ids arrive in a new array", async () => {
+    setMockResponse("calculate_room_price_preview", () => pricingResult(500_000));
+
+    const { rerender, result } = renderHook(
+      ({ ids }: { ids: string[] }) => useRoomPrices({ roomIds: ids, ...WINDOW, guests: null }),
+      { initialProps: { ids: ["R101"] } },
+    );
+
+    await waitFor(() => expect(result.current.byRoomId.R101).toBeDefined());
+    const before = invoke.mock.calls.length;
+
+    rerender({ ids: ["R101"] });
+    await waitFor(() => expect(result.current.loading).toBe(false));
+
+    expect(invoke.mock.calls.length).toBe(before);
+  });
+
+  /// A failure must also clear what an *earlier* success left behind. Without
+  /// that, changing the dates to a window that cannot be priced leaves the old
+  /// quotes on screen, and the group total keeps adding up — from a stay nobody
+  /// is booking any more.
+  it("clears the previous quotes when a later lookup fails", async () => {
+    setMockResponse("calculate_room_price_preview", () => pricingResult(600_000));
+
+    const { rerender, result } = renderHook(
+      ({ checkIn }: { checkIn: string }) =>
+        useRoomPrices({ roomIds: ["R101"], checkIn, checkOut: "2026-04-30", guests: null }),
+      { initialProps: { checkIn: "2026-04-20" } },
+    );
+
+    await waitFor(() => expect(result.current.byRoomId.R101).toBeDefined());
+
+    setMockResponse("calculate_room_price_preview", () => {
+      throw new Error("database is locked");
+    });
+    rerender({ checkIn: "2026-04-21" });
+
+    await waitFor(() => expect(result.current.failed).toBe(true));
+    expect(result.current.byRoomId).toEqual({});
+    expect(sumRoomPrices(["R101"], result.current.byRoomId)).toBeNull();
+  });
+
+  /// One failure must not leave a partial map behind: a total summed from three
+  /// of four rooms is the same class of lie as multiplying in JavaScript.
+  it("reports failure rather than a partial set of quotes", async () => {
+    setMockResponse("calculate_room_price_preview", (args) => {
+      if (args?.roomId === "R202") throw new Error("database is locked");
+      return pricingResult(600_000);
+    });
+
+    const { result } = renderHook(() =>
+      useRoomPrices({ roomIds: ["R101", "R202"], ...WINDOW, guests: null }),
+    );
+
+    await waitFor(() => expect(result.current.failed).toBe(true));
+    expect(result.current.byRoomId).toEqual({});
+  });
+});
+
+describe("sumRoomPrices", () => {
+  it("adds the quotes up", () => {
+    expect(
+      sumRoomPrices(["A", "B"], { A: pricingResult(100), B: pricingResult(250) }),
+    ).toBe(350);
+  });
+
+  /// The caller renders `…` on `null`. Returning a number here would show a
+  /// total that silently leaves a booked room out of it.
+  it("refuses to total a set with an unpriced room", () => {
+    expect(sumRoomPrices(["A", "B"], { A: pricingResult(100) })).toBeNull();
+  });
+
+  it("totals an empty selection as zero, not null", () => {
+    expect(sumRoomPrices([], {})).toBe(0);
+  });
+});

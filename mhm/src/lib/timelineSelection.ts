@@ -26,6 +26,26 @@ export function addDaysIso(date: string, days: number): string {
     return localDateIso(new Date(y, m - 1, d + days));
 }
 
+// Đồng hồ địa phương kèm độ lệch: "2026-07-29T16:40:00+07:00".
+//
+// Nhận phòng vãng lai được tính tiền từ `Local::now()` ở `stay_lifecycle.rs`,
+// nên bản xem trước phải hỏi đúng thời điểm đó — không phải ngày trần (thứ mà
+// đặt phòng trước dùng). `toISOString()` không dùng được: nó quy về UTC, và ở
+// Việt Nam có bảy giờ mỗi ngày mà UTC vẫn còn là hôm qua — đủ để tra nhầm ngày
+// lễ trong `special_dates`.
+export function localRfc3339(d: Date): string {
+    const pad = (n: number) => String(n).padStart(2, "0");
+    const offsetMinutes = -d.getTimezoneOffset();
+    const sign = offsetMinutes < 0 ? "-" : "+";
+    const abs = Math.abs(offsetMinutes);
+    const clock = `${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
+    return `${localDateIso(d)}T${clock}${sign}${pad(Math.floor(abs / 60))}:${pad(abs % 60)}`;
+}
+
+export function addDays(d: Date, days: number): Date {
+    return new Date(d.getTime() + days * 86_400_000);
+}
+
 // Ngày dạng "YYYY-MM-DD" (không giờ) được JS phân giải theo UTC — dùng nguyên
 // dạng đó (không thêm "T00:00:00") để tránh lệch ngày ở múi giờ dương như
 // Asia/Ho_Chi_Minh khi quy đổi qua toISOString(). Dùng chung cho

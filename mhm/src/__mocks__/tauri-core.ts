@@ -130,6 +130,7 @@ export const invoke = vi.fn(async (command: string, args?: Record<string, unknow
         logout: undefined,
         search_guest_by_phone: [],
         calculate_price_preview: { total: 0, breakdown: [] },
+        calculate_room_price_preview: { total: 0, breakdown: [] },
         get_folio_lines: [],
         get_rooms_availability: [],
     };

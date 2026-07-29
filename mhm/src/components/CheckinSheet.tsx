@@ -11,6 +11,8 @@ import { formatAppError } from "@/lib/appError";
 import { getRoomTypeLabel } from "@/lib/constants";
 import { fmtMoney } from "@/lib/format";
 import { createDeferredCleanup } from "@/lib/deferredCleanup";
+import { addDays, localRfc3339 } from "@/lib/timelineSelection";
+import { usePricePreview } from "@/hooks/usePricePreview";
 import { toast } from "sonner";
 import type { CccdInfo, GuestInput, GuestSummary } from "@/types";
 
@@ -146,9 +148,33 @@ export default function CheckinSheet({ preSelectedRoomId, preSelectedNights }: {
     }, [rooms, selectedRoom, vacantRooms]);
 
     const selectedRoomData = rooms.find((r) => r.id === selectedRoom);
-    const totalPrice = selectedRoomData
-        ? selectedRoomData.base_price * nights
-        : 0;
+
+    // Nhận phòng vãng lai được tính tiền từ `Local::now()` cho `nights` ngày
+    // (`stay_lifecycle.rs`), nên bản xem trước phải hỏi đúng hai mốc đó — không
+    // phải ngày trần, vốn là cách đặt phòng trước được tính.
+    const { quoteCheckIn, quoteCheckOut } = useMemo(() => {
+        const now = new Date();
+        return {
+            quoteCheckIn: localRfc3339(now),
+            quoteCheckOut: localRfc3339(addDays(now, Math.max(nights, 0))),
+        };
+    }, [nights]);
+
+    // Con số phải do engine trả về. `base_price × nights` bỏ qua bảng giá đã
+    // cấu hình, phụ thu cuối tuần và phụ thu ngày lễ — những thứ lúc thu tiền
+    // đều tính.
+    const {
+        preview: stayPrice,
+        loading: priceLoading,
+        error: priceFailed,
+    } = usePricePreview({
+        roomId: selectedRoom,
+        checkIn: quoteCheckIn,
+        checkOut: quoteCheckOut,
+        // `stay_lifecycle::check_in` truyền `None`, nên khách vãng lai không bị
+        // tính phụ thu thêm người. Gửi số khách ở đây sẽ báo cao hơn số thực thu.
+        guests: null,
+    });
 
     const { fromDate, toDate } = useMemo(() => {
         const now = new Date();
@@ -419,8 +445,7 @@ export default function CheckinSheet({ preSelectedRoomId, preSelectedNights }: {
                                 <option value="">Chọn phòng...</option>
                                 {vacantRooms.map((r) => (
                                 <option key={r.id} value={r.id}>
-                                        {r.id} — {getRoomTypeLabel(r.type)} (
-                                        {fmtMoney(r.base_price)})
+                                        {r.id} — {getRoomTypeLabel(r.type)}
                                     </option>
                                 ))}
                             </select>
@@ -470,15 +495,42 @@ export default function CheckinSheet({ preSelectedRoomId, preSelectedNights }: {
                         </div>
                     )}
 
-                    {/* Total price */}
+                    {/* Total price — con số do engine tính, không phải phép nhân ở đây */}
                     {selectedRoomData && (
-                        <div className="bg-slate-50 rounded-xl p-3 flex justify-between items-center">
-                            <span className="text-xs text-brand-muted font-medium">
-                                Tổng tiền ({nights} đêm × {fmtMoney(selectedRoomData.base_price)})
-                            </span>
-                            <span className="text-base font-bold text-emerald-600 tabular-nums">
-                                {fmtMoney(totalPrice)}
-                            </span>
+                        <div className="bg-slate-50 rounded-xl p-3 space-y-1">
+                            <div className="flex justify-between items-center">
+                                <span className="text-xs text-brand-muted font-medium">
+                                    Tổng tiền ({nights} đêm)
+                                </span>
+                                {priceFailed ? (
+                                    <span
+                                        data-testid="stay-price-error"
+                                        className="text-xs font-semibold text-amber-600"
+                                    >
+                                        Chưa tính được giá
+                                    </span>
+                                ) : (
+                                    <span
+                                        data-testid="stay-price-total"
+                                        className="text-base font-bold text-emerald-600 tabular-nums"
+                                    >
+                                        {priceLoading || !stayPrice ? "…" : fmtMoney(stayPrice.total)}
+                                    </span>
+                                )}
+                            </div>
+                            {!priceFailed && stayPrice && stayPrice.breakdown.length > 1 && (
+                                <ul data-testid="stay-price-breakdown" className="space-y-0.5">
+                                    {stayPrice.breakdown.map((line, index) => (
+                                        <li
+                                            key={`${line.label}-${index}`}
+                                            className="flex justify-between text-[11px] text-brand-muted"
+                                        >
+                                            <span>{line.label}</span>
+                                            <span className="tabular-nums">{fmtMoney(line.amount)}</span>
+                                        </li>
+                                    ))}
+                                </ul>
+                            )}
                         </div>
                     )}
 
