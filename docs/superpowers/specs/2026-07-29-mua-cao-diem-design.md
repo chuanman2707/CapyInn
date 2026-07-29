@@ -21,7 +21,7 @@ nhau:
    nhận phòng**, rồi nhân mức % ấy cho **toàn bộ** số đêm
    (`pricing_queries.rs:311` → `domain/booking/pricing.rs:137` →
    `pricing.rs:118`). Nó không đi từng đêm như phụ thu cuối tuần vẫn làm
-   (`pricing.rs:419`).
+   (`pricing.rs:427`).
 
 Hậu quả của (2), lấy Tết khai 14/02–22/02 +40%:
 
@@ -41,27 +41,34 @@ hình khai báo mà bỏ qua (2) thì đưa cho chủ nhà một nút bấm ra g
   nghĩ theo kỳ nghỉ chứ không theo ngày lẻ. Gom được là suy ra chắc chắn từ ba
   thuộc tính đó, không cần lưu thêm gì.
 - **Trùng ngày thì báo rõ rồi hỏi**, chứ không ghi đè im lặng như backend hiện
-  giờ đang làm (`pricing_repository.rs:85`, `ON CONFLICT(date) DO UPDATE`).
+  giờ đang làm (`repositories/booking/pricing_repository.rs:85`, `ON CONFLICT(date) DO UPDATE`).
 - **Sửa luật đếm đêm luôn trong đợt này**, vì màn hình khai báo không có giá trị
   nếu luật sai.
 
 ### Vì sao tính bằng **mức bình quân** chứ không sửa `pricing.rs`
 
 Cách hiển nhiên là cho `crate::pricing::calculate_price` nhận một danh sách % theo
-từng đêm. Nhưng có một cách cho ra **kết quả đúng y hệt** mà không phải chạm vào
-`pricing.rs`:
+từng đêm. Nhưng có một cách rẻ hơn nhiều mà không phải chạm vào `pricing.rs`:
 
 ```
-% hiệu dụng = (tổng % của từng đêm trong kỳ ở) ÷ số đêm
+% hiệu dụng = (tổng % của từng ngày trong kỳ ở) ÷ N        (N = số ngày kỳ ở)
 ```
 
-Đây **không phải xấp xỉ**. Vì `special = base × pct`, và `base = giá đêm × số đêm`:
+Điều luôn đúng, với **mọi** kiểu tính giá:
 
 ```
-base × (Σ pct_d / N) = (base/N) × Σ pct_d = giá đêm × Σ pct_d
+base × (Σ pct_d / N) = Σ ( (base/N) × pct_d )
 ```
 
-đúng bằng tổng phụ thu tính riêng từng đêm. Kiểm hai ví dụ:
+Nghĩa là: chia `base` thành N phần bằng nhau, mỗi ngày chịu mức % của riêng nó
+trên phần của mình. Đó là định nghĩa của "chia đều theo ngày", và nó là hệ quả
+đại số chứ không phải xấp xỉ.
+
+Điều **chỉ đúng với `nightly`, `overnight`, `daily`**: `base/N` đúng bằng giá một
+đêm đã cấu hình. Ba nhánh này tính `base = giá đêm × số ngày`, với **cùng một**
+biểu thức đếm ngày mà `calculate_weekend_uplift` đang dùng
+(`pricing.rs:115-116`, `:251-260`, `:345-346`, đối chiếu `:440`). Nên với ba
+nhánh này, "chia đều theo ngày" **chính là** "từng đêm chịu mức của nó":
 
 - 12/02→16/02, Tết 14–22 +40%. Bốn đêm 12,13,14,15 → Σ = 0+0+40+40 = 80, chia 4 =
   **20%**. Phụ thu = 20% × 4 đêm = 40% × 2 đêm. ✓
@@ -69,13 +76,45 @@ base × (Σ pct_d / N) = (base/N) × Σ pct_d = giá đêm × Σ pct_d
   chia 5 = **34%**. 5 đêm × 34% = 3 đêm × 40% + 2 đêm × 25%. ✓ Kỳ ở vắt qua hai
   mùa khác giá cũng ra đúng, mà chữ ký hàm không đổi.
 
-Lợi thêm: chỉ **một** lần làm tròn ở bước nhân %, thay vì làm tròn từng đêm rồi
-cộng lại.
+### `hourly` là ngoại lệ, và nó đổi hành vi
 
-Lợi về va chạm: nhánh `refactor/pricing-preview-honesty` đang chạy song song ở
-phiên khác **không chạm `pricing.rs`** (đã đối chiếu `git diff main...`). Giữ
-`pricing.rs` nguyên vẹn thu vùng va chạm còn đúng hai file, và một trong hai
-(`domain/booking/pricing.rs`) là của phiên này.
+`calculate_hourly` (`pricing.rs:155-174`) tính `base = giá giờ × số giờ`, hoặc
+một mức trần `overnight_rate`, hoặc `daily_rate × ceil(số giờ / 24)`. **Không**
+cái nào tỉ lệ với `total_days` của `calculate_weekend_uplift`. Nên với kiểu giờ,
+`base/N` không phải giá một đêm, và "chia đều theo ngày" **không** trùng với
+"từng đêm chịu mức của nó".
+
+Kỳ ở theo giờ **trong cùng một ngày** thì `N = 1`, mức hiệu dụng bằng đúng mức
+của ngày đó, kết quả **y hệt** hôm nay. Kỳ ở theo giờ **vắt qua từ hai ngày trở
+lên** thì đổi số. Ví dụ giá giờ 20k / qua đêm 300k / ngày 400k, ở
+`2026-02-13T20:00 → 2026-02-15T02:00` (30 giờ), Tết 14–22 +40%:
+
+| | Kết quả |
+|---|---|
+| `base` | 600.000₫ (`raw_hourly`, không chạm trần) |
+| Hôm nay | phụ thu **0₫** — ngày đến 13/02 chưa khai |
+| Sau khi sửa | `(0+40)/2 = 20%` → phụ thu **120.000₫** |
+
+Đây là **chủ ý**, không phải tác dụng phụ: một kỳ ở đè lên ngày lễ thì phải chịu
+phụ thu, và chia đều theo ngày là cách phân bổ duy nhất có nghĩa khi `base` không
+tính theo đêm. Nó được chốt bằng một test riêng, không để trôi vào phần "không
+đổi".
+
+### Làm tròn
+
+Chỉ **một** lần làm tròn, ở bước nhân %, thay vì làm tròn từng đêm rồi cộng lại.
+Với giá đêm chẵn thì hai cách ra cùng số. Với giá lẻ thì lệch vài đồng — 333.333₫
+một đêm, ba đêm +40%: gộp ra 400.000₫, cộng từng đêm ra 399.999₫. Bản gộp là bản
+đúng theo hợp đồng; test phải ghi **số tuyệt đối**, không được viết kiểu "tính
+từng đêm rồi cộng lại rồi so bằng".
+
+### Lợi thêm: vùng tranh chấp co lại
+
+Nhánh `refactor/pricing-preview-honesty` đang chạy song song ở
+phiên khác **không chạm `pricing.rs`** (đã đối chiếu `git diff --stat main...`,
+21 file, không có file này). Giữ `pricing.rs` nguyên vẹn thu vùng tranh chấp ở
+tầng engine còn đúng **một** file production: `queries/booking/pricing_queries.rs`.
+Chi tiết ở phần Rủi ro.
 
 ### Vì sao không thêm bảng "khoảng" thật
 
@@ -107,21 +146,29 @@ Kiểu này định nghĩa **trong `domain`**, không mượn `SpecialDate` củ
 `queries::booking::pricing_queries`. Chiều phụ thuộc là queries → domain;
 `architecture_guard` giữ chiều ấy.
 
-Hàm thuần mới, đi từng ngày y hệt `calculate_weekend_uplift` (`pricing.rs:419`)
+Hàm thuần mới, đi từng ngày y hệt `calculate_weekend_uplift` (`pricing.rs:427`)
 để hai phụ thu không bao giờ bất đồng về "một kỳ ở gồm những ngày nào":
 
 ```rust
-/// Mức uplift bình quân trên số đêm. Xem phần "Vì sao tính bằng mức bình quân"
-/// trong spec: nhân mức này với `base` ra đúng bằng cộng phụ thu từng đêm.
+/// Mức uplift bình quân trên số ngày của kỳ ở.
+///
+/// Nhân mức này với `base` là chia đều `base` cho từng ngày rồi cho mỗi ngày
+/// chịu mức của riêng nó. Với `nightly`/`overnight`/`daily`, phần chia đều ấy
+/// đúng bằng giá một đêm, nên kết quả là "từng đêm chịu mức của nó". Với
+/// `hourly` thì `base` không tính theo đêm, và đây là phép phân bổ theo ngày —
+/// cố ý, xem spec 2026-07-29-mua-cao-diem-design.md.
 fn effective_special_uplift(inputs: &StayPricingInputs) -> BookingResult<f64>
 ```
 
 - Lấy ngày của `check_in`, `check_out` bằng chính bộ phân tích mà
   `nights_between` đang dùng (`value.get(..10)`, an toàn với chuỗi nhiều byte).
-- `total_days = (co - ci).num_days().max(1)` — **y hệt** `calculate_weekend_uplift`,
-  nên kỳ ở trong ngày (theo giờ) đếm đúng ngày nhận phòng.
-- Đi `total_days` bước từ `ci`, mỗi bước cộng `uplift_pct` của ngày đó, không có
-  thì cộng 0.
+- `total_days = (co_date - ci_date).num_days().max(1)` — trừ trên **`NaiveDate`**
+  đã cắt, không phải trên datetime. Trừ datetime cho ra 3 với
+  `12/02T14:00 → 16/02T12:00` trong khi đáp án là 4. Con số này phải **y hệt**
+  `calculate_weekend_uplift` (`pricing.rs:440`), nếu không hai phụ thu sẽ bất
+  đồng về "kỳ ở này gồm những ngày nào".
+- Đi `total_days` bước từ `ci_date`, mỗi bước cộng `uplift_pct` của ngày đó,
+  không có thì cộng 0.
 - Trả `tổng / total_days`.
 - `special_days` rỗng → trả `0.0`, không rẽ nhánh riêng.
 
@@ -145,6 +192,13 @@ Cận trên lấy **bao gồm** ngày trả phòng. Đọc dư một ngày là c
 `load_special_uplift` / `load_special_uplift_tx` thành
 `load_special_days(pool, check_in, check_out)` / `load_special_days_tx(...)`,
 bind `date_key(check_in)` và `date_key(check_out)`.
+
+**Sửa `date_key` luôn** (`pricing_queries.rs:72-78`). Nó đang là `&date_str[..10]`
+— cắt theo **byte**, nên **panic** nếu byte thứ 10 rơi vào giữa một ký tự nhiều
+byte. Tầng domain đã được vá đúng lỗi này ở phiên trước (`get(..10)`, kèm test
+`nights_between_rejects_check_in_with_non_char_boundary_byte_ten_without_panicking`,
+`domain/booking/pricing.rs:288`). Thay đổi này cho `date_key` ăn **hai** chuỗi
+thay vì một, nên phải vá trước khi tăng phơi nhiễm: `get(..10).unwrap_or(date_str)`.
 
 Ba chỗ dựng `StayPricingInputs` đổi theo, **giữ nguyên** cách xử lỗi đang có:
 
@@ -172,28 +226,57 @@ Ba chỗ dựng `StayPricingInputs` đổi theo, **giữ nguyên** cách xử l�
 
 ## 2. Lệnh backend
 
-### Thêm mới
+### Hai lệnh, không phải ba
 
 ```rust
-save_special_date_range(from: String, to: String, label: String, uplift_pct: f64)
+save_special_date_range(remove: Vec<String>, from: String, to: String,
+                        label: String, uplift_pct: f64)
 delete_special_dates(dates: Vec<String>)
 ```
 
-Cả hai `require_admin`, cả hai chạy trong **một** transaction — nửa khoảng nằm
-lại trong DB là giá sai âm thầm, tệ hơn là báo lỗi.
+`remove` là **chìa khoá của tính nguyên tử**. Khai mới thì nó rỗng. Sửa một cụm
+cho ngắn lại thì nó chứa những ngày rơi ra khỏi khoảng mới, và cả việc xoá lẫn
+việc ghi nằm trong **cùng một** transaction.
 
-`save_special_date` cũ **giữ nguyên chữ ký** (đã đăng ký ở `lib.rs:395`), nhưng
-gọi lại đường khoảng với `from = to = date`, để chỉ còn một đường ghi.
+Nếu tách thành "gọi xoá rồi gọi ghi" thì đó là hai transaction: xoá xong mà ghi
+hỏng là mất hẳn mấy ngày đã khai, màn hình tải lại hiện một mùa bị cụt, không ai
+biết. Đúng cái "nửa khoảng nằm lại trong DB" mà spec này nói là không chấp nhận
+được — và nó rơi vào luồng dễ gặp nhất.
 
-Repository nhận cả khoảng, giữ nguyên `ON CONFLICT(date) DO UPDATE` hiện có:
+Cả hai lệnh `require_admin`. Cả hai gọi `emit_db_update(&app, "pricing")` sau khi
+commit, như `save_pricing_rule` đang làm (`commands/pricing.rs:92`) — giá vừa
+đổi thì màn hình khác đang hiện giá phải biết.
 
-```rust
-upsert_special_date_range_tx(tx, ids, from, to, label, uplift_pct, now)
-delete_special_dates_tx(tx, dates)
-```
+### Bỏ `save_special_date`
 
-`id` sinh mới cho từng ngày; ngày đã tồn tại thì `ON CONFLICT` giữ `id` và
-`created_at` cũ, đúng như ghi chú ở `pricing_repository.rs:72`.
+Lệnh cũ (`commands/pricing.rs:141`, đăng ký ở `lib.rs:396`) **không có ai gọi** —
+không trong `src/`, không trong `gateway/`, đã dò trên mọi nhánh còn sống. Giữ nó
+lại nghĩa là có hai đường ghi vào cùng một bảng tiền, và phải nuôi một test chỉ
+để bảo vệ một lệnh không ai dùng. Bỏ. `save_special_date_range` với `from = to`
+làm được đúng việc ấy và làm được nhiều hơn.
+
+### Tầng nào làm gì
+
+Theo `docs/architecture/core-pms-boundaries.md:100` ("new write behavior should
+have a clear service or lifecycle home") và theo đúng lối `save_pricing_rule`
+đang đi (`commands/pricing.rs:70-93` → `pricing_service.rs:101-140`):
+
+| Tầng | Việc |
+|---|---|
+| `commands/pricing.rs` | `require_admin`, nhận tham số, gọi service, `emit_db_update` |
+| `services/booking/pricing_service.rs` | mở transaction, chặn đầu vào, trải `from..to` thành danh sách ngày, sinh `id`, gọi repository, commit |
+| `repositories/booking/pricing_repository.rs` | `upsert_special_date_tx(tx, …)` một ngày một lần, và `delete_special_dates_tx(tx, dates)` |
+
+Trải khoảng thành từng ngày là quy tắc nghiệp vụ, nên nó ở service; repository
+giữ nguyên độ ngu ngốc của nó, mỗi lần một dòng, dùng lại `ON CONFLICT(date) DO
+UPDATE` sẵn có. Ngày đã tồn tại thì `ON CONFLICT` giữ `id` và `created_at` cũ,
+đúng như ghi chú ở `pricing_repository.rs:72`.
+
+> **Lưu ý cho người làm.** `architecture_guard.rs:244` chỉ dò chuỗi `sqlx::query`
+> trong `commands/`, nên một lệnh tự mở transaction vẫn **qua được** guard. Đừng
+> lấy "test xanh" làm bằng chứng là đã đặt đúng tầng. Trong toàn bộ cây, không
+> có lệnh nào cầm `Transaction<'_, Sqlite>`; mọi `pool.begin()` đều nằm ở service
+> (hoặc `folio_repository.rs:20`). Đi theo lối đó.
 
 ### Chặn đầu vào (ở tầng lệnh, trước khi mở transaction)
 
@@ -214,12 +297,21 @@ Không cần lệnh đọc mới. Màn hình đã tải toàn bộ qua `get_spec
 việc dò trùng ngày làm ngay phía giao diện. Đây là ứng dụng một máy một người
 dùng; khoảng hở giữa lúc dò và lúc ghi không có ý nghĩa thực tế.
 
+Gateway MCP cũng không cần đổi gì. Không có công cụ MCP nào đọc hay ghi
+`special_dates`. Nhưng công cụ `calculate_price` (`gateway/tools.rs:1233-1249`)
+đi qua `load_stay_pricing_inputs_for_room_type` — một trong ba chỗ spec này sửa —
+nên nó **được hưởng bản sửa miễn phí**, không phải đụng dòng nào.
+
 ## 3. Màn hình khai báo
 
 Cài đặt → mục mới **Peak Season** (`CalendarDays`), chỉ hiện với admin, xếp cạnh
 **Pricing** trong khối `isCurrentAdmin` ở `src/pages/settings/index.tsx:68`.
 Nhãn thanh bên bằng tiếng Anh cho khớp các mục cũ; nội dung bên trong tiếng Việt,
 đúng như `PricingSection.tsx` đang làm.
+
+Đấu dây đủ ba chỗ, đừng sót: thêm `"peak-season"` vào `SettingsSectionKey`
+(`index.tsx:33`), thêm một dòng render cạnh `{activeSection === "pricing" && …}`
+(`index.tsx:132`), và đăng ký hai lệnh mới trong `invoke_handler` ở `lib.rs`.
 
 File mới `src/pages/settings/SpecialDatesSection.tsx`. Không nhét vào
 `PricingSection.tsx` — file đó đang lo bảng giá theo loại phòng, thêm một CRUD
@@ -283,9 +375,11 @@ không tính là trùng.
 
 ### Sửa và xoá
 
-- **Sửa**: đổ cụm vào form. Lưu = `delete_special_dates(ngày cũ không còn nằm
-  trong khoảng mới)` rồi `save_special_date_range(khoảng mới)`. Rút ngắn khoảng
-  thì mấy ngày rơi ra bị xoá thật, không sót lại thành ngày lễ mồ côi.
+- **Sửa**: đổ cụm vào form. Lưu = **một** lệnh
+  `save_special_date_range(remove: ngày cũ không còn trong khoảng mới, …)`. Rút
+  ngắn khoảng thì mấy ngày rơi ra bị xoá thật, không sót lại thành ngày lễ mồ
+  côi — và xoá với ghi cùng chung một transaction, hỏng thì hỏng cả, không mất
+  ngày nào.
 - **Xoá**: hỏi lại một lần, rồi `delete_special_dates(cụm.dates)` — một lệnh cho
   cả cụm.
 - Xong việc thì tải lại bằng `get_special_dates`, không tự sửa state cục bộ, để
@@ -294,6 +388,19 @@ không tính là trùng.
 Ghi qua `invokeWriteCommand` như `PricingSection.tsx:47`. Báo kết quả bằng
 `toast`, theo đúng lối file đó.
 
+### Hai file hạ tầng phải sửa kèm, không sửa là đỏ
+
+- **`mhm/tests/frontend-invoke-wrapper-guardrails.test.ts`** là bánh cóc hai
+  chiều: `RAW_INVOKE_ALLOWED_COMMANDS` (`:20-62`) liệt kê mọi `invoke` trần trong
+  `src/` kèm lý do, và test ở `:260-290` đỏ với bất kỳ `invoke` trần nào không có
+  trong danh sách. `get_special_dates` **chưa có** trong đó (hôm nay không ai
+  gọi). Bắt chước y `PricingSection.tsx` — nơi `invoke("get_pricing_rules")` trần
+  *đã* được cho phép ở `:45` — sẽ ra một test đỏ mà nguyên nhân rất khó lần. Phải
+  thêm `get_special_dates` kèm lý do, và cân nhắc thêm hai lệnh ghi mới vào
+  `PMS_WRITE_COMMANDS_REQUIRING_WRAPPER`.
+- **`src/__mocks__/tauri-core.ts`** **ném lỗi** với mọi lệnh chưa đăng ký. Hai
+  lệnh mới phải có trong `defaults`, hoặc mỗi test phải `setMockResponse`.
+
 ## 4. Kiểm chứng
 
 Theo TDD: test đỏ trước, và với hai ca dưới đây phải **thấy** nó đỏ đúng vì lý do
@@ -301,15 +408,21 @@ số học, không phải vì thiếu hàm.
 
 ### Rust — `domain/booking/pricing.rs`
 
+Mọi test ghi **số tuyệt đối**. Cấm viết kiểu "tính từng đêm rồi cộng lại rồi so
+bằng" — xem phần Làm tròn, cách ấy lệch vài đồng với giá lẻ và sẽ đỏ vì lý do
+không liên quan tới luật.
+
 | Test | Con số |
 |---|---|
-| kỳ ở bắt đầu **trước** mùa | 12/02→16/02, Tết 14–22 +40%, giá 500k/đêm → phụ thu 400.000₫ (2 đêm × 40%), **không phải 0** |
-| kỳ ở kéo **quá** mùa | 22/02→25/02, cùng khai → phụ thu 200.000₫ (1 đêm), **không phải 600.000₫** |
-| vắt qua hai mức | 20/02→25/02, +40% ba đêm rồi +25% hai đêm → đúng bằng tổng tính riêng từng đêm |
+| kỳ ở bắt đầu **trước** mùa | 12/02→16/02, Tết 14–22 +40%, giá 500k/đêm → phụ thu **400.000₫**, **không phải 0** |
+| kỳ ở kéo **quá** mùa | 22/02→25/02, cùng khai → phụ thu **200.000₫**, **không phải 600.000₫** |
+| vắt qua hai mức | 20/02→25/02, giá 500k/đêm, +40% ba đêm rồi +25% hai đêm → mức hiệu dụng 34%, phụ thu **850.000₫** trên `base` 2.500.000₫ |
 | nằm trọn trong mùa | kết quả **y hệt** trước khi sửa — chống hồi quy |
 | không khai ngày nào | `special_days` rỗng → phụ thu 0 |
-| kỳ ở theo giờ | cùng ngày, ngày đó có khai → ra như cũ |
+| theo giờ, **cùng ngày** | ngày đó có khai → ra **như cũ** |
+| theo giờ, **vắt hai ngày** | ví dụ 30 giờ ở phần `hourly` là ngoại lệ: `base` 600.000₫, phụ thu **120.000₫** — khoá lại đúng cái hành vi đã đổi, kèm chú thích là chủ ý |
 | lễ trùng thứ 7 | vẫn ăn **cả hai** phụ thu — khoá hành vi hiện có |
+| ngày sai định dạng trong DB | không panic, coi như không khai |
 
 ### Rust — `queries/booking/pricing_queries.rs`
 
@@ -318,17 +431,19 @@ số học, không phải vì thiếu hàm.
 - Bản theo mã phòng và bản theo loại phòng đọc cùng một khoảng.
 - `special_dates` hỏng: đường `_tx` ném lỗi, hai đường xem trước trả rỗng.
 
-### Rust — lệnh và repository
+### Rust — service, lệnh và repository
 
 - `save_special_date_range` 14/02→22/02 ghi đúng **9** dòng.
+- `from = to` ghi đúng **một** dòng.
 - Ghi đè khoảng có ngày trùng: `label` và `uplift_pct` đổi, `created_at` **giữ
   nguyên**.
-- `save_special_date` một ngày vẫn ghi đúng một dòng (chữ ký cũ còn dùng được).
+- **`remove` và ghi trong cùng một transaction**: cho bước ghi hỏng giữa chừng,
+  khẳng định những ngày trong `remove` **vẫn còn nguyên** trong DB. Đây là test
+  quan trọng nhất của phần này — nó là lý do tồn tại của tham số `remove`.
 - `delete_special_dates` xoá đúng danh sách, không đụng ngày khác.
 - Mỗi luật chặn đầu vào một test: ngày sai dạng, `to < from`, 367 ngày, `-10`,
   `600`, nhãn toàn khoảng trắng, `dates` rỗng.
 - Không phải admin thì cả hai lệnh ghi bị từ chối.
-- Lỗi giữa chừng khi ghi khoảng → DB không còn dòng nào của khoảng đó.
 
 ### Frontend — `src/lib/specialDateRanges.test.ts`
 
@@ -339,6 +454,9 @@ số học, không phải vì thiếu hàm.
 - Đầu vào rỗng → mảng rỗng.
 - Đầu vào không theo thứ tự ngày → vẫn gom đúng.
 - Vắt qua ranh giới tháng và ranh giới năm (28/02→01/03, 31/12→01/01).
+- Ngày sai định dạng trong DB → danh sách **không sập**. Cột `date` không có ràng
+  buộc `CHECK` (`db/migrations.rs:209-216`) và lệnh ghi cũ chưa hề kiểm tra, nên
+  dữ liệu rác là có thật.
 
 ### Frontend — `SpecialDatesSection.test.tsx`
 
@@ -357,6 +475,20 @@ số học, không phải vì thiếu hàm.
 `npm run verify:full`, `cargo check --all-targets`, và **`cargo fmt --check`** —
 cái cuối CI có gác mà `verify:full` không chạy, phiên trước đã dính đỏ vì nó.
 
+## Thứ tự thi công
+
+Ba khối tách rời được, và **luật tính giá phải đi trước, thành commit riêng**:
+
+1. **Luật đếm đêm** — `domain/booking/pricing.rs` + `queries/booking/pricing_queries.rs`
+   (kèm bản vá `date_key`). Khối này ôm toàn bộ rủi ro về tiền và toàn bộ rủi ro
+   va chạm. Nó đứng một mình cũng có giá trị: ai đã lỡ khai `special_dates` bằng
+   tay thì được tính đúng ngay.
+2. **Lệnh ghi** — command + service + repository, kèm test.
+3. **Màn hình** — module gom cụm, section, và hai file hạ tầng nói ở trên.
+
+Đừng trộn (1) vào giữa phần CRUD. Nếu phải quay lại hoặc phải gỡ tay lúc gộp
+nhánh, tách sẵn thế này là đỡ nhất.
+
 ## Ngoài phạm vi
 
 - **Hiện số đêm lễ trong dòng phân tích.** Muốn "Phụ thu 2 đêm lễ (Tết)" thì
@@ -374,17 +506,32 @@ cái cuối CI có gác mà `verify:full` không chạy, phiên trước đã d�
 - **Số khách cho nhận phòng vãng lai và nhận phòng đoàn.** Là việc của phiên
   kia, cố ý không đụng.
 - **Ngày "hôm nay" tính theo UTC**, sai trong khoảng 00:00–07:00 giờ Việt Nam.
-  Không thuộc màn hình này.
+  Đây đúng là thứ `src/lib/datetime.ts` của nhánh
+  `refactor/pricing-preview-honesty` (`localRfc3339` / `localDayKey`) sinh ra để
+  vá. Để nhánh ấy lo, đừng vá song song.
 
 ## Rủi ro
 
-- **Va chạm với `refactor/pricing-preview-honesty`.** Hai nhánh cùng sửa
-  `pricing_queries.rs` và `pricing_service.rs`. Đã thu hẹp bằng cách không đụng
-  `pricing.rs`, nhưng lúc gộp vẫn phải gỡ tay ba chỗ dựng `StayPricingInputs`.
-  Chốt sẵn: giữ **kiểu dữ liệu của nhánh này**, giữ **cách xử lỗi của nhánh kia**.
-- **Đổi luật là đổi giá cho đơn đã đặt.** Đơn đã lưu giữ `total_price` cũ, không
-  bị tính lại. Nhưng đặt trước rồi **sửa ngày** hay **gia hạn** thì đi lại engine
-  và ra số mới — đúng hơn số cũ, mà vẫn là một thay đổi chủ nhà cần biết.
+- **Va chạm với `refactor/pricing-preview-honesty`.** Nhánh kia cắt từ `36878af`
+  chứ không phải từ `main` (`a233ac9`), nên bên đó `load_stay_pricing_inputs_for_room`
+  **chưa tồn tại** và các loader chưa có tham số `guests` — cả hai thứ ấy lên
+  `main` sau. Nghĩa là nhánh kia phải rebase lên `main` trước đã; việc gỡ tay là
+  của bước rebase đó, không phải của nhánh này.
+  - File production tranh chấp thật sự: **`queries/booking/pricing_queries.rs`**,
+    một file. Phần nhánh kia sửa trong `pricing_service.rs` **chỉ nằm trong
+    `mod tests`**.
+  - Trong file ấy, nhánh kia còn đổi `FALLBACK_BASE_PRICE_SQL` (thêm `ORDER BY
+    id`, `pricing_queries.rs:25`) — khác vùng, nhiều khả năng tự gộp được, nhưng
+    ghi ra đây để không ai bất ngờ.
+  - Chốt sẵn cách gỡ: giữ **kiểu dữ liệu của nhánh này**, giữ **cách xử lỗi
+    nghiêm của nhánh kia** (xem trước cũng ném lỗi).
+- **Đổi luật là đổi giá cho khách đang ở, không chỉ đơn bị sửa.** Đơn đã lưu giữ
+  `total_price` cũ. Nhưng `CheckoutSettlementMode::ActualNights`
+  (`stay_lifecycle.rs:668-690`) **tính lại cả kỳ ở** lúc trả phòng. Khai Tết khi
+  khách đang ở trong phòng sẽ đổi số tiền họ trả lúc đi, dù không ai sửa ngày,
+  không ai gia hạn. Đây là **chủ ý** — luật cũ sai thì số cũ cũng sai — nhưng
+  phải ghi ra để sau này không ai coi là lỗi. (`extend_stay` `:1078` thì không
+  ảnh hưởng: nó chỉ tính một đêm tăng thêm, `N = 1`, luật cũ và mới ra cùng số.)
 - **Gom cụm là suy đoán, không phải dữ liệu.** Hai kỳ khác nhau tình cờ liền
   ngày, cùng nhãn, cùng mức sẽ hiện thành một dòng. Vô hại — xoá cụm ấy đúng là
   xoá chừng đó ngày — nhưng phải nói rõ để sau này không ai coi đó là lỗi.
