@@ -16,7 +16,9 @@ pub(crate) struct StayPricingInputs {
     pub(crate) room_type: String,
     pub(crate) stored_rule: Option<StoredPricingRule>,
     pub(crate) fallback_base_price: Option<MoneyVnd>,
-    pub(crate) special_uplift_pct: f64,
+    /// Những ngày trong khoảng kỳ ở đã được khai là mùa cao điểm. Ngày không
+    /// khai thì không có mặt. Rỗng nghĩa là không phụ thu.
+    pub(crate) special_days: Vec<SpecialDay>,
     pub(crate) check_in: String,
     pub(crate) check_out: String,
     pub(crate) pricing_type: String,
@@ -27,6 +29,17 @@ pub(crate) struct StayPricingInputs {
     pub(crate) base_guests: i32,
     /// `rooms.extra_person_fee`: phụ thu mỗi khách vượt mốc, mỗi đêm.
     pub(crate) extra_person_fee: MoneyVnd,
+}
+
+/// Một ngày đã khai là mùa cao điểm.
+///
+/// Định nghĩa ở đây chứ không mượn `queries::booking::pricing_queries::SpecialDate`:
+/// chiều phụ thuộc là queries → domain, và `architecture_guard` giữ chiều ấy.
+#[derive(Debug, Clone)]
+pub(crate) struct SpecialDay {
+    /// `YYYY-MM-DD` đúng như nằm trong cột `special_dates.date`.
+    pub(crate) date: String,
+    pub(crate) uplift_pct: f64,
 }
 
 /// A row of `pricing_rules`, decoded but not yet interpreted.
@@ -119,15 +132,55 @@ pub(crate) fn build_effective_pricing_rule(
     }
 }
 
-/// Số đêm giữa hai mốc, chấp nhận cả `YYYY-MM-DD` lẫn RFC3339 (cắt 10 ký tự đầu).
-/// Trả 0 khi ngày đi không sau ngày đến — đúng lúc `calculate_price` cũng trả 0.
-fn nights_between(check_in: &str, check_out: &str) -> BookingResult<i64> {
-    let parse = |value: &str| {
-        let head = value.get(..10).unwrap_or(value);
-        NaiveDate::parse_from_str(head, "%Y-%m-%d")
-            .map_err(|error| BookingError::datetime_parse(error.to_string()))
-    };
-    Ok((parse(check_out)? - parse(check_in)?).num_days().max(0))
+/// Ngày lịch của một mốc thời gian.
+///
+/// Cắt bằng `get` chứ không phải `&value[..10]`: một chuỗi nhiều byte sẽ làm
+/// bản cắt theo byte panic.
+fn date_only(value: &str) -> BookingResult<NaiveDate> {
+    let head = value.get(..10).unwrap_or(value);
+    NaiveDate::parse_from_str(head, "%Y-%m-%d")
+        .map_err(|error| BookingError::datetime_parse(error.to_string()))
+}
+
+pub(crate) fn nights_between(check_in: &str, check_out: &str) -> BookingResult<i64> {
+    Ok((date_only(check_out)? - date_only(check_in)?)
+        .num_days()
+        .max(0))
+}
+
+/// Mức uplift bình quân trên số ngày của kỳ ở.
+///
+/// Nhân mức này với `base` là chia đều `base` cho từng ngày rồi cho mỗi ngày
+/// chịu mức của riêng nó: `base × (Σ pct_d / N) = Σ ((base/N) × pct_d)`.
+///
+/// Với `nightly`/`overnight`/`daily`, `base/N` đúng bằng giá một đêm đã cấu
+/// hình, nên kết quả **là** "từng đêm chịu mức của nó". Với `hourly` thì `base`
+/// không tính theo đêm và đây là phép phân bổ theo ngày — cố ý, xem spec
+/// `2026-07-29-mua-cao-diem-design.md`.
+///
+/// Đi từng ngày y hệt `crate::pricing::calculate_weekend_uplift`, nên phụ thu
+/// cuối tuần và phụ thu ngày lễ không bao giờ bất đồng về việc một kỳ ở gồm
+/// những ngày nào.
+fn effective_special_uplift(inputs: &StayPricingInputs) -> BookingResult<f64> {
+    if inputs.special_days.is_empty() {
+        return Ok(0.0);
+    }
+
+    let check_in = date_only(&inputs.check_in)?;
+    let check_out = date_only(&inputs.check_out)?;
+    let total_days = (check_out - check_in).num_days().max(1);
+
+    let mut total_pct = 0.0;
+    let mut date = check_in;
+    for _ in 0..total_days {
+        let key = date.format("%Y-%m-%d").to_string();
+        if let Some(day) = inputs.special_days.iter().find(|day| day.date == key) {
+            total_pct += day.uplift_pct;
+        }
+        date = date.succ_opt().unwrap_or(date);
+    }
+
+    Ok(total_pct / total_days as f64)
 }
 
 /// Phụ thu thêm người: khoản phẳng theo đêm.
@@ -174,7 +227,7 @@ pub(crate) fn calculate_from_loaded_inputs(
         &inputs.check_in,
         &inputs.check_out,
         &inputs.pricing_type,
-        inputs.special_uplift_pct,
+        effective_special_uplift(inputs)?,
     )
     .map_err(BookingError::datetime_parse)?;
 
@@ -195,7 +248,7 @@ pub(crate) fn calculate_from_loaded_inputs(
 #[cfg(test)]
 mod tests {
     use super::{
-        build_effective_pricing_rule, calculate_from_loaded_inputs, nights_between,
+        build_effective_pricing_rule, calculate_from_loaded_inputs, nights_between, SpecialDay,
         StayPricingInputs, StoredPricingRule,
     };
     use crate::domain::booking::BookingError;
@@ -206,7 +259,7 @@ mod tests {
             room_type: "standard".to_string(),
             stored_rule: None,
             fallback_base_price: None,
-            special_uplift_pct: 0.0,
+            special_days: Vec::new(),
             check_in: "2026-04-20".to_string(),
             check_out: "2026-04-22".to_string(),
             pricing_type: "nightly".to_string(),
@@ -214,6 +267,39 @@ mod tests {
             base_guests: 2,
             extra_person_fee: 0,
         }
+    }
+
+    /// Giá 500k một đêm, **không** phụ thu cuối tuần. Bỏ `weekend_uplift_pct`
+    /// đi là mọi con số trong các test ngày lễ dưới đây sai, vì `sample_inputs`
+    /// không có `stored_rule` sẽ rơi xuống mặc định 20% của `PricingRule`.
+    fn holiday_rule() -> StoredPricingRule {
+        StoredPricingRule {
+            room_type: "standard".to_string(),
+            hourly_rate: 20_000,
+            overnight_rate: 300_000,
+            daily_rate: 500_000,
+            overnight_start: "22:00".to_string(),
+            overnight_end: "11:00".to_string(),
+            daily_checkin: "14:00".to_string(),
+            daily_checkout: "12:00".to_string(),
+            early_checkin_surcharge_pct: 0.0,
+            late_checkout_surcharge_pct: 0.0,
+            weekend_uplift_pct: 0.0,
+        }
+    }
+
+    fn special(date: &str, uplift_pct: f64) -> SpecialDay {
+        SpecialDay {
+            date: date.to_string(),
+            uplift_pct,
+        }
+    }
+
+    /// Tết 14/02–22/02 +40%, đúng khai báo dùng chung cho các test dưới.
+    fn tet_2026() -> Vec<SpecialDay> {
+        (14..=22)
+            .map(|day| special(&format!("2026-02-{day:02}"), 40.0))
+            .collect()
     }
 
     #[test]
@@ -306,7 +392,7 @@ mod tests {
         inputs.fallback_base_price = Some(500_000);
         inputs.check_in = "2026-04-20T10:00:00+07:00".to_string();
         inputs.check_out = "2026-04-22T10:00:00+07:00".to_string();
-        inputs.special_uplift_pct = 10.0;
+        inputs.special_days = vec![special("2026-04-20", 10.0), special("2026-04-21", 10.0)];
 
         let pricing = calculate_from_loaded_inputs(&inputs).unwrap();
 
@@ -412,7 +498,7 @@ mod tests {
     fn extra_guest_line_is_not_multiplied_by_uplift() {
         let mut inputs = sample_inputs();
         inputs.fallback_base_price = Some(500_000);
-        inputs.special_uplift_pct = 10.0;
+        inputs.special_days = vec![special("2026-04-20", 10.0), special("2026-04-21", 10.0)];
         inputs.guests = Some(3);
         inputs.base_guests = 2;
         inputs.extra_person_fee = 50_000;
@@ -462,5 +548,161 @@ mod tests {
         let error = calculate_from_loaded_inputs(&inputs).unwrap_err();
 
         assert!(matches!(error, BookingError::Validation(_)));
+    }
+
+    #[test]
+    fn special_uplift_covers_only_the_nights_inside_the_season() {
+        // 12/02→16/02 là bốn đêm 12,13,14,15. Tết phủ 14 và 15.
+        // Hôm nay engine nhìn mỗi ngày đến 12/02 rồi báo 0₫.
+        let mut inputs = sample_inputs();
+        inputs.stored_rule = Some(holiday_rule());
+        inputs.special_days = tet_2026();
+        inputs.check_in = "2026-02-12".to_string();
+        inputs.check_out = "2026-02-16".to_string();
+
+        let pricing = calculate_from_loaded_inputs(&inputs).unwrap();
+
+        // 2 đêm × 500.000 × 40% = 400.000
+        assert_eq!(pricing.surcharge_amount, 400_000);
+    }
+
+    #[test]
+    fn special_uplift_stops_at_the_end_of_the_season() {
+        // 22/02→25/02 là ba đêm 22,23,24. Chỉ đêm 22 còn trong Tết.
+        // Hôm nay engine thấy ngày đến 22/02 là lễ rồi tính 40% cho cả ba đêm.
+        let mut inputs = sample_inputs();
+        inputs.stored_rule = Some(holiday_rule());
+        inputs.special_days = tet_2026();
+        inputs.check_in = "2026-02-22".to_string();
+        inputs.check_out = "2026-02-25".to_string();
+
+        let pricing = calculate_from_loaded_inputs(&inputs).unwrap();
+
+        // 1 đêm × 500.000 × 40% = 200.000, không phải 600.000
+        assert_eq!(pricing.surcharge_amount, 200_000);
+    }
+
+    #[test]
+    fn special_uplift_spans_two_different_seasons() {
+        // 20/02→25/02 là năm đêm. Tết +40% ba đêm 20,21,22; Hè +25% hai đêm 23,24.
+        let mut inputs = sample_inputs();
+        inputs.stored_rule = Some(holiday_rule());
+        inputs.special_days = tet_2026()
+            .into_iter()
+            .chain([special("2026-02-23", 25.0), special("2026-02-24", 25.0)])
+            .collect();
+        inputs.check_in = "2026-02-20".to_string();
+        inputs.check_out = "2026-02-25".to_string();
+
+        let pricing = calculate_from_loaded_inputs(&inputs).unwrap();
+
+        // Mức bình quân (40×3 + 25×2)/5 = 34%. base = 5 × 500.000 = 2.500.000.
+        // 2.500.000 × 34% = 850.000 = 3×200.000 + 2×125.000.
+        assert_eq!(pricing.base_amount, 2_500_000);
+        assert_eq!(pricing.surcharge_amount, 850_000);
+    }
+
+    #[test]
+    fn special_uplift_is_unchanged_for_a_stay_entirely_inside_the_season() {
+        // Chống hồi quy: kỳ ở nằm trọn trong mùa phải ra y như luật cũ.
+        let mut inputs = sample_inputs();
+        inputs.stored_rule = Some(holiday_rule());
+        inputs.special_days = tet_2026();
+        inputs.check_in = "2026-02-15".to_string();
+        inputs.check_out = "2026-02-18".to_string();
+
+        let pricing = calculate_from_loaded_inputs(&inputs).unwrap();
+
+        // Cả ba đêm 15,16,17 đều là Tết → vẫn đúng 40% trên toàn bộ base.
+        assert_eq!(pricing.base_amount, 1_500_000);
+        assert_eq!(pricing.surcharge_amount, 600_000);
+    }
+
+    #[test]
+    fn no_special_days_means_no_surcharge() {
+        let mut inputs = sample_inputs();
+        inputs.stored_rule = Some(holiday_rule());
+        inputs.check_in = "2026-02-12".to_string();
+        inputs.check_out = "2026-02-16".to_string();
+
+        let pricing = calculate_from_loaded_inputs(&inputs).unwrap();
+
+        assert_eq!(pricing.surcharge_amount, 0);
+    }
+
+    #[test]
+    fn hourly_stay_within_one_day_is_unchanged() {
+        // N = 1, mức bình quân bằng đúng mức của ngày ấy. Kết quả như luật cũ.
+        let mut inputs = sample_inputs();
+        inputs.stored_rule = Some(holiday_rule());
+        inputs.special_days = tet_2026();
+        inputs.pricing_type = "hourly".to_string();
+        inputs.check_in = "2026-02-14T08:00:00".to_string();
+        inputs.check_out = "2026-02-14T13:00:00".to_string();
+
+        let pricing = calculate_from_loaded_inputs(&inputs).unwrap();
+
+        // 5 giờ × 20.000 = 100.000; 100.000 × 40% = 40.000.
+        assert_eq!(pricing.base_amount, 100_000);
+        assert_eq!(pricing.surcharge_amount, 40_000);
+    }
+
+    #[test]
+    fn hourly_stay_across_two_days_is_prorated_and_this_is_a_deliberate_change() {
+        // Ngoại lệ đã ghi trong spec: `base` của kiểu giờ không tính theo đêm,
+        // nên chia đều theo ngày là cách phân bổ duy nhất có nghĩa. Trước khi
+        // sửa, kỳ ở này ra 0₫ vì ngày đến 13/02 chưa khai.
+        let mut inputs = sample_inputs();
+        inputs.stored_rule = Some(holiday_rule());
+        inputs.special_days = tet_2026();
+        inputs.pricing_type = "hourly".to_string();
+        inputs.check_in = "2026-02-13T20:00:00".to_string();
+        inputs.check_out = "2026-02-15T02:00:00".to_string();
+
+        let pricing = calculate_from_loaded_inputs(&inputs).unwrap();
+
+        // 30 giờ × 20.000 = 600.000, không chạm trần nào.
+        // Hai ngày lịch 13 và 14; (0 + 40)/2 = 20% → 120.000.
+        assert_eq!(pricing.base_amount, 600_000);
+        assert_eq!(pricing.surcharge_amount, 120_000);
+    }
+
+    #[test]
+    fn a_holiday_that_falls_on_a_weekend_still_charges_both() {
+        // Khoá hành vi hiện có: hai phụ thu cộng dồn, không cái nào nuốt cái
+        // nào. Đây là quyết định về giá, đổi nó không thuộc phạm vi đợt này.
+        // Chú ý fixture: test này là chỗ DUY NHẤT cố ý bật phụ thu cuối tuần.
+        let mut rule = holiday_rule();
+        rule.weekend_uplift_pct = 20.0;
+        let mut inputs = sample_inputs();
+        inputs.stored_rule = Some(rule);
+        inputs.special_days = tet_2026();
+        // 14/02/2026 là thứ Bảy, 15/02 là Chủ nhật — hai đêm, cả hai đều cuối
+        // tuần và cả hai đều trong Tết.
+        inputs.check_in = "2026-02-14".to_string();
+        inputs.check_out = "2026-02-16".to_string();
+
+        let pricing = calculate_from_loaded_inputs(&inputs).unwrap();
+
+        assert_eq!(pricing.base_amount, 1_000_000);
+        assert_eq!(pricing.weekend_amount, 200_000, "2 đêm × 500.000 × 20%");
+        assert_eq!(pricing.surcharge_amount, 400_000, "2 đêm × 500.000 × 40%");
+        assert_eq!(pricing.total, 1_600_000, "cả hai phụ thu đều được cộng");
+    }
+
+    #[test]
+    fn a_malformed_stored_date_simply_never_matches() {
+        // Cột `date` không có ràng buộc CHECK, nên rác là có thật. Tính chất
+        // "coi như không khai" tự có từ việc so sánh chuỗi — đừng thêm đường
+        // phân tích-rồi-báo-lỗi, làm thế là đổi đúng hành vi test này khoá.
+        let mut inputs = sample_inputs();
+        inputs.stored_rule = Some(holiday_rule());
+        inputs.special_days = vec![special("khong-phai-ngay", 40.0)];
+        inputs.check_in = "2026-02-12".to_string();
+        inputs.check_out = "2026-02-16".to_string();
+
+        let pricing = calculate_from_loaded_inputs(&inputs).unwrap();
+
+        assert_eq!(pricing.surcharge_amount, 0);
     }
 }

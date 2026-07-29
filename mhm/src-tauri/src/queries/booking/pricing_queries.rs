@@ -10,7 +10,7 @@
 use sqlx::{Pool, Row, Sqlite, Transaction};
 
 use crate::db::row::{get_f64, get_money_vnd};
-use crate::domain::booking::pricing::{StayPricingInputs, StoredPricingRule};
+use crate::domain::booking::pricing::{SpecialDay, StayPricingInputs, StoredPricingRule};
 use crate::domain::booking::{BookingError, BookingResult};
 use crate::money::MoneyVnd;
 
@@ -78,8 +78,8 @@ const ROOM_GUEST_PRICING_BY_TYPE_SQL: &str = "SELECT COALESCE(max_guests, 2) AS 
             COALESCE(extra_person_fee, 0) AS extra_person_fee
      FROM rooms WHERE LOWER(type) = LOWER(?) ORDER BY id LIMIT 1";
 
-const SPECIAL_UPLIFT_SQL: &str =
-    "SELECT CAST(uplift_pct AS REAL) FROM special_dates WHERE date = ?";
+const SPECIAL_DAYS_IN_RANGE_SQL: &str = "SELECT date, CAST(uplift_pct AS REAL) AS uplift_pct
+     FROM special_dates WHERE date >= ? AND date <= ? ORDER BY date";
 
 /// Every room type the house actually has rooms in. A type with a
 /// `pricing_rules` row but no rooms prices nothing, so it is not listed.
@@ -223,14 +223,14 @@ pub(crate) async fn load_stay_pricing_inputs_tx(
     } else {
         None
     };
-    let special_uplift_pct = load_special_uplift_tx(tx, check_in).await?;
+    let special_days = load_special_days_tx(tx, check_in, check_out).await?;
     let guest_pricing = load_room_guest_pricing_tx(tx, room_id).await?;
 
     Ok(StayPricingInputs {
         room_type,
         stored_rule,
         fallback_base_price,
-        special_uplift_pct,
+        special_days,
         check_in: check_in.to_string(),
         check_out: check_out.to_string(),
         pricing_type: pricing_type.to_string(),
@@ -264,14 +264,14 @@ pub(crate) async fn load_stay_pricing_inputs_for_room_type(
     guests: Option<i32>,
 ) -> BookingResult<StayPricingInputs> {
     let rule_inputs = load_type_rule_inputs(pool, room_type).await?;
-    let special_uplift_pct = load_special_uplift(pool, check_in).await?;
+    let special_days = load_special_days(pool, check_in, check_out).await?;
     let guest_pricing = load_room_guest_pricing_for_type(pool, room_type).await?;
 
     Ok(StayPricingInputs {
         room_type: room_type.to_string(),
         stored_rule: rule_inputs.stored_rule,
         fallback_base_price: rule_inputs.fallback_base_price,
-        special_uplift_pct,
+        special_days,
         check_in: check_in.to_string(),
         check_out: check_out.to_string(),
         pricing_type: pricing_type.to_string(),
@@ -299,14 +299,14 @@ pub(crate) async fn load_stay_pricing_inputs_for_room(
 ) -> BookingResult<StayPricingInputs> {
     let room_type = load_room_type(pool, room_id).await?;
     let rule_inputs = load_type_rule_inputs(pool, &room_type).await?;
-    let special_uplift_pct = load_special_uplift(pool, check_in).await?;
+    let special_days = load_special_days(pool, check_in, check_out).await?;
     let guest_pricing = load_room_guest_pricing(pool, room_id).await?;
 
     Ok(StayPricingInputs {
         room_type,
         stored_rule: rule_inputs.stored_rule,
         fallback_base_price: rule_inputs.fallback_base_price,
-        special_uplift_pct,
+        special_days,
         check_in: check_in.to_string(),
         check_out: check_out.to_string(),
         pricing_type: pricing_type.to_string(),
@@ -391,14 +391,46 @@ async fn load_fallback_base_price(
     Ok(row.as_ref().map(|row| get_money_vnd(row, "base_price")))
 }
 
-async fn load_special_uplift(pool: &Pool<Sqlite>, date_str: &str) -> BookingResult<f64> {
-    let row: Option<(f64,)> = sqlx::query_as(SPECIAL_UPLIFT_SQL)
-        .bind(date_key(date_str))
-        .fetch_optional(pool)
+/// Ngày lễ trong khoảng kỳ ở.
+///
+/// Cận trên **bao gồm** ngày trả phòng. Đọc dư một ngày là cố ý: quyết định
+/// "ngày nào là một đêm" thuộc về `domain`, tầng đọc không được tự cắt.
+async fn load_special_days(
+    pool: &Pool<Sqlite>,
+    check_in: &str,
+    check_out: &str,
+) -> BookingResult<Vec<SpecialDay>> {
+    let rows = sqlx::query_as(SPECIAL_DAYS_IN_RANGE_SQL)
+        .bind(date_key(check_in))
+        .bind(date_key(check_out))
+        .fetch_all(pool)
         .await
         .map_err(database_error)?;
 
-    Ok(row.map(|value| value.0).unwrap_or(0.0))
+    Ok(special_days_from_rows(rows))
+}
+
+async fn load_special_days_tx(
+    tx: &mut Transaction<'_, Sqlite>,
+    check_in: &str,
+    check_out: &str,
+) -> BookingResult<Vec<SpecialDay>> {
+    let rows = sqlx::query_as(SPECIAL_DAYS_IN_RANGE_SQL)
+        .bind(date_key(check_in))
+        .bind(date_key(check_out))
+        .fetch_all(&mut **tx)
+        .await
+        .map_err(database_error)?;
+
+    Ok(special_days_from_rows(rows))
+}
+
+/// Bản pool và bản transaction chỉ khác nhau ở chỗ chạy câu lệnh. Dùng chung
+/// một bộ ánh xạ để hai đường không thể hiểu khác nhau về cùng một hàng.
+fn special_days_from_rows(rows: Vec<(String, f64)>) -> Vec<SpecialDay> {
+    rows.into_iter()
+        .map(|(date, uplift_pct)| SpecialDay { date, uplift_pct })
+        .collect()
 }
 
 pub(crate) async fn load_pricing_rule_listings(
@@ -471,22 +503,9 @@ async fn load_fallback_base_price_tx(
         .map(|row| get_money_vnd(row, "base_price")))
 }
 
-async fn load_special_uplift_tx(
-    tx: &mut Transaction<'_, Sqlite>,
-    date_str: &str,
-) -> BookingResult<f64> {
-    let row: Option<(f64,)> = sqlx::query_as(SPECIAL_UPLIFT_SQL)
-        .bind(date_key(date_str))
-        .fetch_optional(&mut **tx)
-        .await
-        .map_err(database_error)?;
-
-    Ok(row.map(|value| value.0).unwrap_or(0.0))
-}
-
 #[cfg(test)]
 mod tests {
-    use super::{date_key, load_stay_pricing_inputs_tx, stored_rule_from_row};
+    use super::{date_key, load_special_days, load_stay_pricing_inputs_tx, stored_rule_from_row};
     use sqlx::{sqlite::SqlitePoolOptions, Connection, Executor, SqliteConnection};
 
     #[tokio::test]
@@ -640,7 +659,8 @@ mod tests {
         assert_eq!(inputs.room_type, "deluxe");
         assert!(inputs.stored_rule.is_some());
         assert_eq!(inputs.fallback_base_price, None);
-        assert_eq!(inputs.special_uplift_pct, 10.0);
+        assert_eq!(inputs.special_days.len(), 1);
+        assert_eq!(inputs.special_days[0].uplift_pct, 10.0);
 
         tx.rollback().await.unwrap();
     }
@@ -672,8 +692,57 @@ mod tests {
         assert_eq!(inputs.room_type, "standard");
         assert!(inputs.stored_rule.is_none());
         assert_eq!(inputs.fallback_base_price, Some(480000));
-        assert_eq!(inputs.special_uplift_pct, 0.0);
+        assert!(inputs.special_days.is_empty());
 
         tx.rollback().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn load_special_days_returns_only_the_days_inside_the_stay() {
+        let pool = setup_loader_pool().await;
+        for (date, pct) in [
+            ("2026-02-13", 40.0),
+            ("2026-02-14", 40.0),
+            ("2026-02-15", 40.0),
+            ("2026-02-16", 40.0),
+            ("2026-02-17", 40.0),
+        ] {
+            sqlx::query("INSERT INTO special_dates (date, uplift_pct) VALUES (?, ?)")
+                .bind(date)
+                .bind(pct)
+                .execute(&pool)
+                .await
+                .unwrap();
+        }
+
+        let days = load_special_days(&pool, "2026-02-14", "2026-02-16")
+            .await
+            .unwrap();
+
+        // Cận trên bao gồm ngày trả phòng, nên 16 có mặt; 13 và 17 thì không.
+        let dates: Vec<&str> = days.iter().map(|day| day.date.as_str()).collect();
+        assert_eq!(dates, vec!["2026-02-14", "2026-02-15", "2026-02-16"]);
+    }
+
+    #[tokio::test]
+    async fn load_special_days_truncates_an_rfc3339_bound() {
+        let pool = setup_loader_pool().await;
+        sqlx::query("INSERT INTO special_dates (date, uplift_pct) VALUES (?, ?)")
+            .bind("2026-02-14")
+            .bind(40.0)
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        let days = load_special_days(
+            &pool,
+            "2026-02-14T08:00:00+07:00",
+            "2026-02-14T20:00:00+07:00",
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(days.len(), 1);
+        assert_eq!(days[0].uplift_pct, 40.0);
     }
 }
