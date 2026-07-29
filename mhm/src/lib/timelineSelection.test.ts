@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { addDaysIso, localDateIso, resolveSelection } from "./timelineSelection";
+import { addDaysIso, localDateIso, nightsBetween, resolveSelection } from "./timelineSelection";
 
 const days = Array.from({ length: 16 }, (_, i) => ({
     // cột 0 = 26/07, cột 3 = hôm nay 29/07 (khớp layout thật: today − 3)
@@ -55,5 +55,18 @@ describe("date helpers", () => {
     });
     it("localDateIso định dạng YYYY-MM-DD", () => {
         expect(localDateIso(new Date(2026, 6, 29))).toBe("2026-07-29");
+    });
+});
+
+describe("nightsBetween", () => {
+    it("tính đúng số đêm giữa hai ngày", () => {
+        expect(nightsBetween("2026-07-26", "2026-07-28")).toBe(2);
+    });
+    it("ngày ra trước ngày vào → số âm", () => {
+        expect(nightsBetween("2026-07-28", "2026-07-26")).toBe(-2);
+    });
+    it("thiếu ngày vào hoặc ngày ra → 0", () => {
+        expect(nightsBetween("", "2026-07-28")).toBe(0);
+        expect(nightsBetween("2026-07-26", "")).toBe(0);
     });
 });

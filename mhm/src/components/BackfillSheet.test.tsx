@@ -69,7 +69,19 @@ vi.mock("sonner", () => ({
     },
 }));
 
+import { addDaysIso, localDateIso } from "@/lib/timelineSelection";
 import BackfillSheet from "./BackfillSheet";
+
+// FormField/FormFieldSelect (shared) chỉ đặt <label> cạnh <input>/<select>,
+// không có htmlFor/id liên kết (xem CheckinSheet.test.tsx) — nên
+// getByLabelText không tìm ra các trường Ngày sinh/Giới tính/Quốc tịch/Địa
+// chỉ. Đây là control nằm ngay sau <label> có cùng text, trong cùng div cha.
+function controlAfterLabel(labelText: string): HTMLElement {
+    const label = screen.getByText(labelText);
+    const el = label.parentElement?.querySelector("input, select");
+    if (!el) throw new Error(`Không tìm thấy control cạnh nhãn "${labelText}"`);
+    return el as HTMLElement;
+}
 
 describe("BackfillSheet", () => {
     beforeEach(() => {
@@ -116,6 +128,11 @@ describe("BackfillSheet", () => {
         await waitFor(() => {
             expect(screen.getAllByDisplayValue("500000").length).toBe(2);
         });
+
+        // step="1" trên hai ô tiền — thiếu nó, một giá trị như 500000.5 được
+        // gửi lên như float thay vì bị chặn ngay trong form.
+        expect(screen.getByLabelText(/Tiền phòng/i)).toHaveAttribute("step", "1");
+        expect(screen.getByLabelText("Đã thu")).toHaveAttribute("step", "1");
     });
 
     it("khách còn ở: đổi nhãn ngày ra thành dự kiến", async () => {
@@ -300,5 +317,177 @@ describe("BackfillSheet", () => {
 
         expect(screen.getByPlaceholderText("Họ và tên *")).toHaveValue("");
         expect(await screen.findByDisplayValue("2026-07-10")).toBeInTheDocument();
+    });
+
+    it("bật rồi tắt 'Khách còn ở' thì Đã thu đổi theo đúng chiều (không bị kẹt)", async () => {
+        // Mở từ một vùng kéo đã trả phòng: total → 500000, "Đã thu" tự nạp
+        // theo total. Tick "Khách còn ở": phải về 0 (khách chưa trả phòng,
+        // không được gửi paid_amount=500000 cho khách chưa trả). Untick lại:
+        // phải nạp lại total. Bug cũ: guard `!paidDirty && !stillStaying` chỉ
+        // đúng chiều untick→total, còn tick→0 bị bỏ sót nên giá trị cũ dính lại.
+        const user = userEvent.setup();
+        render(
+            <BackfillSheet
+                open
+                onOpenChange={() => {}}
+                prefill={{ roomId: "R101", checkInDate: "2026-07-26", checkOutDate: "2026-07-28", stillStaying: false }}
+            />,
+        );
+        await waitFor(() => {
+            expect(screen.getByLabelText("Đã thu")).toHaveValue(500000);
+        });
+
+        const stayingCheckbox = screen.getByRole("checkbox", { name: /Khách còn ở/ });
+        await user.click(stayingCheckbox);
+        await waitFor(() => {
+            expect(screen.getByLabelText("Đã thu")).toHaveValue(0);
+        });
+
+        await user.click(stayingCheckbox);
+        await waitFor(() => {
+            expect(screen.getByLabelText("Đã thu")).toHaveValue(500000);
+        });
+    });
+
+    it("ngày vào không được chọn tương lai; ngày ra bị giới hạn theo chế độ", async () => {
+        const todayIso = localDateIso(new Date());
+        const { rerender } = render(
+            <BackfillSheet
+                open
+                onOpenChange={() => {}}
+                prefill={{ roomId: "R101", checkInDate: "2026-07-26", checkOutDate: "2026-07-28", stillStaying: false }}
+            />,
+        );
+        const checkIn = await screen.findByLabelText("Ngày vào");
+        expect(checkIn).toHaveAttribute("max", todayIso);
+
+        // Đã trả phòng: ngày ra không được sau hôm nay, không có min.
+        const checkOutDone = screen.getByLabelText(/^Ngày ra$/);
+        expect(checkOutDone).toHaveAttribute("max", todayIso);
+        expect(checkOutDone).not.toHaveAttribute("min");
+
+        rerender(
+            <BackfillSheet
+                open
+                onOpenChange={() => {}}
+                prefill={{ roomId: "R101", checkInDate: "2026-07-27", checkOutDate: "2026-07-31", stillStaying: true }}
+            />,
+        );
+        // Còn ở: ngày ra dự kiến phải sau hôm nay, không có max.
+        const checkOutStaying = await screen.findByLabelText("Ngày ra dự kiến");
+        expect(checkOutStaying).toHaveAttribute("min", addDaysIso(todayIso, 1));
+        expect(checkOutStaying).not.toHaveAttribute("max");
+    });
+
+    it("nhập ngày sinh/giới tính/quốc tịch/địa chỉ thật thì gửi đúng giá trị đã nhập", async () => {
+        // Trước đây các trường này bị hardcode (dob rỗng, gender "Nam",
+        // nationality "Việt Nam", address rỗng) bất kể chủ gõ gì — dữ liệu này
+        // feed thẳng vào khai báo tạm trú nộp công an nên không được bịa.
+        const user = userEvent.setup();
+        render(
+            <BackfillSheet
+                open
+                onOpenChange={() => {}}
+                prefill={{ roomId: "R101", checkInDate: "2026-07-26", checkOutDate: "2026-07-28", stillStaying: false }}
+            />,
+        );
+        await user.type(screen.getByPlaceholderText("Họ và tên *"), "Nguyễn Văn Bù");
+        await user.type(controlAfterLabel("Ngày sinh"), "1990-01-01");
+        await user.selectOptions(controlAfterLabel("Giới tính"), "Nữ");
+        const nationalityInput = controlAfterLabel("Quốc tịch");
+        await user.clear(nationalityInput);
+        await user.type(nationalityInput, "Hàn Quốc");
+        await user.type(controlAfterLabel("Địa chỉ"), "123 Lê Lợi");
+
+        await waitFor(() => {
+            expect(screen.getAllByDisplayValue("500000").length).toBe(2);
+        });
+        await user.click(screen.getByRole("button", { name: /Ghi bù/ }));
+
+        await waitFor(() => {
+            expect(invokeWriteCommand).toHaveBeenCalledWith(
+                "backfill_stay",
+                expect.objectContaining({
+                    req: expect.objectContaining({
+                        guests: [
+                            expect.objectContaining({
+                                full_name: "Nguyễn Văn Bù",
+                                dob: "1990-01-01",
+                                gender: "Nữ",
+                                nationality: "Hàn Quốc",
+                                address: "123 Lê Lợi",
+                            }),
+                        ],
+                    }),
+                }),
+                expect.anything(),
+            );
+        });
+    });
+
+    it("chọn phòng rồi bật 'Khách còn ở' làm phòng biến khỏi danh sách thì tự bỏ chọn", async () => {
+        rooms = [
+            ...ORIGINAL_ROOMS,
+            {
+                id: "R102",
+                name: "R102",
+                type: "deluxe",
+                floor: 2,
+                has_balcony: true,
+                base_price: 800000,
+                max_guests: 3,
+                extra_person_fee: 80000,
+                status: "occupied",
+            },
+        ];
+        const user = userEvent.setup();
+        render(
+            <BackfillSheet
+                open
+                onOpenChange={() => {}}
+                prefill={{ roomId: "R102", checkInDate: "2026-07-26", checkOutDate: "2026-07-28", stillStaying: false }}
+            />,
+        );
+        const select = (await screen.findByLabelText(/^Phòng$/)) as HTMLSelectElement;
+        expect(select).toHaveValue("R102");
+
+        const stayingCheckbox = screen.getByRole("checkbox", { name: /Khách còn ở/ });
+        await user.click(stayingCheckbox);
+        await waitFor(() => {
+            expect(select).toHaveValue("");
+        });
+
+        // Chỉ hiện blank vì option biến mất chưa chứng minh được gì — nếu state
+        // `roomId` chưa thực sự bị xoá, bật lại (option quay lại danh sách) sẽ
+        // hiện lại "R102" dù chủ chưa hề chọn lại nó. Untick lại để chứng minh
+        // state đã bị xoá thật, không phải chỉ DOM ẩn option đi tạm thời.
+        await user.click(stayingCheckbox);
+        await waitFor(() => {
+            expect(select).toHaveValue("");
+        });
+    });
+
+    it("backend báo lỗi: báo toast, giữ sheet mở và giữ nguyên dữ liệu đã nhập", async () => {
+        invokeWriteCommand.mockRejectedValueOnce(new Error("boom"));
+        const onOpenChange = vi.fn();
+        const user = userEvent.setup();
+        render(
+            <BackfillSheet
+                open
+                onOpenChange={onOpenChange}
+                prefill={{ roomId: "R101", checkInDate: "2026-07-26", checkOutDate: "2026-07-28", stillStaying: false }}
+            />,
+        );
+        await user.type(screen.getByPlaceholderText("Họ và tên *"), "Nguyễn Văn Bù");
+        await waitFor(() => {
+            expect(screen.getAllByDisplayValue("500000").length).toBe(2);
+        });
+        await user.click(screen.getByRole("button", { name: /Ghi bù/ }));
+
+        await waitFor(() => {
+            expect(toastError).toHaveBeenCalled();
+        });
+        expect(onOpenChange).not.toHaveBeenCalledWith(false);
+        expect(screen.getByPlaceholderText("Họ và tên *")).toHaveValue("Nguyễn Văn Bù");
     });
 });
