@@ -191,6 +191,36 @@ pub async fn get_special_dates(
         .collect())
 }
 
+#[tauri::command]
+pub async fn save_special_date_range(
+    state: State<'_, AppState>,
+    app: tauri::AppHandle,
+    remove: Vec<String>,
+    from: String,
+    to: String,
+    label: String,
+    uplift_pct: f64,
+) -> Result<(), String> {
+    require_admin(&state)?;
+
+    pricing_service::save_special_date_range(
+        &state.db,
+        pricing_service::SaveSpecialDateRange {
+            remove,
+            from,
+            to,
+            label,
+            uplift_pct,
+        },
+        uuid::Uuid::new_v4().to_string(),
+        chrono::Local::now().to_rfc3339(),
+    )
+    .await?;
+
+    emit_db_update(&app, "pricing");
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::do_get_room_type_rates;
