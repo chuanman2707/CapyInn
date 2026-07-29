@@ -365,10 +365,11 @@ mod tests {
     use super::{
         calculate_price_preview, calculate_room_price_preview, calculate_stay_price_tx,
         delete_special_dates, save_pricing_rule, save_special_date_range, SavePricingRule,
-        SaveSpecialDateRange,
+        SaveSpecialDateRange, MAX_SPECIAL_RANGE_DAYS,
     };
     use crate::app_error::{codes, AppErrorKind};
     use crate::domain::booking::BookingError;
+    use chrono::NaiveDate;
     use sqlx::{sqlite::SqlitePoolOptions, Executor, Pool, Row, Sqlite};
 
     const CHECK_IN: &str = "2026-04-20T14:00:00+07:00";
@@ -1270,6 +1271,14 @@ mod tests {
         assert_eq!(count.0, 0, "không lần nào được ghi gì");
     }
 
+    /// Seeds two independent, non-adjacent seasons and deletes only one of
+    /// them. A bare `COUNT(*) == 0` on a pool that only ever held the deleted
+    /// season would pass just as well for an unconditional `DELETE FROM
+    /// special_dates` (or one matching on the wrong column) as for a correct,
+    /// targeted delete — it proves the table got emptied, not that the right
+    /// rows were the ones targeted. Comparing the full remaining date list
+    /// against the untouched season closes that gap: an unconditional delete
+    /// wipes it out too, and the second assertion below catches that.
     #[tokio::test]
     async fn delete_special_dates_removes_a_whole_cluster_at_once() {
         let pool = special_dates_pool().await;
@@ -1282,20 +1291,52 @@ mod tests {
                 label: "Tết".to_string(),
                 uplift_pct: 40.0,
             },
-            "base".to_string(),
+            "tet".to_string(),
             "2026-01-01T00:00:00+07:00".to_string(),
         )
         .await
         .unwrap();
 
-        let dates: Vec<String> = (14..=22).map(|day| format!("2026-02-{day:02}")).collect();
-        delete_special_dates(&pool, dates).await.unwrap();
+        save_special_date_range(
+            &pool,
+            SaveSpecialDateRange {
+                remove: Vec::new(),
+                from: "2026-04-01".to_string(),
+                to: "2026-04-04".to_string(),
+                label: "Nghỉ lễ".to_string(),
+                uplift_pct: 20.0,
+            },
+            "le".to_string(),
+            "2026-01-01T00:00:00+07:00".to_string(),
+        )
+        .await
+        .unwrap();
 
-        let count: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM special_dates")
-            .fetch_one(&pool)
-            .await
-            .unwrap();
-        assert_eq!(count.0, 0);
+        let deleted: Vec<String> = (14..=22).map(|day| format!("2026-02-{day:02}")).collect();
+        delete_special_dates(&pool, deleted.clone()).await.unwrap();
+
+        let remaining: Vec<String> =
+            sqlx::query_as::<_, (String,)>("SELECT date FROM special_dates ORDER BY date")
+                .fetch_all(&pool)
+                .await
+                .unwrap()
+                .into_iter()
+                .map(|row| row.0)
+                .collect();
+
+        for date in &deleted {
+            assert!(
+                !remaining.contains(date),
+                "{date} from the deleted season must be gone"
+            );
+        }
+
+        let expected_untouched: Vec<String> =
+            (1..=4).map(|day| format!("2026-04-{day:02}")).collect();
+        assert_eq!(
+            remaining, expected_untouched,
+            "the untouched season must survive, date for date"
+        );
     }
 
     #[tokio::test]
@@ -1308,5 +1349,42 @@ mod tests {
         delete_special_dates(&pool, vec!["14/02/2026".to_string()])
             .await
             .expect_err("ngày sai định dạng");
+    }
+
+    /// `MAX_SPECIAL_RANGE_DAYS` caps how many dates a single delete call may
+    /// carry. Only the empty-list and malformed-date rejections were covered
+    /// before; this exercises the length cap itself, and checks the table is
+    /// untouched afterwards so a rejection that half-executed would be
+    /// caught.
+    #[tokio::test]
+    async fn delete_special_dates_rejects_a_list_longer_than_the_max_range() {
+        let pool = special_dates_pool().await;
+        sqlx::query(
+            "INSERT INTO special_dates (id, date, label, uplift_pct, created_at)
+             VALUES ('kept-1', '2026-02-14', 'Tết', 40.0, '2026-01-01T00:00:00+07:00')",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let from = NaiveDate::from_ymd_opt(2026, 1, 1).unwrap();
+        let too_many: Vec<String> = (0..(MAX_SPECIAL_RANGE_DAYS + 1))
+            .map(|offset| {
+                (from + chrono::Duration::days(offset))
+                    .format("%Y-%m-%d")
+                    .to_string()
+            })
+            .collect();
+        assert_eq!(too_many.len() as i64, MAX_SPECIAL_RANGE_DAYS + 1);
+
+        delete_special_dates(&pool, too_many)
+            .await
+            .expect_err("367 ngày vượt trần xoá");
+
+        let count: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM special_dates")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(count.0, 1, "một lệnh bị từ chối không được đụng vào bảng");
     }
 }
