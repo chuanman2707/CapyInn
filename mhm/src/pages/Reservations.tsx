@@ -1,4 +1,4 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useMemo, type MouseEvent as ReactMouseEvent } from "react";
 import { Search, ChevronLeft, ChevronRight, Plus } from "lucide-react";
 import { Input } from "@/components/ui/input";
 import { Badge } from "@/components/ui/badge";
@@ -15,6 +15,7 @@ import InvoiceDialog from "@/components/InvoiceDialog";
 import { useInvoiceDialog } from "@/hooks/useInvoiceDialog";
 import ReservationSheet from "@/components/ReservationSheet";
 import RoomDrawer from "@/components/RoomDrawer";
+import { resolveSelection, localDateIso, type TimelineSelectionRange } from "@/lib/timelineSelection";
 import type { BookingStatus, BookingWithGuest } from "@/types";
 
 type BookingBar = BookingWithGuest & {
@@ -116,7 +117,7 @@ function getStatusLabel(status: BookingStatus): string {
 }
 
 export default function Reservations() {
-    const { rooms, fetchRooms } = useHotelStore();
+    const { rooms, fetchRooms, setCheckinOpen } = useHotelStore();
     const [bookings, setBookings] = useState<BookingWithGuest[]>([]);
     const [searchQuery, setSearchQuery] = useState("");
     const [dateOffset, setDateOffset] = useState(0);
@@ -124,9 +125,11 @@ export default function Reservations() {
     const [selectedBooking, setSelectedBooking] = useState<BookingWithGuest | null>(null);
     const [editBooking, setEditBooking] = useState<BookingWithGuest | null>(null);
     const [drawerRoomId, setDrawerRoomId] = useState<string | null>(null);
+    const [dragSel, setDragSel] = useState<TimelineSelectionRange | null>(null);
+    const [reservationPrefill, setReservationPrefill] = useState<{ roomId: string; checkIn: string; checkOut: string } | null>(null);
     const { invoiceOpen, invoiceData, invoiceLoading, viewInvoice, closeInvoice } = useInvoiceDialog();
 
-    const DAYS = getDateRange(dateOffset);
+    const DAYS = useMemo(() => getDateRange(dateOffset), [dateOffset]);
     const rangeLabel = formatRangeLabel(DAYS);
 
     useEffect(() => { fetchRooms(); }, []);
@@ -237,6 +240,40 @@ export default function Reservations() {
             toast.error(formatAppError(e));
         }
     }
+
+    function handleCellMouseDown(roomId: string, colIndex: number, event: ReactMouseEvent) {
+        if (event.button !== 0) return;
+        event.preventDefault(); // chặn select text khi kéo
+        setDragSel({ roomId, startIndex: colIndex, endIndex: colIndex });
+    }
+
+    function handleCellMouseEnter(roomId: string, colIndex: number) {
+        setDragSel((prev) => (prev && prev.roomId === roomId ? { ...prev, endIndex: colIndex } : prev));
+    }
+
+    useEffect(() => {
+        if (!dragSel) return;
+        const onMouseUp = () => {
+            const resolved = resolveSelection(dragSel, DAYS, localDateIso(new Date()));
+            setDragSel(null);
+            if (resolved.kind === "checkin") {
+                setCheckinOpen(true, resolved.roomId, resolved.nights);
+            } else if (resolved.kind === "reservation") {
+                setReservationPrefill({ roomId: resolved.roomId, checkIn: resolved.checkInDate, checkOut: resolved.checkOutDate });
+                setSheetOpen(true);
+            }
+            // "backfill": nối ở task BackfillSheet — tới lúc đó bấm ngày quá khứ chưa làm gì.
+        };
+        const onKeyDown = (event: KeyboardEvent) => {
+            if (event.key === "Escape") setDragSel(null);
+        };
+        window.addEventListener("mouseup", onMouseUp);
+        window.addEventListener("keydown", onKeyDown);
+        return () => {
+            window.removeEventListener("mouseup", onMouseUp);
+            window.removeEventListener("keydown", onKeyDown);
+        };
+    }, [dragSel, DAYS]);
 
     return (
         <div className="flex flex-col h-full bg-white rounded-3xl shadow-soft overflow-hidden">
@@ -351,9 +388,21 @@ export default function Reservations() {
                                         </div>
 
                                         <div className="flex relative w-max">
-                                            {DAYS.map((d, colIndex) => (
-                                                <div key={colIndex} className={`w-[80px] shrink-0 border-r border-slate-200 ${d.isToday ? "bg-blue-50/10" : ""} group-hover:bg-slate-50/30 transition-colors`} />
-                                            ))}
+                                            {DAYS.map((d, colIndex) => {
+                                                const inSelection = dragSel !== null
+                                                    && dragSel.roomId === room.id
+                                                    && colIndex >= Math.min(dragSel.startIndex, dragSel.endIndex)
+                                                    && colIndex <= Math.max(dragSel.startIndex, dragSel.endIndex);
+                                                return (
+                                                    <div
+                                                        key={colIndex}
+                                                        data-testid={`cell-${room.id}-${colIndex}`}
+                                                        onMouseDown={(event) => handleCellMouseDown(room.id, colIndex, event)}
+                                                        onMouseEnter={() => handleCellMouseEnter(room.id, colIndex)}
+                                                        className={`w-[80px] shrink-0 border-r border-slate-200 select-none cursor-pointer ${inSelection ? "bg-blue-100/70" : d.isToday ? "bg-blue-50/10" : ""} group-hover:bg-slate-50/30 transition-colors`}
+                                                    />
+                                                );
+                                            })}
 
                                             {DAYS.some(d => d.isToday) && (
                                                 <div data-testid="timeline-today-marker" className="absolute top-0 bottom-0 w-[2px] bg-brand-primary/60 z-20" style={{ left: `${DAYS.findIndex(d => d.isToday) * COL_WIDTH + COL_WIDTH / 2}px` }} />
@@ -437,9 +486,11 @@ export default function Reservations() {
                 open={sheetOpen || !!editBooking}
                 onOpenChange={(v) => {
                     setSheetOpen(v);
-                    if (!v) { setEditBooking(null); loadBookings(); }
+                    if (!v) { setEditBooking(null); setReservationPrefill(null); loadBookings(); }
                 }}
                 editBooking={editBooking || undefined}
+                preSelectedRoomId={reservationPrefill?.roomId}
+                prefillDates={reservationPrefill ? { checkIn: reservationPrefill.checkIn, checkOut: reservationPrefill.checkOut } : undefined}
             />
         </div>
     );
