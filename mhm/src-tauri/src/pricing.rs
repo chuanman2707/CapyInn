@@ -119,18 +119,18 @@ fn calculate_nightly(
         .map_err(|error| error.message)?;
 
     let mut breakdown = vec![PricingLine {
-        label: format!("{} night(s) x {}", nights, fmt_vnd(rule.daily_rate)),
+        label: format!("{} đêm x {}", nights, fmt_vnd(rule.daily_rate)),
         amount: base,
     }];
     if weekend > 0 {
         breakdown.push(PricingLine {
-            label: "Weekend surcharge".into(),
+            label: "Phụ thu cuối tuần".into(),
             amount: weekend,
         });
     }
     if special != 0 {
         breakdown.push(PricingLine {
-            label: "Holiday surcharge".into(),
+            label: "Phụ thu ngày lễ".into(),
             amount: special,
         });
     }
@@ -181,7 +181,7 @@ fn calculate_hourly(
     if capped {
         breakdown.push(PricingLine {
             label: format!(
-                "{}h x {} = {} -> Capped to {} rate",
+                "{}h x {} = {} -> Giới hạn theo giá {}",
                 hours,
                 fmt_vnd(rule.hourly_rate),
                 fmt_vnd(raw_hourly),
@@ -197,13 +197,13 @@ fn calculate_hourly(
     }
     if weekend > 0 {
         breakdown.push(PricingLine {
-            label: "Weekend surcharge".into(),
+            label: "Phụ thu cuối tuần".into(),
             amount: weekend,
         });
     }
     if special != 0 {
         breakdown.push(PricingLine {
-            label: "Holiday surcharge".into(),
+            label: "Phụ thu ngày lễ".into(),
             amount: special,
         });
     }
@@ -252,7 +252,7 @@ fn calculate_overnight(
     let base = checked_mul_money(rule.overnight_rate, nights, "overnight_rate")?;
     let mut surcharge = 0;
     let mut breakdown = vec![PricingLine {
-        label: format!("{} night(s) x {}", nights, fmt_vnd(rule.overnight_rate)),
+        label: format!("{} đêm x {}", nights, fmt_vnd(rule.overnight_rate)),
         amount: base,
     }];
 
@@ -267,7 +267,7 @@ fn calculate_overnight(
         surcharge = checked_add_money(surcharge, early_amount, "surcharge_amount")?;
         breakdown.push(PricingLine {
             label: format!(
-                "Early check-in surcharge ({}%)",
+                "Phụ thu nhận phòng sớm ({}%)",
                 rule.early_checkin_surcharge_pct
             ),
             amount: early_amount,
@@ -285,7 +285,7 @@ fn calculate_overnight(
         surcharge = checked_add_money(surcharge, late_amount, "surcharge_amount")?;
         breakdown.push(PricingLine {
             label: format!(
-                "Late check-out surcharge ({}%)",
+                "Phụ thu trả phòng muộn ({}%)",
                 rule.late_checkout_surcharge_pct
             ),
             amount: late_amount,
@@ -298,13 +298,13 @@ fn calculate_overnight(
 
     if weekend > 0 {
         breakdown.push(PricingLine {
-            label: "Weekend surcharge".into(),
+            label: "Phụ thu cuối tuần".into(),
             amount: weekend,
         });
     }
     if special != 0 {
         breakdown.push(PricingLine {
-            label: "Holiday surcharge".into(),
+            label: "Phụ thu ngày lễ".into(),
             amount: special,
         });
     }
@@ -344,7 +344,7 @@ fn calculate_daily(
 
     let mut surcharge = 0;
     let mut breakdown = vec![PricingLine {
-        label: format!("{} day(s) x {}", days, fmt_vnd(rule.daily_rate)),
+        label: format!("{} ngày x {}", days, fmt_vnd(rule.daily_rate)),
         amount: base,
     }];
 
@@ -359,7 +359,7 @@ fn calculate_daily(
         surcharge = checked_add_money(surcharge, early_amount, "surcharge_amount")?;
         breakdown.push(PricingLine {
             label: format!(
-                "Early check-in surcharge ({}%)",
+                "Phụ thu nhận phòng sớm ({}%)",
                 rule.early_checkin_surcharge_pct
             ),
             amount: early_amount,
@@ -377,7 +377,7 @@ fn calculate_daily(
         surcharge = checked_add_money(surcharge, late_amount, "surcharge_amount")?;
         breakdown.push(PricingLine {
             label: format!(
-                "Late check-out surcharge ({}%)",
+                "Phụ thu trả phòng muộn ({}%)",
                 rule.late_checkout_surcharge_pct
             ),
             amount: late_amount,
@@ -390,13 +390,13 @@ fn calculate_daily(
 
     if weekend > 0 {
         breakdown.push(PricingLine {
-            label: "Weekend surcharge".into(),
+            label: "Phụ thu cuối tuần".into(),
             amount: weekend,
         });
     }
     if special != 0 {
         breakdown.push(PricingLine {
-            label: "Holiday surcharge".into(),
+            label: "Phụ thu ngày lễ".into(),
             amount: special,
         });
     }

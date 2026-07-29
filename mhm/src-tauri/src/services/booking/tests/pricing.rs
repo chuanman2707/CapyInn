@@ -50,11 +50,11 @@ async fn calculate_stay_price_tx_applies_special_date_uplift() {
     assert_eq!(pricing.weekend_amount, 0);
     assert_eq!(pricing.breakdown.len(), 2);
     assert_eq!(pricing.breakdown[0].amount, 1_200_000);
-    assert!(pricing.breakdown[0].label.contains("night(s)"));
+    assert!(pricing.breakdown[0].label.contains("đêm"));
     assert!(pricing
         .breakdown
         .iter()
-        .any(|line| line.label == "Holiday surcharge"));
+        .any(|line| line.label == "Phụ thu ngày lễ"));
 
     tx.rollback().await.unwrap();
 }

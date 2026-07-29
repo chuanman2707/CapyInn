@@ -354,7 +354,7 @@ describe("ReservationSheet", () => {
           weekend_amount: 0,
           total: 1_500_000,
           capped: false,
-          breakdown: [{ label: "3 night(s) x 500.000", amount: 1_500_000 }],
+          breakdown: [{ label: "3 đêm x 500.000", amount: 1_500_000 }],
         };
       }
       return { available: true, conflicts: [], max_nights: null };
@@ -375,7 +375,7 @@ describe("ReservationSheet", () => {
     fireEvent.change(checkOut, { target: { value: "2026-08-09" } });
 
     await waitFor(() => {
-      expect(screen.getByText(/3 night\(s\)/i)).toBeInTheDocument();
+      expect(screen.getByText(/3 đêm/i)).toBeInTheDocument();
     });
   });
 
@@ -460,7 +460,7 @@ describe("ReservationSheet", () => {
           total: 1_200_000,
           capped: false,
           breakdown: [
-            { label: "2 night(s) x 500.000", amount: 1_000_000 },
+            { label: "2 đêm x 500.000", amount: 1_000_000 },
             { label: "Phụ thu 2 khách", amount: 200_000 },
           ],
         };
@@ -493,7 +493,7 @@ describe("ReservationSheet", () => {
           total: 1_000_000,
           capped: true,
           breakdown: [
-            { label: "2 night(s) x 1.000.000", amount: 2_000_000 },
+            { label: "2 đêm x 1.000.000", amount: 2_000_000 },
             { label: "Phụ thu 3 khách", amount: 3_000_000 },
           ],
         };
@@ -530,7 +530,7 @@ describe("ReservationSheet", () => {
             total: 600_000,
             capped: false,
             breakdown: [
-              { label: "1 night(s) x 500.000", amount: 500_000 },
+              { label: "1 đêm x 500.000", amount: 500_000 },
               { label: "Phụ thu 1 khách", amount: 100_000 },
             ],
           };
