@@ -147,4 +147,29 @@ describe("09 — Reservations", () => {
         expect(bookingBar).toHaveStyle({ left: "280px" });
         expect(bookingBar).not.toHaveStyle({ left: "200px" });
     });
+
+    it("cắt bar của booking đã trả tại ngày trả thực tế", async () => {
+        const dayMs = 86400000;
+        const base = new Date();
+        setMockResponse("get_all_bookings", () => [
+            createBookingWithGuest({
+                id: "b-early",
+                room_id: "1A",
+                guest_name: "Khách Trả Sớm",
+                status: "checked_out",
+                check_in_at: new Date(base.getTime() - 2 * dayMs).toISOString(),
+                expected_checkout: new Date(base.getTime() + 2 * dayMs).toISOString(),
+                actual_checkout: base.toISOString(),
+            }),
+        ]);
+
+        render(<Reservations />);
+
+        const bar = await screen.findByTestId("booking-bar-b-early");
+        // Cột đầu = hôm nay − 3. Check-in cách đây 2 ngày → cột 1 → left (1 + 0.5) × 80 = 120px.
+        // Kết thúc tại actual_checkout (hôm nay, cột 3) → width (3.5 − 1.5) × 80 = 160px,
+        // KHÔNG phải kéo tới expected_checkout (cột 5, width 320px).
+        expect(bar.style.left).toBe("120px");
+        expect(bar.style.width).toBe("160px");
+    });
 });
