@@ -65,10 +65,13 @@ trên phần của mình. Đó là định nghĩa của "chia đều theo ngày"
 đại số chứ không phải xấp xỉ.
 
 Điều **chỉ đúng với `nightly`, `overnight`, `daily`**: `base/N` đúng bằng giá một
-đêm đã cấu hình. Ba nhánh này tính `base = giá đêm × số ngày`, với **cùng một**
-biểu thức đếm ngày mà `calculate_weekend_uplift` đang dùng
-(`pricing.rs:115-116`, `:251-260`, `:345-346`, đối chiếu `:440`). Nên với ba
-nhánh này, "chia đều theo ngày" **chính là** "từng đêm chịu mức của nó":
+đêm đã cấu hình. Ba nhánh này tính `base = giá đêm × số ngày`, đếm ngày **tương
+đương** với `calculate_weekend_uplift` (`pricing.rs:115-116`, `:251-260`,
+`:345-346`, đối chiếu `:440`). Nói *tương đương* chứ không phải *cùng một biểu
+thức*: `calculate_overnight` viết `if days == 0 { 1 } else { days }` thay vì
+`.max(1)`. Hai cách cho cùng kết quả ở đây, vì `calculate_price` đã thoát sớm khi
+`co <= ci` (`pricing.rs:86-96`) nên `days` không bao giờ âm. Nên với ba nhánh
+này, "chia đều theo ngày" **chính là** "từng đêm chịu mức của nó":
 
 - 12/02→16/02, Tết 14–22 +40%. Bốn đêm 12,13,14,15 → Σ = 0+0+40+40 = 80, chia 4 =
   **20%**. Phụ thu = 20% × 4 đêm = 40% × 2 đêm. ✓
@@ -99,6 +102,12 @@ lên** thì đổi số. Ví dụ giá giờ 20k / qua đêm 300k / ngày 400k, 
 phụ thu, và chia đều theo ngày là cách phân bổ duy nhất có nghĩa khi `base` không
 tính theo đêm. Nó được chốt bằng một test riêng, không để trôi vào phần "không
 đổi".
+
+Và diện ảnh hưởng nhỏ hơn nghe tưởng. Muốn `N ≥ 2` thì kỳ ở phải **dài quá 24
+giờ**. Mà nhánh chặn trần về `overnight_rate` chỉ chạy khi `duration_hours <= 13`
+(`pricing.rs:161`), nên nó không bao giờ chạm tới `N ≥ 2`. Nói cách khác: đổi số
+**chỉ xảy ra với kỳ ở tính theo giờ mà dài hơn một ngày** — thứ vốn đã hiếm, và
+vốn đã là ca mà tính theo giờ cho ra giá kỳ quặc.
 
 ### Làm tròn
 
@@ -229,10 +238,28 @@ Ba chỗ dựng `StayPricingInputs` đổi theo, **giữ nguyên** cách xử l�
 ### Hai lệnh, không phải ba
 
 ```rust
-save_special_date_range(remove: Vec<String>, from: String, to: String,
-                        label: String, uplift_pct: f64)
-delete_special_dates(dates: Vec<String>)
+#[tauri::command]
+pub async fn save_special_date_range(
+    state: State<'_, AppState>,
+    app: tauri::AppHandle,
+    remove: Vec<String>,
+    from: String,
+    to: String,
+    label: String,
+    uplift_pct: f64,
+) -> Result<(), String>
+
+#[tauri::command]
+pub async fn delete_special_dates(
+    state: State<'_, AppState>,
+    app: tauri::AppHandle,
+    dates: Vec<String>,
+) -> Result<(), String>
 ```
+
+`state` và `app` là bắt buộc, không phải trang trí: `require_admin` cần `state`,
+và `emit_db_update` cần `AppHandle` (`commands/mod.rs:44`). `save_special_date`
+cũ không có `app` — đừng chép chữ ký của nó.
 
 `remove` là **chìa khoá của tính nguyên tử**. Khai mới thì nó rỗng. Sửa một cụm
 cho ngắn lại thì nó chứa những ngày rơi ra khỏi khoảng mới, và cả việc xoá lẫn
@@ -249,11 +276,18 @@ commit, như `save_pricing_rule` đang làm (`commands/pricing.rs:92`) — giá 
 
 ### Bỏ `save_special_date`
 
-Lệnh cũ (`commands/pricing.rs:141`, đăng ký ở `lib.rs:396`) **không có ai gọi** —
-không trong `src/`, không trong `gateway/`, đã dò trên mọi nhánh còn sống. Giữ nó
-lại nghĩa là có hai đường ghi vào cùng một bảng tiền, và phải nuôi một test chỉ
-để bảo vệ một lệnh không ai dùng. Bỏ. `save_special_date_range` với `from = to`
-làm được đúng việc ấy và làm được nhiều hơn.
+Lệnh cũ (`commands/pricing.rs:169`, đăng ký ở `lib.rs:396`) **không có ai gọi** —
+không trong `src/`, không trong `gateway/`, đã dò trên toàn bộ 73 nhánh còn sống:
+ở đâu cũng chỉ có đúng hai chỗ, định nghĩa và dòng đăng ký. `gateway/proxy.rs`
+không có đường chuyển tiếp lệnh theo tên, nên không ai với tới nó lúc chạy được.
+Giữ nó lại nghĩa là có hai đường ghi vào cùng một bảng tiền, và phải nuôi một
+test chỉ để bảo vệ một lệnh không ai dùng. Bỏ. `save_special_date_range` với
+`from = to` làm được đúng việc ấy và làm được nhiều hơn.
+
+Bỏ nó thì `pricing_repository::upsert_special_date(pool, …)`
+(`pricing_repository.rs:74-98`) mất người gọi cuối cùng. **Chuyển nó thành bản
+`_tx`**, đừng để lại bản nhận `pool`: nó `pub` trong lib crate nên `dead_code`
+không cảnh báo, và nó sẽ mục ở đó không ai biết.
 
 ### Tầng nào làm gì
 
@@ -263,9 +297,33 @@ have a clear service or lifecycle home") và theo đúng lối `save_pricing_rul
 
 | Tầng | Việc |
 |---|---|
-| `commands/pricing.rs` | `require_admin`, nhận tham số, gọi service, `emit_db_update` |
-| `services/booking/pricing_service.rs` | mở transaction, chặn đầu vào, trải `from..to` thành danh sách ngày, sinh `id`, gọi repository, commit |
+| `commands/pricing.rs` | `require_admin`, **sinh `id` và `now`**, gọi service, `emit_db_update` |
+| `services/booking/pricing_service.rs` | **chặn đầu vào**, mở transaction, trải `from..to` thành danh sách ngày, gọi repository, commit |
 | `repositories/booking/pricing_repository.rs` | `upsert_special_date_tx(tx, …)` một ngày một lần, và `delete_special_dates_tx(tx, dates)` |
+
+**Chặn đầu vào ở service, không phải ở lệnh.** `core-pms-boundaries.md:110` cho
+phép cả hai, nên đây là một lựa chọn thật chứ không phải chuyện hiển nhiên. Chọn
+service vì `save_pricing_rule` đã đi lối ấy, và vì như thế thì lỗi trả về là
+`CommandError::user` chứ không phải `String` trần. Bảy test chặn đầu vào cũng nằm
+ở service.
+
+**Sinh `id` và `now` ở tầng lệnh**, hệt `save_pricing_rule`
+(`commands/pricing.rs:87-88` truyền `uuid::Uuid::new_v4().to_string()` và
+`chrono::Local::now().to_rfc3339()` vào `pricing_service.rs:101-106`). Hai lý do,
+lý do thứ hai mới là lý do thật:
+
+1. Service thuần hơn — không tự đọc đồng hồ, không tự lấy số ngẫu nhiên.
+2. **Đó là đường duy nhất để viết được cái test quan trọng nhất của phần này.**
+   Mọi cột đều `NOT NULL` và do service tự điền, còn `ON CONFLICT(date)` đã nuốt
+   mất ràng buộc duy nhất trên `date`. Chỗ hỏng-được-theo-ý còn lại trong
+   transaction là **đụng khoá chính `id`** — mà muốn đụng thì `id` phải đến từ
+   bên ngoài. Service tự sinh `id` là tự bịt mất chỗ đó.
+
+**Thứ tự trong transaction: xoá `remove` trước, ghi khoảng sau.** Ghi trước xoá
+sau thì một ngày vừa nằm trong `remove` vừa nằm trong `[from..to]` sẽ bị xoá mất
+ngay bên trong chính cái transaction dựng lên để đừng mất nó. Giao diện như đặc
+tả không bao giờ sinh ra chồng lấn ấy, nhưng đây là hợp đồng của lệnh chứ không
+phải của một màn hình, nên **chặn luôn**: `remove` giao `[from..to]` phải rỗng.
 
 Trải khoảng thành từng ngày là quy tắc nghiệp vụ, nên nó ở service; repository
 giữ nguyên độ ngu ngốc của nó, mỗi lần một dòng, dùng lại `ON CONFLICT(date) DO
@@ -278,7 +336,9 @@ UPDATE` sẵn có. Ngày đã tồn tại thì `ON CONFLICT` giữ `id` và `cre
 > có lệnh nào cầm `Transaction<'_, Sqlite>`; mọi `pool.begin()` đều nằm ở service
 > (hoặc `folio_repository.rs:20`). Đi theo lối đó.
 
-### Chặn đầu vào (ở tầng lệnh, trước khi mở transaction)
+### Chặn đầu vào (ở service, trước khi mở transaction)
+
+`save_special_date_range`:
 
 | Điều kiện | Vì sao |
 |---|---|
@@ -287,9 +347,21 @@ UPDATE` sẵn có. Ngày đã tồn tại thì `ON CONFLICT` giữ `id` và `cre
 | khoảng ≤ 366 ngày | gõ nhầm năm sẽ sinh hàng nghìn dòng |
 | `0 <= uplift_pct <= 500` | `uplift_pct` là `REAL` không chặn gì; âm là giảm giá ngầm |
 | `label` bỏ khoảng trắng còn khác rỗng | gom cụm dựa vào nhãn; nhãn rỗng gom nhầm hai kỳ khác nhau |
-| `dates` không rỗng, mỗi phần tử đúng dạng | xoá rỗng là lệnh vô nghĩa |
+| `remove` **được phép rỗng** — đó là ca khai mới | đừng bắt buộc như `dates` |
+| mỗi phần tử của `remove` đúng dạng `YYYY-MM-DD` | nó đi thẳng vào `DELETE … WHERE date IN (…)` |
+| `remove` ≤ 366 phần tử | cùng lý do với trần của khoảng |
+| `remove` giao `[from..to]` phải rỗng | xem phần thứ tự ở trên: chồng lấn là mất ngày |
 
-Lỗi trả về tiếng Việt, theo lối các lệnh khác trong `commands/pricing.rs`.
+`delete_special_dates`:
+
+| Điều kiện | Vì sao |
+|---|---|
+| `dates` **không rỗng**, mỗi phần tử đúng dạng | xoá rỗng là lệnh vô nghĩa |
+
+Hai bảng tách riêng vì luật của `remove` và của `dates` **ngược nhau** ở chỗ
+rỗng: `remove` rỗng là hợp lệ, `dates` rỗng là lỗi.
+
+Lỗi trả về tiếng Việt qua `CommandError::user`, theo lối `pricing_service.rs`.
 
 ### Không thêm
 
@@ -408,9 +480,33 @@ số học, không phải vì thiếu hàm.
 
 ### Rust — `domain/booking/pricing.rs`
 
-Mọi test ghi **số tuyệt đối**. Cấm viết kiểu "tính từng đêm rồi cộng lại rồi so
-bằng" — xem phần Làm tròn, cách ấy lệch vài đồng với giá lẻ và sẽ đỏ vì lý do
-không liên quan tới luật.
+Ba luật bắt buộc cho mọi test ở phần này. Vi phạm luật nào cũng ra một test đỏ vì
+lý do chẳng liên quan gì tới thứ đang kiểm.
+
+**Một — ghi số tuyệt đối.** Cấm viết kiểu "tính từng đêm rồi cộng lại rồi so
+bằng": xem phần Làm tròn, cách ấy lệch vài đồng với giá lẻ.
+
+**Hai — khẳng định trên `surcharge_amount`, không phải `total`.** Mọi con số dưới
+đây là **riêng phần phụ thu ngày lễ**, đúng bằng `surcharge_amount` trong
+`calculate_nightly` (`pricing.rs:141`) và `calculate_hourly` (`:227`).
+
+**Ba — đặt `weekend_uplift_pct = 0` trong fixture.** Cái bẫy: `sample_inputs()`
+để `stored_rule: None`, nên `build_effective_pricing_rule`
+(`domain/booking/pricing.rs:75-83`) rơi xuống `..Default::default()`, tức
+`weekend_uplift_pct: 20.0` (`pricing.rs:46`). Mà **mọi** ngày trong các ví dụ
+dưới đây đều đụng cuối tuần:
+
+| Ngày | Thứ | | Ngày | Thứ |
+|---|---|---|---|---|
+| 12/02/2026 | Năm | | 20/02/2026 | Sáu |
+| 13/02/2026 | Sáu | | **21/02/2026** | **Bảy** |
+| **14/02/2026** | **Bảy** | | **22/02/2026** | **CN** |
+| **15/02/2026** | **CN** | | 23/02/2026 | Hai |
+| 16/02/2026 | Hai | | 24/02/2026 | Ba |
+
+Để mặc 20% thì `total` gánh thêm phụ thu cuối tuần và mọi con số dưới đây sai
+hết. Test cũ `calculate_from_loaded_inputs_applies_special_uplift` né bằng cách
+chọn 20–22/04 (Hai–Ba) — đó là chủ ý, không phải ngẫu nhiên.
 
 | Test | Con số |
 |---|---|
@@ -437,9 +533,14 @@ không liên quan tới luật.
 - `from = to` ghi đúng **một** dòng.
 - Ghi đè khoảng có ngày trùng: `label` và `uplift_pct` đổi, `created_at` **giữ
   nguyên**.
-- **`remove` và ghi trong cùng một transaction**: cho bước ghi hỏng giữa chừng,
-  khẳng định những ngày trong `remove` **vẫn còn nguyên** trong DB. Đây là test
-  quan trọng nhất của phần này — nó là lý do tồn tại của tham số `remove`.
+- **`remove` và ghi trong cùng một transaction** — test quan trọng nhất của phần
+  này, là lý do tồn tại của tham số `remove`. Cách làm cho nó hỏng có kiểm soát:
+  truyền vào một `id` đã tồn tại trên **một ngày khác**, để bước upsert đụng khoá
+  chính `id` giữa chừng. (`ON CONFLICT` chỉ đỡ cho `date`, không đỡ cho `id`.)
+  Rồi khẳng định những ngày trong `remove` **vẫn còn nguyên** trong DB. Test này
+  chỉ viết được vì `id` do tầng lệnh truyền vào — xem phần Tầng nào làm gì.
+- `remove` giao `[from..to]` khác rỗng → bị từ chối, không ghi gì.
+- Thứ tự đúng: `remove` được xoá **trước** khi ghi khoảng.
 - `delete_special_dates` xoá đúng danh sách, không đụng ngày khác.
 - Mỗi luật chặn đầu vào một test: ngày sai dạng, `to < from`, 367 ngày, `-10`,
   `600`, nhãn toàn khoảng trắng, `dates` rỗng.
@@ -458,6 +559,11 @@ không liên quan tới luật.
   buộc `CHECK` (`db/migrations.rs:209-216`) và lệnh ghi cũ chưa hề kiểm tra, nên
   dữ liệu rác là có thật.
 
+Ở phía Rust, tính chất "ngày rác thì coi như không khai" **tự có** từ cách so
+sánh: `effective_special_uplift` dựng khoá `YYYY-MM-DD` rồi dò trong danh sách,
+nên chuỗi rác đơn giản là không bao giờ khớp. Đừng thêm đường phân tích-rồi-báo-
+lỗi; làm thế là đổi đúng cái hành vi mà test này sinh ra để khoá.
+
 ### Frontend — `SpecialDatesSection.test.tsx`
 
 - Danh sách hiện **một** dòng cho chín ngày Tết.
@@ -467,7 +573,9 @@ không liên quan tới luật.
   `invokeWriteCommand` **không** được gọi.
 - Bấm tiếp tục → mới gọi lệnh ghi.
 - Xoá cụm → `delete_special_dates` nhận đúng 9 ngày trong một lần gọi.
-- Sửa cụm cho ngắn lại → những ngày rơi ra có mặt trong lệnh xoá.
+- Sửa cụm cho ngắn lại → những ngày rơi ra có mặt trong tham số **`remove` của
+  lệnh ghi**, và **không** có lệnh `delete_special_dates` nào được gọi. Test này
+  chính là chỗ khoá lại việc bỏ luồng hai lệnh.
 - Lệnh lỗi → hiện toast lỗi, danh sách không bị đổi ngầm.
 
 ### Cổng chung
@@ -517,9 +625,12 @@ nhánh, tách sẵn thế này là đỡ nhất.
   **chưa tồn tại** và các loader chưa có tham số `guests` — cả hai thứ ấy lên
   `main` sau. Nghĩa là nhánh kia phải rebase lên `main` trước đã; việc gỡ tay là
   của bước rebase đó, không phải của nhánh này.
-  - File production tranh chấp thật sự: **`queries/booking/pricing_queries.rs`**,
-    một file. Phần nhánh kia sửa trong `pricing_service.rs` **chỉ nằm trong
-    `mod tests`**.
+  - Ở tầng engine, file production tranh chấp thật sự là
+    **`queries/booking/pricing_queries.rs`**, một file.
+  - `services/booking/pricing_service.rs` bị **cả hai** nhánh chạm, nhưng lệch
+    vùng: nhánh này thêm code production (hai hàm ghi mới, theo phần 2), nhánh
+    kia chỉ thêm trong `mod tests`. Nhiều khả năng tự gộp được, nhưng đừng đọc
+    câu trên thành "chỉ một file bị đụng".
   - Trong file ấy, nhánh kia còn đổi `FALLBACK_BASE_PRICE_SQL` (thêm `ORDER BY
     id`, `pricing_queries.rs:25`) — khác vùng, nhiều khả năng tự gộp được, nhưng
     ghi ra đây để không ai bất ngờ.
@@ -535,6 +646,6 @@ nhánh, tách sẵn thế này là đỡ nhất.
 - **Gom cụm là suy đoán, không phải dữ liệu.** Hai kỳ khác nhau tình cờ liền
   ngày, cùng nhãn, cùng mức sẽ hiện thành một dòng. Vô hại — xoá cụm ấy đúng là
   xoá chừng đó ngày — nhưng phải nói rõ để sau này không ai coi đó là lỗi.
-- **Không có ràng buộc `CHECK` dưới DB.** Mọi chặn đầu vào nằm ở tầng lệnh. Ghi
+- **Không có ràng buộc `CHECK` dưới DB.** Mọi chặn đầu vào nằm ở tầng service. Ghi
   thẳng vào SQLite bằng tay vẫn lọt. Chấp nhận: mọi bảng khác trong dự án cũng
   thế.
