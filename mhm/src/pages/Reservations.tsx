@@ -267,11 +267,14 @@ export default function Reservations() {
         const onKeyDown = (event: KeyboardEvent) => {
             if (event.key === "Escape") setDragSel(null);
         };
+        const onBlur = () => setDragSel(null);
         window.addEventListener("mouseup", onMouseUp);
         window.addEventListener("keydown", onKeyDown);
+        window.addEventListener("blur", onBlur);
         return () => {
             window.removeEventListener("mouseup", onMouseUp);
             window.removeEventListener("keydown", onKeyDown);
+            window.removeEventListener("blur", onBlur);
         };
     }, [dragSel, DAYS]);
 
@@ -405,7 +408,7 @@ export default function Reservations() {
                                             })}
 
                                             {DAYS.some(d => d.isToday) && (
-                                                <div data-testid="timeline-today-marker" className="absolute top-0 bottom-0 w-[2px] bg-brand-primary/60 z-20" style={{ left: `${DAYS.findIndex(d => d.isToday) * COL_WIDTH + COL_WIDTH / 2}px` }} />
+                                                <div data-testid="timeline-today-marker" className="absolute top-0 bottom-0 w-[2px] bg-brand-primary/60 z-20 pointer-events-none" style={{ left: `${DAYS.findIndex(d => d.isToday) * COL_WIDTH + COL_WIDTH / 2}px` }} />
                                             )}
 
                                             {bars.map((bar) => (

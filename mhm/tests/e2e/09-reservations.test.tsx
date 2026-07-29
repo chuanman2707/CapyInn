@@ -49,7 +49,12 @@ describe("09 — Reservations", () => {
         invoke.mockClear();
 
         // Reservations page needs rooms for the timeline grid
-        useHotelStore.setState({ rooms: mockRooms });
+        useHotelStore.setState({
+            rooms: mockRooms,
+            isCheckinOpen: false,
+            checkinRoomId: null,
+            checkinNights: null,
+        });
         setMockResponse("get_rooms", () => mockRooms);
         setMockResponse("get_all_bookings", () => mockBookings);
         setMockResponse("check_availability", () => ({ available: true, conflicts: [], max_nights: null }));
@@ -190,13 +195,69 @@ describe("09 — Reservations", () => {
         const start = await screen.findByTestId("cell-1A-5");
         const end = await screen.findByTestId("cell-1A-6");
         fireEvent.mouseDown(start, { button: 0 });
-        fireEvent.mouseEnter(end);
+        // React derives onMouseEnter from the mouseout/mouseover pair at its root —
+        // testing-library's mouseEnter dispatches a non-bubbling event React never
+        // sees there. mouseOver is what actually reaches handleCellMouseEnter.
+        fireEvent.mouseOver(end);
         fireEvent.mouseUp(window);
 
         expect(await screen.findByText("Đặt phòng trước")).toBeInTheDocument();
-        const expectedCheckIn = new Date(Date.now() + 2 * 86400000);
         const iso = (d: Date) =>
             `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+        const expectedCheckIn = new Date(Date.now() + 2 * 86400000);
+        const expectedCheckOut = new Date(Date.now() + 4 * 86400000);
         expect(screen.getByDisplayValue(iso(expectedCheckIn))).toBeInTheDocument();
+        expect(screen.getByDisplayValue(iso(expectedCheckOut))).toBeInTheDocument();
+    });
+
+    it("bấm vào bar booking mở popup chi tiết mà không bắt đầu kéo chọn", async () => {
+        render(<Reservations />);
+        const bar = await screen.findByTestId("booking-bar-b3"); // status: checked_out
+        fireEvent.click(bar);
+
+        // Popup mở
+        expect(await screen.findByText("Đã trả — Lê Văn C")).toBeInTheDocument();
+
+        // Không có selection/form nào khác bị kích hoạt bởi cú click này
+        expect(useHotelStore.getState().isCheckinOpen).toBe(false);
+        expect(screen.queryByText("Đặt phòng trước")).not.toBeInTheDocument();
+    });
+
+    it("nhấn chuột phải trên ô không bắt đầu kéo chọn", async () => {
+        render(<Reservations />);
+        const cell = await screen.findByTestId("cell-1A-3");
+        fireEvent.mouseDown(cell, { button: 2 });
+        fireEvent.mouseUp(window);
+
+        expect(useHotelStore.getState().isCheckinOpen).toBe(false);
+        expect(screen.queryByText("Đặt phòng trước")).not.toBeInTheDocument();
+    });
+
+    it("nhấn Escape khi đang kéo sẽ huỷ selection, không mở form nào", async () => {
+        render(<Reservations />);
+        const start = await screen.findByTestId("cell-1A-5");
+        const end = await screen.findByTestId("cell-1A-6");
+        fireEvent.mouseDown(start, { button: 0 });
+        fireEvent.mouseOver(end);
+        fireEvent.keyDown(window, { key: "Escape" });
+        fireEvent.mouseUp(window);
+
+        expect(useHotelStore.getState().isCheckinOpen).toBe(false);
+        expect(screen.queryByText("Đặt phòng trước")).not.toBeInTheDocument();
+    });
+
+    it("thả chuột ngoài cửa sổ (window blur) huỷ selection đang kéo", async () => {
+        render(<Reservations />);
+        const start = await screen.findByTestId("cell-1A-5");
+        const end = await screen.findByTestId("cell-1A-6");
+        fireEvent.mouseDown(start, { button: 0 });
+        fireEvent.mouseOver(end);
+        fireEvent(window, new Event("blur"));
+        // mouseUp xảy ra sau khi quay lại cửa sổ — selection phải đã bị xoá từ blur,
+        // nên mouseUp này không được mở form nào.
+        fireEvent.mouseUp(window);
+
+        expect(useHotelStore.getState().isCheckinOpen).toBe(false);
+        expect(screen.queryByText("Đặt phòng trước")).not.toBeInTheDocument();
     });
 });
