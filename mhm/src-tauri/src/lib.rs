@@ -320,6 +320,7 @@ pub fn run() {
             commands::rooms::get_rooms,
             commands::rooms::get_dashboard_stats,
             commands::rooms::check_in,
+            commands::rooms::backfill_stay,
             commands::rooms::get_room_detail,
             commands::rooms::check_out,
             commands::rooms::preview_checkout_settlement,

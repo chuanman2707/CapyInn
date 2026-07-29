@@ -279,8 +279,6 @@ fn backfill_lock_keys_from_payload(hash_payload: &serde_json::Value) -> CommandR
     Ok(vec![crate::aggregate_locks::room_key(room_id)?])
 }
 
-// Lệnh Tauri gọi hàm này được nối ở bước sau; hiện chỉ có test gọi tới.
-#[allow(dead_code)]
 pub async fn backfill_stay_idempotent(
     pool: &Pool<Sqlite>,
     ctx: &WriteCommandContext,

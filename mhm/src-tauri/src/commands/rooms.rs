@@ -9,7 +9,10 @@ use crate::{
     money::validate_non_negative_money_vnd,
     queries::booking::{expense_queries, revenue_queries, room_queries, stay_info_queries},
     repositories::booking::expense_repository,
-    services::{booking::stay_lifecycle, housekeeping::housekeeping_service},
+    services::{
+        booking::{backfill, stay_lifecycle},
+        housekeeping::housekeeping_service,
+    },
 };
 use serde_json::{json, Value};
 use sqlx::{Pool, Sqlite};
@@ -127,6 +130,73 @@ pub async fn check_in(
         "check_in success correlation_id={} source={:?} booking_id={} room_id={}",
         effective_correlation_id.value,
         effective_correlation_id.source,
+        booking.id,
+        booking.room_id
+    );
+
+    emit_db_update(&app, "rooms");
+
+    Ok(booking)
+}
+
+// ─── Backfill Stay Command ───
+
+fn backfill_stay_failure_context(req: &BackfillStayRequest) -> Value {
+    json!({
+        "room_id": req.room_id.clone(),
+        "guest_count": req.guests.len(),
+        "still_staying": req.check_out_date.is_none(),
+        "source": req.source.clone(),
+    })
+}
+
+#[tauri::command]
+pub async fn backfill_stay(
+    state: State<'_, AppState>,
+    app: tauri::AppHandle,
+    req: BackfillStayRequest,
+    correlation_id: Option<String>,
+    idempotency_key: String,
+) -> CommandResult<Booking> {
+    let effective_correlation_id = normalize_correlation_id(correlation_id);
+    let error_context = backfill_stay_failure_context(&req);
+    let actor_id = get_user_id(&state)
+        .ok_or_else(|| CommandError::user(codes::AUTH_NOT_AUTHENTICATED, "Chưa đăng nhập"))?;
+    let mut write_command_context = WriteCommandContext::for_scoped_command(
+        effective_correlation_id.value.clone(),
+        idempotency_key,
+        "backfill_stay",
+    )?;
+    write_command_context.actor_id = Some(actor_id.clone());
+    log::info!(
+        "backfill_stay start correlation_id={} room_id={} guest_count={}",
+        effective_correlation_id.value,
+        req.room_id,
+        req.guests.len()
+    );
+    let result =
+        backfill::backfill_stay_idempotent(&state.db, &write_command_context, req, Some(actor_id))
+            .await
+            .inspect_err(|command_error| {
+                record_command_failure_with_db_group(
+                    "backfill_stay",
+                    command_error,
+                    &effective_correlation_id.value,
+                    None,
+                    error_context.clone(),
+                );
+            })?;
+    let booking: Booking = serde_json::from_value(result.response).map_err(|error| {
+        CommandError::system(
+            codes::SYSTEM_INTERNAL_ERROR,
+            format!("Invalid backfill_stay idempotent response: {error}"),
+        )
+        .with_request_id(write_command_context.request_id.clone())
+    })?;
+
+    log::info!(
+        "backfill_stay success correlation_id={} booking_id={} room_id={}",
+        effective_correlation_id.value,
         booking.id,
         booking.room_id
     );
