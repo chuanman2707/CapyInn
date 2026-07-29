@@ -110,9 +110,8 @@ phụ_thu    = khách_thêm × extra_person_fee × số_đêm
 
 **Đặt phép cộng ở đâu.** Trong `calculate_from_loaded_inputs` (`domain/booking/pricing.rs:77`),
 *sau* khi `crate::pricing::calculate_price` đã trả kết quả: đẩy thêm một dòng nhãn
-`"Phụ thu N khách"` vào `PricingResult.breakdown` rồi cộng vào `total`. Module `crate::pricing`
-giữ nguyên, không đổi một dòng — nó vẫn chỉ biết về giá phòng và các loại %, còn luật thêm người
-nằm ở tầng domain cùng chỗ với các đầu vào của nó.
+`"Phụ thu N khách"` vào `PricingResult.breakdown` rồi cộng vào `total`. Luật thêm người nằm ở tầng
+domain cùng chỗ với các đầu vào của nó, không chui vào phần tính giá phòng và các loại phần trăm.
 
 Hệ quả: phụ thu **không** nằm trong `base_amount`, nên không bị `weekend_uplift_pct` hay
 `special_dates.uplift_pct` nhân lên.
@@ -188,6 +187,25 @@ Chạy `npm run verify:full`. Test viết thêm:
 - Đổi phòng → ô Số khách nạp lại theo `max_guests` của phòng mới.
 - Dòng tổng tiền lấy từ `calculate_price_preview`, không phải phép nhân phía giao diện.
 
+## Sai lệch đã chấp nhận so với bản spec đầu
+
+Ghi lại lúc thi công, để spec và code không nói ngược nhau:
+
+1. **`crate::pricing` có bị sửa.** Bản đầu viết là module này giữ nguyên không đổi một dòng. Thực tế
+   nó bị sửa hai lần, và đều đúng: toàn bộ 17 nhãn `PricingLine` được dịch sang tiếng Việt (trước đó
+   là `"N night(s) x ..."`, `"Weekend surcharge"`, `"Holiday surcharge"`), vì đợt này cho form hiển
+   thị thẳng breakdown của engine nên nhân viên đọc phải nhãn tiếng Anh mỗi lần đặt phòng. Giá trị
+   máy `PricingResult.pricing_type` giữ nguyên tiếng Anh. Đã kiểm: không có chỗ nào trong code sản
+   xuất so khớp chuỗi nhãn, chỉ hiển thị.
+2. **Trần 90 đêm phải dựng lại.** Ô "Số đêm" cũ mang `max={90}`; bỏ ô đi là mất trần, mà backend
+   chưa từng có trần riêng. Đã thêm ở cả ba nơi: `max` trên ô ngày đi, chặn trong `handleSubmit`,
+   và giới hạn trong `validate_requested_nights` để đường gateway/agent cũng được phủ.
+3. **Phép nhân phụ thu đi qua `checked_mul_money`/`checked_add_money`**, không phải `checked_mul`
+   thô — tức là qua cả `validate_transport_money_vnd`, giống mọi dòng tiền khác trong engine.
+4. **Chế độ sửa giữ NULL.** Booking cũ chưa có số khách, mở ra sửa ngày mà không đụng ô Số khách thì
+   gửi `new_guests: null`, không phải một con số bịa ra. Ô hiển thị `max_guests` của phòng làm giá
+   trị gợi ý, và giá trị đó trung tính về giá.
+
 ## Ngoài phạm vi
 
 Ghi lại để làm đợt sau, không làm trong đợt này:
@@ -196,7 +214,19 @@ Ghi lại để làm đợt sau, không làm trong đợt này:
    `uplift_pct`, nhưng không có màn hình nào để nhập. Ví dụ ban đầu của người dùng ("mùa cao điểm
    với 4 người") có hai yếu tố; spec này phủ yếu tố số khách, còn yếu tố mùa cao điểm cần màn hình đó.
 2. **Số khách cho khách vãng lai.** `check_in_tx` (`stay_lifecycle.rs:258`) tạo booking mới không qua
-   đặt phòng trước, nên chưa có ô số khách. Cùng một cột `guests`, chỉ thiếu ô nhập.
+   đặt phòng trước, nên chưa có ô số khách. Cùng một cột `guests`, chỉ thiếu ô nhập. Check-in theo
+   đoàn (`group_lifecycle.rs:441`) cũng vậy, và ở đó danh sách khách đã nằm sẵn trong tay.
+3. **Đặt phòng qua AI agent chưa có số khách.** `gateway/models.rs` `CreateReservationInput` không có
+   trường `guests`, nên booking do agent tạo luôn tính theo số khách base. Sửa đặt phòng thì an toàn:
+   `modify_reservation_tx` dùng `.or(reservation.guests)` nên agent không thể xoá mất phụ thu đã có.
+4. **Nhãn trên hoá đơn vẫn tiếng Anh.** Hoá đơn không dùng breakdown của engine —
+   `invoice_generation.rs:120` tự dựng `"{} night(s) x {}d"`, `InvoiceDialog.tsx:175` và
+   `InvoicePDF.tsx:407` in `"{nights} night(s)"`. **Tiền thì đúng**: hoá đơn lấy `total_price` thật
+   rồi chia số đêm, nên đã gồm phụ thu. Việc còn lại thuần hiển thị, cộng với chuyện phụ thu chưa
+   được tách thành dòng riêng trên hoá đơn.
+5. **"Hôm nay" tính theo giờ UTC.** `new Date().toISOString().split("T")[0]` dùng cho ngày đến mặc
+   định và cho thuộc tính `min`. Từ nửa đêm tới 7h sáng giờ Việt Nam nó trả ngày hôm trước. Lỗi có
+   sẵn từ trước đợt này, không phải hồi quy.
 
 ## Rủi ro
 
