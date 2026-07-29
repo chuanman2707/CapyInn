@@ -246,6 +246,14 @@ describe("09 — Reservations", () => {
         expect(screen.queryByText("Đặt phòng trước")).not.toBeInTheDocument();
     });
 
+    it("bấm ô quá khứ mở form ghi bù", async () => {
+        render(<Reservations />);
+        const cell = await screen.findByTestId("cell-1A-0"); // cột 0 = hôm nay − 3
+        fireEvent.mouseDown(cell, { button: 0 });
+        fireEvent.mouseUp(window);
+        expect(await screen.findByText("Ghi bù sổ khách")).toBeInTheDocument();
+    });
+
     it("thả chuột ngoài cửa sổ (window blur) huỷ selection đang kéo", async () => {
         render(<Reservations />);
         const start = await screen.findByTestId("cell-1A-5");

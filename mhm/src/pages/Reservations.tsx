@@ -14,6 +14,7 @@ import BookingDetailPopup from "@/components/BookingDetailPopup";
 import InvoiceDialog from "@/components/InvoiceDialog";
 import { useInvoiceDialog } from "@/hooks/useInvoiceDialog";
 import ReservationSheet from "@/components/ReservationSheet";
+import BackfillSheet, { type BackfillPrefill } from "@/components/BackfillSheet";
 import RoomDrawer from "@/components/RoomDrawer";
 import { resolveSelection, localDateIso, type TimelineSelectionRange } from "@/lib/timelineSelection";
 import type { BookingStatus, BookingWithGuest } from "@/types";
@@ -127,6 +128,7 @@ export default function Reservations() {
     const [drawerRoomId, setDrawerRoomId] = useState<string | null>(null);
     const [dragSel, setDragSel] = useState<TimelineSelectionRange | null>(null);
     const [reservationPrefill, setReservationPrefill] = useState<{ roomId: string; checkIn: string; checkOut: string } | null>(null);
+    const [backfillPrefill, setBackfillPrefill] = useState<BackfillPrefill | null>(null);
     const { invoiceOpen, invoiceData, invoiceLoading, viewInvoice, closeInvoice } = useInvoiceDialog();
 
     const DAYS = useMemo(() => getDateRange(dateOffset), [dateOffset]);
@@ -261,8 +263,14 @@ export default function Reservations() {
             } else if (resolved.kind === "reservation") {
                 setReservationPrefill({ roomId: resolved.roomId, checkIn: resolved.checkInDate, checkOut: resolved.checkOutDate });
                 setSheetOpen(true);
+            } else {
+                setBackfillPrefill({
+                    roomId: resolved.roomId,
+                    checkInDate: resolved.checkInDate,
+                    checkOutDate: resolved.checkOutDate,
+                    stillStaying: resolved.stillStaying,
+                });
             }
-            // "backfill": nối ở task BackfillSheet — tới lúc đó bấm ngày quá khứ chưa làm gì.
         };
         const onKeyDown = (event: KeyboardEvent) => {
             if (event.key === "Escape") setDragSel(null);
@@ -494,6 +502,15 @@ export default function Reservations() {
                 editBooking={editBooking || undefined}
                 preSelectedRoomId={reservationPrefill?.roomId}
                 prefillDates={reservationPrefill ? { checkIn: reservationPrefill.checkIn, checkOut: reservationPrefill.checkOut } : undefined}
+            />
+
+            {/* Backfill Sheet — ghi bù khách đã ở nhưng chưa nhập, mở từ ô ngày quá khứ */}
+            <BackfillSheet
+                open={!!backfillPrefill}
+                onOpenChange={(v) => {
+                    if (!v) { setBackfillPrefill(null); loadBookings(); fetchRooms(); }
+                }}
+                prefill={backfillPrefill ?? undefined}
             />
         </div>
     );
