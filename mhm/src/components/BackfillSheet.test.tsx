@@ -1,5 +1,5 @@
 import type { ButtonHTMLAttributes, HTMLAttributes, ReactNode } from "react";
-import { render, screen, waitFor } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -178,6 +178,44 @@ describe("BackfillSheet", () => {
                 expect.objectContaining({ correlationId: "COR-BACKFILL01" }),
             );
         });
+    });
+
+    it("gõ tiền lẻ (500000.5) vào ô tiền thì số gửi lên backend vẫn là số nguyên", async () => {
+        // Money là MoneyVnd (số nguyên) ở backend. step="1" không chặn được gì
+        // vì form không có thẻ <form> nên constraint validation của trình
+        // duyệt (stepMismatch) không bao giờ chạy — submit chỉ là
+        // onClick={handleSubmit}. Test này gõ thẳng một giá trị thập phân hợp
+        // lệ với input type="number" và buộc component tự làm tròn, không dựa
+        // vào step.
+        const user = userEvent.setup();
+        render(
+            <BackfillSheet
+                open
+                onOpenChange={() => {}}
+                prefill={{ roomId: "R101", checkInDate: "2026-07-26", checkOutDate: "2026-07-28", stillStaying: false }}
+            />,
+        );
+        await user.type(screen.getByPlaceholderText("Họ và tên *"), "Nguyễn Văn Bù");
+        await waitFor(() => {
+            expect(screen.getAllByDisplayValue("500000").length).toBe(2);
+        });
+
+        const totalInput = screen.getByLabelText(/Tiền phòng/i);
+        fireEvent.change(totalInput, { target: { value: "500000.5" } });
+        const paidInput = screen.getByLabelText("Đã thu");
+        fireEvent.change(paidInput, { target: { value: "300000.5" } });
+
+        await user.click(screen.getByRole("button", { name: /Ghi bù/ }));
+
+        await waitFor(() => {
+            expect(invokeWriteCommand).toHaveBeenCalled();
+        });
+        const [, payload] = invokeWriteCommand.mock.calls[0];
+        const req = (payload as { req: { total_price: number; paid_amount: number } }).req;
+        expect(Number.isInteger(req.total_price)).toBe(true);
+        expect(Number.isInteger(req.paid_amount)).toBe(true);
+        expect(req.total_price).toBe(500001);
+        expect(req.paid_amount).toBe(300001);
     });
 
     it("khách còn ở: gửi expected_checkout_date, để trống check_out_date", async () => {
