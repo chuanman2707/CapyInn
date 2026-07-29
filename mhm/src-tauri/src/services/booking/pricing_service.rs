@@ -201,17 +201,13 @@ pub struct SaveSpecialDateRange {
     pub uplift_pct: f64,
 }
 
-fn parse_date_only(value: &str, field: &str) -> CommandResult<NaiveDate> {
-    NaiveDate::parse_from_str(value, "%Y-%m-%d").map_err(|_| {
-        CommandError::user(
-            codes::VALIDATION_INVALID_INPUT,
-            format!("{field} phải có dạng YYYY-MM-DD"),
-        )
-    })
-}
-
 fn invalid_input(message: impl Into<String>) -> CommandError {
     CommandError::user(codes::VALIDATION_INVALID_INPUT, message)
+}
+
+fn parse_date_only(value: &str, field: &str) -> CommandResult<NaiveDate> {
+    NaiveDate::parse_from_str(value, "%Y-%m-%d")
+        .map_err(|_| invalid_input(format!("{field} phải có dạng YYYY-MM-DD")))
 }
 
 /// Khai một khoảng ngày là mùa cao điểm, một dòng cho một ngày.
@@ -326,7 +322,7 @@ mod tests {
         calculate_price_preview, calculate_room_price_preview, calculate_stay_price_tx,
         save_pricing_rule, save_special_date_range, SavePricingRule, SaveSpecialDateRange,
     };
-    use crate::app_error::codes;
+    use crate::app_error::{codes, AppErrorKind};
     use crate::domain::booking::BookingError;
     use sqlx::{sqlite::SqlitePoolOptions, Executor, Pool, Row, Sqlite};
 
@@ -961,6 +957,20 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(count.0, 9);
+
+        let row: (String, f64, String) = sqlx::query_as(
+            "SELECT label, uplift_pct, created_at FROM special_dates WHERE date = ?",
+        )
+        .bind("2026-02-15")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(row.0, "Tết Nguyên đán", "label must be written");
+        assert_eq!(row.1, 40.0, "uplift_pct must be written");
+        assert_eq!(
+            row.2, "2026-01-01T00:00:00+07:00",
+            "created_at must be written"
+        );
     }
 
     #[tokio::test]
@@ -1022,7 +1032,25 @@ mod tests {
         )
         .await
         .expect_err("mã trùng phải làm cả transaction hỏng");
-        let _ = error;
+
+        // The failure must come from *inside* the transaction (the upsert's
+        // primary-key clash), not from validation — validation runs before
+        // `pool.begin()` and would also leave every row untouched, which
+        // would make the assertions below pass for the wrong reason. Pinning
+        // the error to `log_system_error`'s contract (`SYSTEM_INTERNAL_ERROR`,
+        // `AppErrorKind::System`, a support id) is what keeps this test
+        // honest if a future validation rule started rejecting this input
+        // earlier.
+        assert_eq!(
+            error.code,
+            codes::SYSTEM_INTERNAL_ERROR,
+            "failure must be the in-transaction upsert error, not a validation rejection"
+        );
+        assert_eq!(error.kind, AppErrorKind::System);
+        assert!(
+            error.support_id.is_some(),
+            "system errors carry a support id"
+        );
 
         let kept: (i64,) =
             sqlx::query_as("SELECT COUNT(*) FROM special_dates WHERE date = '2026-02-25'")
@@ -1040,6 +1068,54 @@ mod tests {
                 .await
                 .unwrap();
         assert_eq!(written.0, 0, "không được để lại nửa khoảng");
+    }
+
+    /// The main production flow: re-saving a range that overlaps rows already
+    /// in the table (editing a peak season), not just declaring a brand new
+    /// one. This exercises `upsert_special_date_tx`'s `ON CONFLICT(date) DO
+    /// UPDATE` through the service, which must keep the existing row's `id`
+    /// and `created_at` while updating `label` and `uplift_pct`.
+    #[tokio::test]
+    async fn save_special_date_range_edits_an_existing_day_in_place() {
+        let pool = special_dates_pool().await;
+        sqlx::query(
+            "INSERT INTO special_dates (id, date, label, uplift_pct, created_at)
+             VALUES ('old-9', '2026-02-15', 'Tết', 40.0, '2026-01-01T00:00:00+07:00')",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        save_special_date_range(
+            &pool,
+            SaveSpecialDateRange {
+                remove: Vec::new(),
+                from: "2026-02-14".to_string(),
+                to: "2026-02-16".to_string(),
+                label: "Tết Nguyên đán".to_string(),
+                uplift_pct: 55.0,
+            },
+            "base".to_string(),
+            "2026-06-01T00:00:00+07:00".to_string(),
+        )
+        .await
+        .unwrap();
+
+        let row: (String, String, f64, String) = sqlx::query_as(
+            "SELECT id, label, uplift_pct, created_at FROM special_dates WHERE date = ?",
+        )
+        .bind("2026-02-15")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+
+        assert_eq!(row.0, "old-9", "editing must keep the existing row id");
+        assert_eq!(row.1, "Tết Nguyên đán", "label must be updated");
+        assert_eq!(row.2, 55.0, "uplift_pct must be updated");
+        assert_eq!(
+            row.3, "2026-01-01T00:00:00+07:00",
+            "created_at must not move on an edit"
+        );
     }
 
     #[tokio::test]
