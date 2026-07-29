@@ -124,7 +124,7 @@ export default function ReservationSheet({ open, onOpenChange, preSelectedRoomId
                 setCheckOutDate(addDays(tomorrow, 1));
             }
         }
-    }, [open, editBooking, prefillDates]);
+    }, [open, editBooking, prefillDates?.checkIn, prefillDates?.checkOut]);
 
     useEffect(() => {
         if (preSelectedRoomId) setRoomId(preSelectedRoomId);
