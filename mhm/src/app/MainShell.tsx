@@ -75,7 +75,7 @@ const PAGE_TITLES: Record<string, string> = {
 };
 
 export function MainShell() {
-  const { activeTab, setTab, setCheckinOpen, setGroupCheckinOpen, checkinRoomId } = useHotelStore();
+  const { activeTab, setTab, setCheckinOpen, setGroupCheckinOpen, checkinRoomId, checkinNights } = useHotelStore();
   const { user, logout } = useAuthStore();
   const { collapsed, toggleCollapse } = useSidebarCollapse();
 
@@ -348,7 +348,7 @@ export function MainShell() {
         </div>
       </main>
 
-      <CheckinSheet preSelectedRoomId={checkinRoomId ?? undefined} />
+      <CheckinSheet preSelectedRoomId={checkinRoomId ?? undefined} preSelectedNights={checkinNights ?? undefined} />
       <GroupCheckinSheet />
       <AppToaster />
     </div>
