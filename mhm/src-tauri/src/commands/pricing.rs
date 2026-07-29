@@ -221,6 +221,20 @@ pub async fn save_special_date_range(
     Ok(())
 }
 
+#[tauri::command]
+pub async fn delete_special_dates(
+    state: State<'_, AppState>,
+    app: tauri::AppHandle,
+    dates: Vec<String>,
+) -> Result<(), String> {
+    require_admin(&state)?;
+
+    pricing_service::delete_special_dates(&state.db, dates).await?;
+
+    emit_db_update(&app, "pricing");
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::do_get_room_type_rates;

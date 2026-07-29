@@ -396,6 +396,7 @@ pub fn run() {
             commands::pricing::calculate_room_price_preview,
             commands::pricing::get_special_dates,
             commands::pricing::save_special_date_range,
+            commands::pricing::delete_special_dates,
             // Folio/Billing
             commands::billing::add_folio_line,
             commands::billing::record_payment,
