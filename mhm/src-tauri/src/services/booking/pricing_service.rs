@@ -320,6 +320,67 @@ mod tests {
         assert_ne!(configured.total, house.total);
     }
 
+    /// With no `pricing_rules` row, the rule is derived from *one* room's
+    /// `base_price`, chosen by `FALLBACK_BASE_PRICE_SQL`. When the rooms of a
+    /// type disagree about that price, which one wins decides the money.
+    ///
+    /// Two separate properties, and only one of them is the design working:
+    ///
+    /// 1. The quote and the charge must pick the *same* room. They do only
+    ///    because both loaders share one SQL constant — a coincidence of
+    ///    spelling that nothing pinned until now.
+    /// 2. The pick must not change between runs. `ORDER BY id` is what makes
+    ///    that true; without it SQLite is free to return either row.
+    ///
+    /// What this deliberately does *not* claim is that the answer is right.
+    /// Checking into the 800k room is charged the 600k room's rate, because a
+    /// type-level rule cannot represent two prices. That is recorded, not fixed.
+    #[tokio::test]
+    async fn the_quote_and_the_charge_agree_on_which_room_sets_a_mixed_type_price() {
+        let pool = migrated_pool().await;
+        // Inserted expensive-first so insertion order and id order disagree.
+        seed_room(&pool, "R-902", "mixed", 800_000).await;
+        seed_room(&pool, "R-901", "mixed", 600_000).await;
+
+        let preview = calculate_price_preview(&pool, "mixed", CHECK_IN, CHECK_OUT, "nightly")
+            .await
+            .expect("preview");
+
+        for room_id in ["R-901", "R-902"] {
+            let mut tx = pool.begin().await.expect("begin");
+            let charged = calculate_stay_price_tx(&mut tx, room_id, CHECK_IN, CHECK_OUT, "nightly")
+                .await
+                .unwrap_or_else(|error| panic!("charge for {room_id}: {error}"));
+            tx.rollback().await.expect("rollback");
+
+            assert_eq!(
+                preview.total, charged.total,
+                "the quote and the charge disagreed for {room_id}"
+            );
+        }
+
+        // Which room won: the lowest id, not the lowest price, not the insertion
+        // order. Compared against a type holding exactly one room at that price,
+        // so the expectation does not restate the derivation arithmetic.
+        seed_room(&pool, "R-801", "lone-600", 600_000).await;
+        seed_room(&pool, "R-802", "lone-800", 800_000).await;
+        let lone_600 = calculate_price_preview(&pool, "lone-600", CHECK_IN, CHECK_OUT, "nightly")
+            .await
+            .expect("lone 600k preview");
+        let lone_800 = calculate_price_preview(&pool, "lone-800", CHECK_IN, CHECK_OUT, "nightly")
+            .await
+            .expect("lone 800k preview");
+
+        assert_eq!(
+            preview.total, lone_600.total,
+            "R-901 has the lower id, so its 600k sets the mixed-type price"
+        );
+        assert_ne!(
+            preview.total, lone_800.total,
+            "and the 800k room is charged its sibling's rate — recorded, not fixed"
+        );
+    }
+
     #[tokio::test]
     async fn a_special_date_uplifts_the_preview() {
         let pool = migrated_pool().await;

@@ -22,7 +22,21 @@ const STORED_PRICING_RULE_SQL: &str = "SELECT room_type, hourly_rate, overnight_
 
 const ROOM_TYPE_SQL: &str = "SELECT type FROM rooms WHERE id = ? LIMIT 1";
 
-const FALLBACK_BASE_PRICE_SQL: &str = "SELECT base_price FROM rooms WHERE LOWER(type) = ? LIMIT 1";
+/// The base price a room type falls back to when it has no `pricing_rules` row.
+///
+/// `ORDER BY id` is load-bearing, if only for reproducibility. Without it SQLite
+/// returns whichever row it likes, so two rooms of one type with different
+/// `base_price` could quote one figure and charge another across app restarts.
+///
+/// It does not make the answer *right*, and this is the honest limit of the
+/// type-keyed design: with mixed prices inside a type, a type-level rule cannot
+/// represent both rooms, so an 800k room is billed at its 600k sibling's rate.
+/// Pricing the booked room instead would need the preview to know which room —
+/// which the group sheet, quoting per type, does not. That is a product
+/// decision, not a bug fix. Both loaders share this constant so the quote and
+/// the charge cannot disagree about which room they picked.
+const FALLBACK_BASE_PRICE_SQL: &str =
+    "SELECT base_price FROM rooms WHERE LOWER(type) = ? ORDER BY id LIMIT 1";
 
 const SPECIAL_UPLIFT_SQL: &str =
     "SELECT CAST(uplift_pct AS REAL) FROM special_dates WHERE date = ?";
