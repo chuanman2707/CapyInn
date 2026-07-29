@@ -8,7 +8,6 @@
 use super::{emit_db_update, require_admin, AppState};
 use crate::money::MoneyVnd;
 use crate::queries::booking::pricing_queries;
-use crate::repositories::booking::pricing_repository;
 use crate::services::booking::pricing_service::{self, SavePricingRule};
 use sqlx::{Pool, Sqlite};
 use tauri::State;
@@ -190,27 +189,6 @@ pub async fn get_special_dates(
             })
         })
         .collect())
-}
-
-#[tauri::command]
-pub async fn save_special_date(
-    state: State<'_, AppState>,
-    date: String,
-    label: String,
-    uplift_pct: f64,
-) -> Result<(), String> {
-    require_admin(&state)?;
-
-    pricing_repository::upsert_special_date(
-        &state.db,
-        &uuid::Uuid::new_v4().to_string(),
-        &date,
-        &label,
-        uplift_pct,
-        &chrono::Local::now().to_rfc3339(),
-    )
-    .await
-    .map_err(|e| e.to_string())
 }
 
 #[cfg(test)]

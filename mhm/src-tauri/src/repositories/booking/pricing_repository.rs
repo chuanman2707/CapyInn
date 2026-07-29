@@ -3,7 +3,7 @@
 //! Both are upserts keyed on the natural business key — one rule per room type,
 //! one uplift per date — so saving twice replaces rather than duplicating.
 
-use sqlx::{Pool, Sqlite};
+use sqlx::{Pool, Sqlite, Transaction};
 
 use crate::money::MoneyVnd;
 
@@ -69,15 +69,29 @@ pub async fn upsert_pricing_rule(
     Ok(())
 }
 
-/// `created_at` is only written on insert; an update leaves the original date in
-/// place, which is why it is not in the `DO UPDATE SET` list.
-pub async fn upsert_special_date(
-    pool: &Pool<Sqlite>,
-    id: &str,
-    date: &str,
-    label: &str,
-    uplift_pct: f64,
-    now: &str,
+/// Giá trị đã được service kiểm và đã đủ, writer không quyết định gì.
+// `repositories` is a private module, so `pub` here doesn't reach the crate's
+// external API — rustc still flags it as dead code until Task 4 wires in the caller.
+#[allow(dead_code)]
+pub struct SpecialDateUpsert<'a> {
+    pub id: &'a str,
+    pub date: &'a str,
+    pub label: &'a str,
+    pub uplift_pct: f64,
+    pub now: &'a str,
+}
+
+/// `created_at` chỉ được ghi lúc thêm mới; lần cập nhật giữ nguyên mốc cũ, nên
+/// nó không nằm trong danh sách `DO UPDATE SET`. `id` cũng vậy: ngày đã tồn tại
+/// thì giữ mã cũ, để mọi tham chiếu bên ngoài còn dùng được.
+///
+/// Nhận `tx` chứ không nhận `pool`: khai một khoảng là nhiều dòng, và mất nửa
+/// khoảng còn tệ hơn báo lỗi.
+// No caller yet outside these tests; Task 4 wires this into the service.
+#[allow(dead_code)]
+pub async fn upsert_special_date_tx(
+    tx: &mut Transaction<'_, Sqlite>,
+    upsert: &SpecialDateUpsert<'_>,
 ) -> Result<(), sqlx::Error> {
     sqlx::query(
         "INSERT INTO special_dates (id, date, label, uplift_pct, created_at)
@@ -86,13 +100,148 @@ pub async fn upsert_special_date(
             label = excluded.label,
             uplift_pct = excluded.uplift_pct",
     )
-    .bind(id)
-    .bind(date)
-    .bind(label)
-    .bind(uplift_pct)
-    .bind(now)
-    .execute(pool)
+    .bind(upsert.id)
+    .bind(upsert.date)
+    .bind(upsert.label)
+    .bind(upsert.uplift_pct)
+    .bind(upsert.now)
+    .execute(&mut **tx)
     .await?;
 
     Ok(())
+}
+
+/// Xoá từng ngày một thay vì dựng `IN (…)`: sqlx không bind được mảng cho
+/// SQLite, và ghép chuỗi SQL động là thứ không đáng đổi lấy một vòng lặp tối đa
+/// 366 bước.
+// No caller yet outside these tests; Task 4 wires this into the service.
+#[allow(dead_code)]
+pub async fn delete_special_dates_tx(
+    tx: &mut Transaction<'_, Sqlite>,
+    dates: &[String],
+) -> Result<(), sqlx::Error> {
+    for date in dates {
+        sqlx::query("DELETE FROM special_dates WHERE date = ?")
+            .bind(date)
+            .execute(&mut **tx)
+            .await?;
+    }
+
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{delete_special_dates_tx, upsert_special_date_tx, SpecialDateUpsert};
+    use sqlx::sqlite::SqlitePoolOptions;
+    use sqlx::{Executor, Pool, Sqlite};
+
+    async fn test_pool() -> Pool<Sqlite> {
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+        pool.execute(
+            "CREATE TABLE special_dates (
+                id TEXT PRIMARY KEY,
+                date TEXT NOT NULL,
+                label TEXT NOT NULL DEFAULT '',
+                uplift_pct REAL NOT NULL DEFAULT 0,
+                created_at TEXT NOT NULL,
+                UNIQUE(date)
+            )",
+        )
+        .await
+        .unwrap();
+        pool
+    }
+
+    #[tokio::test]
+    async fn upsert_keeps_the_original_created_at_when_the_date_already_exists() {
+        let pool = test_pool().await;
+        let mut tx = pool.begin().await.unwrap();
+        upsert_special_date_tx(
+            &mut tx,
+            &SpecialDateUpsert {
+                id: "id-1",
+                date: "2026-02-14",
+                label: "Tết",
+                uplift_pct: 40.0,
+                now: "2026-01-01T00:00:00+07:00",
+            },
+        )
+        .await
+        .unwrap();
+        upsert_special_date_tx(
+            &mut tx,
+            &SpecialDateUpsert {
+                id: "id-2",
+                date: "2026-02-14",
+                label: "Tết Nguyên đán",
+                uplift_pct: 45.0,
+                now: "2026-06-01T00:00:00+07:00",
+            },
+        )
+        .await
+        .unwrap();
+        tx.commit().await.unwrap();
+
+        let row: (String, String, f64, String) = sqlx::query_as(
+            "SELECT id, label, uplift_pct, created_at FROM special_dates WHERE date = ?",
+        )
+        .bind("2026-02-14")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+
+        assert_eq!(row.0, "id-1", "id cũ phải được giữ");
+        assert_eq!(row.1, "Tết Nguyên đán");
+        assert_eq!(row.2, 45.0);
+        assert_eq!(
+            row.3, "2026-01-01T00:00:00+07:00",
+            "created_at phải được giữ"
+        );
+    }
+
+    #[tokio::test]
+    async fn delete_removes_exactly_the_listed_dates() {
+        let pool = test_pool().await;
+        let mut tx = pool.begin().await.unwrap();
+        for (index, date) in ["2026-02-14", "2026-02-15", "2026-02-16"]
+            .iter()
+            .enumerate()
+        {
+            upsert_special_date_tx(
+                &mut tx,
+                &SpecialDateUpsert {
+                    id: &format!("id-{index}"),
+                    date,
+                    label: "Tết",
+                    uplift_pct: 40.0,
+                    now: "2026-01-01T00:00:00+07:00",
+                },
+            )
+            .await
+            .unwrap();
+        }
+        delete_special_dates_tx(&mut tx, &["2026-02-15".to_string()])
+            .await
+            .unwrap();
+        tx.commit().await.unwrap();
+
+        let remaining: Vec<(String,)> =
+            sqlx::query_as("SELECT date FROM special_dates ORDER BY date")
+                .fetch_all(&pool)
+                .await
+                .unwrap();
+
+        assert_eq!(
+            remaining
+                .iter()
+                .map(|row| row.0.as_str())
+                .collect::<Vec<_>>(),
+            vec!["2026-02-14", "2026-02-16"]
+        );
+    }
 }
