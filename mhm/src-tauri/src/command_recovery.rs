@@ -47,7 +47,8 @@ pub fn command_recovery_risk_level(command_name: &str) -> RecoveryRiskLevel {
         | "extend_stay"
         | "group_checkin"
         | "group_checkout"
-        | "generate_invoice" => RecoveryRiskLevel::High,
+        | "generate_invoice"
+        | "backfill_stay" => RecoveryRiskLevel::High,
         name if name.contains("night_audit") => RecoveryRiskLevel::High,
         _ => RecoveryRiskLevel::Low,
     }
@@ -952,6 +953,18 @@ mod tests {
         .expect_err("requires reason");
         assert_eq!(missing_reason.code, codes::APPROVAL_REQUIRED);
         assert_eq!(action_count(&pool, id).await, 0);
+    }
+
+    #[test]
+    fn backfill_stay_is_classified_high_risk() {
+        // backfill_stay writes a booking row, a room charge, a payment, room-calendar
+        // rows, guest records, and (in "still staying" mode) flips a room to occupied --
+        // the same blast radius as check_in. A failed backfill must not be dismissable
+        // or retryable without operator confirmation and a stated reason.
+        assert_eq!(
+            command_recovery_risk_level("backfill_stay"),
+            RecoveryRiskLevel::High
+        );
     }
 
     #[tokio::test]
