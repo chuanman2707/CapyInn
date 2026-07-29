@@ -31,6 +31,7 @@ interface HotelStore {
   loading: boolean;
   isCheckinOpen: boolean;
   checkinRoomId: string | null;
+  checkinNights: number | null;
   isGroupCheckinOpen: boolean;
   groups: BookingGroup[];
 
@@ -38,7 +39,7 @@ interface HotelStore {
   fetchStats: () => Promise<void>;
   markDashboardDataChanged: () => void;
   setTab: (tab: HotelTab) => void;
-  setCheckinOpen: (open: boolean, roomId?: string | null) => void;
+  setCheckinOpen: (open: boolean, roomId?: string | null, nights?: number | null) => void;
   checkIn: (roomId: string, guests: CheckInGuestInput[], nights: number, paidAmount?: MoneyVnd, source?: string, notes?: string) => Promise<void>;
   checkOut: (
     bookingId: string,
@@ -83,6 +84,7 @@ export const useHotelStore = create<HotelStore>((set, get) => {
     loading: false,
     isCheckinOpen: false,
     checkinRoomId: null,
+    checkinNights: null,
     isGroupCheckinOpen: false,
     groups: [],
 
@@ -102,10 +104,11 @@ export const useHotelStore = create<HotelStore>((set, get) => {
       })),
 
     setTab: (tab) => set({ activeTab: tab }),
-    setCheckinOpen: (open, roomId = null) =>
+    setCheckinOpen: (open, roomId = null, nights = null) =>
       set({
         isCheckinOpen: open,
         checkinRoomId: open ? roomId : null,
+        checkinNights: open ? nights : null,
       }),
 
     checkIn: async (roomId, guests, nights, paidAmount, source, notes) => {

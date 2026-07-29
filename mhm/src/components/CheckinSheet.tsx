@@ -24,7 +24,7 @@ const emptyGuest = (): GuestInput => ({
     address: "",
 });
 
-export default function CheckinSheet({ preSelectedRoomId }: { preSelectedRoomId?: string } = {}) {
+export default function CheckinSheet({ preSelectedRoomId, preSelectedNights }: { preSelectedRoomId?: string; preSelectedNights?: number } = {}) {
     const { rooms, checkIn, fetchRooms, isCheckinOpen, setCheckinOpen } = useHotelStore();
 
     const [guests, setGuests] = useState<GuestInput[]>([emptyGuest()]);
@@ -46,6 +46,13 @@ export default function CheckinSheet({ preSelectedRoomId }: { preSelectedRoomId?
             setSelectedRoom(preSelectedRoomId);
         }
     }, [isCheckinOpen, preSelectedRoomId]);
+
+    // Auto-fill nights when pre-selected
+    useEffect(() => {
+        if (isCheckinOpen && preSelectedNights) {
+            setNights(preSelectedNights);
+        }
+    }, [isCheckinOpen, preSelectedNights]);
 
     // Listen for OCR results from background watcher
     useEffect(() => {
