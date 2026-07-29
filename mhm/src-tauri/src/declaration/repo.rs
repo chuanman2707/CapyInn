@@ -25,6 +25,37 @@ const KEY_REDACT_AFTER_DAYS: &str = "declaration.redact_after_days";
 const DEFAULT_CSLT_NAME: &str = "CSLT";
 const DEFAULT_REDACT_AFTER_DAYS: i64 = 90;
 
+/// Bao lâu sau khi trả phòng thì một lượt lưu trú rời khỏi tầm khai báo.
+///
+/// Khách ĐÃ TRẢ PHÒNG phải nằm trong tầm, nếu không thì chính thứ mà tính năng
+/// "ghi bù sổ khách" sinh ra để cứu — một khách cũ bị bỏ quên, cần khai lên
+/// công an — lại vô hình với màn khai báo. Nhưng danh sách này là HÀNG CHỜ
+/// VIỆC chứ không phải kho lưu trữ: không có cửa sổ thì mọi lượt đã trả trong
+/// đời khách sạn dồn hết vào đó.
+///
+/// 30 ngày: đủ rộng để chủ soát sổ cuối tháng vẫn còn ghi bù và khai kịp, đủ
+/// hẹp để danh sách không phình, và vẫn nằm gọn trong hạn che dữ liệu 90 ngày
+/// (`DEFAULT_REDACT_AFTER_DAYS`) nên không bao giờ lòi ra một dòng đã bị che.
+const CHECKED_OUT_WINDOW_DAYS: i64 = 30;
+
+/// Điều kiện "lượt lưu trú còn trong tầm khai báo", dùng chung cho câu dựng
+/// danh sách và câu đếm badge — hai câu lệch nhau thì badge nhắc một khách mà
+/// danh sách không có (hoặc ngược lại), và người vận hành không có đường đi
+/// tiếp. `b` là alias của `bookings`.
+///
+/// Khách đang ở: giữ nguyên luật cũ, không có cửa sổ thời gian.
+/// Khách đã trả: dùng `actual_checkout`, lùi về `expected_checkout` cho những
+/// booking cũ không ghi ngày trả thật.
+fn stay_in_declaration_scope() -> String {
+    format!(
+        "(b.status = 'active'
+          OR (b.status = 'checked_out'
+              AND julianday('now')
+                  - julianday(COALESCE(b.actual_checkout, b.expected_checkout))
+                  <= {CHECKED_OUT_WINDOW_DAYS}))"
+    )
+}
+
 fn now() -> String {
     chrono::Local::now().to_rfc3339()
 }
@@ -37,14 +68,15 @@ fn placeholders(n: usize) -> String {
 
 /// Đường DUY NHẤT module này đọc dữ liệu của PMS. Chỉ SELECT.
 pub async fn load_stays_for_declaration(pool: &Pool<Sqlite>) -> Result<Vec<StayInfo>, String> {
-    let rows = sqlx::query(
+    let rows = sqlx::query(&format!(
         "SELECT b.id AS stay_id, r.name AS room_name, b.check_in_at,
                 b.expected_checkout, b.actual_checkout
            FROM bookings b
            JOIN rooms r ON r.id = b.room_id
-          WHERE b.status = 'active'
+          WHERE {}
           ORDER BY b.check_in_at DESC",
-    )
+        stay_in_declaration_scope()
+    ))
     .fetch_all(pool)
     .await
     .map_err(|e| format!("Không đọc được lượt lưu trú: {e}"))?;
@@ -70,8 +102,15 @@ pub async fn load_stays_for_declaration(pool: &Pool<Sqlite>) -> Result<Vec<StayI
 
 /// Khách chưa khai = lượt lưu trú không có link nào thuộc lô `verified`.
 /// Tính bằng query, không cần cột mới ở bảng cũ (§5.3).
-pub async fn count_undeclared_within_48h(pool: &Pool<Sqlite>) -> Result<i64, String> {
-    let rows = sqlx::query(
+///
+/// Chỉ đếm những lượt mà danh sách khai báo thực sự hiện ra
+/// (`stay_in_declaration_scope`), cộng thêm một hạn hẹp hơn cho khách ĐANG Ở:
+/// 48h kể từ lúc nhận phòng — đó là luật cũ của badge, giữ nguyên. Khách ĐÃ
+/// TRẢ PHÒNG mà vẫn chưa khai thì đã quá hạn theo định nghĩa, nên được đếm
+/// suốt thời gian còn nằm trong danh sách; badge im trong khi danh sách vẫn
+/// còn việc là kiểu lệch khiến người vận hành không biết mình còn nợ ai.
+pub async fn count_undeclared_stays(pool: &Pool<Sqlite>) -> Result<i64, String> {
+    let rows = sqlx::query(&format!(
         "SELECT
             (SELECT COUNT(*) FROM booking_guests bg WHERE bg.booking_id = b.id) AS guest_count,
             (SELECT COUNT(*) FROM declaration_link dl
@@ -79,9 +118,11 @@ pub async fn count_undeclared_within_48h(pool: &Pool<Sqlite>) -> Result<i64, Str
                JOIN declaration_batch dbt ON dbt.id     = de.batch_id
               WHERE dl.stay_id = b.id AND dbt.status = 'verified') AS declared_count
            FROM bookings b
-          WHERE b.status = 'active'
-            AND julianday('now') - julianday(b.check_in_at) <= 2",
-    )
+          WHERE {}
+            AND (b.status <> 'active'
+                 OR julianday('now') - julianday(b.check_in_at) <= 2)",
+        stay_in_declaration_scope()
+    ))
     .fetch_all(pool)
     .await
     .map_err(|e| format!("Không đếm được khách chưa khai: {e}"))?;
@@ -661,7 +702,7 @@ pub async fn confidence_by_link(
 /// Link đã ghép nhưng chưa nằm trong lô `verified` nào.
 ///
 /// Đây là định nghĩa "còn phải khai" ở mức từng hồ sơ, khác với
-/// `count_undeclared_within_48h` vốn đếm theo lượt lưu trú cho badge sidebar.
+/// `count_undeclared_stays` vốn đếm theo lượt lưu trú cho badge sidebar.
 pub async fn pending_link_ids(pool: &Pool<Sqlite>) -> Result<Vec<String>, String> {
     sqlx::query_scalar::<_, String>(
         "SELECT dl.id
