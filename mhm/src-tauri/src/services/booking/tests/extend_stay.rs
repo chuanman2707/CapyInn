@@ -7,7 +7,9 @@ async fn extend_stay_prices_the_extra_night_with_the_guest_charge() {
         .await
         .unwrap();
     let booking_id = uuid::Uuid::new_v4().to_string();
-    seed_active_booking(&pool, &booking_id, "R320").await.unwrap();
+    seed_active_booking(&pool, &booking_id, "R320")
+        .await
+        .unwrap();
 
     sqlx::query("UPDATE bookings SET guests = 4, total_price = 1200000, nights = 2 WHERE id = ?")
         .bind(&booking_id)
@@ -15,7 +17,9 @@ async fn extend_stay_prices_the_extra_night_with_the_guest_charge() {
         .await
         .unwrap();
 
-    let booking = stay_lifecycle::extend_stay(&pool, &booking_id).await.unwrap();
+    let booking = stay_lifecycle::extend_stay(&pool, &booking_id)
+        .await
+        .unwrap();
 
     // 1.200.000₫ cũ + 600.000₫ cho đêm thêm, không phải + 500.000₫.
     assert_eq!(booking.total_price, 1_800_000);
