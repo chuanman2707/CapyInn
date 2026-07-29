@@ -129,12 +129,12 @@ fn room_not_found(room_id: &str) -> BookingError {
 
 /// `special_dates.date` is a bare `YYYY-MM-DD`, so an RFC3339 check-in has to
 /// be truncated before it will match.
+///
+/// Cắt bằng `get` chứ không phải `&value[..10]`: chuỗi đến từ dữ liệu người
+/// dùng, và cắt theo byte sẽ panic nếu byte thứ mười rơi vào giữa một ký tự
+/// nhiều byte. Tầng domain đã vá đúng lỗi này ở `nights_between`.
 fn date_key(date_str: &str) -> &str {
-    if date_str.len() >= 10 {
-        &date_str[..10]
-    } else {
-        date_str
-    }
+    date_str.get(..10).unwrap_or(date_str)
 }
 
 /// Mốc tính giá của một phòng. Phòng không tìm thấy thì dùng mặc định của schema
@@ -486,7 +486,7 @@ async fn load_special_uplift_tx(
 
 #[cfg(test)]
 mod tests {
-    use super::{load_stay_pricing_inputs_tx, stored_rule_from_row};
+    use super::{date_key, load_stay_pricing_inputs_tx, stored_rule_from_row};
     use sqlx::{sqlite::SqlitePoolOptions, Connection, Executor, SqliteConnection};
 
     #[tokio::test]
@@ -523,6 +523,15 @@ mod tests {
         assert_eq!(rule.early_checkin_surcharge_pct, 15.0);
         assert_eq!(rule.late_checkout_surcharge_pct, 20.0);
         assert_eq!(rule.weekend_uplift_pct, 12.5);
+    }
+
+    #[test]
+    fn date_key_does_not_panic_when_byte_ten_splits_a_character() {
+        // Chín ký tự ASCII rồi một ký tự hai byte: byte thứ 10 rơi vào giữa
+        // ký tự ấy. `&value[..10]` sẽ panic ở đây.
+        let value = "123456789é";
+
+        assert_eq!(date_key(value), value);
     }
 
     async fn setup_loader_pool() -> sqlx::SqlitePool {
