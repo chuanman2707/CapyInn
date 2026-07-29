@@ -846,4 +846,93 @@ describe("ReservationSheet", () => {
     const checkInAfterRerender = screen.getByLabelText(/ngày đến/i) as HTMLInputElement;
     expect(checkInAfterRerender.value).toBe("2026-08-10");
   });
+
+  // Ô lịch tương lai của một phòng ĐANG CÓ KHÁCH vẫn kéo được (khách rời sau
+  // hai hôm), và cú kéo truyền thẳng roomId vào đây. Danh sách chỉ liệt kê
+  // vacant/booked, nên phòng đó không có option nào khớp: ô "Phòng" hiện
+  // trống trong khi state vẫn giữ id — và nút gửi vẫn sáng, vì nó gác trên
+  // `!roomId`, mà id vô hình kia là truthy.
+  it("bỏ chọn phòng khi phòng kéo từ lịch không nằm trong danh sách chọn được", async () => {
+    rooms = [
+      ORIGINAL_ROOMS[0],
+      { ...ORIGINAL_ROOMS[1], status: "occupied" },
+    ];
+    const { rerender } = render(
+      <ReservationSheet open onOpenChange={vi.fn()} preSelectedRoomId="R102" />,
+    );
+
+    const roomSelect = screen.getByLabelText(/^Phòng$/) as HTMLSelectElement;
+    await waitFor(() => {
+      expect(roomSelect).toHaveValue("");
+    });
+    // Nút gửi phải tắt: bật lên với một phòng vô hình chỉ dẫn tới một cú từ
+    // chối ở backend.
+    expect(screen.getByRole("button", { name: /Đặt phòng/ })).toBeDisabled();
+
+    // Ô trống chưa chứng minh gì — jsdom cũng hiện trống khi state còn giữ
+    // R102 mà option đã bị lọc mất. Cho R102 trở lại danh sách: state chưa bị
+    // xoá thật thì select tự nhảy về "R102" dù chủ chưa hề chọn lại.
+    rooms = ORIGINAL_ROOMS.map((r) => ({ ...r }));
+    rerender(<ReservationSheet open onOpenChange={vi.fn()} preSelectedRoomId="R102" />);
+
+    await waitFor(() => {
+      expect(
+        Array.from((screen.getByLabelText(/^Phòng$/) as HTMLSelectElement).options).map(
+          (o) => o.value,
+        ),
+      ).toContain("R102");
+    });
+    expect(screen.getByLabelText(/^Phòng$/)).toHaveValue("");
+  });
+
+  // Chế độ sửa: phòng lấy từ chính booking đang sửa, ô select bị disable, và
+  // phòng đó rất có thể không còn vacant/booked — nó đang có khách. Ô select
+  // hiện trống ở cả hai đời code (không có option khớp), nên chỉ soi DOM là
+  // không phân biệt được; đường lưu thay đổi mới là thứ chứng minh state còn
+  // nguyên: `handleSubmit` chặn ngay ở `!roomId`.
+  it("không bỏ chọn phòng của booking đang sửa dù phòng đó đang có khách", async () => {
+    rooms = [
+      ORIGINAL_ROOMS[0],
+      { ...ORIGINAL_ROOMS[1], status: "occupied" },
+    ];
+    const user = userEvent.setup();
+    render(
+      <ReservationSheet
+        open
+        onOpenChange={vi.fn()}
+        editBooking={{
+          id: "B-EDIT",
+          room_id: "R102",
+          guest_name: "Nguyen Van A",
+          guest_phone: "0900000000",
+          check_in_at: "2026-08-02T14:00:00+07:00",
+          expected_checkout: "2026-08-05T12:00:00+07:00",
+          scheduled_checkin: "2026-08-02",
+          scheduled_checkout: "2026-08-05",
+          nights: 3,
+          guests: 2,
+          total_price: 1000000,
+          deposit_amount: 0,
+          source: "phone",
+        }}
+      />,
+    );
+
+    await waitFor(() => {
+      expect(fetchRooms).toHaveBeenCalledTimes(1);
+    });
+
+    await user.click(screen.getByRole("button", { name: /lưu thay đổi/i }));
+
+    await waitFor(() => {
+      expect(invokeWriteCommand).toHaveBeenCalledWith(
+        "modify_reservation",
+        expect.objectContaining({
+          req: expect.objectContaining({ booking_id: "B-EDIT" }),
+        }),
+        expect.anything(),
+      );
+    });
+    expect(toastError).not.toHaveBeenCalled();
+  });
 });

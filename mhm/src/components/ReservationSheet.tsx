@@ -11,7 +11,7 @@ import { createCorrelationId } from "@/lib/correlationId";
 import { fmtNumber } from "@/lib/format";
 import { invokeWriteCommand } from "@/lib/invokeCommand";
 import { optionalMoneyVnd } from "@/lib/money";
-import { nightsBetween } from "@/lib/timelineSelection";
+import { addDaysIso, localDateIso, nightsBetween } from "@/lib/timelineSelection";
 import { toast } from "sonner";
 import InvoiceDialog from "./InvoiceDialog";
 import type { EditableBooking } from "@/types";
@@ -22,12 +22,6 @@ interface Props {
     preSelectedRoomId?: string;
     editBooking?: EditableBooking;
     prefillDates?: { checkIn: string; checkOut: string };
-}
-
-function addDays(date: string, days: number): string {
-    const d = new Date(date);
-    d.setDate(d.getDate() + days);
-    return d.toISOString().split("T")[0];
 }
 
 // Trần số đêm cho một đặt phòng. Trước đây ngày đi chỉ đọc được, suy ra từ
@@ -110,9 +104,9 @@ export default function ReservationSheet({ open, onOpenChange, preSelectedRoomId
                 setCheckOutDate(prefillDates.checkOut);
             } else {
                 // Mặc định: nhận phòng ngày mai, ở 1 đêm.
-                const tomorrow = addDays(new Date().toISOString().split("T")[0], 1);
+                const tomorrow = addDaysIso(localDateIso(new Date()), 1);
                 setCheckInDate(tomorrow);
-                setCheckOutDate(addDays(tomorrow, 1));
+                setCheckOutDate(addDaysIso(tomorrow, 1));
             }
         }
     }, [open, editBooking, prefillDates?.checkIn, prefillDates?.checkOut]);
@@ -159,6 +153,28 @@ export default function ReservationSheet({ open, onOpenChange, preSelectedRoomId
         const room = rooms.find((r) => r.id === editBooking.room_id);
         if (room) setGuests(room.max_guests);
     }, [isEditMode, editBooking, rooms, guestsTouched]);
+
+    const vacantRooms = rooms.filter((r) => r.status === "vacant" || r.status === "booked");
+
+    // Kéo một ô lịch TƯƠNG LAI của phòng đang có khách (khách rời sau hai hôm)
+    // mở sheet này với đúng roomId đó, mà danh sách chỉ liệt kê vacant/booked —
+    // <select> không có option khớp nên hiện trống, còn state vẫn giữ id đó và
+    // nút gửi vẫn sáng vì nó gác trên `!roomId`, mà id vô hình kia là truthy.
+    // Cùng cách xử lý như BackfillSheet.tsx.
+    //
+    // Chế độ sửa được miễn: phòng ở đó lấy từ chính booking đang sửa và ô
+    // select bị disable — phòng đang có khách là chuyện bình thường, xoá đi sẽ
+    // chặn luôn việc lưu thay đổi.
+    useEffect(() => {
+        if (isEditMode) return;
+        // `rooms.length > 0`: các sheet này gọi fetchRooms() lúc mở, nên có một
+        // khoảnh khắc danh sách còn rỗng. Không có vế này, một phòng hợp lệ
+        // truyền vào bị xoá ngay trước khi rooms kịp về, và effect nạp
+        // preSelected không chạy lại để đặt lại nó.
+        if (rooms.length > 0 && roomId && !vacantRooms.some((r) => r.id === roomId)) {
+            setRoomId("");
+        }
+    }, [isEditMode, rooms, roomId, vacantRooms]);
 
     async function handleSubmit() {
         if (!roomId || !checkInDate || !checkOutDate) {
@@ -263,8 +279,6 @@ export default function ReservationSheet({ open, onOpenChange, preSelectedRoomId
         resetAvailability();
     }
 
-    const vacantRooms = rooms.filter((r) => r.status === "vacant" || r.status === "booked");
-
     return (
         <Sheet open={open} onOpenChange={onOpenChange}>
             <SheetContent side="right" className="w-[480px] sm:w-[520px] overflow-y-auto p-0">
@@ -304,13 +318,13 @@ export default function ReservationSheet({ open, onOpenChange, preSelectedRoomId
                                 type="date"
                                 className="w-full h-10 px-3 rounded-xl border border-slate-200 bg-slate-50 text-sm focus:outline-none focus:ring-2 focus:ring-blue-200"
                                 value={checkInDate}
-                                min={new Date().toISOString().split("T")[0]}
+                                min={localDateIso(new Date())}
                                 onChange={(e) => {
                                     const nextCheckIn = e.target.value;
                                     setCheckInDate(nextCheckIn);
                                     // Giữ ngày đi hợp lệ: đẩy nó ra sau ngày đến mới.
                                     if (nextCheckIn && nightsBetween(nextCheckIn, checkOutDate) <= 0) {
-                                        setCheckOutDate(addDays(nextCheckIn, 1));
+                                        setCheckOutDate(addDaysIso(nextCheckIn, 1));
                                     }
                                 }}
                             />
@@ -322,8 +336,8 @@ export default function ReservationSheet({ open, onOpenChange, preSelectedRoomId
                                 type="date"
                                 className="w-full h-10 px-3 rounded-xl border border-slate-200 bg-slate-50 text-sm focus:outline-none focus:ring-2 focus:ring-blue-200"
                                 value={checkOutDate}
-                                min={checkInDate ? addDays(checkInDate, 1) : undefined}
-                                max={checkInDate ? addDays(checkInDate, MAX_RESERVATION_NIGHTS) : undefined}
+                                min={checkInDate ? addDaysIso(checkInDate, 1) : undefined}
+                                max={checkInDate ? addDaysIso(checkInDate, MAX_RESERVATION_NIGHTS) : undefined}
                                 onChange={(e) => setCheckOutDate(e.target.value)}
                             />
                         </div>
