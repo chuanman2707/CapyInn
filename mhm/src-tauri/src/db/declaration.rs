@@ -615,7 +615,7 @@ mod tests {
     async fn undeclared_count_drops_only_when_a_batch_is_verified() {
         let pool = seeded_pool().await;
 
-        let before = crate::declaration::repo::count_undeclared_within_48h(&pool)
+        let before = crate::declaration::repo::count_undeclared_stays(&pool)
             .await
             .expect("đếm được");
         assert_eq!(before, 2, "hai khách trong booking, chưa ai được khai");
@@ -646,7 +646,7 @@ mod tests {
             .expect("lưu được dòng của lô");
 
         // Lô mới xuất ('exported') chưa tính là đã khai.
-        let exported = crate::declaration::repo::count_undeclared_within_48h(&pool)
+        let exported = crate::declaration::repo::count_undeclared_stays(&pool)
             .await
             .expect("đếm được");
         assert_eq!(exported, 2, "xuất file chưa phải là đã khai");
@@ -654,7 +654,7 @@ mod tests {
         crate::declaration::repo::set_batch_verified(&pool, &batch, 1)
             .await
             .expect("đối chiếu xong");
-        let verified = crate::declaration::repo::count_undeclared_within_48h(&pool)
+        let verified = crate::declaration::repo::count_undeclared_stays(&pool)
             .await
             .expect("đếm được");
         assert_eq!(verified, 1, "một khách đã khai, còn một chưa");
@@ -664,9 +664,156 @@ mod tests {
         crate::declaration::repo::set_batch_failed(&pool, &batch, 0)
             .await
             .expect("đánh dấu lô hỏng");
-        let failed = crate::declaration::repo::count_undeclared_within_48h(&pool)
+        let failed = crate::declaration::repo::count_undeclared_stays(&pool)
             .await
             .expect("đếm được");
         assert_eq!(failed, 2);
+    }
+
+    /// Dấu thời gian đúng định dạng PMS thật ghi ra (RFC3339 giờ địa phương,
+    /// xem `services::booking::backfill::local_datetime_rfc3339`). Dùng
+    /// `datetime('now', ...)` của SQLite sẽ ra "YYYY-MM-DD HH:MM:SS" — một
+    /// định dạng không bao giờ có trong DB thật, và `booking_ts_to_iso_date`
+    /// không đọc nổi.
+    fn days_ago_rfc3339(days: i64) -> String {
+        (chrono::Local::now() - chrono::Duration::days(days)).to_rfc3339()
+    }
+
+    /// Một lượt lưu trú đứng riêng (phòng + khách + booking), đủ để thử cửa sổ
+    /// thời gian của hai câu đọc PMS mà không lẫn với `booking-1` của
+    /// `seeded_pool`. Các tham số ngày tính bằng "số ngày trước hôm nay".
+    async fn pool_with_one_stay(
+        status: &str,
+        check_in_days_ago: i64,
+        actual_checkout_days_ago: Option<i64>,
+        guests: usize,
+    ) -> SqlitePool {
+        let pool = SqlitePool::connect("sqlite::memory:")
+            .await
+            .expect("connects in-memory sqlite");
+        run_migrations(&pool).await.expect("runs migrations");
+
+        sqlx::query(
+            "INSERT INTO rooms (
+                id, name, type, floor, has_balcony, base_price, max_guests, extra_person_fee, status
+             ) VALUES ('room-1', 'Phòng 5B', 'standard', 1, 0, 100000, 2, 0, 'vacant')",
+        )
+        .execute(&pool)
+        .await
+        .expect("seeds room");
+
+        for n in 0..guests {
+            sqlx::query(
+                "INSERT INTO guests (id, guest_type, full_name, doc_number, created_at)
+                 VALUES (?, 'domestic', 'Khách thử', 'DOC-1', datetime('now'))",
+            )
+            .bind(format!("guest-{n}"))
+            .execute(&pool)
+            .await
+            .expect("seeds guest");
+        }
+
+        sqlx::query(
+            "INSERT INTO bookings (
+                id, room_id, primary_guest_id, check_in_at, expected_checkout,
+                actual_checkout, nights, total_price, status, created_at
+             ) VALUES ('booking-x', 'room-1', 'guest-0', ?, ?, ?, 1, 500000, ?, ?)",
+        )
+        .bind(days_ago_rfc3339(check_in_days_ago))
+        // Ngày trả dự kiến của một lượt đã trả nằm cùng chỗ với ngày trả thật;
+        // với lượt đang ở thì là tương lai.
+        .bind(days_ago_rfc3339(
+            actual_checkout_days_ago.unwrap_or(check_in_days_ago - 1),
+        ))
+        .bind(actual_checkout_days_ago.map(days_ago_rfc3339))
+        .bind(status)
+        .bind(days_ago_rfc3339(check_in_days_ago))
+        .execute(&pool)
+        .await
+        .expect("seeds booking");
+
+        for n in 0..guests {
+            sqlx::query(
+                "INSERT INTO booking_guests (booking_id, guest_id) VALUES ('booking-x', ?)",
+            )
+            .bind(format!("guest-{n}"))
+            .execute(&pool)
+            .await
+            .expect("seeds booking guest");
+        }
+
+        pool
+    }
+
+    /// Ghi bù một khách ĐÃ TRẢ PHÒNG là chính lý do tính năng ghi bù tồn tại —
+    /// khách đó phải vào được danh sách khai báo, nếu không thì không có đường
+    /// nào nộp cho công an.
+    #[tokio::test]
+    async fn a_recently_checked_out_stay_still_shows_up_for_declaration() {
+        let pool = pool_with_one_stay("checked_out", 4, Some(2), 2).await;
+
+        let stays = crate::declaration::repo::load_stays_for_declaration(&pool)
+            .await
+            .expect("đọc được lượt lưu trú");
+        assert_eq!(
+            stays.iter().map(|s| s.stay_id.as_str()).collect::<Vec<_>>(),
+            vec!["booking-x"],
+        );
+        assert!(
+            stays[0].actual_out.is_some(),
+            "ngày trả thật phải theo về cùng dòng"
+        );
+
+        assert_eq!(
+            crate::declaration::repo::count_undeclared_stays(&pool)
+                .await
+                .expect("đếm được"),
+            2,
+            "badge phải nhắc cho tới khi khách vừa ghi bù được khai"
+        );
+    }
+
+    /// Danh sách khai báo là hàng chờ việc, không phải kho lưu trữ: một lượt đã
+    /// trả từ lâu không được nằm mãi ở đó.
+    #[tokio::test]
+    async fn a_long_checked_out_stay_drops_off_the_declaration_list() {
+        let pool = pool_with_one_stay("checked_out", 62, Some(60), 2).await;
+
+        assert!(
+            crate::declaration::repo::load_stays_for_declaration(&pool)
+                .await
+                .expect("đọc được lượt lưu trú")
+                .is_empty(),
+            "lượt đã trả quá cửa sổ không còn trong danh sách"
+        );
+        assert_eq!(
+            crate::declaration::repo::count_undeclared_stays(&pool)
+                .await
+                .expect("đếm được"),
+            0,
+        );
+    }
+
+    /// Luật cũ cho khách ĐANG Ở không đổi: danh sách lấy mọi lượt `active` bất
+    /// kể nhận phòng từ bao giờ, còn badge vẫn chỉ đếm trong 48h.
+    #[tokio::test]
+    async fn active_stays_keep_their_old_rules() {
+        let pool = pool_with_one_stay("active", 30, None, 2).await;
+
+        assert_eq!(
+            crate::declaration::repo::load_stays_for_declaration(&pool)
+                .await
+                .expect("đọc được lượt lưu trú")
+                .len(),
+            1,
+            "khách đang ở luôn nằm trong danh sách, không có cửa sổ thời gian"
+        );
+        assert_eq!(
+            crate::declaration::repo::count_undeclared_stays(&pool)
+                .await
+                .expect("đếm được"),
+            0,
+            "badge 48h của khách đang ở giữ nguyên như cũ"
+        );
     }
 }
