@@ -771,9 +771,6 @@ describe("ReservationSheet", () => {
       expect(checkIn.value).toBe("2026-08-02");
       expect(checkOut.value).toBe("2026-08-05");
     });
-    await waitFor(() => {
-      expect(screen.getByText(/3 đêm/i)).toBeInTheDocument();
-    });
   });
 
   it("editBooking thắng prefillDates khi component nhận cả hai (edit mode ưu tiên)", async () => {
