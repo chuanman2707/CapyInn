@@ -232,12 +232,14 @@ describe("PendingList", () => {
 
     render(<PendingList />);
 
-    expect(
-      await screen.findByText(/Khách nước ngoài \(XML\)/i),
-    ).toBeInTheDocument();
-    expect(screen.getByText(/Khách Việt Nam \(XLSX\)/i)).toBeInTheDocument();
-    expect(screen.getByText("ZOLOCHEVSKAIA VERONIKA")).toBeInTheDocument();
+    // Await a *row*, not a section header. Both headers render immediately with
+    // an empty "Không có khách nào" body, so awaiting one resolves on the first
+    // paint and the synchronous row assertions below then race the pending
+    // `kbtt_pending_rows` promise. That lost on CI while passing everywhere else.
+    expect(await screen.findByText("ZOLOCHEVSKAIA VERONIKA")).toBeInTheDocument();
     expect(screen.getByText("Nguyễn Văn A")).toBeInTheDocument();
+    expect(screen.getByText(/Khách nước ngoài \(XML\)/i)).toBeInTheDocument();
+    expect(screen.getByText(/Khách Việt Nam \(XLSX\)/i)).toBeInTheDocument();
   });
 
   it("shows blocking error codes on the row", async () => {
