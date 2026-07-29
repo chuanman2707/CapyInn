@@ -809,4 +809,44 @@ describe("ReservationSheet", () => {
     expect(checkIn.value).toBe("2026-04-20");
     expect(checkOut.value).toBe("2026-04-22");
   });
+
+  it("một re-render không liên quan với prefillDates object mới (cùng nội dung) không được xoá ngày người dùng vừa sửa", async () => {
+    // prefillDates đến từ kéo-thả trên lịch (Task 8) và được component cha
+    // dựng inline trong JSX (`prefillDates={... ? { checkIn, checkOut } : undefined}`),
+    // nên mỗi lần cha re-render vì lý do bất kỳ sẽ tạo ra một object mới có
+    // cùng nội dung. Nếu effect phụ thuộc vào *reference* của prefillDates,
+    // nó sẽ chạy lại, rơi vào nhánh `else if (prefillDates)`, và ghi đè ngày
+    // người dùng vừa gõ tay trở lại giá trị prefill ban đầu.
+    const { rerender } = render(
+      <ReservationSheet
+        open
+        onOpenChange={vi.fn()}
+        preSelectedRoomId="R101"
+        prefillDates={{ checkIn: "2026-08-02", checkOut: "2026-08-05" }}
+      />,
+    );
+
+    const checkIn = screen.getByLabelText(/ngày đến/i) as HTMLInputElement;
+    await waitFor(() => {
+      expect(checkIn.value).toBe("2026-08-02");
+    });
+
+    // Người dùng tự sửa ngày đến sau khi sheet đã mở.
+    fireEvent.change(checkIn, { target: { value: "2026-08-10" } });
+    expect(checkIn.value).toBe("2026-08-10");
+
+    // Re-render với một object prefillDates MỚI nhưng cùng nội dung — đúng
+    // những gì component cha (calendar kéo-thả) tạo ra ở mỗi lần render.
+    rerender(
+      <ReservationSheet
+        open
+        onOpenChange={vi.fn()}
+        preSelectedRoomId="R101"
+        prefillDates={{ checkIn: "2026-08-02", checkOut: "2026-08-05" }}
+      />,
+    );
+
+    const checkInAfterRerender = screen.getByLabelText(/ngày đến/i) as HTMLInputElement;
+    expect(checkInAfterRerender.value).toBe("2026-08-10");
+  });
 });
