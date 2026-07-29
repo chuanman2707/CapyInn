@@ -142,10 +142,12 @@ pub async fn save_pricing_rule(
 #[cfg(test)]
 mod tests {
     use super::{
-        calculate_price_preview, calculate_stay_price_tx, save_pricing_rule, SavePricingRule,
+        calculate_price_preview, calculate_room_price_preview, calculate_stay_price_tx,
+        save_pricing_rule, SavePricingRule,
     };
     use crate::app_error::codes;
-    use sqlx::{sqlite::SqlitePoolOptions, Pool, Row, Sqlite};
+    use crate::domain::booking::BookingError;
+    use sqlx::{sqlite::SqlitePoolOptions, Executor, Pool, Row, Sqlite};
 
     const CHECK_IN: &str = "2026-04-20T14:00:00+07:00";
     const CHECK_OUT: &str = "2026-04-22T12:00:00+07:00";
@@ -190,6 +192,145 @@ mod tests {
         .execute(pool)
         .await
         .expect("seed room");
+    }
+
+    async fn seed_special_date(pool: &Pool<Sqlite>, date: &str, uplift_pct: f64) {
+        sqlx::query(
+            "INSERT INTO special_dates (id, date, label, uplift_pct, created_at)
+             VALUES (?, ?, 'Lễ', ?, '2026-04-01T00:00:00+07:00')",
+        )
+        .bind(format!("sd-{date}"))
+        .bind(date)
+        .bind(uplift_pct)
+        .execute(pool)
+        .await
+        .expect("seed special date");
+    }
+
+    /// Price belongs to the room type, so the room a guest is given must not
+    /// change what they pay. This is the test that says so.
+    ///
+    /// The case that can break it: no `pricing_rules` row, so the type price is
+    /// derived from *one* room's `base_price` via `FALLBACK_BASE_PRICE_SQL`.
+    /// Three properties, all of which the decision requires:
+    ///
+    /// 1. Every room of the type is charged the same — the 800k room and the
+    ///    600k room cost the same night.
+    /// 2. The quote and the charge derive from the same room. They do only
+    ///    because both loaders share one SQL constant.
+    /// 3. The pick does not drift between runs. `ORDER BY id` is what makes that
+    ///    true; without it SQLite is free to return either row.
+    #[tokio::test]
+    async fn the_room_a_guest_is_given_does_not_change_what_the_type_costs() {
+        let pool = migrated_pool().await;
+        // Inserted expensive-first so insertion order and id order disagree.
+        seed_room(&pool, "R-902", "mixed", 800_000).await;
+        seed_room(&pool, "R-901", "mixed", 600_000).await;
+
+        let preview = calculate_price_preview(&pool, "mixed", CHECK_IN, CHECK_OUT, "nightly", None)
+            .await
+            .expect("preview");
+
+        let mut charged_by_room = Vec::new();
+        for room_id in ["R-901", "R-902"] {
+            let mut tx = pool.begin().await.expect("begin");
+            let charged =
+                calculate_stay_price_tx(&mut tx, room_id, CHECK_IN, CHECK_OUT, "nightly", None)
+                    .await
+                    .unwrap_or_else(|error| panic!("charge for {room_id}: {error}"));
+            tx.rollback().await.expect("rollback");
+
+            assert_eq!(
+                preview.total, charged.total,
+                "the quote and the charge disagreed for {room_id}"
+            );
+            charged_by_room.push(charged.total);
+        }
+
+        // The decision itself, stated without going through the preview: two
+        // rooms of one type, 200k apart in `base_price`, cost the same night.
+        assert_eq!(
+            charged_by_room[0], charged_by_room[1],
+            "the cheap room and the expensive room of one type were charged differently"
+        );
+
+        // Which room won: the lowest id, not the lowest price, not the insertion
+        // order. Compared against types holding exactly one room at that price,
+        // so the expectation does not restate the derivation arithmetic.
+        seed_room(&pool, "R-801", "lone-600", 600_000).await;
+        seed_room(&pool, "R-802", "lone-800", 800_000).await;
+        let lone_600 =
+            calculate_price_preview(&pool, "lone-600", CHECK_IN, CHECK_OUT, "nightly", None)
+                .await
+                .expect("lone 600k preview");
+        let lone_800 =
+            calculate_price_preview(&pool, "lone-800", CHECK_IN, CHECK_OUT, "nightly", None)
+                .await
+                .expect("lone 800k preview");
+
+        assert_eq!(
+            preview.total, lone_600.total,
+            "R-901 has the lower id, so its 600k sets the mixed-type price"
+        );
+        assert_ne!(
+            preview.total, lone_800.total,
+            "a type cannot hold two prices: the 800k room bills at its sibling's rate"
+        );
+    }
+
+    /// Both previews used to swallow a failed `special_dates` read and quote a
+    /// 0% uplift. On a holiday that is a number below what check-in charges,
+    /// read aloud to the guest before anyone takes their money.
+    #[tokio::test]
+    async fn a_failed_special_date_read_fails_both_previews_instead_of_quoting_no_uplift() {
+        let pool = migrated_pool().await;
+        seed_room(&pool, "R-901", "derived", 500_000).await;
+        seed_special_date(&pool, "2026-04-20", 10.0).await;
+
+        // Precondition: the holiday really is reaching both previews, so the
+        // failure below is about the read and not about an uplift that was never
+        // applied to begin with.
+        let by_type =
+            calculate_price_preview(&pool, "derived", CHECK_IN, CHECK_OUT, "nightly", None)
+                .await
+                .expect("type preview");
+        let by_room =
+            calculate_room_price_preview(&pool, "R-901", CHECK_IN, CHECK_OUT, "nightly", None)
+                .await
+                .expect("room preview");
+        assert!(
+            by_type.surcharge_amount > 0,
+            "precondition: the holiday uplift is not reaching the type preview"
+        );
+        assert_eq!(
+            by_type.total, by_room.total,
+            "the two previews disagreed before anything was broken"
+        );
+
+        pool.execute("DROP TABLE special_dates")
+            .await
+            .expect("drop special_dates");
+
+        // Pinned on the error *variant*, not on SQLite's wording. Only this
+        // test's own DROP produces "no such table", so asserting that text would
+        // prove the test rather than the code.
+        let type_error =
+            calculate_price_preview(&pool, "derived", CHECK_IN, CHECK_OUT, "nightly", None)
+                .await
+                .expect_err("the type preview quoted a price it could not read");
+        assert!(
+            matches!(type_error, BookingError::Database(_)),
+            "type preview: {type_error:?}"
+        );
+
+        let room_error =
+            calculate_room_price_preview(&pool, "R-901", CHECK_IN, CHECK_OUT, "nightly", None)
+                .await
+                .expect_err("the room preview quoted a price it could not read");
+        assert!(
+            matches!(room_error, BookingError::Database(_)),
+            "room preview: {room_error:?}"
+        );
     }
 
     /// The point of routing both paths through this module: the quote the UI
