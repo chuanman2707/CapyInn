@@ -1,4 +1,5 @@
 pub mod audit_service;
+pub mod backfill;
 pub mod billing_service;
 pub mod group_lifecycle;
 pub mod group_service_management;

@@ -200,6 +200,23 @@ pub struct CheckInRequest {
     pub pricing_type: Option<String>,
 }
 
+/// Ghi bù một lượt khách đã ở nhưng chưa được nhập máy.
+#[derive(Debug, Deserialize)]
+pub struct BackfillStayRequest {
+    pub room_id: String,
+    pub guests: Vec<CreateGuestRequest>,
+    /// YYYY-MM-DD, bắt buộc trong quá khứ.
+    pub check_in_date: String,
+    /// YYYY-MM-DD; None = khách còn ở.
+    pub check_out_date: Option<String>,
+    /// YYYY-MM-DD; bắt buộc khi khách còn ở, phải sau hôm nay.
+    pub expected_checkout_date: Option<String>,
+    pub total_price: MoneyVnd,
+    pub paid_amount: MoneyVnd,
+    pub source: Option<String>,
+    pub notes: Option<String>,
+}
+
 #[derive(Debug, Serialize, Deserialize, Clone, Copy, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum CheckoutSettlementMode {

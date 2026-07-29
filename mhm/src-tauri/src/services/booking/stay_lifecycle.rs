@@ -24,7 +24,7 @@ use super::{
         record_charge_tx, record_charge_with_origin_tx, record_payment_tx,
         record_payment_with_origin_tx,
     },
-    guest_service::{create_guest_manifest, link_booking_guests},
+    guest_service::{create_guest_manifest, guest_hash_payload_entries, link_booking_guests},
     pricing_service::calculate_stay_price_tx,
     support::{
         begin_tx, ensure_one_row_affected, insert_room_calendar_rows, invalid_state_transition,
@@ -36,7 +36,7 @@ use super::{
 #[cfg(test)]
 use super::support::{begin_immediate_tx, fetch_booking};
 
-fn mark_write_db_error(error: BookingError) -> BookingError {
+pub(super) fn mark_write_db_error(error: BookingError) -> BookingError {
     match error {
         BookingError::Database(message) => BookingError::database_write(message),
         other => other,
@@ -139,29 +139,10 @@ pub(super) fn map_extend_stay_command_error(error: BookingError) -> CommandError
 }
 
 fn build_check_in_hash_payload(req: &CheckInRequest) -> serde_json::Value {
-    let guests = req
-        .guests
-        .iter()
-        .map(|guest| {
-            json!({
-                "guest_type": guest.guest_type.clone(),
-                "full_name": guest.full_name.clone(),
-                "doc_number": guest.doc_number.clone(),
-                "dob": guest.dob.clone(),
-                "gender": guest.gender.clone(),
-                "nationality": guest.nationality.clone(),
-                "address": guest.address.clone(),
-                "visa_expiry": guest.visa_expiry.clone(),
-                "scan_path": guest.scan_path.clone(),
-                "phone": guest.phone.clone(),
-            })
-        })
-        .collect::<Vec<_>>();
-
     json!({
         "schema": "stay.check_in.v1",
         "room_id": req.room_id.clone(),
-        "guests": guests,
+        "guests": guest_hash_payload_entries(&req.guests),
         "nights": req.nights,
         "source": req.source.clone(),
         "notes": req.notes.clone(),
@@ -221,7 +202,7 @@ fn extend_stay_initial_lock_keys_from_payload(
     ])
 }
 
-async fn fetch_booking_tx(
+pub(super) async fn fetch_booking_tx(
     tx: &mut Transaction<'_, Sqlite>,
     booking_id: &str,
 ) -> BookingResult<Booking> {
