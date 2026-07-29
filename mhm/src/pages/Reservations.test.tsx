@@ -69,6 +69,7 @@ vi.mock("sonner", () => ({
   },
 }));
 
+import { emitTestEvent, resetEventMocks } from "@test-mocks/tauri-event";
 import Reservations from "./Reservations";
 
 function formatLocalDate(date: Date): string {
@@ -339,6 +340,49 @@ describe("Reservations date navigation", () => {
 
     // Lùi 7 ngày: lưới phủ hôm nay - 10 đến hôm nay + 5, hôm nay vẫn nằm trong.
     expect(screen.getByTestId("timeline-today-marker")).toBeTruthy();
+  });
+});
+
+describe("Reservations timeline refresh", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    resetEventMocks();
+    invokeWriteCommand.mockResolvedValue(undefined);
+    createCorrelationId.mockReturnValue("COR-5E6F7A8B");
+  });
+
+  // Đường check-in kéo từ lịch bàn giao hẳn cho CheckinSheet ở MainShell —
+  // không có onOpenChange nào quay về trang này, nên trước đây check-in xong
+  // là lịch đứng im và ô vừa kéo trông như vẫn trống. Sự kiện "db-updated" là
+  // thứ backend phát sau MỌI lệnh ghi, kể cả check_in.
+  it("nạp lại bookings khi backend báo dữ liệu đổi", async () => {
+    let bookings: unknown[] = [];
+    invoke.mockImplementation(async (command: string) => {
+      if (command === "get_all_bookings") return bookings;
+      return undefined;
+    });
+
+    render(<Reservations />);
+
+    await waitFor(() => {
+      expect(screen.getByText("Room R101")).toBeTruthy();
+    });
+    expect(screen.queryByTestId("booking-bar-B-CHECKIN")).toBeNull();
+
+    // Khách vừa được check-in từ ô lịch: booking chỉ tồn tại sau lần nạp sau.
+    bookings = [
+      bookingAt({
+        id: "B-CHECKIN",
+        guest_name: "Khách vãng lai",
+        status: "active",
+        scheduled_checkin: dateOffsetFromToday(0),
+        scheduled_checkout: dateOffsetFromToday(2),
+      }),
+    ];
+
+    await emitTestEvent("db-updated", { entity: "rooms" });
+
+    expect(await screen.findByTestId("booking-bar-B-CHECKIN")).toBeTruthy();
   });
 });
 

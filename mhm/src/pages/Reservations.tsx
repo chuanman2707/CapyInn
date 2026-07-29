@@ -1,4 +1,5 @@
 import { useState, useEffect, useMemo, type MouseEvent as ReactMouseEvent } from "react";
+import { listen } from "@tauri-apps/api/event";
 import { Search, ChevronLeft, ChevronRight, Plus } from "lucide-react";
 import { Input } from "@/components/ui/input";
 import { Badge } from "@/components/ui/badge";
@@ -8,6 +9,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { getRoomTypeLabel } from "@/lib/constants";
 import { createCorrelationId } from "@/lib/correlationId";
 import { formatAppError } from "@/lib/appError";
+import { createDeferredCleanup } from "@/lib/deferredCleanup";
 import { invokeWriteCommand } from "@/lib/invokeCommand";
 import { toast } from "sonner";
 import BookingDetailPopup from "@/components/BookingDetailPopup";
@@ -41,13 +43,6 @@ function startOfLocalDay(date: Date): Date {
     return new Date(date.getFullYear(), date.getMonth(), date.getDate());
 }
 
-function formatLocalDate(date: Date): string {
-    const year = date.getFullYear();
-    const month = String(date.getMonth() + 1).padStart(2, "0");
-    const day = String(date.getDate()).padStart(2, "0");
-    return `${year}-${month}-${day}`;
-}
-
 function differenceInCalendarDays(left: Date, right: Date): number {
     const leftUtc = Date.UTC(left.getFullYear(), left.getMonth(), left.getDate());
     const rightUtc = Date.UTC(right.getFullYear(), right.getMonth(), right.getDate());
@@ -56,11 +51,11 @@ function differenceInCalendarDays(left: Date, right: Date): number {
 
 function getDateRange(offset: number) {
     const today = startOfLocalDay(new Date());
-    const todayKey = formatLocalDate(today);
+    const todayKey = localDateIso(today);
     return Array.from({ length: VISIBLE_DAYS }, (_, i) => {
         const d = new Date(today);
         d.setDate(today.getDate() + i - 3 + offset);
-        const fullDate = formatLocalDate(d);
+        const fullDate = localDateIso(d);
         return {
             day: d.toLocaleDateString("vi-VN", { weekday: "short" }).replace(".", ""),
             date: d.getDate(),
@@ -144,6 +139,26 @@ export default function Reservations() {
 
     useEffect(() => { loadBookings(); }, []);
 
+    // `bookings` là state cục bộ của trang này, và listener toàn cục ở
+    // RuntimeStateProvider chỉ làm mới rooms/stats — không ai làm mới bookings.
+    // Đường check-in kéo từ lịch bàn giao hẳn cho CheckinSheet ở MainShell nên
+    // cũng không có callback nào quay về đây: check-in xong, lịch đứng im,
+    // không có bar nào hiện ra, và chủ kéo lại đúng ô đó thì ăn lỗi "phòng
+    // không còn trống". Backend phát "db-updated" sau MỌI lệnh ghi
+    // (commands/mod.rs::emit_db_update), nên nghe đúng một chỗ này là ba đường
+    // kéo (check-in / đặt trước / ghi bù) làm mới giống hệt nhau.
+    //
+    // Vì mọi lệnh ghi đều đi qua đây, các lời gọi loadBookings() rải trong
+    // handler đóng sheet / confirm / cancel đã được bỏ: giữ lại chúng sẽ nạp
+    // hai lần cho cùng một thao tác. Lần nạp lúc mount ở trên vẫn cần — không
+    // có sự kiện nào phát khi trang vừa mở.
+    useEffect(() => {
+        const cleanup = createDeferredCleanup(
+            listen<{ entity: string }>("db-updated", () => { loadBookings(); }),
+        );
+        return cleanup;
+    }, []);
+
     const roomGroups = Object.values(
         rooms.reduce<Record<string, { name: string; rooms: { id: string; type: string }[] }>>((groups, room) => {
             const existing = groups[room.type] ?? {
@@ -222,8 +237,6 @@ export default function Reservations() {
         try {
             await invokeWriteCommand("confirm_reservation", { bookingId }, { correlationId });
             toast.success("Check-in reservation thành công!");
-            loadBookings();
-            fetchRooms();
             setSelectedBooking(null);
         } catch (e) {
             toast.error(formatAppError(e));
@@ -235,8 +248,6 @@ export default function Reservations() {
         try {
             await invokeWriteCommand("cancel_reservation", { bookingId }, { correlationId });
             toast.success("Đã hủy reservation. Tiền cọc được giữ lại.");
-            loadBookings();
-            fetchRooms();
             setSelectedBooking(null);
         } catch (e) {
             toast.error(formatAppError(e));
@@ -480,7 +491,7 @@ export default function Reservations() {
             {/* Room Drawer for active bookings */}
             <RoomDrawer
                 open={!!drawerRoomId}
-                onClose={() => { setDrawerRoomId(null); loadBookings(); fetchRooms(); }}
+                onClose={() => setDrawerRoomId(null)}
                 roomId={drawerRoomId}
             />
 
@@ -497,7 +508,7 @@ export default function Reservations() {
                 open={sheetOpen || !!editBooking}
                 onOpenChange={(v) => {
                     setSheetOpen(v);
-                    if (!v) { setEditBooking(null); setReservationPrefill(null); loadBookings(); }
+                    if (!v) { setEditBooking(null); setReservationPrefill(null); }
                 }}
                 editBooking={editBooking || undefined}
                 preSelectedRoomId={reservationPrefill?.roomId}
@@ -508,7 +519,7 @@ export default function Reservations() {
             <BackfillSheet
                 open={!!backfillPrefill}
                 onOpenChange={(v) => {
-                    if (!v) { setBackfillPrefill(null); loadBookings(); fetchRooms(); }
+                    if (!v) setBackfillPrefill(null);
                 }}
                 prefill={backfillPrefill ?? undefined}
             />
