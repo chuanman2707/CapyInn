@@ -595,6 +595,42 @@ describe("BackfillSheet", () => {
         });
     });
 
+    // Bug thật: chủ kéo từ 3 hôm trước đến hôm qua (khách đã trả phòng), lỡ tay
+    // tick "Khách còn ở" (ngày ra dự kiến nhảy sang ngày mai — đúng), rồi tắt
+    // lại ngay. Trước đây nhánh tắt chỉ biết chốt về `todayIso` khi ngày ra
+    // đang ở tương lai — nó xoá mất luôn ngày "hôm qua" chủ đã kéo thật, âm
+    // thầm biến một lượt ở đúng thành một lượt dài thêm một đêm mà nút gửi vẫn
+    // sáng và giá vẫn tính lại êm ru, chủ không hề hay biết.
+    it("kéo từ quá khứ, bật rồi tắt 'Khách còn ở' thì ngày ra trở lại đúng ngày đã kéo (không bị chốt về hôm nay)", async () => {
+        const today = localDateIso(new Date());
+        const draggedCheckOut = addDaysIso(today, -1);
+        const user = userEvent.setup();
+        render(
+            <BackfillSheet
+                open
+                onOpenChange={() => {}}
+                prefill={{
+                    roomId: "R101",
+                    checkInDate: addDaysIso(today, -3),
+                    checkOutDate: draggedCheckOut,
+                    stillStaying: false,
+                }}
+            />,
+        );
+        expect(await screen.findByLabelText("Ngày ra")).toHaveValue(draggedCheckOut);
+
+        const stayingCheckbox = screen.getByRole("checkbox", { name: /Khách còn ở/ });
+        await user.click(stayingCheckbox);
+        await waitFor(() => {
+            expect(screen.getByLabelText("Ngày ra dự kiến")).toHaveValue(addDaysIso(today, 1));
+        });
+
+        await user.click(stayingCheckbox);
+        await waitFor(() => {
+            expect(screen.getByLabelText("Ngày ra")).toHaveValue(draggedCheckOut);
+        });
+    });
+
     it("không cho ghi bù một lượt 0₫", async () => {
         const user = userEvent.setup();
         render(
