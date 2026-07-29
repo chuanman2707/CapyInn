@@ -179,13 +179,21 @@ fn calculate_hourly(
 
     let mut breakdown = vec![];
     if capped {
+        // Display-only Vietnamese wording for the cap kind; `cap_type` itself
+        // (and the `pricing_type` it feeds below) must stay the English
+        // machine value "overnight" / "daily".
+        let cap_label = match cap_type {
+            "overnight" => "qua đêm",
+            "daily" => "theo ngày",
+            other => other,
+        };
         breakdown.push(PricingLine {
             label: format!(
                 "{}h x {} = {} -> Giới hạn theo giá {}",
                 hours,
                 fmt_vnd(rule.hourly_rate),
                 fmt_vnd(raw_hourly),
-                cap_type
+                cap_label
             ),
             amount: base,
         });
@@ -616,6 +624,54 @@ mod tests {
         );
         assert!(r.capped);
         assert!(r.total <= 400_000 * 2);
+    }
+
+    #[test]
+    fn test_hourly_capping_to_overnight_label_is_vietnamese_but_pricing_type_stays_english() {
+        // 5h x 80k = 400k > overnight 300k -> capped to overnight
+        let r = p(
+            &std_rule(),
+            "2026-03-17T18:00:00",
+            "2026-03-17T23:00:00",
+            "hourly",
+            0.0,
+        );
+        assert!(r.capped);
+        let label = &r.breakdown[0].label;
+        assert!(
+            label.contains("qua đêm"),
+            "expected Vietnamese cap label 'qua đêm', got: {label}"
+        );
+        assert!(
+            !label.contains("overnight"),
+            "label leaked English machine value: {label}"
+        );
+        // Machine value must remain the English contract, untouched.
+        assert_eq!(r.pricing_type, "overnight");
+    }
+
+    #[test]
+    fn test_hourly_capping_to_daily_label_is_vietnamese_but_pricing_type_stays_english() {
+        // 20h x 80k = 1600k > daily 400k -> capped to daily
+        let r = p(
+            &std_rule(),
+            "2026-03-17T08:00:00",
+            "2026-03-18T04:00:00",
+            "hourly",
+            0.0,
+        );
+        assert!(r.capped);
+        let label = &r.breakdown[0].label;
+        assert!(
+            label.contains("theo ngày"),
+            "expected Vietnamese cap label 'theo ngày', got: {label}"
+        );
+        assert!(
+            !label.contains("daily"),
+            "label leaked English machine value: {label}"
+        );
+        // Machine value must remain the English contract, untouched.
+        assert_eq!(r.pricing_type, "daily");
     }
 
     #[test]
