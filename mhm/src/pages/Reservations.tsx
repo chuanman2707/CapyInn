@@ -320,7 +320,7 @@ export default function Reservations() {
                     </div>
 
                     {DAYS.map((d, i) => (
-                        <div key={i} className={`w-[80px] shrink-0 border-r border-slate-50 flex flex-col items-center justify-center py-2.5 ${d.isToday ? "bg-blue-50/40" : ""}`}>
+                        <div key={i} className={`w-[80px] shrink-0 border-r border-slate-200 flex flex-col items-center justify-center py-2.5 ${d.isToday ? "bg-blue-50/40" : ""}`}>
                             <span className={`text-[10px] font-semibold uppercase ${d.isToday ? "text-brand-primary" : "text-slate-400"}`}>{d.day}</span>
                             <span className={`text-sm font-bold ${d.isToday ? "text-brand-primary" : "text-slate-700"}`}>{d.date}</span>
                         </div>
@@ -337,7 +337,7 @@ export default function Reservations() {
                                 </div>
                                 <div className="flex">
                                     {DAYS.map((d, i) => (
-                                        <div key={i} className={`w-[80px] shrink-0 border-r border-slate-50 ${d.isToday ? "bg-blue-50/20" : ""}`} />
+                                        <div key={i} className={`w-[80px] shrink-0 border-r border-slate-200 ${d.isToday ? "bg-blue-50/20" : ""}`} />
                                     ))}
                                 </div>
                             </div>
@@ -345,14 +345,14 @@ export default function Reservations() {
                             {group.rooms.map((room) => {
                                 const bars = getBookingBars(room.id);
                                 return (
-                                    <div key={room.id} className="flex group border-b border-slate-50 h-[64px]">
+                                    <div key={room.id} className="flex group border-b border-slate-100 h-[64px]">
                                         <div className="w-[140px] shrink-0 border-r border-slate-100 bg-white shadow-[2px_0_10px_rgba(0,0,0,0.02)] sticky left-0 z-10 flex items-center px-4 group-hover:bg-slate-50/50 transition-colors">
                                             <span className="font-bold text-sm text-slate-700">Room {room.id}</span>
                                         </div>
 
                                         <div className="flex relative w-max">
                                             {DAYS.map((d, colIndex) => (
-                                                <div key={colIndex} className={`w-[80px] shrink-0 border-r border-slate-50 ${d.isToday ? "bg-blue-50/10" : ""} group-hover:bg-slate-50/30 transition-colors`} />
+                                                <div key={colIndex} className={`w-[80px] shrink-0 border-r border-slate-200 ${d.isToday ? "bg-blue-50/10" : ""} group-hover:bg-slate-50/30 transition-colors`} />
                                             ))}
 
                                             {DAYS.some(d => d.isToday) && (
