@@ -70,9 +70,6 @@ pub async fn upsert_pricing_rule(
 }
 
 /// Giá trị đã được service kiểm và đã đủ, writer không quyết định gì.
-// `repositories` is a private module, so `pub` here doesn't reach the crate's
-// external API — rustc still flags it as dead code until Task 4 wires in the caller.
-#[allow(dead_code)]
 pub struct SpecialDateUpsert<'a> {
     pub id: &'a str,
     pub date: &'a str,
@@ -87,8 +84,6 @@ pub struct SpecialDateUpsert<'a> {
 ///
 /// Nhận `tx` chứ không nhận `pool`: khai một khoảng là nhiều dòng, và mất nửa
 /// khoảng còn tệ hơn báo lỗi.
-// No caller yet outside these tests; Task 4 wires this into the service.
-#[allow(dead_code)]
 pub async fn upsert_special_date_tx(
     tx: &mut Transaction<'_, Sqlite>,
     upsert: &SpecialDateUpsert<'_>,
@@ -114,8 +109,6 @@ pub async fn upsert_special_date_tx(
 /// Xoá từng ngày một thay vì dựng `IN (…)`: sqlx không bind được mảng cho
 /// SQLite, và ghép chuỗi SQL động là thứ không đáng đổi lấy một vòng lặp tối đa
 /// 366 bước.
-// No caller yet outside these tests; Task 4 wires this into the service.
-#[allow(dead_code)]
 pub async fn delete_special_dates_tx(
     tx: &mut Transaction<'_, Sqlite>,
     dates: &[String],

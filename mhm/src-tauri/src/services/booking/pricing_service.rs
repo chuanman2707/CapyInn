@@ -10,9 +10,10 @@
 //! else a 350k house default — which meant a preview could in principle
 //! disagree with what the guest was actually charged.
 
+use chrono::NaiveDate;
 use sqlx::{Pool, Sqlite, Transaction};
 
-use crate::app_error::CommandResult;
+use crate::app_error::{codes, CommandError, CommandResult};
 use crate::domain::booking::pricing::{build_effective_pricing_rule, calculate_from_loaded_inputs};
 use crate::domain::booking::BookingResult;
 use crate::money::{validate_non_negative_money_vnd, MoneyVnd};
@@ -20,7 +21,9 @@ use crate::queries::booking::pricing_queries::{
     load_room_type_names, load_stay_pricing_inputs_for_room,
     load_stay_pricing_inputs_for_room_type, load_stay_pricing_inputs_tx, load_type_rule_inputs,
 };
-use crate::repositories::booking::pricing_repository::{self, PricingRuleUpsert};
+use crate::repositories::booking::pricing_repository::{
+    self, delete_special_dates_tx, upsert_special_date_tx, PricingRuleUpsert, SpecialDateUpsert,
+};
 
 /// Prices inside the caller's transaction so a lifecycle write can read the
 /// rows it just inserted but has not committed.
@@ -183,11 +186,145 @@ pub async fn save_pricing_rule(
         })
 }
 
+const MAX_SPECIAL_RANGE_DAYS: i64 = 366;
+const MAX_SPECIAL_UPLIFT_PCT: f64 = 500.0;
+
+pub struct SaveSpecialDateRange {
+    /// Những ngày phải xoá **cùng** transaction với lần ghi này. Rỗng là khai
+    /// mới; có giá trị là đang sửa một cụm cho ngắn lại. Đây là lý do lệnh xoá
+    /// và lệnh ghi không tách rời: xoá xong mà ghi hỏng là mất hẳn mấy ngày đã
+    /// khai, và không ai biết.
+    pub remove: Vec<String>,
+    pub from: String,
+    pub to: String,
+    pub label: String,
+    pub uplift_pct: f64,
+}
+
+fn parse_date_only(value: &str, field: &str) -> CommandResult<NaiveDate> {
+    NaiveDate::parse_from_str(value, "%Y-%m-%d").map_err(|_| {
+        CommandError::user(
+            codes::VALIDATION_INVALID_INPUT,
+            format!("{field} phải có dạng YYYY-MM-DD"),
+        )
+    })
+}
+
+fn invalid_input(message: impl Into<String>) -> CommandError {
+    CommandError::user(codes::VALIDATION_INVALID_INPUT, message)
+}
+
+/// Khai một khoảng ngày là mùa cao điểm, một dòng cho một ngày.
+///
+/// `id_base` cấp mã cho từng ngày mới theo dạng `{id_base}-{chỉ số}`. Lệnh
+/// truyền vào một uuid nên trong thực tế không bao giờ đụng; test thì truyền
+/// một gốc đã có trong bảng để ép lỗi khoá chính giữa transaction — đó là chỗ
+/// hỏng-được-theo-ý duy nhất, vì `ON CONFLICT(date)` đã nuốt mất ràng buộc trên
+/// `date`.
+pub async fn save_special_date_range(
+    pool: &Pool<Sqlite>,
+    request: SaveSpecialDateRange,
+    id_base: String,
+    now: String,
+) -> CommandResult<()> {
+    let from = parse_date_only(&request.from, "Ngày bắt đầu")?;
+    let to = parse_date_only(&request.to, "Ngày kết thúc")?;
+    if to < from {
+        return Err(invalid_input("Ngày kết thúc không được trước ngày bắt đầu"));
+    }
+
+    let day_count = (to - from).num_days() + 1;
+    if day_count > MAX_SPECIAL_RANGE_DAYS {
+        return Err(invalid_input(format!(
+            "Khoảng ngày tối đa {MAX_SPECIAL_RANGE_DAYS} ngày"
+        )));
+    }
+
+    if !(0.0..=MAX_SPECIAL_UPLIFT_PCT).contains(&request.uplift_pct) {
+        return Err(invalid_input(format!(
+            "Mức phụ thu phải trong khoảng 0–{MAX_SPECIAL_UPLIFT_PCT:.0}%"
+        )));
+    }
+
+    let label = request.label.trim();
+    if label.is_empty() {
+        return Err(invalid_input("Tên đợt cao điểm không được để trống"));
+    }
+
+    if request.remove.len() as i64 > MAX_SPECIAL_RANGE_DAYS {
+        return Err(invalid_input(format!(
+            "Chỉ xoá được tối đa {MAX_SPECIAL_RANGE_DAYS} ngày một lần"
+        )));
+    }
+    for date in &request.remove {
+        let removed = parse_date_only(date, "Ngày cần xoá")?;
+        if removed >= from && removed <= to {
+            return Err(invalid_input(
+                "Ngày cần xoá không được nằm trong chính khoảng đang khai",
+            ));
+        }
+    }
+
+    let mut tx = pool.begin().await.map_err(|error| {
+        crate::app_error::log_system_error(
+            "save_special_date_range",
+            error.to_string(),
+            serde_json::json!({ "step": "begin" }),
+        )
+    })?;
+
+    // Xoá trước, ghi sau. Ngược lại thì một ngày vừa nằm trong `remove` vừa
+    // nằm trong khoảng sẽ bị xoá mất ngay bên trong transaction dựng lên để
+    // đừng mất nó. Đã chặn chồng lấn ở trên, nhưng thứ tự vẫn phải đúng.
+    delete_special_dates_tx(&mut tx, &request.remove)
+        .await
+        .map_err(|error| {
+            crate::app_error::log_system_error(
+                "save_special_date_range",
+                error.to_string(),
+                serde_json::json!({ "step": "delete_special_dates_tx" }),
+            )
+        })?;
+
+    let mut date = from;
+    for index in 0..day_count {
+        let id = format!("{id_base}-{index}");
+        let date_key = date.format("%Y-%m-%d").to_string();
+        upsert_special_date_tx(
+            &mut tx,
+            &SpecialDateUpsert {
+                id: &id,
+                date: &date_key,
+                label,
+                uplift_pct: request.uplift_pct,
+                now: &now,
+            },
+        )
+        .await
+        .map_err(|error| {
+            crate::app_error::log_system_error(
+                "save_special_date_range",
+                error.to_string(),
+                serde_json::json!({ "step": "upsert_special_date_tx", "date": &date_key }),
+            )
+        })?;
+        date = date.succ_opt().unwrap_or(date);
+    }
+
+    tx.commit().await.map_err(|error| {
+        crate::app_error::log_system_error(
+            "save_special_date_range",
+            error.to_string(),
+            serde_json::json!({ "step": "commit" }),
+        )
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
         calculate_price_preview, calculate_room_price_preview, calculate_stay_price_tx,
-        save_pricing_rule, SavePricingRule,
+        save_pricing_rule, save_special_date_range, SavePricingRule, SaveSpecialDateRange,
     };
     use crate::app_error::codes;
     use crate::domain::booking::BookingError;
@@ -221,6 +358,33 @@ mod tests {
         crate::db::run_migrations(&pool)
             .await
             .expect("run migrations");
+        pool
+    }
+
+    /// Dựng riêng cho phần khai mùa cao điểm — chỉ bảng `special_dates`, không
+    /// chạy migrations đầy đủ như `migrated_pool`, để không đụng vào các test
+    /// giá đang dựa vào đúng bộ bảng của hàm đó.
+    async fn special_dates_pool() -> Pool<Sqlite> {
+        use sqlx::sqlite::SqlitePoolOptions;
+        use sqlx::Executor;
+
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+        pool.execute(
+            "CREATE TABLE special_dates (
+                id TEXT PRIMARY KEY,
+                date TEXT NOT NULL,
+                label TEXT NOT NULL DEFAULT '',
+                uplift_pct REAL NOT NULL DEFAULT 0,
+                created_at TEXT NOT NULL,
+                UNIQUE(date)
+            )",
+        )
+        .await
+        .unwrap();
         pool
     }
 
@@ -771,5 +935,217 @@ mod tests {
         assert_eq!(rows.len(), 1, "one rule per room type");
         assert_eq!(rows[0].1, 550_000, "the later save wins");
         assert_eq!(rows[0].0, "rule-a", "the original row id is kept");
+    }
+
+    #[tokio::test]
+    async fn save_special_date_range_writes_one_row_per_day() {
+        let pool = special_dates_pool().await;
+
+        save_special_date_range(
+            &pool,
+            SaveSpecialDateRange {
+                remove: Vec::new(),
+                from: "2026-02-14".to_string(),
+                to: "2026-02-22".to_string(),
+                label: "Tết Nguyên đán".to_string(),
+                uplift_pct: 40.0,
+            },
+            "base".to_string(),
+            "2026-01-01T00:00:00+07:00".to_string(),
+        )
+        .await
+        .unwrap();
+
+        let count: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM special_dates")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(count.0, 9);
+    }
+
+    #[tokio::test]
+    async fn save_special_date_range_accepts_a_single_day() {
+        let pool = special_dates_pool().await;
+
+        save_special_date_range(
+            &pool,
+            SaveSpecialDateRange {
+                remove: Vec::new(),
+                from: "2026-04-30".to_string(),
+                to: "2026-04-30".to_string(),
+                label: "Lễ 30/4".to_string(),
+                uplift_pct: 30.0,
+            },
+            "base".to_string(),
+            "2026-01-01T00:00:00+07:00".to_string(),
+        )
+        .await
+        .unwrap();
+
+        let count: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM special_dates")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(count.0, 1);
+    }
+
+    #[tokio::test]
+    async fn a_failed_write_leaves_every_removed_day_in_place() {
+        // Test quan trọng nhất của task này: `remove` tồn tại để việc xoá và
+        // việc ghi cùng chung một transaction.
+        //
+        // Ép hỏng giữa chừng bằng cách cho `id_base` sinh ra một mã đã tồn tại
+        // trên một ngày KHÁC, để bước upsert đụng khoá chính. `ON CONFLICT` chỉ
+        // đỡ cho `date`, không đỡ cho `id` — đây là chỗ hỏng-được-theo-ý duy
+        // nhất, và nó chỉ dùng được vì `id` do bên ngoài truyền vào.
+        let pool = special_dates_pool().await;
+        sqlx::query(
+            "INSERT INTO special_dates (id, date, label, uplift_pct, created_at)
+             VALUES ('base-1', '2026-12-25', 'Noel', 10.0, '2026-01-01T00:00:00+07:00'),
+                    ('keep-1', '2026-02-25', 'Tết', 40.0, '2026-01-01T00:00:00+07:00')",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let error = save_special_date_range(
+            &pool,
+            SaveSpecialDateRange {
+                remove: vec!["2026-02-25".to_string()],
+                from: "2026-02-14".to_string(),
+                to: "2026-02-16".to_string(),
+                label: "Tết".to_string(),
+                uplift_pct: 40.0,
+            },
+            "base".to_string(),
+            "2026-06-01T00:00:00+07:00".to_string(),
+        )
+        .await
+        .expect_err("mã trùng phải làm cả transaction hỏng");
+        let _ = error;
+
+        let kept: (i64,) =
+            sqlx::query_as("SELECT COUNT(*) FROM special_dates WHERE date = '2026-02-25'")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(
+            kept.0, 1,
+            "ngày trong `remove` phải còn nguyên khi ghi hỏng"
+        );
+
+        let written: (i64,) =
+            sqlx::query_as("SELECT COUNT(*) FROM special_dates WHERE date = '2026-02-14'")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(written.0, 0, "không được để lại nửa khoảng");
+    }
+
+    #[tokio::test]
+    async fn remove_is_deleted_before_the_range_is_written() {
+        let pool = special_dates_pool().await;
+        sqlx::query(
+            "INSERT INTO special_dates (id, date, label, uplift_pct, created_at)
+             VALUES ('old-1', '2026-02-20', 'Tết', 40.0, '2026-01-01T00:00:00+07:00')",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        save_special_date_range(
+            &pool,
+            SaveSpecialDateRange {
+                remove: vec!["2026-02-20".to_string()],
+                from: "2026-02-14".to_string(),
+                to: "2026-02-16".to_string(),
+                label: "Tết".to_string(),
+                uplift_pct: 40.0,
+            },
+            "base".to_string(),
+            "2026-06-01T00:00:00+07:00".to_string(),
+        )
+        .await
+        .unwrap();
+
+        let dates: Vec<(String,)> = sqlx::query_as("SELECT date FROM special_dates ORDER BY date")
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+        assert_eq!(
+            dates.iter().map(|row| row.0.as_str()).collect::<Vec<_>>(),
+            vec!["2026-02-14", "2026-02-15", "2026-02-16"]
+        );
+    }
+
+    #[tokio::test]
+    async fn save_special_date_range_rejects_bad_input() {
+        let pool = special_dates_pool().await;
+
+        let base = || SaveSpecialDateRange {
+            remove: Vec::new(),
+            from: "2026-02-14".to_string(),
+            to: "2026-02-16".to_string(),
+            label: "Tết".to_string(),
+            uplift_pct: 40.0,
+        };
+        let run = |request| {
+            let pool = pool.clone();
+            async move {
+                save_special_date_range(
+                    &pool,
+                    request,
+                    "base".to_string(),
+                    "2026-01-01T00:00:00+07:00".to_string(),
+                )
+                .await
+            }
+        };
+
+        // ngày sai định dạng
+        let mut request = base();
+        request.from = "14/02/2026".to_string();
+        run(request).await.expect_err("ngày sai định dạng");
+
+        // ngày kết thúc trước ngày bắt đầu
+        let mut request = base();
+        request.to = "2026-02-10".to_string();
+        run(request).await.expect_err("to < from");
+
+        // quá 366 ngày
+        let mut request = base();
+        request.to = "2027-02-16".to_string();
+        run(request).await.expect_err("367 ngày");
+
+        // phần trăm âm
+        let mut request = base();
+        request.uplift_pct = -10.0;
+        run(request).await.expect_err("phần trăm âm");
+
+        // phần trăm quá trần
+        let mut request = base();
+        request.uplift_pct = 600.0;
+        run(request).await.expect_err("phần trăm quá 500");
+
+        // nhãn toàn khoảng trắng
+        let mut request = base();
+        request.label = "   ".to_string();
+        run(request).await.expect_err("nhãn rỗng");
+
+        // phần tử của remove sai định dạng
+        let mut request = base();
+        request.remove = vec!["hôm-qua".to_string()];
+        run(request).await.expect_err("remove sai định dạng");
+
+        // remove chồng lên khoảng đang khai
+        let mut request = base();
+        request.remove = vec!["2026-02-15".to_string()];
+        run(request).await.expect_err("remove chồng lấn");
+
+        let count: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM special_dates")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(count.0, 0, "không lần nào được ghi gì");
     }
 }
