@@ -44,9 +44,12 @@ async fn calculate_stay_price_tx_applies_special_date_uplift() {
     .unwrap();
 
     assert_eq!(pricing.pricing_type, "nightly");
-    assert_eq!(pricing.total, 1_320_000);
+    // Kỳ ở 20/04→22/04 là hai đêm 20 và 21. Chỉ 20/04 được khai là ngày lễ
+    // (10%); 21/04 thì không. Mức bình quân (10 + 0) / 2 = 5%, không phải 10%
+    // cho cả hai đêm như luật cũ (tính theo ngày check-in).
+    assert_eq!(pricing.total, 1_260_000);
     assert_eq!(pricing.base_amount, 1_200_000);
-    assert_eq!(pricing.surcharge_amount, 120_000);
+    assert_eq!(pricing.surcharge_amount, 60_000);
     assert_eq!(pricing.weekend_amount, 0);
     assert_eq!(pricing.breakdown.len(), 2);
     assert_eq!(pricing.breakdown[0].amount, 1_200_000);
@@ -280,7 +283,9 @@ async fn calculate_stay_price_tx_reads_uncommitted_special_date() {
     .await
     .unwrap();
 
-    assert_eq!(pricing.total, 1_320_000);
+    // Cùng lý do như test ở trên: chỉ đêm 20/04 nằm trong ngày lễ, đêm 21/04
+    // thì không, nên mức bình quân là 5% chứ không phải 10%.
+    assert_eq!(pricing.total, 1_260_000);
 
     tx.rollback().await.unwrap();
 }
