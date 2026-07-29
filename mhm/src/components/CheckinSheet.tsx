@@ -7,6 +7,7 @@ import { Sheet, SheetContent, SheetHeader, SheetTitle } from "@/components/ui/sh
 import { Button } from "@/components/ui/button";
 import { FormField, FormFieldSelect } from "@/components/shared/FormField";
 import { useAvailability } from "@/hooks/useAvailability";
+import { useStayPrice } from "@/hooks/useStayPrice";
 import { formatAppError } from "@/lib/appError";
 import { getRoomTypeLabel } from "@/lib/constants";
 import { fmtMoney } from "@/lib/format";
@@ -120,9 +121,18 @@ export default function CheckinSheet({ preSelectedRoomId }: { preSelectedRoomId?
 
     const vacantRooms = rooms.filter((r) => r.status === "vacant");
     const selectedRoomData = rooms.find((r) => r.id === selectedRoom);
-    const totalPrice = selectedRoomData
-        ? selectedRoomData.base_price * nights
-        : 0;
+    // Asked of the backend, not computed here: `base_price × nights` ignores the
+    // configured nightly rate, the weekend uplift and any holiday surcharge, all
+    // of which check-in does charge.
+    const {
+        price: stayPrice,
+        loading: priceLoading,
+        failed: priceFailed,
+    } = useStayPrice({
+        roomType: selectedRoomData?.type,
+        nights,
+        disabled: !isCheckinOpen || !selectedRoomData,
+    });
 
     const { fromDate, toDate } = useMemo(() => {
         const now = new Date();
@@ -405,7 +415,9 @@ export default function CheckinSheet({ preSelectedRoomId }: { preSelectedRoomId?
                             label="Số đêm"
                             value={String(nights)}
                             type="number"
-                            onChange={(v) => setNights(Number(v) || 1)}
+                            // A negative count passed straight through before, which
+                            // priced nothing and was only rejected at submit.
+                            onChange={(v) => setNights(Math.max(1, Number(v) || 1))}
                         />
 
                         {/* Paid amount */}
@@ -444,15 +456,44 @@ export default function CheckinSheet({ preSelectedRoomId }: { preSelectedRoomId?
                         </div>
                     )}
 
-                    {/* Total price */}
+                    {/* Total price — the figure check-in will actually charge.
+                        The breakdown is shown because the total no longer matches
+                        the room's base price, and staff need to see why. */}
                     {selectedRoomData && (
-                        <div className="bg-slate-50 rounded-xl p-3 flex justify-between items-center">
-                            <span className="text-xs text-brand-muted font-medium">
-                                Tổng tiền ({nights} đêm × {fmtMoney(selectedRoomData.base_price)})
-                            </span>
-                            <span className="text-base font-bold text-emerald-600 tabular-nums">
-                                {fmtMoney(totalPrice)}
-                            </span>
+                        <div className="bg-slate-50 rounded-xl p-3 space-y-1.5">
+                            <div className="flex justify-between items-center">
+                                <span className="text-xs text-brand-muted font-medium">
+                                    Tổng tiền ({nights} đêm)
+                                </span>
+                                {priceFailed ? (
+                                    <span
+                                        data-testid="stay-price-error"
+                                        className="text-xs font-semibold text-amber-600"
+                                    >
+                                        Chưa tính được giá
+                                    </span>
+                                ) : (
+                                    <span
+                                        data-testid="stay-price-total"
+                                        className="text-base font-bold text-emerald-600 tabular-nums"
+                                    >
+                                        {priceLoading || !stayPrice ? "…" : fmtMoney(stayPrice.total)}
+                                    </span>
+                                )}
+                            </div>
+                            {!priceFailed && stayPrice && stayPrice.breakdown.length > 1 && (
+                                <ul data-testid="stay-price-breakdown" className="space-y-0.5">
+                                    {stayPrice.breakdown.map((line, index) => (
+                                        <li
+                                            key={`${line.label}-${index}`}
+                                            className="flex justify-between text-[11px] text-brand-muted"
+                                        >
+                                            <span>{line.label}</span>
+                                            <span className="tabular-nums">{fmtMoney(line.amount)}</span>
+                                        </li>
+                                    ))}
+                                </ul>
+                            )}
                         </div>
                     )}
 

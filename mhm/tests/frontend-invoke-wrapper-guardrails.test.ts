@@ -19,6 +19,7 @@ const PMS_WRITE_COMMANDS_REQUIRING_WRAPPER = new Set([
 
 const RAW_INVOKE_ALLOWED_COMMANDS: Record<string, string> = {
   backup_database: "system backup/export action, not a PMS business write wrapper target",
+  calculate_price_preview: "read-only price quote; writes nothing and must match what check-in charges",
   check_availability: "read-only reservation availability lookup",
   complete_onboarding: "bootstrap setup command excluded from Batch 1 PMS wrapper scope",
   export_bookings_csv: "system export action, not a PMS business write wrapper target",
