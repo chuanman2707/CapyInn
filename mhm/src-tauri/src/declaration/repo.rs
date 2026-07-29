@@ -34,8 +34,29 @@ const DEFAULT_REDACT_AFTER_DAYS: i64 = 90;
 /// đời khách sạn dồn hết vào đó.
 ///
 /// 30 ngày: đủ rộng để chủ soát sổ cuối tháng vẫn còn ghi bù và khai kịp, đủ
-/// hẹp để danh sách không phình, và vẫn nằm gọn trong hạn che dữ liệu 90 ngày
-/// (`DEFAULT_REDACT_AFTER_DAYS`) nên không bao giờ lòi ra một dòng đã bị che.
+/// hẹp để danh sách không phình.
+///
+/// Con số này còn một nghĩa thứ hai, không chỉ khống chế độ dài danh sách:
+/// `load_rows_by_link_ids` (dưới) ghép `StayInfo` cho mỗi link qua
+/// `load_stays_for_declaration` — mà `load_stays_for_declaration` chỉ trả về
+/// những lượt lưu trú còn nằm trong đúng cửa sổ 30 ngày này. Một
+/// `declaration_link` còn tồn đọng (chưa gộp lô/chưa verify) quá 30 ngày sau
+/// checkout của lượt lưu trú nó trỏ tới sẽ không khớp được `StayInfo` nào và
+/// rơi vào nhánh `unwrap_or(StayInfo { stay_id, ..Default::default() })` —
+/// tức là XUẤT ra XML với số phòng và ngày tháng RỖNG; validator W01 chỉ cảnh
+/// báo, không chặn xuất. Vậy
+/// 30 ngày còn là hạn chót ngầm để một link giữ được dữ liệu lưu trú đầy đủ
+/// lúc xuất, không riêng gì việc nó có hiện trong màn chọn hay không.
+///
+/// (Trước đây có thêm một vế nói cửa sổ này luôn nằm gọn trong hạn che dữ
+/// liệu 90 ngày nên "không bao giờ lòi ra một dòng đã bị che" — vế đó sai và
+/// đã bị bỏ: `redact_old_identities` chỉ che `declaration_identity`, còn
+/// `load_stays_for_declaration` vốn không đọc bảng đó và không trả về dữ liệu
+/// danh tính nào cả, nên một dòng bị che không thể lọt vào đây bất kể cửa sổ
+/// dài ngắn ra sao. Hơn nữa hạn che 90 ngày chỉ là mặc định —
+/// `redact_after_days()` đọc từ cấu hình `declaration.redact_after_days`, và
+/// test của chính module này đặt nó thành 30 — nên "luôn nằm gọn trong 90
+/// ngày" chưa từng là một điều đảm bảo được.)
 const CHECKED_OUT_WINDOW_DAYS: i64 = 30;
 
 /// Điều kiện "lượt lưu trú còn trong tầm khai báo", dùng chung cho câu dựng

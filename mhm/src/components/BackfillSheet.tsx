@@ -42,6 +42,12 @@ export default function BackfillSheet({ open, onOpenChange, prefill }: Props) {
     const [checkInDate, setCheckInDate] = useState("");
     const [checkOutDate, setCheckOutDate] = useState("");
     const [stillStaying, setStillStaying] = useState(false);
+    // Nhớ ngày ra *trước khi* tick "Khách còn ở", để tắt lại trả nó về đúng
+    // ngày chủ đã kéo — thay vì chốt cứng về hôm nay. `null` nghĩa là không
+    // còn giá trị đáng tin để phục hồi (sheet mở sẵn ở chế độ còn ở, hoặc chủ
+    // đã tự sửa ô ngày ra trong lúc toggle đang bật) — khi đó rơi về nhánh
+    // chốt-hôm-nay cũ như trước.
+    const [preToggleCheckOutDate, setPreToggleCheckOutDate] = useState<string | null>(null);
     const [total, setTotal] = useState(0);
     const [totalDirty, setTotalDirty] = useState(false);
     const [paid, setPaid] = useState(0);
@@ -62,6 +68,7 @@ export default function BackfillSheet({ open, onOpenChange, prefill }: Props) {
         setCheckInDate(prefill?.checkInDate ?? "");
         setCheckOutDate(prefill?.checkOutDate ?? "");
         setStillStaying(prefill?.stillStaying ?? false);
+        setPreToggleCheckOutDate(null);
         setGuestName("");
         setGuestPhone("");
         setGuestDoc("");
@@ -238,6 +245,10 @@ export default function BackfillSheet({ open, onOpenChange, prefill }: Props) {
                                 const nextStillStaying = e.target.checked;
                                 setStillStaying(nextStillStaying);
                                 if (nextStillStaying) {
+                                    // Nhớ lại ngày ra hiện tại (ngày chủ thực sự đã kéo/nhập)
+                                    // trước khi ghi đè nó, để tắt toggle sau này biết phục hồi
+                                    // đúng giá trị thay vì chốt cứng về hôm nay.
+                                    setPreToggleCheckOutDate(checkOutDate || null);
                                     // §4: ngày ra dự kiến lấy theo cuối vùng kéo khi vùng đó
                                     // chạm tương lai, còn không thì mặc định NGÀY MAI. Đổi nhãn
                                     // và min/max thôi là chưa đủ: `datesValid` chỉ soi nights > 0
@@ -249,11 +260,28 @@ export default function BackfillSheet({ open, onOpenChange, prefill }: Props) {
                                     if (!checkOutDate || checkOutDate <= todayIso) {
                                         setCheckOutDate(addDaysIso(todayIso, 1));
                                     }
-                                } else if (checkOutDate > todayIso) {
-                                    // Chiều ngược lại, mở ra bởi chính cú nhảy ở trên: "đã trả
-                                    // phòng" mà ngày ra ở tương lai cũng bị backend từ chối. Kéo
-                                    // về hôm nay — đúng `max` của ô ở chế độ này.
-                                    setCheckOutDate(todayIso);
+                                } else {
+                                    if (preToggleCheckOutDate && preToggleCheckOutDate <= todayIso) {
+                                        // Bug thật đã sửa: trước đây nhánh này chỉ biết chốt về
+                                        // `todayIso` khi ngày ra đang ở tương lai — nó xoá mất
+                                        // ngày chủ đã kéo thật (vd "hôm qua") và âm thầm biến
+                                        // một lượt ở đúng thành dài thêm một đêm mà không ai
+                                        // hay biết. Còn giá trị nhớ được (và nó hợp lệ cho chế
+                                        // độ "đã trả phòng", tức không nằm ở tương lai) thì
+                                        // phục hồi đúng ngày đó.
+                                        setCheckOutDate(preToggleCheckOutDate);
+                                    } else if (checkOutDate > todayIso) {
+                                        // Không có gì đáng tin để phục hồi (sheet mở sẵn ở chế
+                                        // độ còn ở, hoặc chủ đã tự sửa ô ngày ra trong lúc
+                                        // toggle đang bật) — rơi về hành vi cũ: "đã trả phòng"
+                                        // mà ngày ra ở tương lai cũng bị backend từ chối, kéo
+                                        // về hôm nay — đúng `max` của ô ở chế độ này.
+                                        setCheckOutDate(todayIso);
+                                    }
+                                    // Chỉ dọn giá trị nhớ được ở nhánh tắt toggle — nhánh bật
+                                    // toggle ở trên vừa mới ghi nó, xoá ngay tại đây (thay vì
+                                    // chỉ trong nhánh tắt) sẽ xoá mất giá trị vừa ghi đó.
+                                    setPreToggleCheckOutDate(null);
                                 }
                             }}
                         />
@@ -285,7 +313,14 @@ export default function BackfillSheet({ open, onOpenChange, prefill }: Props) {
                                 value={checkOutDate}
                                 min={stillStaying ? addDaysIso(todayIso, 1) : undefined}
                                 max={stillStaying ? undefined : todayIso}
-                                onChange={(e) => setCheckOutDate(e.target.value)}
+                                onChange={(e) => {
+                                    setCheckOutDate(e.target.value);
+                                    // Chủ tự sửa ngày trong lúc toggle đang bật: giá trị nhớ
+                                    // trước-toggle không còn đáng tin để phục hồi khi tắt lại
+                                    // (chủ vừa đổi ý) — bỏ nó, tắt toggle sẽ rơi về nhánh chốt
+                                    // hôm nay như hành vi cũ.
+                                    if (stillStaying) setPreToggleCheckOutDate(null);
+                                }}
                             />
                         </div>
                     </div>

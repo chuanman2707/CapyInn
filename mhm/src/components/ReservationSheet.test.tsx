@@ -865,6 +865,14 @@ describe("ReservationSheet", () => {
     await waitFor(() => {
       expect(roomSelect).toHaveValue("");
     });
+    // Điền tên khách trước — nút gửi cũng khoá bởi `!isEditMode && !guestName`
+    // (xem disabled expression trong ReservationSheet.tsx), nên nếu bỏ qua
+    // bước này, assertion dưới đúng bất kể roomId có bị xoá hay không và
+    // không chứng minh được gì cho chính bug đang test. Điền tên vào rồi thì
+    // việc phòng bị xoá mới là lý do DUY NHẤT còn giữ nút tắt.
+    fireEvent.change(screen.getByPlaceholderText(/họ và tên/i), {
+      target: { value: "Nguyễn Nhật Huy" },
+    });
     // Nút gửi phải tắt: bật lên với một phòng vô hình chỉ dẫn tới một cú từ
     // chối ở backend.
     expect(screen.getByRole("button", { name: /Đặt phòng/ })).toBeDisabled();
