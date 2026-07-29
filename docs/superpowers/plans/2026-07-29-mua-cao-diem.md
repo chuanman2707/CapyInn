@@ -75,7 +75,7 @@ Thêm vào `mod tests` ở cuối `pricing_queries.rs`. Trong khối `use super:
 - [ ] **Bước 2: Chạy test cho thấy nó đỏ**
 
 ```bash
-cd mhm/src-tauri && cargo test -p capyinn_lib date_key_does_not_panic -- --nocapture
+cd mhm/src-tauri && cargo test -p capyinn date_key_does_not_panic -- --nocapture
 ```
 
 Kỳ vọng: **FAIL**, panic với thông điệp kiểu `byte index 10 is not a char boundary`.
@@ -99,7 +99,7 @@ fn date_key(date_str: &str) -> &str {
 - [ ] **Bước 4: Chạy lại cho xanh**
 
 ```bash
-cd mhm/src-tauri && cargo test -p capyinn_lib date_key_does_not_panic
+cd mhm/src-tauri && cargo test -p capyinn date_key_does_not_panic
 ```
 
 Kỳ vọng: **PASS**, `test result: ok. 1 passed`.
@@ -107,7 +107,7 @@ Kỳ vọng: **PASS**, `test result: ok. 1 passed`.
 - [ ] **Bước 5: Chạy cả module để chắc không vỡ gì**
 
 ```bash
-cd mhm/src-tauri && cargo test -p capyinn_lib pricing_queries
+cd mhm/src-tauri && cargo test -p capyinn pricing_queries
 ```
 
 Kỳ vọng: PASS toàn bộ, không có warning mới.
@@ -375,7 +375,7 @@ Thêm vào `mod tests` của `domain/booking/pricing.rs`:
 - [ ] **Bước 3: Chạy cho thấy đỏ vì lý do đúng**
 
 ```bash
-cd mhm/src-tauri && cargo test -p capyinn_lib domain::booking::pricing 2>&1 | head -40
+cd mhm/src-tauri && cargo test -p capyinn domain::booking::pricing 2>&1 | head -40
 ```
 
 Kỳ vọng: **FAIL biên dịch** — `no field 'special_days' on type 'StayPricingInputs'`, `cannot find function 'special'`, `cannot find type 'SpecialDay'`. Đây là đỏ đúng: kiểu chưa tồn tại.
@@ -558,7 +558,7 @@ Sửa ba chỗ dựng `StayPricingInputs`, **giữ nguyên** cách xử lỗi c�
 - [ ] **Bước 7: Chạy test domain cho xanh**
 
 ```bash
-cd mhm/src-tauri && cargo test -p capyinn_lib domain::booking::pricing
+cd mhm/src-tauri && cargo test -p capyinn domain::booking::pricing
 ```
 
 Kỳ vọng: **PASS**, kể cả tám test mới. Nếu `special_uplift_spans_two_different_seasons` đỏ ở 199.999 thay vì 200.000, dừng lại và báo — con số ấy phụ thuộc vào chế độ làm tròn ở `money.rs:58`.
@@ -632,7 +632,7 @@ Trong `use super::{…}` của module test, thêm `load_special_days`.
 - [ ] **Bước 9: Chạy toàn bộ test Rust**
 
 ```bash
-cd mhm/src-tauri && cargo test -p capyinn_lib 2>&1 | tail -20
+cd mhm/src-tauri && cargo test -p capyinn 2>&1 | tail -20
 ```
 
 Kỳ vọng: **PASS**, không có warning mới. Nếu có chỗ nào khác còn nhắc `special_uplift_pct`, trình biên dịch sẽ chỉ đúng dòng.
@@ -787,7 +787,7 @@ mod tests {
 - [ ] **Bước 2: Chạy cho thấy đỏ**
 
 ```bash
-cd mhm/src-tauri && cargo test -p capyinn_lib pricing_repository 2>&1 | head -20
+cd mhm/src-tauri && cargo test -p capyinn pricing_repository 2>&1 | head -20
 ```
 
 Kỳ vọng: **FAIL biên dịch** — `cannot find function 'upsert_special_date_tx'`.
@@ -865,7 +865,7 @@ Nếu sau khi xoá mà `uuid` hoặc `pricing_repository` không còn được `
 - [ ] **Bước 5: Chạy cho xanh**
 
 ```bash
-cd mhm/src-tauri && cargo test -p capyinn_lib pricing_repository && cargo check --all-targets 2>&1 | tail -20
+cd mhm/src-tauri && cargo test -p capyinn pricing_repository && cargo check --all-targets 2>&1 | tail -20
 ```
 
 Kỳ vọng: hai test PASS, `cargo check` **không có warning nào**.
@@ -1148,7 +1148,7 @@ Trong `use super::{…}` của module test, thêm `delete_special_dates, save_sp
 - [ ] **Bước 2: Chạy cho thấy đỏ**
 
 ```bash
-cd mhm/src-tauri && cargo test -p capyinn_lib pricing_service 2>&1 | head -20
+cd mhm/src-tauri && cargo test -p capyinn pricing_service 2>&1 | head -20
 ```
 
 Kỳ vọng: **FAIL biên dịch** — `cannot find function 'save_special_date_range'`.
@@ -1296,7 +1296,7 @@ pub async fn save_special_date_range(
 - [ ] **Bước 4: Chạy cho xanh**
 
 ```bash
-cd mhm/src-tauri && cargo test -p capyinn_lib pricing_service
+cd mhm/src-tauri && cargo test -p capyinn pricing_service
 ```
 
 Kỳ vọng: **PASS** toàn bộ, kể cả năm test mới.
@@ -1429,7 +1429,7 @@ Trong `mod tests` của `pricing_service.rs`:
 - [ ] **Bước 2: Chạy cho thấy đỏ**
 
 ```bash
-cd mhm/src-tauri && cargo test -p capyinn_lib delete_special_dates 2>&1 | head -20
+cd mhm/src-tauri && cargo test -p capyinn delete_special_dates 2>&1 | head -20
 ```
 
 Kỳ vọng: **FAIL biên dịch** — `cannot find function 'delete_special_dates'`.
@@ -1487,7 +1487,7 @@ pub async fn delete_special_dates(pool: &Pool<Sqlite>, dates: Vec<String>) -> Co
 - [ ] **Bước 4: Chạy cho xanh**
 
 ```bash
-cd mhm/src-tauri && cargo test -p capyinn_lib pricing_service
+cd mhm/src-tauri && cargo test -p capyinn pricing_service
 ```
 
 Kỳ vọng: **PASS**.
@@ -1521,7 +1521,7 @@ Trong `lib.rs`, thêm dưới dòng vừa thêm ở Task 4:
 - [ ] **Bước 6: Chạy toàn bộ Rust**
 
 ```bash
-cd mhm/src-tauri && cargo test -p capyinn_lib 2>&1 | tail -10 && cargo check --all-targets 2>&1 | tail -10
+cd mhm/src-tauri && cargo test -p capyinn 2>&1 | tail -10 && cargo check --all-targets 2>&1 | tail -10
 ```
 
 Kỳ vọng: PASS toàn bộ, `cargo check` sạch.
@@ -2357,7 +2357,7 @@ first instead of happening silently, and a mistyped season can be deleted."
 Chạy sau khi cả bảy task xong, trước khi báo hoàn thành:
 
 ```bash
-cd mhm/src-tauri && cargo fmt --check && cargo check --all-targets && cargo test -p capyinn_lib 2>&1 | tail -5
+cd mhm/src-tauri && cargo fmt --check && cargo check --all-targets && cargo test -p capyinn 2>&1 | tail -5
 ```
 
 ```bash
