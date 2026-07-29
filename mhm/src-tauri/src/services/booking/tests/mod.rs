@@ -20,7 +20,7 @@ mod prelude {
         commands::reservations,
         domain::booking::{BookingError, OriginSideEffect},
         models::{
-            AddGroupServiceRequest, CheckOutRequest, CheckoutSettlementMode,
+            AddGroupServiceRequest, BackfillStayRequest, CheckOutRequest, CheckoutSettlementMode,
             CheckoutSettlementPreviewRequest, CreateGuestRequest, CreateReservationRequest,
             GroupCheckoutRequest, ModifyReservationRequest,
         },
@@ -29,7 +29,7 @@ mod prelude {
     };
 
     pub(crate) use crate::services::booking::{
-        audit_service,
+        audit_service, backfill,
         billing_service::{
             add_folio_line, add_folio_line_idempotent, record_cancellation_fee_tx,
             record_deposit_tx, record_deposit_with_origin_tx, record_payment,
@@ -42,6 +42,7 @@ mod prelude {
     };
 }
 
+mod backfill;
 mod checkout_settlement;
 mod extend_stay;
 mod folio;

@@ -11,6 +11,30 @@ pub struct GuestManifest {
     pub guest_ids: Vec<String>,
 }
 
+/// Ánh xạ khách sang JSON dùng cho request hash của các lệnh ghi.
+///
+/// Sống cạnh `create_guest_manifest` để mọi hiểu biết về các trường của
+/// `CreateGuestRequest` nằm chung một chỗ: thêm một trường thì chỉ sửa ở đây.
+pub(super) fn guest_hash_payload_entries(guests: &[CreateGuestRequest]) -> Vec<serde_json::Value> {
+    guests
+        .iter()
+        .map(|guest| {
+            serde_json::json!({
+                "guest_type": guest.guest_type.clone(),
+                "full_name": guest.full_name.clone(),
+                "doc_number": guest.doc_number.clone(),
+                "dob": guest.dob.clone(),
+                "gender": guest.gender.clone(),
+                "nationality": guest.nationality.clone(),
+                "address": guest.address.clone(),
+                "visa_expiry": guest.visa_expiry.clone(),
+                "scan_path": guest.scan_path.clone(),
+                "phone": guest.phone.clone(),
+            })
+        })
+        .collect()
+}
+
 struct GuestRecordInput<'a> {
     guest_type: &'a str,
     full_name: &'a str,
