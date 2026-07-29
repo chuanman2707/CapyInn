@@ -112,9 +112,12 @@ fn extra_guest_charge(inputs: &StayPricingInputs, nights: i64) -> BookingResult<
     // `crate::pricing` (`checked_mul_money` ends in `validate_transport_money_vnd`),
     // instead of a raw `checked_mul` that would let a fat-fingered guest count
     // write an unsafe-integer total straight to `bookings.total_price`.
-    let per_night =
-        crate::pricing::checked_mul_money(inputs.extra_person_fee, extra_guests, "extra_guest_charge")
-            .map_err(BookingError::validation)?;
+    let per_night = crate::pricing::checked_mul_money(
+        inputs.extra_person_fee,
+        extra_guests,
+        "extra_guest_charge",
+    )
+    .map_err(BookingError::validation)?;
     let amount = crate::pricing::checked_mul_money(per_night, nights, "extra_guest_charge")
         .map_err(BookingError::validation)?;
 

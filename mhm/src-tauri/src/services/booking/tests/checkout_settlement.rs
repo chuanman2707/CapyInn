@@ -50,7 +50,9 @@ async fn actual_nights_settlement_keeps_the_guest_charge() {
     // check-in date (today minus 2) does not land on a Sat/Sun.
     seed_pricing_rule(&pool, "standard", 500_000).await.unwrap();
     let booking_id = uuid::Uuid::new_v4().to_string();
-    seed_active_booking(&pool, &booking_id, "R330").await.unwrap();
+    seed_active_booking(&pool, &booking_id, "R330")
+        .await
+        .unwrap();
 
     let check_in = Local::now() - Duration::days(2);
     sqlx::query(

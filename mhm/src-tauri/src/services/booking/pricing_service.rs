@@ -69,15 +69,9 @@ pub async fn calculate_room_price_preview(
     pricing_type: &str,
     guests: Option<i32>,
 ) -> BookingResult<crate::pricing::PricingResult> {
-    let inputs = load_stay_pricing_inputs_for_room(
-        pool,
-        room_id,
-        check_in,
-        check_out,
-        pricing_type,
-        guests,
-    )
-    .await?;
+    let inputs =
+        load_stay_pricing_inputs_for_room(pool, room_id, check_in, check_out, pricing_type, guests)
+            .await?;
     calculate_from_loaded_inputs(&inputs)
 }
 
