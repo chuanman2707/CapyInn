@@ -14,7 +14,12 @@ pub struct GuestManifest {
 /// Ánh xạ khách sang JSON dùng cho request hash của các lệnh ghi.
 ///
 /// Sống cạnh `create_guest_manifest` để mọi hiểu biết về các trường của
-/// `CreateGuestRequest` nằm chung một chỗ: thêm một trường thì chỉ sửa ở đây.
+/// `CreateGuestRequest` nằm chung một chỗ. Đây là điểm sửa duy nhất cho check-in
+/// (`stay_lifecycle::build_check_in_hash_payload`) và ghi bù
+/// (`backfill::build_backfill_hash_payload`) — nhưng KHÔNG phải điểm sửa duy nhất cho toàn bộ
+/// hệ thống: `group_lifecycle::build_group_checkin_hash_payload` vẫn tự ánh xạ từng trường một
+/// cách độc lập (chưa gọi hàm này), nên thêm một trường mới ở đây sẽ không tự động phản ánh
+/// sang lệnh check-in nhóm.
 pub(super) fn guest_hash_payload_entries(guests: &[CreateGuestRequest]) -> Vec<serde_json::Value> {
     guests
         .iter()

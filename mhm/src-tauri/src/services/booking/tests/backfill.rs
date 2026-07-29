@@ -188,6 +188,8 @@ async fn backfill_still_staying_rejects_room_that_is_not_vacant() {
         error.message
     );
 
+    // Guards ordering, not rollback: the room-status guard runs before any write, so this
+    // rejected call never wrote a row (see `backfill_rejects_overlapping_stay` for detail).
     assert_eq!(count(&pool, "SELECT COUNT(*) FROM bookings").await, 0);
     assert_eq!(count(&pool, "SELECT COUNT(*) FROM guests").await, 0);
     assert_eq!(count(&pool, "SELECT COUNT(*) FROM room_calendar").await, 0);
@@ -209,6 +211,8 @@ async fn backfill_rejects_check_in_today_or_future() {
         error.message
     );
 
+    // Guards ordering, not rollback: validation runs before any write, so this rejected call
+    // never wrote a row (see `backfill_rejects_overlapping_stay` for detail).
     assert_eq!(count(&pool, "SELECT COUNT(*) FROM bookings").await, 0);
     assert_eq!(count(&pool, "SELECT COUNT(*) FROM guests").await, 0);
 }
@@ -233,7 +237,16 @@ async fn backfill_rejects_overlapping_stay() {
         error.message
     );
 
-    // Lần ghi bù hỏng không được để lại mảnh dữ liệu nào.
+    // These counts show only the first (successful) stay's rows remain: 1 booking, 1 guest,
+    // 2 calendar rows, 2 transactions — nothing extra from the second, rejected call.
+    //
+    // What this does NOT prove: that a write started and was then rolled back. The overlap
+    // check runs *before* `create_guest_manifest` (the first write) in `backfill_stay_tx`, so
+    // the rejected call never writes a row in the first place — there is nothing to roll back.
+    // These assertions guard against a future reordering that moved a write ahead of the
+    // guards; they are not evidence that transactional rollback itself works. That guarantee
+    // is structural: every mutation in `backfill_stay_tx` runs on the single `Transaction` the
+    // executor commits only on `Ok`, and no test here exercises a failure after a real write.
     assert_eq!(count(&pool, "SELECT COUNT(*) FROM bookings").await, 1);
     assert_eq!(count(&pool, "SELECT COUNT(*) FROM guests").await, 1);
     assert_eq!(count(&pool, "SELECT COUNT(*) FROM room_calendar").await, 2);
@@ -257,7 +270,53 @@ async fn backfill_rejects_paid_above_total() {
         error.message
     );
 
+    // Guards ordering, not rollback: money validation runs before any write, so this rejected
+    // call never wrote a row (see `backfill_rejects_overlapping_stay` for detail).
     assert_eq!(count(&pool, "SELECT COUNT(*) FROM bookings").await, 0);
+}
+
+#[tokio::test]
+async fn backfill_with_zero_paid_amount_writes_no_payment_row() {
+    let pool = test_pool().await;
+    seed_room(&pool, "R-BF8").await.unwrap();
+    let ctx = cmd_with_request("backfill_stay", "req-bf-8", "idem-bf-8");
+    let mut request = req("R-BF8", -3, Some(-1), None);
+    request.paid_amount = 0;
+
+    let result = backfill::backfill_stay_idempotent(&pool, &ctx, request, None)
+        .await
+        .unwrap();
+    let booking: crate::models::Booking = serde_json::from_value(result.response).unwrap();
+
+    assert_eq!(booking.paid_amount, 0);
+
+    // Money path: `paid_amount > 0` guards whether a payment row is written at all. This is
+    // the only test in the suite where `paid_amount` is 0, so it is the only one that exercises
+    // the "no payment" branch.
+    let row = sqlx::query("SELECT paid_amount FROM bookings WHERE id = ?")
+        .bind(&booking.id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(row.get::<i64, _>("paid_amount"), 0);
+
+    let charges: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM transactions WHERE booking_id = ? AND type = 'charge'",
+    )
+    .bind(&booking.id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(charges, 1, "charge row must still be written");
+
+    let payments: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM transactions WHERE booking_id = ? AND type = 'payment'",
+    )
+    .bind(&booking.id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(payments, 0, "no payment row when nothing was paid");
 }
 
 #[tokio::test]
