@@ -200,6 +200,65 @@ async fn room_price_preview_uses_its_own_rooms_surcharge_not_a_same_type_sibling
     assert_eq!(preview.breakdown[1].amount, 200_000);
 }
 
+/// Cái toàn bộ thiết kế của nhánh này đặt cược vào: bản xem trước theo phòng
+/// (`calculate_room_price_preview`) phải trả đúng con số sẽ bị tính khi ghi
+/// sổ (`calculate_stay_price_tx`) — kể cả khi có phụ thu thêm khách, không
+/// chỉ khi `guests: None`. Hai bài `room_price_preview_matches_...` ở trên chỉ
+/// so `preview.total` với một con số hằng (`1_200_000`); bài
+/// `the_preview_and_the_lifecycle_charge_agree_on_every_reachable_rule_source`
+/// trong `pricing_service.rs` so cấu trúc thật nhưng chỉ chạy với
+/// `guests: None`. Bài này là bài giữ lời hứa đó khỏi mục rữa: so cấu trúc
+/// (breakdown nhãn + số tiền, không chỉ tổng) với `guests: Some(4)`.
+#[tokio::test]
+async fn room_price_preview_matches_the_lifecycle_charge_structurally_with_extra_guests() {
+    let pool = test_pool().await;
+    seed_room_with_guest_pricing(&pool, "R341", 500_000, 2, 50_000)
+        .await
+        .unwrap();
+
+    let preview = pricing_service::calculate_room_price_preview(
+        &pool,
+        "R341",
+        "2026-08-06",
+        "2026-08-08",
+        "nightly",
+        Some(4),
+    )
+    .await
+    .unwrap();
+
+    let mut tx = pool.begin().await.unwrap();
+    let charged = calculate_stay_price_tx(
+        &mut tx,
+        "R341",
+        "2026-08-06",
+        "2026-08-08",
+        "nightly",
+        Some(4),
+    )
+    .await
+    .unwrap();
+    tx.rollback().await.unwrap();
+
+    assert_eq!(preview.total, charged.total);
+    assert_eq!(preview.base_amount, charged.base_amount);
+    assert_eq!(preview.surcharge_amount, charged.surcharge_amount);
+    assert_eq!(preview.weekend_amount, charged.weekend_amount);
+    assert_eq!(preview.breakdown.len(), charged.breakdown.len());
+    for (preview_line, charged_line) in preview.breakdown.iter().zip(charged.breakdown.iter()) {
+        assert_eq!(preview_line.label, charged_line.label);
+        assert_eq!(preview_line.amount, charged_line.amount);
+    }
+
+    // Con số thật phải khác 0 và có mặt dòng phụ thu — nếu không, so sánh
+    // cấu trúc ở trên có thể trùng khớp một cách vô nghĩa (cả hai đều rỗng).
+    assert!(charged.total > 0);
+    assert!(charged
+        .breakdown
+        .iter()
+        .any(|line| line.label.contains("khách")));
+}
+
 #[tokio::test]
 async fn calculate_stay_price_tx_reads_uncommitted_special_date() {
     let pool = test_pool().await;

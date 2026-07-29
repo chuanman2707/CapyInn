@@ -994,6 +994,14 @@ pub async fn modify_reservation_idempotent(
         .await
 }
 
+/// Trần số đêm cho một đặt phòng. Trước nhánh này, ngày đi chỉ đọc được (suy
+/// ra từ một ô số đêm mang `max={90}`), nên 90 đêm là trần cứng theo cấu trúc.
+/// Nhánh này cho gõ tay ngày đi trực tiếp và xoá ô số đêm đó — nhưng không có
+/// gì thay thế trần cũ, nên một lỗi gõ năm (`2036` thay vì `2026`) tạo ra một
+/// đặt phòng khoảng 3650 đêm, khoá phòng đó cả thập kỷ trong `room_calendar`.
+/// Đây là khôi phục lại trần cũ, không phải đặt ra chính sách mới.
+const MAX_RESERVATION_NIGHTS: i64 = 90;
+
 fn validate_requested_nights(
     check_in_date: &str,
     check_out_date: &str,
@@ -1006,6 +1014,12 @@ fn validate_requested_nights(
         return Err(BookingError::validation(
             "Check-out date must be after check-in date".to_string(),
         ));
+    }
+    if derived_nights > MAX_RESERVATION_NIGHTS {
+        return Err(BookingError::validation(format!(
+            "Number of nights must not exceed {}",
+            MAX_RESERVATION_NIGHTS
+        )));
     }
     if requested_nights != derived_nights as i32 {
         return Err(BookingError::validation(format!(

@@ -108,13 +108,15 @@ fn extra_guest_charge(inputs: &StayPricingInputs, nights: i64) -> BookingResult<
         return Ok((0, 0));
     }
 
-    let amount = inputs
-        .extra_person_fee
-        .checked_mul(extra_guests)
-        .and_then(|per_night| per_night.checked_mul(nights))
-        .ok_or_else(|| {
-            BookingError::validation("extra guest charge overflowed MoneyVnd".to_string())
-        })?;
+    // Goes through the same transport-safe guard as every other money line in
+    // `crate::pricing` (`checked_mul_money` ends in `validate_transport_money_vnd`),
+    // instead of a raw `checked_mul` that would let a fat-fingered guest count
+    // write an unsafe-integer total straight to `bookings.total_price`.
+    let per_night =
+        crate::pricing::checked_mul_money(inputs.extra_person_fee, extra_guests, "extra_guest_charge")
+            .map_err(BookingError::validation)?;
+    let amount = crate::pricing::checked_mul_money(per_night, nights, "extra_guest_charge")
+        .map_err(BookingError::validation)?;
 
     Ok((extra_guests, amount))
 }
@@ -140,9 +142,8 @@ pub(crate) fn calculate_from_loaded_inputs(
             label: format!("Phụ thu {} khách", extra_guests),
             amount: extra_amount,
         });
-        result.total = result.total.checked_add(extra_amount).ok_or_else(|| {
-            BookingError::validation("stay total overflowed MoneyVnd".to_string())
-        })?;
+        result.total = crate::pricing::checked_add_money(result.total, extra_amount, "stay_total")
+            .map_err(BookingError::validation)?;
     }
 
     Ok(result)
@@ -155,6 +156,7 @@ mod tests {
         StayPricingInputs, StoredPricingRule,
     };
     use crate::domain::booking::BookingError;
+    use crate::money::MAX_TRANSPORT_SAFE_MONEY_VND;
 
     fn sample_inputs() -> StayPricingInputs {
         StayPricingInputs {
@@ -365,5 +367,44 @@ mod tests {
         assert_eq!(pricing.surcharge_amount, 100_000);
         assert_eq!(pricing.total, 1_200_000);
         assert_eq!(pricing.breakdown[2].amount, 100_000);
+    }
+
+    /// Một mốc khách hàng gõ nhầm (999_999_999) nhân với phụ thu 1 triệu, 30
+    /// đêm, cho ra khoảng 3e16 — vượt xa `MAX_TRANSPORT_SAFE_MONEY_VND`
+    /// (~9.007e15), mốc mà một số JS còn biểu diễn chính xác được. Trước bản
+    /// vá này, `extra_guest_charge` dùng `checked_mul`/`checked_add` thô: cả
+    /// hai phép tính đều "thành công" theo nghĩa không tràn số nguyên i64,
+    /// nên giá trị méo mó vẫn được ghi vào `bookings.total_price` và trả về
+    /// UI. Bài test này chứng minh giờ nó trả lỗi thay vì âm thầm ghi số sai.
+    #[test]
+    fn calculate_from_loaded_inputs_rejects_extra_guest_charge_beyond_transport_safe_ceiling() {
+        let mut inputs = sample_inputs();
+        inputs.fallback_base_price = Some(500_000);
+        inputs.check_in = "2026-04-20".to_string();
+        inputs.check_out = "2026-05-20".to_string(); // 30 đêm
+        inputs.guests = Some(999_999_999);
+        inputs.base_guests = 2;
+        inputs.extra_person_fee = 1_000_000;
+
+        let error = calculate_from_loaded_inputs(&inputs).unwrap_err();
+
+        assert!(matches!(error, BookingError::Validation(_)));
+    }
+
+    /// Bản thân phụ thu (trước khi cộng vào tổng) cũng phải bị chặn nếu nó
+    /// một mình đã vượt trần — không chỉ khi cộng dồn với `base_amount` mới lộ ra.
+    #[test]
+    fn calculate_from_loaded_inputs_rejects_when_extra_amount_alone_exceeds_the_ceiling() {
+        let mut inputs = sample_inputs();
+        inputs.fallback_base_price = Some(1);
+        inputs.check_in = "2026-04-20".to_string();
+        inputs.check_out = "2026-04-21".to_string(); // 1 đêm
+        inputs.guests = Some(2);
+        inputs.base_guests = 0;
+        inputs.extra_person_fee = MAX_TRANSPORT_SAFE_MONEY_VND;
+
+        let error = calculate_from_loaded_inputs(&inputs).unwrap_err();
+
+        assert!(matches!(error, BookingError::Validation(_)));
     }
 }

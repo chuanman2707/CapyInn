@@ -454,14 +454,22 @@ fn calculate_weekend_uplift(
         .map_err(|error| error.message)
 }
 
-fn checked_mul_money(amount: MoneyVnd, multiplier: i64, field: &str) -> Result<MoneyVnd, String> {
+/// `pub(crate)`, not private: `domain::booking::pricing` reuses this so the
+/// flat extra-guest surcharge goes through the same transport-safe guard as
+/// every other money line here, instead of a raw `checked_mul`.
+pub(crate) fn checked_mul_money(
+    amount: MoneyVnd,
+    multiplier: i64,
+    field: &str,
+) -> Result<MoneyVnd, String> {
     let value = amount
         .checked_mul(multiplier)
         .ok_or_else(|| format!("{field} overflowed"))?;
     validate_transport_money_vnd(value, field).map_err(|error| error.message)
 }
 
-fn checked_add_money(a: MoneyVnd, b: MoneyVnd, field: &str) -> Result<MoneyVnd, String> {
+/// See `checked_mul_money` — same reasoning, `pub(crate)` for the same reason.
+pub(crate) fn checked_add_money(a: MoneyVnd, b: MoneyVnd, field: &str) -> Result<MoneyVnd, String> {
     let value = a
         .checked_add(b)
         .ok_or_else(|| format!("{field} overflowed"))?;

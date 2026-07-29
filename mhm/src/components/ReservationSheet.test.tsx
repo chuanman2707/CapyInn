@@ -220,7 +220,12 @@ describe("ReservationSheet", () => {
           scheduled_checkin: "2026-04-20",
           scheduled_checkout: "2026-04-22",
           nights: 2,
-          guests: 2,
+          // Cố ý KHÁC max_guests của R101 (2) — nếu guard `isEditMode` trên
+          // effect nạp lại số khách theo phòng (guestsLoadedForRoomId) bị gỡ,
+          // effect đó sẽ nạp đè guests = 2 (max_guests của R101), và bài test
+          // này sẽ bắt được ngay vì 2 khác 4. Trùng giá trị với max_guests sẽ
+          // che mất một guard bị gỡ mất — xem finding 4 của lượt review.
+          guests: 4,
           total_price: 1000000,
           source: "phone",
           deposit_amount: 50000,
@@ -248,7 +253,7 @@ describe("ReservationSheet", () => {
             new_check_in_date: "2026-04-20",
             new_check_out_date: "2026-04-23",
             new_nights: 3,
-            new_guests: 2,
+            new_guests: 4,
           },
         },
         {
@@ -263,6 +268,109 @@ describe("ReservationSheet", () => {
       );
     });
     expect(invoke).not.toHaveBeenCalledWith("modify_reservation", expect.anything());
+  });
+
+  it("sửa một đặt phòng cũ (guests NULL) mà không đụng ô số khách thì gửi new_guests: null, giữ nguyên giá cũ", async () => {
+    // Trước bản vá: prefill effect làm `setGuests(editBooking.guests ?? 2)`,
+    // nên guests NULL biến thành số 2 trên form, và submit gửi thẳng số đó —
+    // một đặt phòng cũ chưa từng có phụ thu bỗng bị tính thêm người. Backend
+    // đọc `new_guests: null` là "giữ nguyên số đã lưu"
+    // (modify_reservation_tx: `req.new_guests.or(reservation.guests)`), nên
+    // gửi null mới đúng là "không đụng gì" khi người dùng không đụng ô này.
+    const user = userEvent.setup();
+    render(
+      <ReservationSheet
+        open
+        onOpenChange={vi.fn()}
+        editBooking={{
+          id: "B-LEGACY",
+          room_id: "R101",
+          guest_name: "Nguyen Van Legacy",
+          guest_phone: "0900000000",
+          check_in_at: "2026-04-20",
+          expected_checkout: "2026-04-22",
+          scheduled_checkin: "2026-04-20",
+          scheduled_checkout: "2026-04-22",
+          nights: 2,
+          guests: null,
+          total_price: 1000000,
+          source: "phone",
+          deposit_amount: 50000,
+        }}
+      />,
+    );
+
+    await waitFor(() => {
+      expect(fetchRooms).toHaveBeenCalledTimes(1);
+    });
+
+    // Chỉ đổi ngày — không đụng vào ô số khách.
+    fireEvent.change(screen.getByLabelText(/ngày đi/i), {
+      target: { value: "2026-04-23" },
+    });
+
+    await user.click(screen.getByRole("button", { name: /lưu thay đổi/i }));
+
+    await waitFor(() => {
+      expect(invokeWriteCommand).toHaveBeenCalledWith(
+        "modify_reservation",
+        expect.objectContaining({
+          req: expect.objectContaining({
+            booking_id: "B-LEGACY",
+            new_guests: null,
+          }),
+        }),
+        expect.anything(),
+      );
+    });
+  });
+
+  it("sửa một đặt phòng cũ (guests NULL) và CÓ đụng ô số khách thì gửi đúng số vừa gõ", async () => {
+    const user = userEvent.setup();
+    render(
+      <ReservationSheet
+        open
+        onOpenChange={vi.fn()}
+        editBooking={{
+          id: "B-LEGACY-2",
+          room_id: "R101",
+          guest_name: "Nguyen Van Legacy",
+          guest_phone: "0900000000",
+          check_in_at: "2026-04-20",
+          expected_checkout: "2026-04-22",
+          scheduled_checkin: "2026-04-20",
+          scheduled_checkout: "2026-04-22",
+          nights: 2,
+          guests: null,
+          total_price: 1000000,
+          source: "phone",
+          deposit_amount: 50000,
+        }}
+      />,
+    );
+
+    await waitFor(() => {
+      expect(fetchRooms).toHaveBeenCalledTimes(1);
+    });
+
+    fireEvent.change(screen.getByLabelText(/số khách/i), {
+      target: { value: "3" },
+    });
+
+    await user.click(screen.getByRole("button", { name: /lưu thay đổi/i }));
+
+    await waitFor(() => {
+      expect(invokeWriteCommand).toHaveBeenCalledWith(
+        "modify_reservation",
+        expect.objectContaining({
+          req: expect.objectContaining({
+            booking_id: "B-LEGACY-2",
+            new_guests: 3,
+          }),
+        }),
+        expect.anything(),
+      );
+    });
   });
 
   it("formats create flow failures with formatAppError", async () => {
@@ -403,6 +511,47 @@ describe("ReservationSheet", () => {
       expect(screen.getByText(/ngày đi phải sau ngày đến/i)).toBeInTheDocument();
     });
     expect(submit).toBeDisabled();
+  });
+
+  it("đặt ô ngày đi max = 90 đêm sau ngày đến", async () => {
+    render(<ReservationSheet open onOpenChange={vi.fn()} />);
+
+    fireEvent.change(screen.getByLabelText(/ngày đến/i), {
+      target: { value: "2026-08-06" },
+    });
+
+    const checkOut = screen.getByLabelText(/ngày đi/i) as HTMLInputElement;
+    // 90 đêm sau 2026-08-06.
+    expect(checkOut.max).toBe("2026-11-04");
+  });
+
+  it("từ chối đặt phòng vượt quá 90 đêm dù ô ngày đi cho gõ tay bỏ qua max", async () => {
+    // Ô ngày đi cho gõ tay trực tiếp (không còn suy từ ô số đêm có max={90}
+    // như trước), nên thuộc tính `max` trên input không chặn được input giả
+    // lập qua fireEvent — đúng như một lỗi gõ năm thật (2036 thay vì 2026)
+    // sẽ đi vòng qua trình duyệt. handleSubmit phải tự chặn.
+    const user = userEvent.setup();
+    render(<ReservationSheet open onOpenChange={vi.fn()} />);
+
+    fireEvent.change(screen.getByLabelText(/^phòng$/i), { target: { value: "R101" } });
+    await user.type(screen.getByPlaceholderText(/họ và tên/i), "Nguyen Van A");
+    fireEvent.change(screen.getByLabelText(/ngày đến/i), {
+      target: { value: "2026-08-08" },
+    });
+    fireEvent.change(screen.getByLabelText(/ngày đi/i), {
+      target: { value: "2036-08-08" },
+    });
+
+    await user.click(screen.getByRole("button", { name: /đặt phòng/i }));
+
+    expect(toastError).toHaveBeenCalledWith(
+      expect.stringMatching(/90 đêm/),
+    );
+    expect(invokeWriteCommand).not.toHaveBeenCalledWith(
+      "create_reservation",
+      expect.anything(),
+      expect.anything(),
+    );
   });
 
   it("nạp số khách theo phòng và gửi nó khi đặt phòng", async () => {
