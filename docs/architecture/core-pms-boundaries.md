@@ -111,6 +111,31 @@ Use these defaults when adding or moving SQL:
 - command modules should not accumulate unrelated read SQL, write SQL, and business state-machine logic in the same function;
 - direct PMS table writes from UI, bots, agents, or integrations are forbidden.
 
+## Pricing Is Keyed On Room Type
+
+Price is a property of the room type, not of the room. Two rooms of one type cost
+the same night, whichever key the guest is handed.
+
+- the configured price of a type is its `pricing_rules` row; when a type has no
+  row, a type price is *derived* from one room's `base_price` (lowest room id, so
+  the derivation is reproducible);
+- `rooms.base_price` is therefore per-room data the pricing model does not honour
+  as a price. Do not present it to an operator as what a stay will cost, and do
+  not place it beside a computed total;
+- rooms of one type holding different `base_price` values is a data problem, not
+  a pricing bug: a type cannot express two prices, so give it a rule;
+- the *extra-person surcharge* is the deliberate exception. `rooms.extra_person_fee`
+  is read from the booked room, because two rooms of one type may legitimately
+  charge differently for an extra guest. This is why a quote for a chosen room
+  goes through `calculate_room_price_preview`, not the type-keyed preview;
+- the number shown before a stay must come from the same code that charges for
+  it. Frontends ask a preview command; they do not multiply in JavaScript.
+  `base_price × nights` ignores the configured rate, the weekend uplift, any
+  `special_dates` surcharge and the extra-person fee — all of which check-in
+  charges;
+- a preview that cannot read the prices must fail, not quote a default. Guessing
+  a 0% holiday uplift produces a figure below what the desk will collect.
+
 ## Implementation Path And Rename Debt
 
 `mhm/` is the current implementation path. It is not the product name.
@@ -128,3 +153,4 @@ Before approving a cleanup or feature PR, check:
 - Are transactional outbox writes kept with the business mutation when they are part of the safety contract?
 - Are outbox dispatchers, observers, gateway, MCP, agent, digest, Telegram, CEO, and OpenAI surfaces disabled from the normal PMS profile?
 - Does the PR avoid mixing folder rename debt with runtime or command-safety changes?
+- If it shows the guest a price, does that number come from a preview command rather than arithmetic over `base_price`?

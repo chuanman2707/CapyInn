@@ -22,7 +22,28 @@ const STORED_PRICING_RULE_SQL: &str = "SELECT room_type, hourly_rate, overnight_
 
 const ROOM_TYPE_SQL: &str = "SELECT type FROM rooms WHERE id = ? LIMIT 1";
 
-const FALLBACK_BASE_PRICE_SQL: &str = "SELECT base_price FROM rooms WHERE LOWER(type) = ? LIMIT 1";
+/// The base price a room type falls back to when it has no `pricing_rules` row.
+///
+/// **Price is a property of the room type, not of the room.** That is the
+/// operator's decision, and everything here follows from it: two rooms of one
+/// type cost the same night, whichever key the guest is handed.
+///
+/// So `rooms.base_price` is not a price the system charges. It is per-room data
+/// predating the rule table, read here only to derive a *type* price when the
+/// type has no rule configured. `ORDER BY id` makes that derivation
+/// reproducible: without it SQLite returns whichever row it likes, so a type
+/// whose rooms disagree about `base_price` could quote one figure and charge
+/// another across app restarts.
+///
+/// When rooms of one type do disagree, the lowest id wins and the rest of the
+/// type bills at its rate. Under a type-keyed price that is not an error to fix
+/// in the SQL — it means the operator holds per-room prices the model cannot
+/// express, and the answer is to give the type a `pricing_rules` row.
+///
+/// Both loaders share this constant, so the quote and the charge cannot
+/// disagree about which room they derived from.
+const FALLBACK_BASE_PRICE_SQL: &str =
+    "SELECT base_price FROM rooms WHERE LOWER(type) = ? ORDER BY id LIMIT 1";
 
 const ROOM_GUEST_PRICING_SQL: &str = "SELECT COALESCE(max_guests, 2) AS max_guests,
             COALESCE(extra_person_fee, 0) AS extra_person_fee
@@ -184,10 +205,17 @@ pub(crate) async fn load_stay_pricing_inputs_tx(
 /// preview supply a room *type* directly — there is no booking or room yet — so
 /// this skips the room lookup and is otherwise identical.
 ///
-/// The special-date read is deliberately lenient: a failure prices the stay at a
-/// 0% uplift rather than failing the preview, which is the behaviour the
-/// preview command has always had. The lifecycle path, which actually charges
-/// money, propagates the error instead.
+/// Every read here propagates, exactly as the transactional twin does. The
+/// special-date read used to be lenient — a failure priced the stay at a 0%
+/// uplift instead of failing the preview — so on a holiday the quote came out
+/// *below* what the lifecycle path would charge, silently and in the guest's
+/// favour until the desk collected the difference.
+///
+/// How often that read can fail is not the point, and the honest answer is
+/// rarely: the pool opens WAL with a 5s `busy_timeout` (`db.rs`), so a plain
+/// `SELECT` does not queue behind a writer. The point is that guessing 0% is the
+/// wrong response to not knowing. A preview that cannot read the prices should
+/// say so rather than quote low.
 pub(crate) async fn load_stay_pricing_inputs_for_room_type(
     pool: &Pool<Sqlite>,
     room_type: &str,
@@ -202,7 +230,7 @@ pub(crate) async fn load_stay_pricing_inputs_for_room_type(
     } else {
         None
     };
-    let special_uplift_pct = load_special_uplift(pool, check_in).await.unwrap_or(0.0);
+    let special_uplift_pct = load_special_uplift(pool, check_in).await?;
     let guest_pricing = load_room_guest_pricing_for_type(pool, room_type).await?;
 
     Ok(StayPricingInputs {
@@ -223,8 +251,10 @@ pub(crate) async fn load_stay_pricing_inputs_for_room_type(
 /// người là thuộc tính của từng phòng, nên phòng đã chọn rồi thì phải đọc đúng
 /// phòng đó — hai phòng cùng loại có thể đặt phụ thu khác nhau.
 ///
-/// Đọc lệnh với ngày đặc biệt giống bản theo loại phòng: lỗi thì coi như 0%,
-/// vì đây là xem trước chứ chưa thu tiền.
+/// Ngày đặc biệt đọc y như bản theo loại phòng: lỗi thì **báo lỗi**, không coi
+/// như 0%. Chính vì đây là xem trước nên mới phải chặt: con số này được đọc cho
+/// khách nghe trước khi thu tiền, nên đoán 0% đúng vào ngày lễ chỉ tạo ra một
+/// báo giá thấp hơn số thực thu. Không đọc được giá thì phải nói là không biết.
 pub(crate) async fn load_stay_pricing_inputs_for_room(
     pool: &Pool<Sqlite>,
     room_id: &str,
@@ -240,7 +270,7 @@ pub(crate) async fn load_stay_pricing_inputs_for_room(
     } else {
         None
     };
-    let special_uplift_pct = load_special_uplift(pool, check_in).await.unwrap_or(0.0);
+    let special_uplift_pct = load_special_uplift(pool, check_in).await?;
     let guest_pricing = load_room_guest_pricing(pool, room_id).await?;
 
     Ok(StayPricingInputs {
