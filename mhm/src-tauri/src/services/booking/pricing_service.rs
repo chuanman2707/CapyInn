@@ -316,11 +316,56 @@ pub async fn save_special_date_range(
     })
 }
 
+/// Xoá hẳn một số ngày khỏi bảng mùa cao điểm.
+///
+/// Danh sách rỗng bị từ chối — khác hẳn `SaveSpecialDateRange::remove`, nơi
+/// rỗng chính là ca khai mới. Ở đây rỗng nghĩa là gọi nhầm.
+pub async fn delete_special_dates(pool: &Pool<Sqlite>, dates: Vec<String>) -> CommandResult<()> {
+    if dates.is_empty() {
+        return Err(invalid_input("Chưa chọn ngày nào để xoá"));
+    }
+    if dates.len() as i64 > MAX_SPECIAL_RANGE_DAYS {
+        return Err(invalid_input(format!(
+            "Chỉ xoá được tối đa {MAX_SPECIAL_RANGE_DAYS} ngày một lần"
+        )));
+    }
+    for date in &dates {
+        parse_date_only(date, "Ngày cần xoá")?;
+    }
+
+    let mut tx = pool.begin().await.map_err(|error| {
+        crate::app_error::log_system_error(
+            "delete_special_dates",
+            error.to_string(),
+            serde_json::json!({ "step": "begin" }),
+        )
+    })?;
+
+    delete_special_dates_tx(&mut tx, &dates)
+        .await
+        .map_err(|error| {
+            crate::app_error::log_system_error(
+                "delete_special_dates",
+                error.to_string(),
+                serde_json::json!({ "step": "delete_special_dates_tx" }),
+            )
+        })?;
+
+    tx.commit().await.map_err(|error| {
+        crate::app_error::log_system_error(
+            "delete_special_dates",
+            error.to_string(),
+            serde_json::json!({ "step": "commit" }),
+        )
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
         calculate_price_preview, calculate_room_price_preview, calculate_stay_price_tx,
-        save_pricing_rule, save_special_date_range, SavePricingRule, SaveSpecialDateRange,
+        delete_special_dates, save_pricing_rule, save_special_date_range, SavePricingRule,
+        SaveSpecialDateRange,
     };
     use crate::app_error::{codes, AppErrorKind};
     use crate::domain::booking::BookingError;
@@ -1223,5 +1268,45 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(count.0, 0, "không lần nào được ghi gì");
+    }
+
+    #[tokio::test]
+    async fn delete_special_dates_removes_a_whole_cluster_at_once() {
+        let pool = special_dates_pool().await;
+        save_special_date_range(
+            &pool,
+            SaveSpecialDateRange {
+                remove: Vec::new(),
+                from: "2026-02-14".to_string(),
+                to: "2026-02-22".to_string(),
+                label: "Tết".to_string(),
+                uplift_pct: 40.0,
+            },
+            "base".to_string(),
+            "2026-01-01T00:00:00+07:00".to_string(),
+        )
+        .await
+        .unwrap();
+
+        let dates: Vec<String> = (14..=22).map(|day| format!("2026-02-{day:02}")).collect();
+        delete_special_dates(&pool, dates).await.unwrap();
+
+        let count: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM special_dates")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(count.0, 0);
+    }
+
+    #[tokio::test]
+    async fn delete_special_dates_rejects_an_empty_list_and_a_bad_date() {
+        let pool = special_dates_pool().await;
+
+        delete_special_dates(&pool, Vec::new())
+            .await
+            .expect_err("danh sách rỗng là lệnh vô nghĩa");
+        delete_special_dates(&pool, vec!["14/02/2026".to_string()])
+            .await
+            .expect_err("ngày sai định dạng");
     }
 }
