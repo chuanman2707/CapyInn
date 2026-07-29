@@ -114,13 +114,23 @@ export default function BackfillSheet({ open, onOpenChange, prefill }: Props) {
 
     // Bật "Khách còn ở" có thể lọc mất phòng đang chọn (không còn vacant) —
     // <select> khi đó không có option khớp và hiện trống, nhưng state vẫn giữ
-    // (và vẫn gửi đi) roomId đó nếu không xoá ở đây.
+    // (và vẫn gửi đi) roomId đó nếu không xoá ở đây. Trước đây deps chỉ có
+    // [stillStaying, rooms], thiếu roomId — nếu sheet mở lại với prefill mới
+    // (roomId khác) trong khi stillStaying đã sẵn true và rooms không đổi
+    // reference, effect không chạy lại và không dọn roomId cũ. Depend thẳng
+    // vào roomId và selectableRooms (danh sách đã lọc, đúng những gì effect
+    // dùng) để effect luôn thấy đúng giá trị mới nhất. Không lặp vô hạn: khi
+    // effect tự setRoomId(""), lần chạy kế tiếp roomId rỗng nên `if (roomId
+    // && ...)` chặn ngay ở điều kiện đầu — no-op. Khi roomId đang hợp lệ
+    // (có trong selectableRooms), `!selectableRooms.some(...)` là false nên
+    // cũng no-op — dù selectableRooms là mảng mới mỗi lần stillStaying=true
+    // khiến effect chạy lại nhiều hơn cần thiết, nó không bao giờ gọi
+    // setRoomId khi không cần, nên không thể lặp.
     useEffect(() => {
         if (roomId && !selectableRooms.some((r) => r.id === roomId)) {
             setRoomId("");
         }
-        // eslint-disable-next-line react-hooks/exhaustive-deps
-    }, [stillStaying, rooms]);
+    }, [roomId, selectableRooms]);
 
     // Backend vẫn validate lại — đây chỉ là rào chắn trong form cho khỏi chọn
     // nhầm một ngày rõ ràng vô lý (ghi bù mà ngày vào ở tương lai, hoặc ngày
@@ -310,7 +320,11 @@ export default function BackfillSheet({ open, onOpenChange, prefill }: Props) {
                                 className="w-full h-10 px-3 rounded-xl border border-slate-200 bg-slate-50 text-sm focus:outline-none focus:ring-2 focus:ring-amber-200"
                                 value={total}
                                 onChange={(e) => {
-                                    setTotal(Number(e.target.value) || 0);
+                                    // Money là MoneyVnd (số nguyên) ở backend. Không có <form> bao
+                                    // quanh nên constraint validation của trình duyệt (stepMismatch
+                                    // từ step="1") không bao giờ chạy trước khi handleSubmit gọi API
+                                    // — phải tự làm tròn ở đây, không được dựa vào step.
+                                    setTotal(Math.round(Number(e.target.value) || 0));
                                     setTotalDirty(true);
                                 }}
                             />
@@ -332,7 +346,9 @@ export default function BackfillSheet({ open, onOpenChange, prefill }: Props) {
                                 className="w-full h-10 px-3 rounded-xl border border-slate-200 bg-slate-50 text-sm focus:outline-none focus:ring-2 focus:ring-amber-200"
                                 value={paid}
                                 onChange={(e) => {
-                                    setPaid(Number(e.target.value) || 0);
+                                    // Cùng lý do với ô Tiền phòng ở trên — làm tròn ở đây thay vì
+                                    // trông cậy vào step="1" (không có tác dụng khi không có <form>).
+                                    setPaid(Math.round(Number(e.target.value) || 0));
                                     setPaidDirty(true);
                                 }}
                             />
