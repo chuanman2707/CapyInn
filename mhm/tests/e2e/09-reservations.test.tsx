@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
-import { render, screen, waitFor } from "../helpers/render-app";
+import { render, screen, waitFor, fireEvent } from "../helpers/render-app";
 import userEvent from "@testing-library/user-event";
 import Reservations from "@/pages/Reservations";
 import { setMockResponse, clearMockResponses, invoke } from "@test-mocks/tauri-core";
@@ -171,5 +171,32 @@ describe("09 — Reservations", () => {
         // KHÔNG phải kéo tới expected_checkout (cột 5, width 320px).
         expect(bar.style.left).toBe("120px");
         expect(bar.style.width).toBe("160px");
+    });
+
+    it("bấm ô hôm nay mở check-in với phòng và số đêm", async () => {
+        render(<Reservations />);
+        const cell = await screen.findByTestId("cell-1A-3"); // cột 3 = hôm nay
+        fireEvent.mouseDown(cell, { button: 0 });
+        fireEvent.mouseUp(window);
+
+        const state = useHotelStore.getState();
+        expect(state.isCheckinOpen).toBe(true);
+        expect(state.checkinRoomId).toBe("1A");
+        expect(state.checkinNights).toBe(1);
+    });
+
+    it("kéo 2 ô tương lai mở form đặt phòng với ngày điền sẵn", async () => {
+        render(<Reservations />);
+        const start = await screen.findByTestId("cell-1A-5");
+        const end = await screen.findByTestId("cell-1A-6");
+        fireEvent.mouseDown(start, { button: 0 });
+        fireEvent.mouseEnter(end);
+        fireEvent.mouseUp(window);
+
+        expect(await screen.findByText("Đặt phòng trước")).toBeInTheDocument();
+        const expectedCheckIn = new Date(Date.now() + 2 * 86400000);
+        const iso = (d: Date) =>
+            `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+        expect(screen.getByDisplayValue(iso(expectedCheckIn))).toBeInTheDocument();
     });
 });
