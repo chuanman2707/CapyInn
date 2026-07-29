@@ -126,6 +126,25 @@ export default function CheckinSheet({ preSelectedRoomId, preSelectedNights }: {
     }, [isCheckinOpen]);
 
     const vacantRooms = rooms.filter((r) => r.status === "vacant");
+
+    // Kéo một ô lịch của phòng ĐANG CÓ KHÁCH vẫn mở được sheet này với đúng
+    // roomId đó, mà danh sách chỉ liệt kê phòng trống — <select> không có
+    // option nào khớp nên hiện trống, trong khi state vẫn giữ (và vẫn gửi đi)
+    // id vô hình kia. Trước nhánh này mọi caller đều đã gác sẵn trên "vacant"
+    // nên tình huống không tới được. Cùng cách xử lý như BackfillSheet.tsx:
+    // depend thẳng vào selectedRoom và vacantRooms để effect luôn thấy giá trị
+    // mới nhất. Không lặp vô hạn: sau khi tự xoá, `selectedRoom` rỗng nên điều
+    // kiện đầu chặn ngay; còn khi phòng đang hợp lệ thì vế sau là false.
+    useEffect(() => {
+        // `rooms.length > 0`: các sheet này gọi fetchRooms() lúc mở, nên có một
+        // khoảnh khắc danh sách còn rỗng. Không có vế này, một phòng hợp lệ
+        // truyền vào bị xoá ngay trước khi rooms kịp về, và effect nạp
+        // preSelected không chạy lại để đặt lại nó.
+        if (rooms.length > 0 && selectedRoom && !vacantRooms.some((r) => r.id === selectedRoom)) {
+            setSelectedRoom("");
+        }
+    }, [rooms, selectedRoom, vacantRooms]);
+
     const selectedRoomData = rooms.find((r) => r.id === selectedRoom);
     const totalPrice = selectedRoomData
         ? selectedRoomData.base_price * nights

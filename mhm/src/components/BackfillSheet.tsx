@@ -127,10 +127,14 @@ export default function BackfillSheet({ open, onOpenChange, prefill }: Props) {
     // khiến effect chạy lại nhiều hơn cần thiết, nó không bao giờ gọi
     // setRoomId khi không cần, nên không thể lặp.
     useEffect(() => {
-        if (roomId && !selectableRooms.some((r) => r.id === roomId)) {
+        // `rooms.length > 0`: các sheet này gọi fetchRooms() lúc mở, nên có một
+        // khoảnh khắc danh sách còn rỗng. Không có vế này, một phòng hợp lệ
+        // truyền vào bị xoá ngay trước khi rooms kịp về, và effect nạp
+        // preSelected không chạy lại để đặt lại nó.
+        if (rooms.length > 0 && roomId && !selectableRooms.some((r) => r.id === roomId)) {
             setRoomId("");
         }
-    }, [roomId, selectableRooms]);
+    }, [rooms, roomId, selectableRooms]);
 
     // Backend vẫn validate lại — đây chỉ là rào chắn trong form cho khỏi chọn
     // nhầm một ngày rõ ràng vô lý (ghi bù mà ngày vào ở tương lai, hoặc ngày
