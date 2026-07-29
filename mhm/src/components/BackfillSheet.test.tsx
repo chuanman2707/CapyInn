@@ -228,6 +228,11 @@ describe("BackfillSheet", () => {
             />,
         );
         await user.type(screen.getByPlaceholderText("Họ và tên *"), "Nguyễn Văn Còn Ở");
+        // `canSubmit` đòi total > 0, nên phải chờ gợi ý giá về (hoặc gõ tay)
+        // trước khi bấm — một lượt 0₫ không còn gửi đi được.
+        await waitFor(() => {
+            expect(screen.getByLabelText(/Tiền phòng/i)).not.toHaveValue(0);
+        });
         await user.click(screen.getByRole("button", { name: /Ghi bù/ }));
 
         await waitFor(() => {
@@ -502,6 +507,115 @@ describe("BackfillSheet", () => {
         await user.click(stayingCheckbox);
         await waitFor(() => {
             expect(select).toHaveValue("");
+        });
+    });
+
+    // Spec §4: bật "Khách còn ở" thì ngày ra lấy theo cuối vùng kéo NẾU vùng đó
+    // chạm tương lai, còn không thì mặc định ngày mai. Nửa sau chưa từng được
+    // làm: bật toggle chỉ đổi nhãn và min/max, `checkOutDate` giữ nguyên giá
+    // trị quá khứ, `datesValid` chỉ soi nights > 0 nên nút gửi vẫn sáng và chủ
+    // ăn nguyên toast của backend "Ngày ra dự kiến phải sau hôm nay."
+    it("vùng kéo toàn quá khứ: bật 'Khách còn ở' đẩy ngày ra về ngày mai", async () => {
+        const today = localDateIso(new Date());
+        const user = userEvent.setup();
+        render(
+            <BackfillSheet
+                open
+                onOpenChange={() => {}}
+                prefill={{
+                    roomId: "R101",
+                    checkInDate: addDaysIso(today, -3),
+                    checkOutDate: addDaysIso(today, -1),
+                    stillStaying: false,
+                }}
+            />,
+        );
+        expect(await screen.findByLabelText("Ngày ra")).toHaveValue(addDaysIso(today, -1));
+        await user.type(screen.getByPlaceholderText("Họ và tên *"), "Nguyễn Văn Bù");
+
+        await user.click(screen.getByRole("checkbox", { name: /Khách còn ở/ }));
+
+        await waitFor(() => {
+            expect(screen.getByLabelText("Ngày ra dự kiến")).toHaveValue(addDaysIso(today, 1));
+        });
+        // Ngày đã hợp lệ thì nút gửi phải sáng — nếu ngày vẫn là quá khứ, cái
+        // sáng lên chỉ dẫn tới một cú từ chối ở backend.
+        await waitFor(() => {
+            expect(screen.getByRole("button", { name: /Ghi bù/ })).not.toBeDisabled();
+        });
+    });
+
+    it("không đè ngày ra tương lai đã có sẵn khi bật 'Khách còn ở'", async () => {
+        const today = localDateIso(new Date());
+        const user = userEvent.setup();
+        render(
+            <BackfillSheet
+                open
+                onOpenChange={() => {}}
+                prefill={{
+                    roomId: "R101",
+                    checkInDate: addDaysIso(today, -3),
+                    checkOutDate: addDaysIso(today, 5),
+                    stillStaying: false,
+                }}
+            />,
+        );
+        expect(await screen.findByLabelText("Ngày ra")).toHaveValue(addDaysIso(today, 5));
+
+        await user.click(screen.getByRole("checkbox", { name: /Khách còn ở/ }));
+
+        await waitFor(() => {
+            expect(screen.getByLabelText("Ngày ra dự kiến")).toHaveValue(addDaysIso(today, 5));
+        });
+    });
+
+    // Chiều ngược lại, mở ra bởi chính cú nhảy ở trên: "đã trả phòng" mà ngày
+    // ra nằm ở tương lai cũng bị backend từ chối.
+    it("tắt 'Khách còn ở' kéo ngày ra tương lai về hôm nay", async () => {
+        const today = localDateIso(new Date());
+        const user = userEvent.setup();
+        render(
+            <BackfillSheet
+                open
+                onOpenChange={() => {}}
+                prefill={{
+                    roomId: "R101",
+                    checkInDate: addDaysIso(today, -3),
+                    checkOutDate: addDaysIso(today, 5),
+                    stillStaying: true,
+                }}
+            />,
+        );
+        expect(await screen.findByLabelText("Ngày ra dự kiến")).toHaveValue(addDaysIso(today, 5));
+
+        await user.click(screen.getByRole("checkbox", { name: /Khách còn ở/ }));
+
+        await waitFor(() => {
+            expect(screen.getByLabelText("Ngày ra")).toHaveValue(today);
+        });
+    });
+
+    it("không cho ghi bù một lượt 0₫", async () => {
+        const user = userEvent.setup();
+        render(
+            <BackfillSheet
+                open
+                onOpenChange={() => {}}
+                prefill={{ roomId: "R101", checkInDate: "2026-07-26", checkOutDate: "2026-07-28", stillStaying: false }}
+            />,
+        );
+        await user.type(screen.getByPlaceholderText("Họ và tên *"), "Nguyễn Văn Bù");
+        await waitFor(() => {
+            expect(screen.getByRole("button", { name: /Ghi bù/ })).not.toBeDisabled();
+        });
+
+        // Bảng giá hỏng thì `total` đứng ở 0 — một lượt lưu trú 0₫ không phải
+        // dữ liệu sổ sách thật, và nó cũng làm hỏng luôn cả doanh thu.
+        const totalInput = screen.getByLabelText(/Tiền phòng/i);
+        await user.clear(totalInput);
+
+        await waitFor(() => {
+            expect(screen.getByRole("button", { name: /Ghi bù/ })).toBeDisabled();
         });
     });
 

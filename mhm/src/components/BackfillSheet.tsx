@@ -145,6 +145,9 @@ export default function BackfillSheet({ open, onOpenChange, prefill }: Props) {
         !!checkInDate &&
         !!checkOutDate &&
         datesValid &&
+        // Bảng giá hỏng thì `total` đứng nguyên ở 0 và không gì chặn một lượt
+        // lưu trú 0₫ đi vào sổ — vừa sai sổ sách, vừa kéo lệch doanh thu.
+        total > 0 &&
         !paidTooHigh &&
         !paidNegative &&
         !submitting;
@@ -227,7 +230,28 @@ export default function BackfillSheet({ open, onOpenChange, prefill }: Props) {
                         <input
                             type="checkbox"
                             checked={stillStaying}
-                            onChange={(e) => setStillStaying(e.target.checked)}
+                            onChange={(e) => {
+                                const nextStillStaying = e.target.checked;
+                                setStillStaying(nextStillStaying);
+                                if (nextStillStaying) {
+                                    // §4: ngày ra dự kiến lấy theo cuối vùng kéo khi vùng đó
+                                    // chạm tương lai, còn không thì mặc định NGÀY MAI. Đổi nhãn
+                                    // và min/max thôi là chưa đủ: `datesValid` chỉ soi nights > 0
+                                    // nên nút gửi vẫn sáng với một ngày ra trong quá khứ, và
+                                    // backend từ chối bằng "Ngày ra dự kiến phải sau hôm nay."
+                                    // `min` không cứu được — không có <form> bao quanh và nút
+                                    // không phải submit, đúng lý do đã áp cho step="1" ở ô tiền.
+                                    // Ngày tương lai chủ đã chọn thì giữ nguyên, không đè.
+                                    if (!checkOutDate || checkOutDate <= todayIso) {
+                                        setCheckOutDate(addDaysIso(todayIso, 1));
+                                    }
+                                } else if (checkOutDate > todayIso) {
+                                    // Chiều ngược lại, mở ra bởi chính cú nhảy ở trên: "đã trả
+                                    // phòng" mà ngày ra ở tương lai cũng bị backend từ chối. Kéo
+                                    // về hôm nay — đúng `max` của ô ở chế độ này.
+                                    setCheckOutDate(todayIso);
+                                }
+                            }}
                         />
                         Khách còn ở (chưa trả phòng)
                     </label>
