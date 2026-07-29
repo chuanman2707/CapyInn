@@ -735,4 +735,78 @@ describe("ReservationSheet", () => {
     const guestsAfterRefresh = screen.getByLabelText(/số khách/i) as HTMLInputElement;
     expect(guestsAfterRefresh.value).toBe("9");
   });
+
+  it("điền sẵn ngày và số đêm khi mở từ calendar (prefillDates)", async () => {
+    // Không còn ô "số đêm" riêng (đã bỏ, xem test "để người dùng chọn ngày
+    // đi..." phía trên) — số đêm giờ luôn suy ra từ checkIn/checkOut qua
+    // nightsBetween(). Nạp breakdown giả phản ánh đúng 3 đêm để chứng minh
+    // nights được tính đúng từ cặp ngày prefill, không phải qua ô nhập riêng.
+    invoke.mockImplementation(async (command: string) => {
+      if (command === "calculate_room_price_preview") {
+        return {
+          pricing_type: "nightly",
+          base_amount: 1_500_000,
+          surcharge_amount: 0,
+          weekend_amount: 0,
+          total: 1_500_000,
+          capped: false,
+          breakdown: [{ label: "3 đêm x 500.000", amount: 1_500_000 }],
+        };
+      }
+      return { available: true, conflicts: [], max_nights: null };
+    });
+
+    render(
+      <ReservationSheet
+        open
+        onOpenChange={vi.fn()}
+        preSelectedRoomId="R101"
+        prefillDates={{ checkIn: "2026-08-02", checkOut: "2026-08-05" }}
+      />,
+    );
+
+    const checkIn = screen.getByLabelText(/ngày đến/i) as HTMLInputElement;
+    const checkOut = screen.getByLabelText(/ngày đi/i) as HTMLInputElement;
+    await waitFor(() => {
+      expect(checkIn.value).toBe("2026-08-02");
+      expect(checkOut.value).toBe("2026-08-05");
+    });
+    await waitFor(() => {
+      expect(screen.getByText(/3 đêm/i)).toBeInTheDocument();
+    });
+  });
+
+  it("editBooking thắng prefillDates khi component nhận cả hai (edit mode ưu tiên)", async () => {
+    render(
+      <ReservationSheet
+        open
+        onOpenChange={vi.fn()}
+        prefillDates={{ checkIn: "2026-08-02", checkOut: "2026-08-05" }}
+        editBooking={{
+          id: "B999",
+          room_id: "R101",
+          guest_name: "Existing Guest",
+          guest_phone: "0900000000",
+          check_in_at: "2026-04-20",
+          expected_checkout: "2026-04-22",
+          scheduled_checkin: "2026-04-20",
+          scheduled_checkout: "2026-04-22",
+          nights: 2,
+          guests: 2,
+          total_price: 1000000,
+          source: "phone",
+          deposit_amount: 50000,
+        }}
+      />,
+    );
+
+    await waitFor(() => {
+      expect(fetchRooms).toHaveBeenCalledTimes(1);
+    });
+
+    const checkIn = screen.getByLabelText(/ngày đến/i) as HTMLInputElement;
+    const checkOut = screen.getByLabelText(/ngày đi/i) as HTMLInputElement;
+    expect(checkIn.value).toBe("2026-04-20");
+    expect(checkOut.value).toBe("2026-04-22");
+  });
 });

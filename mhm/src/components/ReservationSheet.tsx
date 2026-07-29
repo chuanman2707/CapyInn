@@ -20,6 +20,7 @@ interface Props {
     onOpenChange: (v: boolean) => void;
     preSelectedRoomId?: string;
     editBooking?: EditableBooking;
+    prefillDates?: { checkIn: string; checkOut: string };
 }
 
 function nightsBetween(checkIn: string, checkOut: string): number {
@@ -45,7 +46,7 @@ function addDays(date: string, days: number): string {
 // Đây là khôi phục lại trần cũ, không phải đặt ra chính sách mới.
 const MAX_RESERVATION_NIGHTS = 90;
 
-export default function ReservationSheet({ open, onOpenChange, preSelectedRoomId, editBooking }: Props) {
+export default function ReservationSheet({ open, onOpenChange, preSelectedRoomId, editBooking, prefillDates }: Props) {
     const { rooms, fetchRooms } = useHotelStore();
     const [roomId, setRoomId] = useState(preSelectedRoomId || "");
     const [guestName, setGuestName] = useState("");
@@ -109,6 +110,13 @@ export default function ReservationSheet({ open, onOpenChange, preSelectedRoomId
                 // (input có `min={1}`) cho khoảnh khắc trước khi effect đó chạy.
                 setGuests(editBooking.guests ?? 1);
                 setGuestsTouched(false);
+            } else if (prefillDates) {
+                // Đến từ kéo-thả trên lịch (Task 8): số đêm không cần tính ở
+                // đây — `nights` luôn được suy ra từ checkInDate/checkOutDate
+                // qua nightsBetween() ở trên, múi giờ-an toàn như mọi nơi khác
+                // trong file này.
+                setCheckInDate(prefillDates.checkIn);
+                setCheckOutDate(prefillDates.checkOut);
             } else {
                 // Mặc định: nhận phòng ngày mai, ở 1 đêm.
                 const tomorrow = addDays(new Date().toISOString().split("T")[0], 1);
@@ -116,7 +124,7 @@ export default function ReservationSheet({ open, onOpenChange, preSelectedRoomId
                 setCheckOutDate(addDays(tomorrow, 1));
             }
         }
-    }, [open, editBooking]);
+    }, [open, editBooking, prefillDates]);
 
     useEffect(() => {
         if (preSelectedRoomId) setRoomId(preSelectedRoomId);
