@@ -141,6 +141,11 @@ async fn ensure_setting_default(
 
 // ─── Versioned Inline Migrations ───
 
+/// Schema version a database reaches after `run_migrations` finishes on this
+/// build. Bump this together with every new migration block below; the
+/// `migrations_run_to_latest_schema_version` test fails otherwise.
+pub(crate) const LATEST_SCHEMA_VERSION: i32 = 22;
+
 async fn get_schema_version(pool: &Pool<Sqlite>) -> Result<i32, sqlx::Error> {
     sqlx::query(
         "CREATE TABLE IF NOT EXISTS schema_version (
@@ -852,7 +857,7 @@ mod tests {
             .expect("reads final schema version")
             .get("version");
 
-        assert_eq!(version, 22);
+        assert_eq!(version, super::LATEST_SCHEMA_VERSION);
     }
 
     #[tokio::test]
