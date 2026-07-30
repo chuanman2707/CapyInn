@@ -10,15 +10,26 @@ import { invokeCommand } from "@/lib/invokeCommand";
 import { useAuthStore } from "@/stores/useAuthStore";
 import { Moon, TrendingUp, Home, DollarSign, AlertCircle } from "lucide-react";
 import { fmtMoney } from "@/lib/format";
+import { addDaysIso, localDateIso } from "@/lib/timelineSelection";
 import type { AuditLog } from "@/types";
 
 export default function NightAudit() {
     const { isAdmin } = useAuthStore();
     const [logs, setLogs] = useState<AuditLog[]>([]);
-    const [auditDate, setAuditDate] = useState(() => {
-        const d = new Date();
-        return d.toISOString().slice(0, 10);
-    });
+    // **Ngày mặc định là ngày địa phương hôm qua** — ngày đã kết thúc.
+    //
+    // Trước đây là `toISOString()`, tức ngày UTC: từ 00:00 đến 07:00 giờ Việt Nam
+    // nó ra hôm qua, còn lại ra hôm nay. Không ai chọn luật đó — nó là hệ quả của
+    // múi giờ, và nó lật lúc 07:00 mà không giải thích được với ai.
+    //
+    // Chọn "hôm qua" vì việc này đóng sổ một ngày đã xong, và vì audit là **một
+    // lần cho mỗi ngày**: `run_night_audit` chặn chạy lại và `mark_bookings_audited_tx`
+    // đóng dấu các booking. Audit một ngày còn đang chạy sẽ chốt vĩnh viễn ngày đó
+    // với doanh thu chưa đủ — không có chỗ nào chặn việc đó. Ô ngày vẫn sửa được
+    // nếu quy ước đóng ngày của khách sạn khác.
+    const [auditDate, setAuditDate] = useState(() =>
+        addDaysIso(localDateIso(new Date()), -1),
+    );
     const [notes, setNotes] = useState("");
     const [running, setRunning] = useState(false);
 
@@ -78,6 +89,11 @@ export default function NightAudit() {
                                 onChange={(e) => setAuditDate(e.target.value)}
                                 className="bg-white/20 border-white/30 text-white placeholder:text-white/50 w-44"
                             />
+                            {/* Mặc định là ngày đã kết thúc, và audit chỉ chạy được
+                                một lần cho mỗi ngày — nên nói rõ đang đóng ngày nào. */}
+                            <p className="text-[11px] text-white/60 mt-1" data-testid="audit-date-hint">
+                                Đóng sổ ngày đã kết thúc. Mỗi ngày chỉ audit được một lần.
+                            </p>
                         </div>
                         <div className="flex-1">
                             <label className="text-xs text-white/70 block mb-1">Ghi chú</label>

@@ -12,6 +12,7 @@ import { Users, DoorOpen, Paintbrush, TrendingUp, ShieldCheck } from "lucide-rea
 import { invokeCommand } from "@/lib/invokeCommand";
 import { invoke } from "@tauri-apps/api/core";
 import { fmtDateShort, fmtMoney, fmtNumber } from "@/lib/format";
+import { addDaysIso, localDateIso } from "@/lib/timelineSelection";
 import type { ActivityItem, BookingWithGuest, ChartDataPoint, ExpenseItem, RoomAvailability } from "@/types";
 
 const DAY_NAMES = ["CN", "T2", "T3", "T4", "T5", "T6", "T7"];
@@ -45,9 +46,12 @@ export default function Dashboard() {
         }
         setRoomAvailability(map);
       }).catch(() => { });
-    const today = new Date();
-    const from = new Date(today.getTime() - 30 * 24 * 60 * 60 * 1000).toISOString().split("T")[0];
-    const to = today.toISOString().split("T")[0];
+    // Ngày địa phương: backend gom doanh thu theo `substr(created_at, 1, 10)` của
+    // mốc giờ địa phương (`revenue_queries::local_date_sql`), nên một khoảng ngày
+    // UTC lệch mất một ngày trong bảy giờ đầu mỗi ngày ở Việt Nam. `addDaysIso`
+    // đi qua lịch địa phương thay vì trừ 30 × 86.400.000ms.
+    const to = localDateIso(new Date());
+    const from = addDaysIso(to, -30);
     invoke<{ daily_revenue: { date: string; revenue: number }[] }>("get_analytics", { period: "7d" })
       .then((data) => {
         const mapped = data.daily_revenue.map((d) => {
