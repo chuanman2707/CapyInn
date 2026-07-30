@@ -3,6 +3,7 @@ import { invoke } from "@tauri-apps/api/core";
 
 import InfoItem from "@/components/shared/InfoItem";
 import Modal from "@/components/ui/Modal";
+import { bookingBalance } from "@/lib/bookingBalance";
 import { fmtMoney } from "@/lib/format";
 import type {
     Booking,
@@ -94,7 +95,11 @@ export default function CheckoutSettlementModal({
         return null;
     }
 
-    const overpaid = booking.paid_amount > finalTotal;
+    // Cùng một hàm với hai màn hình hiện số dư, nên "đã thu quá" ở đây và
+    // "Trả lại khách" ở đó luôn là cùng một điều kiện. Tổng đem so là
+    // `finalTotal` — số đang được chốt, có thể sửa tay — không phải
+    // `booking.total_price`; hai câu hỏi khác nhau, cùng một phép so.
+    const overpaid = bookingBalance(finalTotal, booking.paid_amount).kind === "overpaid";
     const confirmDisabled =
         loadingPreview || submitting || preview === null || finalTotal < 0 || overpaid;
 

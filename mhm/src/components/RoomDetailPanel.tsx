@@ -25,6 +25,7 @@ import { Button } from "@/components/ui/button";
 import { useInvoiceDialog } from "@/hooks/useInvoiceDialog";
 import { formatAppError } from "@/lib/appError";
 import { getRoomTypeLabel } from "@/lib/constants";
+import { BALANCE_TONE_CLASS, balanceDisplay } from "@/lib/bookingBalance";
 import { fmtDate, fmtDateShort, fmtMoney } from "@/lib/format";
 import { nightlyRateDisplay } from "@/lib/roomTypeRate";
 import { useHotelStore } from "@/stores/useHotelStore";
@@ -126,7 +127,10 @@ export default function RoomDetailPanel({
   // số engine bỏ qua khi loại phòng có bảng giá.
   const nightlyRate = nightlyRateDisplay(roomTypeRates, room.type);
   const derivedRateHint = nightlyRate.derived ? " (chưa cấu hình bảng giá)" : "";
-  const outstandingAmount = booking ? booking.total_price - booking.paid_amount : 0;
+  // Một chỗ duy nhất quyết định nhãn và màu của số dư. Trước đây chỗ này hiện
+  // "Còn nợ −3.800.000đ" màu xám khi thu quá — trong khi đúng trạng thái đó lại
+  // đang chặn trả phòng ở `CheckoutSettlementModal`.
+  const balance = booking ? balanceDisplay(booking.total_price, booking.paid_amount) : null;
 
   const guestSection = <RoomGuestsSection guests={guests} mode={mode} />;
 
@@ -186,11 +190,13 @@ export default function RoomDetailPanel({
               <div className="grid grid-cols-3 gap-3 text-center">
                 <PaymentBlock label="Tổng tiền" value={fmtMoney(booking.total_price)} color="text-slate-900" />
                 <PaymentBlock label="Đã trả" value={fmtMoney(booking.paid_amount)} color="text-emerald-600" />
-                <PaymentBlock
-                  label="Còn nợ"
-                  value={fmtMoney(outstandingAmount)}
-                  color={outstandingAmount > 0 ? "text-red-600" : "text-slate-400"}
-                />
+                {balance && (
+                  <PaymentBlock
+                    label={balance.label}
+                    value={balance.text}
+                    color={BALANCE_TONE_CLASS[balance.tone]}
+                  />
+                )}
               </div>
             </Section>
 
