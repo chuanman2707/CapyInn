@@ -3,6 +3,8 @@ import { X } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { basePriceRole } from "@/lib/roomTypeRate";
+import { useHotelStore } from "@/stores/useHotelStore";
 import type { RoomTypeItem } from "@/types";
 
 import type { RoomFormValues } from "./useRoomConfig";
@@ -26,6 +28,9 @@ export default function RoomFormDialog({
   onClose,
   onSubmit,
 }: RoomFormDialogProps) {
+  const roomTypeRates = useHotelStore((state) => state.roomTypeRates);
+  const role = basePriceRole(roomTypeRates, form.room_type);
+
   if (!open) return null;
 
   return (
@@ -95,13 +100,31 @@ export default function RoomFormDialog({
         </div>
         <div />
         <div>
-          <Label>💰 Giá cơ bản (VNĐ)</Label>
+          {/* Không gọi là "giá cơ bản": nhãn đó ngụ ý đây là giá khách trả, mà
+              engine bỏ qua nó ngay khi loại phòng có bảng giá. Dòng chú thích
+              dưới đây nói rõ số này đang có tác dụng gì. */}
+          <Label>💰 Giá gốc của phòng (VNĐ)</Label>
           <Input
             type="number"
             value={form.base_price}
             onChange={(event) => onChange({ ...form, base_price: Number(event.target.value) })}
             className="mt-1.5"
           />
+          <p className="mt-1.5 text-[11px] leading-snug text-brand-muted" data-testid="base-price-role">
+            {role.kind === "ignored" && (
+              <>
+                Loại phòng này đã có bảng giá ({role.typeRateText}/đêm), nên số ở đây{" "}
+                <strong>không</strong> ảnh hưởng tiền khách trả. Sửa giá ở mục Bảng giá.
+              </>
+            )}
+            {role.kind === "derives-type-price" && (
+              <>
+                Loại phòng này chưa có bảng giá, nên giá gốc của phòng có mã nhỏ nhất
+                trong loại sẽ thành giá của cả loại.
+              </>
+            )}
+            {role.kind === "unknown" && <>Chưa đọc được bảng giá, chưa rõ số này có được dùng hay không.</>}
+          </p>
         </div>
         <div>
           <Label>👥 Số khách tính giá base</Label>

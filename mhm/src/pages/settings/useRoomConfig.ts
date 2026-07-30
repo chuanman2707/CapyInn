@@ -4,6 +4,7 @@ import type { ConfigurableRoom, RoomTypeItem } from "@/types";
 import { formatAppError } from "@/lib/appError";
 import { invokeCommand } from "@/lib/invokeCommand";
 import { assertNonNegativeMoneyVnd, type MoneyVnd } from "@/lib/money";
+import { useHotelStore } from "@/stores/useHotelStore";
 
 export interface RoomFormValues {
     id: string;
@@ -38,6 +39,12 @@ export default function useRoomConfig() {
     const loadData = () => {
         invokeCommand<ConfigurableRoom[]>("get_rooms").then(setRooms).catch(() => { });
         invokeCommand<RoomTypeItem[]>("get_room_types").then(setRoomTypes).catch(() => { });
+        // Màn hình này có danh sách phòng riêng, không đi qua store, nên phải tự
+        // xin bảng giá theo loại phòng — đây đúng là chỗ cần nó nhất: nó là nơi
+        // người ta sửa `base_price` và cần biết số đó có tác dụng gì.
+        // Refresh sau khi ghi thì đã có: mọi lệnh ghi phòng phát "db-updated",
+        // RuntimeStateProvider gọi fetchRooms, fetchRooms kéo bảng giá theo.
+        void useHotelStore.getState().fetchRoomTypeRates();
     };
 
     useEffect(loadData, []);

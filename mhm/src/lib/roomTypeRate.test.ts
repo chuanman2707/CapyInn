@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { nightlyRateDisplay } from "./roomTypeRate";
+import { basePriceIsUnused, basePriceRole, nightlyRateDisplay } from "./roomTypeRate";
 import type { RoomTypeRate } from "@/types";
 
 const rates: Record<string, RoomTypeRate> = {
@@ -46,5 +46,42 @@ describe("nightlyRateDisplay", () => {
 
         expect(display.unknown).toBe(false);
         expect(display.text).not.toBe("—");
+    });
+});
+
+describe("basePriceRole", () => {
+    it("reports base_price as ignored, with the rate that wins instead", () => {
+        const role = basePriceRole(rates, "Phòng Đôi");
+
+        expect(role.kind).toBe("ignored");
+        expect(role.kind === "ignored" && role.typeRateText).toContain("640");
+    });
+
+    it("reports base_price as deriving the type price when no rule is configured", () => {
+        // Khác biệt quan trọng: ở trạng thái này số admin gõ *có* tác dụng —
+        // nhưng chỉ với phòng có mã nhỏ nhất trong loại.
+        expect(basePriceRole(rates, "Phòng Đơn").kind).toBe("derives-type-price");
+    });
+
+    it("claims nothing when the rates are unavailable", () => {
+        expect(basePriceRole(null, "Phòng Đôi").kind).toBe("unknown");
+        expect(basePriceRole(rates, "Phòng VIP").kind).toBe("unknown");
+    });
+});
+
+describe("basePriceIsUnused", () => {
+    it("is true when the type charges something other than the room's base price", () => {
+        expect(basePriceIsUnused(rates, "Phòng Đôi", 300_000)).toBe(true);
+    });
+
+    it("is false when the room's base price is exactly what the type charges", () => {
+        expect(basePriceIsUnused(rates, "Phòng Đôi", 640_000)).toBe(false);
+    });
+
+    it("stays quiet when the rates are unavailable", () => {
+        // Cảnh báo đoán mò tệ hơn không cảnh báo: không biết giá loại phòng thì
+        // không kết luận được số của phòng có được dùng hay không.
+        expect(basePriceIsUnused(null, "Phòng Đôi", 300_000)).toBe(false);
+        expect(basePriceIsUnused(rates, "Phòng VIP", 300_000)).toBe(false);
     });
 });
