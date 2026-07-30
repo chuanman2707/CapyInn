@@ -13,6 +13,8 @@ import { clearMockResponses, invoke, setMockResponse } from "@test-mocks/tauri-c
 const autoAssignRooms = vi.hoisted(() => vi.fn());
 const groupCheckIn = vi.hoisted(() => vi.fn());
 const setGroupCheckinOpen = vi.hoisted(() => vi.fn());
+/** Mutable so a test can close the sheet and observe the form reset. */
+const sheetState = vi.hoisted(() => ({ open: true }));
 
 // Two rooms, two prices, and a multi-word type name. Deliberately not tidier
 // than production data: the shipped type names contain spaces, and a fixture
@@ -46,7 +48,7 @@ const ROOMS = [
 
 vi.mock("@/stores/useHotelStore", () => ({
   useHotelStore: () => ({
-    isGroupCheckinOpen: true,
+    isGroupCheckinOpen: sheetState.open,
     setGroupCheckinOpen,
     rooms: ROOMS,
     groupCheckIn,
@@ -238,5 +240,105 @@ describe("GroupCheckinSheet total price", () => {
     // price successfully.
     expect(screen.queryByText(/1\.300\.000/)).not.toBeInTheDocument();
     expect(screen.queryByText(/632\.500/)).not.toBeInTheDocument();
+  });
+});
+
+describe("GroupCheckinSheet and the local day turning", () => {
+  beforeEach(() => {
+    clearMockResponses();
+    invoke.mockClear();
+    autoAssignRooms.mockReset();
+    groupCheckIn.mockReset();
+    setMockResponse("calculate_room_price_preview", () => pricingResult(632_500));
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  /// `todayStr` used to be captured once per render with no reason to re-render,
+  /// so an arrival date of "tomorrow" stayed classified as a reservation after
+  /// midnight had made it *today*. The two classifications send different date
+  /// shapes: bare `YYYY-MM-DD` for a reservation, an offset stamp for a walk-in.
+  /// `group_lifecycle.rs` branches the same way against its own local today, so
+  /// the desk and the ledger disagreed about which stay was being priced.
+  it("reclassifies tomorrow's group as a walk-in once midnight makes it today", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    vi.setSystemTime(new Date(2026, 3, 20, 23, 59, 0));
+
+    const user = userEvent.setup();
+    render(<GroupCheckinSheet />);
+
+    // Ngày nhận phòng nằm ở bước 0, nên phải đặt trước khi đi tiếp. Ngày mai lúc
+    // này là 21, nên đây là đặt trước: ngày trần, không có độ lệch.
+    const arrival = screen.getByDisplayValue("2026-04-20") as HTMLInputElement;
+    await user.clear(arrival);
+    await user.type(arrival, "2026-04-21");
+
+    const textboxes = screen.getAllByRole("textbox");
+    await user.type(textboxes[0], "Đoàn Hà Nội");
+    await user.type(textboxes[1], "Trần Văn B");
+    await user.click(screen.getByRole("button", { name: /Tiếp theo/i }));
+    await user.click(screen.getByRole("button", { name: /Chọn tay/i }));
+    await user.click(screen.getByRole("button", { name: /R101/ }));
+    await user.click(screen.getByRole("button", { name: /R202/ }));
+    const masterCandidates = screen.getAllByRole("button", { name: /R101/ });
+    await user.click(masterCandidates[masterCandidates.length - 1]);
+
+    await vi.waitFor(() =>
+      expect(previewArgs().some((a) => a.checkIn === "2026-04-21")).toBe(true),
+    );
+
+    const beforeMidnight = previewArgs().length;
+    await vi.advanceTimersByTimeAsync(62_000);
+
+    // Qua nửa đêm, 21 chính là hôm nay, nên phải chuyển sang nhánh vãng lai —
+    // đúng nhánh backend sẽ tính tiền.
+    await vi.waitFor(() => expect(previewArgs().length).toBeGreaterThan(beforeMidnight));
+    const latest = previewArgs()[previewArgs().length - 1];
+    expect(latest.checkIn).toMatch(/T\d{2}:\d{2}:\d{2}[+-]\d{2}:\d{2}$/);
+    expect(latest.checkIn.slice(0, 10)).toBe("2026-04-21");
+  });
+});
+
+describe("GroupCheckinSheet form reset", () => {
+  beforeEach(() => {
+    clearMockResponses();
+    invoke.mockClear();
+    sheetState.open = true;
+    setMockResponse("calculate_room_price_preview", () => pricingResult(632_500));
+  });
+
+  afterEach(() => {
+    sheetState.open = true;
+    vi.useRealTimers();
+  });
+
+  /// The reset ran `new Date().toISOString().split("T")[0]` — the UTC day —
+  /// three lines below a comment explaining why that is wrong. Before 07:00 in
+  /// Vietnam the UTC day is still yesterday, so closing and reopening the sheet
+  /// on the night shift put *yesterday* in the arrival field, which then reads as
+  /// a backfill rather than today's walk-in.
+  it("resets the arrival date to the local day, not the UTC day", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    vi.setSystemTime(new Date(2026, 3, 21, 2, 0, 0));
+
+    const user = userEvent.setup();
+    const { container, rerender } = render(<GroupCheckinSheet />);
+    const dateInput = () => container.querySelector('input[type="date"]') as HTMLInputElement;
+
+    const arrival = screen.getByDisplayValue("2026-04-21") as HTMLInputElement;
+    await user.clear(arrival);
+    await user.type(arrival, "2026-04-25");
+    expect((screen.getByDisplayValue("2026-04-25") as HTMLInputElement).value).toBe("2026-04-25");
+
+    sheetState.open = false;
+    rerender(<GroupCheckinSheet />);
+    sheetState.open = true;
+    rerender(<GroupCheckinSheet />);
+
+    await vi.waitFor(() => expect(dateInput().value).toBe("2026-04-21"));
+    // 2026-04-20 là ngày UTC lúc 02:00 giờ Việt Nam — chính con số mà bản cũ đặt.
+    expect(dateInput().value).not.toBe("2026-04-20");
   });
 });

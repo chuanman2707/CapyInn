@@ -170,3 +170,61 @@ describe("CheckinSheet total price", () => {
     expect(option).not.toHaveTextContent("500.000");
   });
 });
+
+describe("CheckinSheet and the local day", () => {
+  beforeEach(() => {
+    clearMockResponses();
+    invoke.mockClear();
+    useHotelStore.setState({ isCheckinOpen: true, rooms: [] });
+    setMockResponse("get_rooms", () => [ROOM]);
+    setMockResponse("calculate_room_price_preview", () => pricingResult(BACKEND_TOTAL));
+    setMockResponse("check_availability", () => ({ available: true, conflicts: [] }));
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  function availabilityArgs(): { fromDate: string; toDate: string }[] {
+    return invoke.mock.calls
+      .filter(([command]) => command === "check_availability")
+      .map(([, args]) => args as never);
+  }
+
+  /// At 02:00 in Vietnam the UTC day is still yesterday, so a `toISOString()`
+  /// window asked whether the room was free *the day before* the guest is
+  /// standing at the desk.
+  it("checks availability for the local day, not the UTC day", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-04-21T02:00:00+07:00"));
+
+    render(<CheckinSheet preSelectedRoomId="R101" />);
+
+    await vi.waitFor(() => expect(availabilityArgs().length).toBeGreaterThan(0));
+    expect(availabilityArgs()[0].fromDate).toBe("2026-04-21");
+    expect(availabilityArgs()[0].toDate).toBe("2026-04-22");
+  });
+
+  /// A sheet opened before midnight and submitted after it quoted yesterday
+  /// while `check_in` charged from today's `Local::now()` — different
+  /// `special_dates` row, different weekend uplift. The night shift is a shift,
+  /// not an edge case.
+  it("re-quotes when the local day turns under an open sheet", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-04-21T23:59:00+07:00"));
+
+    render(<CheckinSheet preSelectedRoomId="R101" />);
+
+    await vi.waitFor(() => expect(previewArgs().length).toBeGreaterThan(0));
+    expect(previewArgs()[0].checkIn).toContain("2026-04-21");
+
+    const before = previewArgs().length;
+    await vi.advanceTimersByTimeAsync(62_000);
+
+    await vi.waitFor(() => expect(previewArgs().length).toBeGreaterThan(before));
+    const latest = previewArgs()[previewArgs().length - 1];
+    expect(latest.checkIn).toContain("2026-04-22");
+    // Vẫn là mốc địa phương có độ lệch, không phải ngày trần hay `Z`.
+    expect(latest.checkIn).toMatch(/[+-]\d{2}:\d{2}$/);
+  });
+});
