@@ -142,7 +142,9 @@ fn date_only(value: &str) -> BookingResult<NaiveDate> {
         .map_err(|error| BookingError::datetime_parse(error.to_string()))
 }
 
-pub(crate) fn nights_between(check_in: &str, check_out: &str) -> BookingResult<i64> {
+/// Số đêm giữa hai mốc, chấp nhận cả `YYYY-MM-DD` lẫn RFC3339 (cắt 10 ký tự đầu).
+/// Trả 0 khi ngày đi không sau ngày đến — đúng lúc `calculate_price` cũng trả 0.
+fn nights_between(check_in: &str, check_out: &str) -> BookingResult<i64> {
     Ok((date_only(check_out)? - date_only(check_in)?)
         .num_days()
         .max(0))
