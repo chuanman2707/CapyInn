@@ -1,6 +1,6 @@
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import {
   createAppErrorException,
@@ -134,5 +134,58 @@ describe("NightAudit", () => {
       );
     });
     expect(toastError).toHaveBeenCalledWith(formatAppError(error));
+  });
+});
+
+describe("NightAudit default audit date", () => {
+  beforeEach(() => {
+    invoke.mockReset();
+    invokeCommand.mockReset();
+    invoke.mockResolvedValue([]);
+    useAuthStore.setState({
+      user: { id: "u1", name: "Admin", role: "admin", active: true, created_at: "" },
+      isAuthenticated: true,
+      loading: false,
+      error: null,
+    });
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  function renderAt(when: Date) {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    vi.setSystemTime(when);
+    const { container } = render(<NightAudit />);
+    return (container.querySelector('input[type="date"]') as HTMLInputElement).value;
+  }
+
+  /// The audit is one-shot per date — `run_night_audit` refuses a re-run and
+  /// `mark_bookings_audited_tx` stamps the bookings — and nothing stops it
+  /// auditing a day still in progress. So the default date decides whether a
+  /// date gets permanently closed with partial revenue.
+  it("defaults to the local day that has ended, on the night shift", () => {
+    // 01:00 on the 22nd in Vietnam. The day that just ended is the 21st.
+    expect(renderAt(new Date("2026-04-22T01:00:00+07:00"))).toBe("2026-04-21");
+  });
+
+  it("defaults to the same completed day during the working day", () => {
+    // The old `toISOString()` value flipped here — 09:00 gave the 22nd, 01:00
+    // gave the 21st — a rule that changes at 07:00 for no stateable reason.
+    expect(renderAt(new Date("2026-04-22T09:00:00+07:00"))).toBe("2026-04-21");
+  });
+
+  it("never defaults to a day still in progress", () => {
+    for (const hour of ["00:30", "06:59", "07:01", "23:30"]) {
+      vi.useRealTimers();
+      const value = renderAt(new Date(`2026-04-22T${hour}:00+07:00`));
+      expect(value).not.toBe("2026-04-22");
+      expect(value).toBe("2026-04-21");
+    }
+  });
+
+  it("crosses a month boundary through the calendar, not by subtracting a day of milliseconds", () => {
+    expect(renderAt(new Date("2026-05-01T02:00:00+07:00"))).toBe("2026-04-30");
   });
 });
