@@ -13,6 +13,7 @@ import { FormField, FormFieldSelect } from "@/components/shared/FormField";
 import { formatAppError } from "@/lib/appError";
 import { fmtMoney } from "@/lib/format";
 import { addDays, addDaysIso, localDateIso, localRfc3339 } from "@/lib/timelineSelection";
+import { useLocalDay } from "@/hooks/useLocalDay";
 import { sumRoomPrices, useRoomPrices } from "@/hooks/useRoomPrices";
 import { toast } from "sonner";
 import { Sparkles, Hand, Check, ChevronLeft, ChevronRight, Users, Star, CalendarClock } from "lucide-react";
@@ -45,7 +46,10 @@ export default function GroupCheckinSheet() {
     // `isReservation` phán nhầm chế độ ngay trong ca đêm.
     const [checkInDate, setCheckInDate] = useState(() => localDateIso(new Date()));
 
-    const todayStr = localDateIso(new Date());
+    // Qua nửa đêm là `todayStr` đổi theo, nên một sheet mở xuyên ca đêm không
+    // còn phân loại một đoàn khách vãng lai thành đặt trước (hoặc ngược lại) —
+    // hai nhánh đó gửi hai dạng ngày khác nhau xuống backend.
+    const todayStr = useLocalDay();
     const isReservation = checkInDate > todayStr;
 
     // Step 2: Room selection
@@ -72,7 +76,10 @@ export default function GroupCheckinSheet() {
             setRoomType("all");
             setNights(1);
             setSource("walk-in");
-            setCheckInDate(new Date().toISOString().split("T")[0]);
+            // Ngày địa phương, cùng lý do đã ghi ở chỗ khởi tạo state phía trên:
+            // `toISOString()` trả ngày UTC, mà trước 07:00 giờ Việt Nam vẫn là
+            // hôm qua — reset form trong ca đêm sẽ đặt sai ngày nhận phòng.
+            setCheckInDate(localDateIso(new Date()));
             setSelectedRooms([]);
             setMasterRoomId("");
             setAssignMode("auto");

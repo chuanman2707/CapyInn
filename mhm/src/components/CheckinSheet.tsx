@@ -11,7 +11,8 @@ import { formatAppError } from "@/lib/appError";
 import { getRoomTypeLabel } from "@/lib/constants";
 import { fmtMoney } from "@/lib/format";
 import { createDeferredCleanup } from "@/lib/deferredCleanup";
-import { addDays, localRfc3339 } from "@/lib/timelineSelection";
+import { addDays, addDaysIso, localRfc3339 } from "@/lib/timelineSelection";
+import { useLocalDay } from "@/hooks/useLocalDay";
 import { usePricePreview } from "@/hooks/usePricePreview";
 import { toast } from "sonner";
 import type { CccdInfo, GuestInput, GuestSummary } from "@/types";
@@ -148,17 +149,22 @@ export default function CheckinSheet({ preSelectedRoomId, preSelectedNights }: {
     }, [rooms, selectedRoom, vacantRooms]);
 
     const selectedRoomData = rooms.find((r) => r.id === selectedRoom);
+    const localDay = useLocalDay();
 
     // Nhận phòng vãng lai được tính tiền từ `Local::now()` cho `nights` ngày
     // (`stay_lifecycle.rs`), nên bản xem trước phải hỏi đúng hai mốc đó — không
     // phải ngày trần, vốn là cách đặt phòng trước được tính.
+    // `localDay` nằm trong deps để mốc báo giá được tính lại khi qua nửa đêm.
+    // Không có nó, sheet mở lúc 23:5x vẫn báo giá theo hôm qua trong khi
+    // `check_in` thu tiền từ `Local::now()` của hôm nay — lệch ngày lễ và lệch
+    // phụ thu cuối tuần, đúng thứ mạch báo giá này dựng lên để chặn.
     const { quoteCheckIn, quoteCheckOut } = useMemo(() => {
         const now = new Date();
         return {
             quoteCheckIn: localRfc3339(now),
             quoteCheckOut: localRfc3339(addDays(now, Math.max(nights, 0))),
         };
-    }, [nights]);
+    }, [localDay, nights]);
 
     // Con số phải do engine trả về. `base_price × nights` bỏ qua bảng giá đã
     // cấu hình, phụ thu cuối tuần và phụ thu ngày lễ — những thứ lúc thu tiền
@@ -176,15 +182,16 @@ export default function CheckinSheet({ preSelectedRoomId, preSelectedNights }: {
         guests: null,
     });
 
-    const { fromDate, toDate } = useMemo(() => {
-        const now = new Date();
-        const next = new Date(now.getTime() + Math.max(nights, 0) * 86400000);
-
-        return {
-            fromDate: now.toISOString().split("T")[0],
-            toDate: next.toISOString().split("T")[0],
-        };
-    }, [nights]);
+    // Ngày địa phương, không phải `toISOString()`: trước 07:00 giờ Việt Nam thì
+    // ngày UTC vẫn là hôm qua, nên cửa sổ này đi tra tình trạng phòng của ngày
+    // hôm trước — trong khi phòng đang được nhận hôm nay.
+    const { fromDate, toDate } = useMemo(
+        () => ({
+            fromDate: localDay,
+            toDate: addDaysIso(localDay, Math.max(nights, 0)),
+        }),
+        [localDay, nights],
+    );
 
     const { availability } = useAvailability({
         roomId: selectedRoom,
