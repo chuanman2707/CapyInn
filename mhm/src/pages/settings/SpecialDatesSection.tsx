@@ -35,11 +35,21 @@ export default function SpecialDatesSection() {
     const [clashes, setClashes] = useState<SpecialDateRow[] | null>(null);
     const [pending, setPending] = useState<PendingWrite | null>(null);
     const [deleting, setDeleting] = useState<SpecialDateRange | null>(null);
+    const [loadError, setLoadError] = useState(false);
 
     const reload = useCallback(() => {
         invoke<SpecialDateRow[]>("get_special_dates")
-            .then(setRows)
-            .catch(() => setRows([]));
+            .then((data) => {
+                setRows(data);
+                setLoadError(false);
+            })
+            .catch(() => {
+                // Không rõ DB có gì — tuyệt đối không giả vờ là "rỗng", vì đó
+                // là dữ liệu mà bảng ghi-đè dùng để so trùng. Rỗng giả sẽ vô
+                // hiệu hoá cảnh báo ghi đè.
+                setLoadError(true);
+                toast.error("Không tải được danh sách đợt cao điểm đã khai");
+            });
     }, []);
 
     useEffect(reload, [reload]);
@@ -52,6 +62,8 @@ export default function SpecialDatesSection() {
         setFrom("");
         setTo("");
         setUpliftPct("30");
+        setClashes(null);
+        setPending(null);
     };
 
     const startEdit = (range: SpecialDateRange) => {
@@ -74,9 +86,33 @@ export default function SpecialDatesSection() {
     };
 
     const handleSave = () => {
+        // Bất kỳ lần bấm lưu nào cũng coi như từ bỏ hộp ghi-đè cũ (nếu có) —
+        // nó có thể đang mô tả một yêu cầu đã lỗi thời.
+        setClashes(null);
+        setPending(null);
+
+        if (loadError) {
+            toast.error(
+                "Chưa tải được danh sách đợt đã khai nên không thể so trùng an toàn. Tải lại trang rồi thử lại.",
+            );
+            return;
+        }
+
         const trimmed = label.trim();
         if (!trimmed || !from || !to || to < from) {
             toast.error("Điền tên đợt và khoảng ngày hợp lệ");
+            return;
+        }
+
+        const trimmedUplift = upliftPct.trim();
+        const upliftValue = Number(trimmedUplift);
+        if (
+            trimmedUplift === "" ||
+            !Number.isFinite(upliftValue) ||
+            upliftValue < 0 ||
+            upliftValue > 500
+        ) {
+            toast.error("Nhập % phụ thu hợp lệ, từ 0 đến 500");
             return;
         }
 
@@ -89,7 +125,7 @@ export default function SpecialDatesSection() {
             from,
             to,
             label: trimmed,
-            upliftPct: Number(upliftPct),
+            upliftPct: upliftValue,
         };
 
         const conflicts = overlappingDates(rows, from, to, editing?.dates ?? []);
@@ -128,7 +164,12 @@ export default function SpecialDatesSection() {
                 </p>
             </div>
 
-            {ranges.length === 0 ? (
+            {loadError ? (
+                <p className="text-sm text-red-600">
+                    Không tải được danh sách đợt cao điểm đã khai. Tải lại trang trước khi thêm
+                    hoặc sửa, để tránh ghi đè nhầm ngày đã khai.
+                </p>
+            ) : ranges.length === 0 ? (
                 <p className="text-sm text-brand-muted">
                     Chưa khai đợt cao điểm nào. Thêm một đợt ở dưới.
                 </p>
