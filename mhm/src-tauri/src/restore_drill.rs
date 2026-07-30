@@ -757,35 +757,42 @@ fn push_core_count_baseline_check(
     }
 }
 
-/// Newest existing report in `restore-drills/`, with its core-table counts.
-/// The current run has not written its own report yet, so the newest file on
-/// disk is the previous drill.
+/// Most recent report in `restore-drills/` that actually carries core-table
+/// counts, with those counts. The current run has not written its own report
+/// yet, so every report on disk is a previous drill.
+///
+/// Reports are searched newest-first rather than reading only the newest one:
+/// a drill that failed before it could count anything (no backup found, bad
+/// integrity, missing tables) writes a report with no counts row, and letting
+/// that blind the comparison would drop the baseline exactly when something
+/// has already gone wrong.
 fn previous_core_counts(runtime_root: &Path) -> Option<(String, Vec<(String, i64)>)> {
     let report_dir = runtime_root.join("restore-drills");
-    let mut newest: Option<String> = None;
+    let mut file_names = Vec::new();
     for entry in fs::read_dir(&report_dir).ok()? {
-        let entry = entry.ok()?;
-        if !entry.file_type().ok()?.is_file() {
+        // One unreadable entry must not hide every other report.
+        let Ok(entry) = entry else { continue };
+        if !entry
+            .file_type()
+            .map(|kind| kind.is_file())
+            .unwrap_or(false)
+        {
             continue;
         }
         let file_name = entry.file_name().to_string_lossy().into_owned();
-        if !file_name.starts_with(REPORT_PREFIX) || !file_name.ends_with(REPORT_SUFFIX) {
-            continue;
-        }
-        // Report names embed a zero-padded timestamp, so byte order is time order.
-        let is_newer = match newest.as_ref() {
-            Some(current) => &file_name > current,
-            None => true,
-        };
-        if is_newer {
-            newest = Some(file_name);
+        if file_name.starts_with(REPORT_PREFIX) && file_name.ends_with(REPORT_SUFFIX) {
+            file_names.push(file_name);
         }
     }
 
-    let file_name = newest?;
-    let contents = fs::read_to_string(report_dir.join(&file_name)).ok()?;
-    let counts = parse_core_counts(&contents)?;
-    Some((file_name, counts))
+    // Report names embed a zero-padded timestamp, so byte order is time order.
+    file_names.sort_unstable_by(|left, right| right.cmp(left));
+
+    file_names.into_iter().find_map(|file_name| {
+        let contents = fs::read_to_string(report_dir.join(&file_name)).ok()?;
+        let counts = parse_core_counts(&contents)?;
+        Some((file_name, counts))
+    })
 }
 
 fn parse_core_counts(report: &str) -> Option<Vec<(String, i64)>> {
@@ -1288,6 +1295,27 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn drill_warns_but_does_not_fail_on_a_backup_timestamped_in_the_future() {
+        let temp = make_temp_dir("restore-drill-future");
+        let backup_dir = temp.path().join("backups");
+        fs::create_dir_all(&backup_dir).unwrap();
+        create_valid_backup(&backup_dir.join("capyinn_backup_scheduled_20260501_110000.db")).await;
+
+        let result = run_restore_drill(RestoreDrillOptions {
+            runtime_root: Some(temp.path().to_path_buf()),
+            backup_path: None,
+            now: Some(fixed_time(2026, 4, 26, 11, 0, 0)),
+        })
+        .await;
+
+        // A skewed clock is not a broken backup.
+        assert_eq!(result.status, RestoreDrillStatus::Pass);
+        let report = fs::read_to_string(result.report_path.expect("writes report")).unwrap();
+        assert!(report.contains("| Backup freshness | WARN |"));
+        assert!(report.contains("check the system clock"));
+    }
+
+    #[tokio::test]
     async fn drill_exempts_an_explicitly_named_backup_from_the_age_limit() {
         let temp = make_temp_dir("restore-drill-explicit-age");
         let backup_dir = temp.path().join("backups");
@@ -1506,6 +1534,29 @@ mod tests {
         let (file_name, counts) = previous_core_counts(temp.path()).expect("finds a report");
         assert_eq!(file_name, "restore-drill-20260425_110000.md");
         assert_eq!(counts, vec![("guests".to_string(), 11)]);
+    }
+
+    #[test]
+    fn previous_core_counts_skips_a_failed_report_with_no_counts() {
+        let temp = make_temp_dir("restore-drill-baseline-skip-failed");
+        let report_dir = temp.path().join("restore-drills");
+        fs::create_dir_all(&report_dir).unwrap();
+        fs::write(
+            report_dir.join("restore-drill-20260419_110000.md"),
+            "| Core tables readable | PASS | guests=9 |\n",
+        )
+        .unwrap();
+        // A drill that failed before it could count anything.
+        fs::write(
+            report_dir.join("restore-drill-20260425_110000.md"),
+            "Status: FAIL\n\n| Backup selection | FAIL | no managed CapyInn backup found |\n",
+        )
+        .unwrap();
+
+        let (file_name, counts) = previous_core_counts(temp.path())
+            .expect("falls back to the newest report that has counts");
+        assert_eq!(file_name, "restore-drill-20260419_110000.md");
+        assert_eq!(counts, vec![("guests".to_string(), 9)]);
     }
 
     #[test]
