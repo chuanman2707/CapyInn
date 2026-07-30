@@ -114,6 +114,7 @@ export const invoke = vi.fn(async (command: string, args?: Record<string, unknow
         get_revenue_stats: { total_revenue: 0, rooms_sold: 0, occupancy_rate: 0, daily_revenue: [] },
         get_expenses: [],
         get_pricing_rules: [],
+        get_room_type_rates: [],
         get_special_dates: [],
         get_audit_logs: [],
         record_js_crash: undefined,

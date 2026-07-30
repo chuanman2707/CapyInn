@@ -5,6 +5,8 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import RoomDetailPanel from "./RoomDetailPanel";
 
 const checkOut = vi.fn();
+let roomTypeRates: Record<string, { room_type: string; nightly_rate: number; configured: boolean }> | null =
+    null;
 
 vi.mock("@/components/CheckoutSettlementModal", () => ({
     default: ({ open }: { open: boolean }) =>
@@ -19,6 +21,7 @@ vi.mock("@/stores/useHotelStore", () => ({
         setTab: vi.fn(),
         setCheckinOpen: vi.fn(),
         loading: false,
+        roomTypeRates,
     }),
 }));
 
@@ -75,5 +78,72 @@ describe("RoomDetailPanel checkout settlement", () => {
         await user.click(screen.getByRole("button", { name: /check-out/i }));
 
         expect(screen.getByTestId("checkout-settlement-modal")).toBeInTheDocument();
+    });
+});
+
+describe("RoomDetailPanel nightly rate", () => {
+    const roomDetail = {
+        room: {
+            id: "101",
+            name: "101",
+            type: "Phòng Đôi",
+            floor: 1,
+            has_balcony: false,
+            // Lệch xa giá loại phòng, để thấy ngay nếu panel in số này.
+            base_price: 300000,
+            max_guests: 2,
+            extra_person_fee: 0,
+            status: "vacant" as const,
+        },
+        booking: null,
+        guests: [],
+    };
+
+    beforeEach(() => {
+        roomTypeRates = null;
+    });
+
+    it("shows the room type's rate, not the room's base_price", () => {
+        roomTypeRates = {
+            "Phòng Đôi": { room_type: "Phòng Đôi", nightly_rate: 480000, configured: true },
+        };
+
+        render(<RoomDetailPanel mode="page" roomDetail={roomDetail} />);
+
+        expect(screen.getByTestId("room-detail-nightly-rate").textContent).toContain("480");
+        expect(screen.getByTestId("room-detail-nightly-rate").textContent).not.toContain("300");
+    });
+
+    it("marks a rate nobody configured, because the fix is to configure one", () => {
+        roomTypeRates = {
+            "Phòng Đôi": { room_type: "Phòng Đôi", nightly_rate: 300000, configured: false },
+        };
+
+        render(<RoomDetailPanel mode="page" roomDetail={roomDetail} />);
+
+        expect(screen.getByTestId("room-detail-nightly-rate").textContent).toContain(
+            "chưa cấu hình bảng giá",
+        );
+    });
+
+    it("shows the same type rate in sheet mode, which renders its own price line", () => {
+        // Hai nhánh render riêng, nên phải chốt cả hai: sửa một nhánh về
+        // `base_price` mà nhánh kia vẫn xanh là đúng cái bẫy ở đây.
+        roomTypeRates = {
+            "Phòng Đôi": { room_type: "Phòng Đôi", nightly_rate: 480000, configured: true },
+        };
+
+        render(<RoomDetailPanel mode="sheet" roomDetail={roomDetail} onClose={vi.fn()} />);
+
+        const rate = screen.getByTestId("room-sheet-nightly-rate");
+        expect(rate.textContent).toContain("480");
+        expect(rate.textContent).not.toContain("300");
+    });
+
+    it("shows a dash and drops the /đêm suffix when the rate is unknown", () => {
+        render(<RoomDetailPanel mode="page" roomDetail={roomDetail} />);
+
+        // "—/đêm" đọc như giá bằng không mỗi đêm; bỏ hậu tố khi không biết giá.
+        expect(screen.getByTestId("room-detail-nightly-rate").textContent).toBe("—");
     });
 });

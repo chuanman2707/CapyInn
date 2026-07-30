@@ -134,7 +134,21 @@ the same night, whichever key the guest is handed.
   `special_dates` surcharge and the extra-person fee — all of which check-in
   charges;
 - a preview that cannot read the prices must fail, not quote a default. Guessing
-  a 0% holiday uplift produces a figure below what the desk will collect.
+  a 0% holiday uplift produces a figure below what the desk will collect;
+- a screen with no stay to price — a room card, the room drawer, the detail panel
+  — shows the *listed* rate from `get_room_type_rates`, which resolves through
+  `build_effective_pricing_rule`, the same function the charge builds its rule
+  with. It is not a quote: uplifts and the extra-person fee depend on dates and
+  guests those screens do not have;
+- when the rate cannot be read, show that it is unknown. There is no fallback
+  number — falling back to `base_price` reintroduces the exact defect, and
+  falling back to 0 reads as a free room;
+- **room types are matched case-insensitively, and both sides of the comparison
+  must be folded by the same function.** SQL's `LOWER` is ASCII-only; Rust's
+  `str::to_lowercase` is not. Folding one side in each meant a type named
+  `Phòng Đôi` never matched itself, so its configured rule was never found and
+  the stay was quoted *and charged* at the 350k house default while settings
+  displayed the real rate. Every type lookup now reads `LOWER(x) = LOWER(?)`.
 
 ## Implementation Path And Rename Debt
 

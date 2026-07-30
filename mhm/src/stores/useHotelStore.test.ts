@@ -435,3 +435,52 @@ describe("useHotelStore navigation side effects", () => {
     expect(useHotelStore.getState().dashboardRefreshVersion).toBe(1);
   });
 });
+
+describe("useHotelStore room type rates", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    useHotelStore.setState({ rooms: [], roomTypeRates: null });
+  });
+
+  it("loads the type rates alongside the rooms they annotate", async () => {
+    invoke.mockImplementation(async (command: string) => {
+      if (command === "get_rooms") return [{ id: "R-101", type: "Phòng Đôi" }];
+      if (command === "get_room_type_rates")
+        return [{ room_type: "Phòng Đôi", nightly_rate: 640000, configured: true }];
+      throw new Error(`unexpected ${command}`);
+    });
+
+    await useHotelStore.getState().fetchRooms();
+
+    // Keyed on `rooms.type`, because that is what every card looks up by.
+    expect(useHotelStore.getState().roomTypeRates?.["Phòng Đôi"]?.nightly_rate).toBe(640000);
+  });
+
+  it("still shows the rooms when the rate lookup fails", async () => {
+    invoke.mockImplementation(async (command: string) => {
+      if (command === "get_rooms") return [{ id: "R-101", type: "Phòng Đôi" }];
+      throw new Error("db locked");
+    });
+
+    // Không throw: mất giá thì màn hình phòng vẫn phải dùng được, chỉ là không
+    // có số để in. `fetchRooms` được gọi sau mọi lệnh ghi nên nó không được vỡ.
+    await useHotelStore.getState().fetchRooms();
+
+    expect(useHotelStore.getState().rooms).toHaveLength(1);
+    expect(useHotelStore.getState().roomTypeRates).toBeNull();
+  });
+
+  it("clears the rates it had when a later lookup fails", async () => {
+    useHotelStore.setState({
+      roomTypeRates: {
+        "Phòng Đôi": { room_type: "Phòng Đôi", nightly_rate: 640000, configured: true },
+      },
+    });
+    invoke.mockRejectedValue(new Error("db locked"));
+
+    await useHotelStore.getState().fetchRoomTypeRates();
+
+    // Giá cũ còn lại thì thẻ phòng in giá của một bảng giá đã đổi — tệ hơn "—".
+    expect(useHotelStore.getState().roomTypeRates).toBeNull();
+  });
+});
