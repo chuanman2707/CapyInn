@@ -26,6 +26,7 @@ import { useInvoiceDialog } from "@/hooks/useInvoiceDialog";
 import { formatAppError } from "@/lib/appError";
 import { getRoomTypeLabel } from "@/lib/constants";
 import { fmtDate, fmtDateShort, fmtMoney } from "@/lib/format";
+import { nightlyRateDisplay } from "@/lib/roomTypeRate";
 import { useHotelStore } from "@/stores/useHotelStore";
 import type { CheckoutSettlementPayload, RoomWithBooking } from "@/types";
 
@@ -49,6 +50,7 @@ export default function RoomDetailPanel({
     setTab,
     setCheckinOpen,
     loading,
+    roomTypeRates,
   } = useHotelStore();
   const [showCheckout, setShowCheckout] = useState(false);
   const [copied, setCopied] = useState(false);
@@ -120,6 +122,10 @@ export default function RoomDetailPanel({
   };
 
   const roomTypeLabel = getRoomTypeLabel(room.type);
+  // Giá của loại phòng, từ engine tính giá. `room.base_price` từng in ở đây là
+  // số engine bỏ qua khi loại phòng có bảng giá.
+  const nightlyRate = nightlyRateDisplay(roomTypeRates, room.type);
+  const derivedRateHint = nightlyRate.derived ? " (chưa cấu hình bảng giá)" : "";
   const outstandingAmount = booking ? booking.total_price - booking.paid_amount : 0;
 
   const guestSection = <RoomGuestsSection guests={guests} mode={mode} />;
@@ -142,7 +148,12 @@ export default function RoomDetailPanel({
             <div>
               <h2 className="text-lg font-bold text-slate-900">{room.name}</h2>
               <p className="text-[12px] text-slate-400">
-                {roomTypeLabel} · Tầng {room.floor} · {fmtMoney(room.base_price)}/đêm
+                {roomTypeLabel} · Tầng {room.floor} ·{" "}
+                <span data-testid="room-detail-nightly-rate">
+                  {nightlyRate.text}
+                  {nightlyRate.unknown ? "" : "/đêm"}
+                  {derivedRateHint}
+                </span>
               </p>
             </div>
           </div>
@@ -218,7 +229,14 @@ export default function RoomDetailPanel({
       <div className="flex-1 overflow-y-auto p-6 space-y-6">
         <div className="flex items-center justify-between">
           <StatusBadge status={room.status} variant="badge" />
-          <span className="text-lg font-bold text-brand-primary">{fmtMoney(room.base_price)}/đêm</span>
+          <span
+            className="text-lg font-bold text-brand-primary"
+            data-testid="room-sheet-nightly-rate"
+            title={nightlyRate.derived ? "Suy ra từ giá phòng, chưa có bảng giá cho loại này" : undefined}
+          >
+            {nightlyRate.text}
+            {nightlyRate.unknown ? "" : "/đêm"}
+          </span>
         </div>
 
         <div className="grid grid-cols-2 gap-3">

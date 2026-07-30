@@ -1,6 +1,8 @@
 import { BedDouble, CalendarClock, LogIn, Sparkles, User, Eye } from "lucide-react";
 import { ROOM_STATUS_CARD_BG, ROOM_STATUS_TEXT, STATUS_DOT_COLORS, STATUS_LABELS, getRoomTypeLabel } from "@/lib/constants";
-import { fmtMoney, fmtDateShort } from "@/lib/format";
+import { fmtDateShort } from "@/lib/format";
+import { nightlyRateDisplay } from "@/lib/roomTypeRate";
+import { useHotelStore } from "@/stores/useHotelStore";
 import type { Room, BookingWithGuest } from "@/types";
 
 interface UnifiedRoomCardProps {
@@ -29,6 +31,8 @@ export default function UnifiedRoomCard({
 }: UnifiedRoomCardProps) {
     const qa = QUICK_ACTION_CONFIG[room.status] ?? QUICK_ACTION_CONFIG.vacant;
     const QaIcon = qa.icon;
+    const roomTypeRates = useHotelStore((state) => state.roomTypeRates);
+    const nightlyRate = nightlyRateDisplay(roomTypeRates, room.type);
 
     const summaryLine = (() => {
         switch (room.status) {
@@ -100,8 +104,13 @@ export default function UnifiedRoomCard({
                 </span>
             </div>
 
-            <div className={`${compact ? "text-[12px]" : "text-[13px]"} font-semibold text-text-primary mb-1.5`}>
-                {fmtMoney(room.base_price)}
+            {/* Giá của **loại phòng**, do engine tính giá trả về — không phải
+                `room.base_price`, thứ engine bỏ qua khi loại phòng có bảng giá. */}
+            <div
+                className={`${compact ? "text-[12px]" : "text-[13px]"} font-semibold mb-1.5 ${nightlyRate.unknown ? "text-text-muted" : "text-text-primary"}`}
+                data-testid="room-card-nightly-rate"
+            >
+                {nightlyRate.text}
             </div>
 
             {/* Status label */}

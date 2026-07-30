@@ -26,6 +26,7 @@ import { useInvoiceDialog } from "@/hooks/useInvoiceDialog";
 import { formatAppError } from "@/lib/appError";
 import { getRoomTypeLabel } from "@/lib/constants";
 import { fmtDateShort, fmtMoney } from "@/lib/format";
+import { nightlyRateDisplay } from "@/lib/roomTypeRate";
 import { useHotelStore } from "@/stores/useHotelStore";
 import type { CheckoutSettlementPayload, RoomWithBooking, HousekeepingTask } from "@/types";
 
@@ -43,6 +44,7 @@ export default function RoomDrawer({ open, onClose, roomId }: RoomDrawerProps) {
         setCheckinOpen,
         fetchRooms,
         updateHousekeeping,
+        roomTypeRates,
     } = useHotelStore();
 
     const [roomDetail, setRoomDetail] = useState<RoomWithBooking | null>(null);
@@ -93,6 +95,8 @@ export default function RoomDrawer({ open, onClose, roomId }: RoomDrawerProps) {
 
     const { room, booking, guests } = roomDetail;
     const roomTypeLabel = getRoomTypeLabel(room.type);
+    // Giá loại phòng từ engine, không phải `room.base_price`.
+    const nightlyRate = nightlyRateDisplay(roomTypeRates, room.type);
 
     const handleCopyStayInfo = async () => {
         if (!booking) return;
@@ -296,7 +300,14 @@ export default function RoomDrawer({ open, onClose, roomId }: RoomDrawerProps) {
                     {/* Status + Price row */}
                     <div className="flex items-center justify-between">
                         <StatusBadge status={room.status} variant="badge" />
-                        <span className="text-lg font-bold text-brand-primary">{fmtMoney(room.base_price)}/đêm</span>
+                        <span
+                            className="text-lg font-bold text-brand-primary"
+                            data-testid="room-drawer-nightly-rate"
+                            title={nightlyRate.derived ? "Suy ra từ giá phòng, chưa có bảng giá cho loại này" : undefined}
+                        >
+                            {nightlyRate.text}
+                            {nightlyRate.unknown ? "" : "/đêm"}
+                        </span>
                     </div>
 
                     {/* Room info */}

@@ -27,6 +27,20 @@ export interface Room {
   status: RoomStatus;
 }
 
+/**
+ * Giá niêm yết của một **loại phòng**, do `get_room_type_rates` trả về.
+ *
+ * Không phải báo giá: uplift cuối tuần, `special_dates` và phụ thu thêm người
+ * đều phụ thuộc ngày và số khách. Con số gắn với một kỳ nghỉ cụ thể phải đi qua
+ * lệnh xem trước (`usePricePreview` / `useRoomPrices`).
+ */
+export interface RoomTypeRate {
+  room_type: string;
+  nightly_rate: MoneyVnd;
+  /** `false` = chưa có bảng giá cho loại này, số trên là suy ra chứ không ai đặt. */
+  configured: boolean;
+}
+
 export interface Guest {
   id: string;
   guest_type: string;

@@ -19,10 +19,19 @@ import type {
   AutoAssignResult,
   CheckoutSettlementMode,
   GroupInvoiceData,
+  RoomTypeRate,
 } from "@/types";
 
 interface HotelStore {
   rooms: Room[];
+  /**
+   * Giá niêm yết theo loại phòng, key là `rooms.type`.
+   *
+   * `null` = chưa tải được. Cố ý không có giá trị mặc định: màn hình nào không
+   * đọc được giá thì hiện "—", chứ không bịa một số ra. `room.base_price` không
+   * dùng làm giá dự phòng — engine bỏ qua nó ngay khi loại phòng có bảng giá.
+   */
+  roomTypeRates: Record<string, RoomTypeRate> | null;
   stats: DashboardStats | null;
   dashboardRefreshVersion: number;
   roomDetail: RoomWithBooking | null;
@@ -36,6 +45,8 @@ interface HotelStore {
   groups: BookingGroup[];
 
   fetchRooms: () => Promise<void>;
+  /** Không bao giờ throw: thất bại thì đặt `roomTypeRates` về `null`. */
+  fetchRoomTypeRates: () => Promise<void>;
   fetchStats: () => Promise<void>;
   markDashboardDataChanged: () => void;
   setTab: (tab: HotelTab) => void;
@@ -76,6 +87,7 @@ export const useHotelStore = create<HotelStore>((set, get) => {
 
   return {
     rooms: [],
+    roomTypeRates: null,
     stats: null,
     dashboardRefreshVersion: 0,
     roomDetail: null,
@@ -91,6 +103,21 @@ export const useHotelStore = create<HotelStore>((set, get) => {
     fetchRooms: async () => {
       const rooms = await invoke<Room[]>("get_rooms");
       set({ rooms });
+      // Cùng một lệnh tải: mọi màn hình hiện giá cạnh phòng đều đọc hai thứ này
+      // cùng lúc, và `fetchRooms` đã được gọi sau mọi lệnh ghi. Giá tải lỗi thì
+      // danh sách phòng vẫn hiện — nên `fetchRoomTypeRates` không throw.
+      await get().fetchRoomTypeRates();
+    },
+
+    fetchRoomTypeRates: async () => {
+      try {
+        const rates = await invoke<RoomTypeRate[]>("get_room_type_rates");
+        set({
+          roomTypeRates: Object.fromEntries(rates.map((rate) => [rate.room_type, rate])),
+        });
+      } catch {
+        set({ roomTypeRates: null });
+      }
     },
 
     fetchStats: async () => {

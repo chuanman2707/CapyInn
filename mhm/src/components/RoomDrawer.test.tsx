@@ -8,6 +8,9 @@ const { invoke } = vi.hoisted(() => ({
     invoke: vi.fn(),
 }));
 
+let roomTypeRates: Record<string, { room_type: string; nightly_rate: number; configured: boolean }> | null =
+    null;
+
 vi.mock("@tauri-apps/api/core", () => ({ invoke }));
 vi.mock("@/components/CheckoutSettlementModal", () => ({
     default: ({ open }: { open: boolean }) =>
@@ -21,6 +24,7 @@ vi.mock("@/stores/useHotelStore", () => ({
         setCheckinOpen: vi.fn(),
         fetchRooms: vi.fn(),
         updateHousekeeping: vi.fn(),
+        roomTypeRates,
     }),
 }));
 vi.mock("@/hooks/useInvoiceDialog", () => ({
@@ -75,5 +79,47 @@ describe("RoomDrawer checkout settlement", () => {
         await user.click(screen.getByRole("button", { name: /check-out/i }));
 
         expect(screen.getByTestId("checkout-settlement-modal")).toBeInTheDocument();
+    });
+});
+
+describe("RoomDrawer nightly rate", () => {
+    beforeEach(() => {
+        invoke.mockReset();
+        roomTypeRates = null;
+        invoke
+            .mockResolvedValueOnce({
+                room: {
+                    id: "101",
+                    name: "101",
+                    type: "Phòng Đôi",
+                    floor: 1,
+                    has_balcony: false,
+                    // Lệch xa giá loại phòng, để thấy ngay nếu drawer in số này.
+                    base_price: 300000,
+                    status: "vacant",
+                },
+                booking: null,
+                guests: [],
+            })
+            .mockResolvedValue([]);
+    });
+
+    it("shows the room type's rate, not the room's base_price", async () => {
+        roomTypeRates = {
+            "Phòng Đôi": { room_type: "Phòng Đôi", nightly_rate: 480000, configured: true },
+        };
+
+        render(<RoomDrawer open onClose={vi.fn()} roomId="101" />);
+
+        const rate = await screen.findByTestId("room-drawer-nightly-rate");
+        expect(rate.textContent).toContain("480");
+        expect(rate.textContent).not.toContain("300");
+    });
+
+    it("shows a dash without the /đêm suffix when the rate is unknown", async () => {
+        render(<RoomDrawer open onClose={vi.fn()} roomId="101" />);
+
+        const rate = await screen.findByTestId("room-drawer-nightly-rate");
+        expect(rate.textContent).toBe("—");
     });
 });
