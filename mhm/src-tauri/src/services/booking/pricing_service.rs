@@ -194,6 +194,31 @@ mod tests {
         .expect("seed room");
     }
 
+    /// `seed_room` with the guest columns opened up: the type-keyed preview has
+    /// to stand a room in for the type, so tests need rooms that disagree.
+    async fn seed_room_with_guests(
+        pool: &Pool<Sqlite>,
+        room_id: &str,
+        room_type: &str,
+        base_price: i64,
+        max_guests: i32,
+        extra_person_fee: i64,
+    ) {
+        sqlx::query(
+            "INSERT INTO rooms (id, name, type, floor, has_balcony, base_price, max_guests, extra_person_fee, status)
+             VALUES (?, ?, ?, 1, 0, ?, ?, ?, 'vacant')",
+        )
+        .bind(room_id)
+        .bind(format!("Room {room_id}"))
+        .bind(room_type)
+        .bind(base_price)
+        .bind(max_guests)
+        .bind(extra_person_fee)
+        .execute(pool)
+        .await
+        .expect("seed room with guests");
+    }
+
     async fn seed_special_date(pool: &Pool<Sqlite>, date: &str, uplift_pct: f64) {
         sqlx::query(
             "INSERT INTO special_dates (id, date, label, uplift_pct, created_at)
@@ -275,6 +300,66 @@ mod tests {
         assert_ne!(
             preview.total, lone_800.total,
             "a type cannot hold two prices: the 800k room bills at its sibling's rate"
+        );
+    }
+
+    /// A type-keyed quote must take *all* of its per-room stand-ins from one
+    /// room. `FALLBACK_BASE_PRICE_SQL` picks the lowest id; the guest limits used
+    /// to be picked by `LIMIT 1` with no `ORDER BY`, so SQLite was free to supply
+    /// them from a different room than the base price came from — a total
+    /// assembled from two rooms, and one that could change on restart.
+    #[tokio::test]
+    async fn a_type_keyed_quote_takes_its_base_price_and_its_guest_limits_from_one_room() {
+        let pool = migrated_pool().await;
+        // Inserted high-id first, and the two rooms disagree about every column
+        // the derivation reads, so a mismatched pick shows up as a wrong total
+        // rather than cancelling out.
+        seed_room_with_guests(&pool, "R-912", "mixed-guests", 800_000, 4, 0).await;
+        seed_room_with_guests(&pool, "R-911", "mixed-guests", 600_000, 2, 150_000).await;
+
+        let quoted = calculate_price_preview(
+            &pool,
+            "mixed-guests",
+            CHECK_IN,
+            CHECK_OUT,
+            "nightly",
+            Some(3),
+        )
+        .await
+        .expect("type preview for 3 guests");
+
+        // R-911 holds the lowest id, so it is the room the type stands on: its
+        // 600k base *and* its 150k surcharge, not one of each.
+        let lowest_id =
+            calculate_room_price_preview(&pool, "R-911", CHECK_IN, CHECK_OUT, "nightly", Some(3))
+                .await
+                .expect("R-911 preview");
+        let other_room =
+            calculate_room_price_preview(&pool, "R-912", CHECK_IN, CHECK_OUT, "nightly", Some(3))
+                .await
+                .expect("R-912 preview");
+
+        assert_eq!(
+            quoted.total, lowest_id.total,
+            "the type quote should match the room its price is derived from"
+        );
+        assert_ne!(
+            quoted.total, other_room.total,
+            "R-912 seats 4, so it charges no surcharge for a third guest — if the \
+             type quote matches it, the guest limits came from the wrong room"
+        );
+
+        // And the surcharge is genuinely in there: without it the two rooms would
+        // agree, and the assertion above would pass on an empty difference.
+        let no_guest_count =
+            calculate_price_preview(&pool, "mixed-guests", CHECK_IN, CHECK_OUT, "nightly", None)
+                .await
+                .expect("type preview with no guest count");
+        assert!(
+            quoted.total > no_guest_count.total,
+            "third guest cost nothing: {} vs {}",
+            quoted.total,
+            no_guest_count.total
         );
     }
 
