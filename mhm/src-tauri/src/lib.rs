@@ -390,6 +390,7 @@ pub fn run() {
             commands::auth::search_guest_by_phone,
             // Pricing Engine
             commands::pricing::get_pricing_rules,
+            commands::pricing::get_room_type_rates,
             commands::pricing::save_pricing_rule,
             commands::pricing::calculate_price_preview,
             commands::pricing::calculate_room_price_preview,

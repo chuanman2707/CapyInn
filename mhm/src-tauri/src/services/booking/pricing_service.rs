@@ -13,12 +13,12 @@
 use sqlx::{Pool, Sqlite, Transaction};
 
 use crate::app_error::CommandResult;
-use crate::domain::booking::pricing::calculate_from_loaded_inputs;
+use crate::domain::booking::pricing::{build_effective_pricing_rule, calculate_from_loaded_inputs};
 use crate::domain::booking::BookingResult;
 use crate::money::{validate_non_negative_money_vnd, MoneyVnd};
 use crate::queries::booking::pricing_queries::{
-    load_stay_pricing_inputs_for_room, load_stay_pricing_inputs_for_room_type,
-    load_stay_pricing_inputs_tx,
+    load_room_type_names, load_stay_pricing_inputs_for_room,
+    load_stay_pricing_inputs_for_room_type, load_stay_pricing_inputs_tx, load_type_rule_inputs,
 };
 use crate::repositories::booking::pricing_repository::{self, PricingRuleUpsert};
 
@@ -73,6 +73,50 @@ pub async fn calculate_room_price_preview(
         load_stay_pricing_inputs_for_room(pool, room_id, check_in, check_out, pricing_type, guests)
             .await?;
     calculate_from_loaded_inputs(&inputs)
+}
+
+/// The nightly rate a room type lists, before any date-dependent uplift.
+pub struct RoomTypeRate {
+    pub room_type: String,
+    pub nightly_rate: MoneyVnd,
+    /// `false` means no `pricing_rules` row: the rate below was *derived* from a
+    /// room's `base_price` (or the house default). The UI says so, because a
+    /// derived rate is a number nobody chose and the fix is to configure one.
+    pub configured: bool,
+}
+
+/// Every room type's listed nightly rate, for screens that show a rate without
+/// having a stay to price — room cards, the room drawer, the detail panel.
+///
+/// Goes through `build_effective_pricing_rule`, the same function the charge
+/// resolves its rule with, so the figure on a card is the figure a nightly stay
+/// starts from. Those screens used to print `rooms.base_price`, which the engine
+/// ignores outright once a type has a rule: a card could read 300k beside a desk
+/// collecting 480k.
+///
+/// It is the *list* rate, not a quote — weekend uplift, `special_dates` and the
+/// extra-person fee all depend on dates and guests this call does not have. A
+/// number attached to actual dates has to come from a preview command.
+pub async fn list_room_type_rates(pool: &Pool<Sqlite>) -> BookingResult<Vec<RoomTypeRate>> {
+    let mut rates = Vec::new();
+
+    for room_type in load_room_type_names(pool).await? {
+        let inputs = load_type_rule_inputs(pool, &room_type).await?;
+        let configured = inputs.stored_rule.is_some();
+        let rule = build_effective_pricing_rule(
+            &room_type,
+            inputs.stored_rule.as_ref(),
+            inputs.fallback_base_price,
+        );
+
+        rates.push(RoomTypeRate {
+            room_type,
+            nightly_rate: rule.daily_rate,
+            configured,
+        });
+    }
+
+    Ok(rates)
 }
 
 /// The values a caller may leave unset, and what the house uses instead.
@@ -303,6 +347,65 @@ mod tests {
         );
     }
 
+    /// A room type named in Vietnamese must be able to hold a price.
+    ///
+    /// The lookups fold case on both sides — `LOWER(type) = ?` in SQL against a
+    /// `str::to_lowercase()` bind — and the two folds are not the same function.
+    /// SQLite's `LOWER` is ASCII-only, so it leaves `Đ` alone; Rust's lowers it to
+    /// `đ`. For any type whose name carries a non-ASCII capital, the two strings
+    /// could never be equal, so *every* lookup missed: no stored rule was found,
+    /// no room supplied a fallback, and the quote came out at the 350k house
+    /// default. An operator could set 900k in settings and watch the desk read
+    /// 350k to the guest, with nothing anywhere reporting a problem.
+    ///
+    /// `Đ` is not an exotic character here. It opens `Đôi` and `Đơn` — double and
+    /// single — which is what half the room types in a Vietnamese hotel are called.
+    #[tokio::test]
+    async fn a_room_type_named_in_vietnamese_keeps_the_price_configured_for_it() {
+        let pool = migrated_pool().await;
+        seed_room(&pool, "R-201", "Phòng Đôi", 640_000).await;
+        save_pricing_rule(
+            &pool,
+            SavePricingRule {
+                room_type: "Phòng Đôi".to_string(),
+                hourly_rate: 100_000,
+                overnight_rate: 500_000,
+                daily_rate: 900_000,
+                ..request(0, 0, 0)
+            },
+            "rule-vn".to_string(),
+            "2026-04-01T00:00:00+07:00".to_string(),
+        )
+        .await
+        .expect("save rule");
+
+        let quoted =
+            calculate_room_price_preview(&pool, "R-201", CHECK_IN, CHECK_OUT, "nightly", None)
+                .await
+                .expect("preview");
+
+        // Two nights at the configured 900k. Stated against the arithmetic
+        // rather than a magic number, because what is being asserted is *which
+        // rate was found*, and the two candidates are far apart: 900k configured,
+        // 640k derived from the room, 350k the house default.
+        assert_eq!(
+            quoted.total,
+            900_000 * 2,
+            "the rule configured for Phòng Đôi was not the rule applied"
+        );
+
+        // And the type-keyed preview agrees, so the miss is not hiding in one of
+        // the two lookup paths.
+        let by_type =
+            calculate_price_preview(&pool, "Phòng Đôi", CHECK_IN, CHECK_OUT, "nightly", None)
+                .await
+                .expect("type preview");
+        assert_eq!(
+            by_type.total, quoted.total,
+            "the type-keyed and room-keyed previews found different rules"
+        );
+    }
+
     /// A type-keyed quote must take *all* of its per-room stand-ins from one
     /// room. `FALLBACK_BASE_PRICE_SQL` picks the lowest id; the guest limits used
     /// to be picked by `LIMIT 1` with no `ORDER BY`, so SQLite was free to supply
@@ -314,19 +417,15 @@ mod tests {
         // Inserted high-id first, and the two rooms disagree about every column
         // the derivation reads, so a mismatched pick shows up as a wrong total
         // rather than cancelling out.
-        seed_room_with_guests(&pool, "R-912", "mixed-guests", 800_000, 4, 0).await;
-        seed_room_with_guests(&pool, "R-911", "mixed-guests", 600_000, 2, 150_000).await;
+        // Named in Vietnamese on purpose: this test also holds the case-fold, so a
+        // lookup that stops matching `Đ` fails here as well as in the rule test.
+        seed_room_with_guests(&pool, "R-912", "Phòng Đôi", 800_000, 4, 0).await;
+        seed_room_with_guests(&pool, "R-911", "Phòng Đôi", 600_000, 2, 150_000).await;
 
-        let quoted = calculate_price_preview(
-            &pool,
-            "mixed-guests",
-            CHECK_IN,
-            CHECK_OUT,
-            "nightly",
-            Some(3),
-        )
-        .await
-        .expect("type preview for 3 guests");
+        let quoted =
+            calculate_price_preview(&pool, "Phòng Đôi", CHECK_IN, CHECK_OUT, "nightly", Some(3))
+                .await
+                .expect("type preview for 3 guests");
 
         // R-911 holds the lowest id, so it is the room the type stands on: its
         // 600k base *and* its 150k surcharge, not one of each.
@@ -352,7 +451,7 @@ mod tests {
         // And the surcharge is genuinely in there: without it the two rooms would
         // agree, and the assertion above would pass on an empty difference.
         let no_guest_count =
-            calculate_price_preview(&pool, "mixed-guests", CHECK_IN, CHECK_OUT, "nightly", None)
+            calculate_price_preview(&pool, "Phòng Đôi", CHECK_IN, CHECK_OUT, "nightly", None)
                 .await
                 .expect("type preview with no guest count");
         assert!(
