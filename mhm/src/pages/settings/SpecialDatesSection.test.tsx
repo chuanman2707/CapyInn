@@ -264,6 +264,33 @@ describe("SpecialDatesSection", () => {
         );
     });
 
+    it("sửa cụm khác trong lúc hộp ghi đè của cụm trước còn treo thì hộp đó phải tắt", async () => {
+        invoke.mockResolvedValue([
+            ...tetRows(),
+            { id: "he-1", date: "2026-03-01", label: "Hè", uplift_pct: 20 },
+        ]);
+        render(<SpecialDatesSection />);
+        await screen.findByText("Tết Nguyên đán");
+        await screen.findByText("Hè");
+
+        // Sửa cụm Tết, kéo dài "Đến ngày" đè lên ngày của cụm Hè để hộp ghi
+        // đè bật lên — nhưng KHÔNG bấm "Tiếp tục" hay "Huỷ" để giải quyết nó.
+        fireEvent.click(screen.getAllByRole("button", { name: "Sửa" })[0]);
+        fireEvent.change(screen.getByLabelText("Đến ngày"), { target: { value: "2026-03-01" } });
+        fireEvent.click(screen.getByRole("button", { name: "Cập nhật" }));
+
+        expect(await screen.findByText(/1 ngày đã khai sẽ bị ghi đè/)).toBeInTheDocument();
+
+        // Bỏ dở hộp đó, chuyển sang sửa cụm Hè — hộp ghi đè của yêu cầu cũ
+        // (mô tả cụm Tết) phải biến mất ngay, vì nó không còn liên quan gì
+        // tới form đang hiển thị (giờ đang hiển thị dữ liệu của cụm Hè).
+        fireEvent.click(screen.getAllByRole("button", { name: "Sửa" })[1]);
+
+        expect(screen.queryByText(/ngày đã khai sẽ bị ghi đè/)).not.toBeInTheDocument();
+        expect(screen.queryByRole("button", { name: "Tiếp tục" })).not.toBeInTheDocument();
+        expect(invokeWriteCommand).not.toHaveBeenCalled();
+    });
+
     it("để trống % phụ thu thì báo lỗi, không lưu 0% ngầm", async () => {
         const { toast } = await import("sonner");
         render(<SpecialDatesSection />);

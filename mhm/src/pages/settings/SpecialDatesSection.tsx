@@ -17,6 +17,11 @@ import {
 /** Quá ngần này thì liệt kê hết chỉ tổ rối; phần còn lại đếm số. */
 const MAX_LISTED_CLASHES = 10;
 
+/** Dùng chung cho mọi điểm chặn ghi khi chưa tải được danh sách để so trùng —
+ * để hai chỗ (handleSave và write) không lệch câu chữ theo thời gian. */
+const LOAD_ERROR_MESSAGE =
+    "Chưa tải được danh sách đợt đã khai nên không thể so trùng an toàn. Tải lại trang rồi thử lại.";
+
 type PendingWrite = {
     remove: string[];
     from: string;
@@ -72,9 +77,23 @@ export default function SpecialDatesSection() {
         setFrom(range.from);
         setTo(range.to);
         setUpliftPct(String(range.uplift_pct));
+        // Sửa một cụm khác phải bỏ hộp ghi-đè (và yêu cầu đã chốt bên trong
+        // nó) của cụm trước — nếu không, "Tiếp tục" của hộp cũ vẫn còn sống
+        // và sẽ ghi một yêu cầu chẳng liên quan gì đến form đang hiển thị.
+        setClashes(null);
+        setPending(null);
     };
 
     const write = async (request: PendingWrite) => {
+        // Chặn ở đúng biên ghi: bất kỳ đường nào gọi tới write() — kể cả từ
+        // "Tiếp tục" của hộp ghi đè, không chỉ từ handleSave — đều phải bị
+        // chặn khi danh sách so trùng chưa tải được, để không có đường vòng
+        // nào ghi đè dựa trên dữ liệu so trùng đã cũ/không rõ.
+        if (loadError) {
+            toast.error(LOAD_ERROR_MESSAGE);
+            return;
+        }
+
         try {
             await invokeWriteCommand("save_special_date_range", request);
             toast.success("Đã lưu đợt cao điểm");
@@ -92,9 +111,7 @@ export default function SpecialDatesSection() {
         setPending(null);
 
         if (loadError) {
-            toast.error(
-                "Chưa tải được danh sách đợt đã khai nên không thể so trùng an toàn. Tải lại trang rồi thử lại.",
-            );
+            toast.error(LOAD_ERROR_MESSAGE);
             return;
         }
 
