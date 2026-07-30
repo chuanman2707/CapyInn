@@ -9,6 +9,7 @@ import { formatAppError } from "@/lib/appError";
 import { createCorrelationId } from "@/lib/correlationId";
 import { invokeWriteCommand } from "@/lib/invokeCommand";
 import { getRoomTypeLabel } from "@/lib/constants";
+import { bookingBalance } from "@/lib/bookingBalance";
 import { fmtNumber } from "@/lib/format";
 import { addDaysIso, localDateIso, nightsBetween } from "@/lib/timelineSelection";
 import { toast } from "sonner";
@@ -148,7 +149,10 @@ export default function BackfillSheet({ open, onOpenChange, prefill }: Props) {
     // ra "đã trả phòng" lại nằm sau hôm nay).
     const todayIso = localDateIso(new Date());
 
-    const paidTooHigh = paid > total;
+    // Cùng vị từ với `CheckoutSettlementModal` và hai màn hình hiện số dư: thu
+    // nhiều hơn tiền phòng là "thu quá". Chỗ này từng viết lại `paid > total`
+    // bằng tay — cùng một câu hỏi, phát biểu lần thứ tư.
+    const paidTooHigh = bookingBalance(total, paid).kind === "overpaid";
     const paidNegative = paid < 0;
     const canSubmit =
         !!roomId &&
