@@ -3,6 +3,8 @@ import { BedDouble, Pencil, Plus, Tag, Trash2, X } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { fmtMoney } from "@/lib/format";
+import { basePriceIsUnused, nightlyRateDisplay } from "@/lib/roomTypeRate";
+import { useHotelStore } from "@/stores/useHotelStore";
 
 import RoomFormDialog from "./RoomFormDialog";
 import useRoomConfig from "./useRoomConfig";
@@ -25,6 +27,7 @@ export default function RoomConfigSection() {
     handleSaveRoom,
     handleDeleteRoom,
   } = useRoomConfig();
+  const roomTypeRates = useHotelStore((state) => state.roomTypeRates);
 
   return (
     <div className="space-y-8">
@@ -85,7 +88,14 @@ export default function RoomConfigSection() {
         />
 
         <div className="space-y-2">
-          {rooms.map((room) => (
+          {rooms.map((room) => {
+            // Con số to nhất trên hàng phải là số khách trả, tức giá của loại
+            // phòng. `room.base_price` từng đứng ở đây là dữ liệu engine bỏ qua
+            // ngay khi loại phòng có bảng giá.
+            const nightlyRate = nightlyRateDisplay(roomTypeRates, room.type);
+            const basePriceUnused = basePriceIsUnused(roomTypeRates, room.type, room.base_price);
+
+            return (
             <div key={room.id} className="flex items-center justify-between p-4 bg-slate-50 rounded-xl hover:bg-slate-100 transition-colors">
               <div className="flex items-center gap-4">
                 <div className="w-10 h-10 rounded-lg bg-brand-primary/10 flex items-center justify-center font-bold text-brand-primary text-sm">
@@ -100,7 +110,15 @@ export default function RoomConfigSection() {
               </div>
               <div className="flex items-center gap-3">
                 <div className="text-right">
-                  <p className="text-sm font-bold text-brand-primary">{fmtMoney(room.base_price)}</p>
+                  <p className="text-sm font-bold text-brand-primary" data-testid="room-row-nightly-rate">
+                    {nightlyRate.text}
+                    {nightlyRate.unknown ? "" : "/đêm"}
+                  </p>
+                  {basePriceUnused && (
+                    <p className="text-[10px] text-amber-600" data-testid="room-row-base-price-unused">
+                      giá gốc {fmtMoney(room.base_price)} không được dùng
+                    </p>
+                  )}
                   {room.extra_person_fee > 0 && <p className="text-[10px] text-brand-muted">+{fmtMoney(room.extra_person_fee)}/người thêm</p>}
                 </div>
                 <button onClick={() => openEdit(room)} className="p-2 hover:bg-slate-200 rounded-lg transition-colors cursor-pointer">
@@ -111,7 +129,8 @@ export default function RoomConfigSection() {
                 </button>
               </div>
             </div>
-          ))}
+            );
+          })}
 
           {rooms.length === 0 && (
             <div className="text-center py-12 text-brand-muted">
