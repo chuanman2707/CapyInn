@@ -326,3 +326,45 @@ async fn complete_setup_rejects_repeated_setup() {
 
     assert_eq!(error, "Setup đã hoàn thành, không thể thực hiện lại.");
 }
+
+/// A hotel that has just been onboarded must be priced the same way as one whose
+/// rule went missing, given the same nightly price.
+///
+/// Onboarding wrote `overnight_rate = base_price` while the engine's fallback
+/// derived `base_price * 75 / 100`. Same input, two overnight rates, and nothing
+/// asserted either — which is how they drifted. Both now go through
+/// `derive_rates_from_base_price`, and this test compares them rather than
+/// restating the arithmetic, so it fails if either side moves alone.
+#[tokio::test]
+async fn onboarding_derives_the_same_rates_the_engine_would_have_fallen_back_to() {
+    let pool = test_pool().await;
+    complete_setup(&pool, sample_onboarding_request(false))
+        .await
+        .expect("complete setup");
+
+    let stored: (i64, i64, i64) = sqlx::query_as(
+        "SELECT hourly_rate, overnight_rate, daily_rate FROM pricing_rules WHERE room_type = ?",
+    )
+    .bind("Deluxe")
+    .fetch_one(&pool)
+    .await
+    .expect("read the rule onboarding wrote");
+
+    let derived = crate::domain::booking::pricing::derive_rates_from_base_price(500_000);
+
+    assert_eq!(
+        (stored.0, stored.1, stored.2),
+        (derived.hourly, derived.overnight, derived.daily),
+        "onboarding and the engine's fallback disagree about the rates for one nightly price"
+    );
+
+    // And the overnight block is genuinely cheaper than a full day. This is the
+    // property the old onboarding value broke: it charged a 22:00–11:00 stay the
+    // same as a whole night.
+    assert!(
+        stored.1 < stored.2,
+        "an overnight block should cost less than a full day: {} vs {}",
+        stored.1,
+        stored.2
+    );
+}

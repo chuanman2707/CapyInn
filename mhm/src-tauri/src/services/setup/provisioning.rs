@@ -1,5 +1,6 @@
 use sqlx::{Pool, Sqlite, Transaction};
 
+use crate::domain::booking::pricing::derive_rates_from_base_price;
 use crate::models::{
     BootstrapStatus, OnboardingAppLockInput, OnboardingCompleteRequest, OnboardingRoomInput,
     OnboardingRoomTypeInput, User,
@@ -275,6 +276,11 @@ async fn insert_pricing_rules(
     let now = chrono::Local::now().to_rfc3339();
 
     for room_type in room_types {
+        // Cùng một hàm suy ra với bảng giá dự phòng của engine. Trước đây chỗ này
+        // ghi `overnight_rate = base_price` còn engine suy ra 0.75×, nên hai khách
+        // sạn cùng giá đêm lại tính giá qua đêm khác nhau.
+        let rates = derive_rates_from_base_price(room_type.base_price);
+
         sqlx::query(
             "INSERT INTO pricing_rules
              (id, room_type, hourly_rate, overnight_rate, daily_rate,
@@ -285,9 +291,9 @@ async fn insert_pricing_rules(
         )
         .bind(uuid::Uuid::new_v4().to_string())
         .bind(room_type.name.trim())
-        .bind((room_type.base_price / 5).max(0))
-        .bind(room_type.base_price)
-        .bind(room_type.base_price)
+        .bind(rates.hourly)
+        .bind(rates.overnight)
+        .bind(rates.daily)
         .bind("22:00")
         .bind("11:00")
         .bind(default_checkin_time)

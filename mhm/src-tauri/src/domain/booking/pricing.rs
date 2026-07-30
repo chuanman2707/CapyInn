@@ -63,6 +63,35 @@ impl StoredPricingRule {
     }
 }
 
+/// The three rates a room type gets when the only thing anyone has stated is its
+/// nightly price.
+///
+/// One function, because there are two callers and they used to disagree.
+/// Onboarding wrote `overnight_rate = base_price` while the fallback here derived
+/// `base_price * 75 / 100` — the same input producing two different overnight
+/// rates depending on whether a hotel was onboarded or had its rule go missing.
+/// Nothing asserted either, which is why it went unnoticed.
+///
+/// 0.75 is the deliberate one: an overnight block (22:00–11:00) is a *shorter*
+/// stay than a full day, so charging it the full nightly rate is wrong on the
+/// merits. Onboarding's was the accident.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct DerivedRates {
+    pub(crate) hourly: MoneyVnd,
+    pub(crate) overnight: MoneyVnd,
+    pub(crate) daily: MoneyVnd,
+}
+
+pub(crate) fn derive_rates_from_base_price(base_price: MoneyVnd) -> DerivedRates {
+    let base = base_price.max(0);
+
+    DerivedRates {
+        hourly: base / 5,
+        overnight: base * 75 / 100,
+        daily: base,
+    }
+}
+
 /// A configured rule wins outright; otherwise derive one from the room's base
 /// price, falling back to a house default when the room has no price either.
 ///
@@ -79,13 +108,13 @@ pub(crate) fn build_effective_pricing_rule(
         return stored_rule.to_pricing_rule();
     }
 
-    let fallback_price = fallback_base_price.unwrap_or(350_000);
+    let rates = derive_rates_from_base_price(fallback_base_price.unwrap_or(350_000));
 
     crate::pricing::PricingRule {
         room_type: room_type.to_string(),
-        hourly_rate: fallback_price / 5,
-        overnight_rate: fallback_price * 75 / 100,
-        daily_rate: fallback_price,
+        hourly_rate: rates.hourly,
+        overnight_rate: rates.overnight,
+        daily_rate: rates.daily,
         ..Default::default()
     }
 }
