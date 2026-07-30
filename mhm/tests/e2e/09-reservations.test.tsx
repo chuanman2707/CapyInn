@@ -178,6 +178,48 @@ describe("09 — Reservations", () => {
         expect(bar.style.width).toBe("160px");
     });
 
+    it("cắt bar khi khách bị gia hạn rồi trả phòng (dữ liệu thật, timestamp có offset)", async () => {
+        // Ca thật do chủ khách sạn báo: Su Huijan phòng 1B nhận 29/07 16:33, bị bấm
+        // gia hạn nên expected_checkout thành 31/07, rồi trả phòng 30/07 09:54.
+        // Backend ghi timestamp dạng RFC3339 kèm offset "+07:00" và micro-giây
+        // (chrono Local::now().to_rfc3339()) — khác định dạng "Z" mà test trên dùng,
+        // nên đường parse này cần được phủ riêng.
+        const atLocalOffset = (dayShift: number, hour: number, minute: number) => {
+            const d = new Date();
+            d.setDate(d.getDate() + dayShift);
+            d.setHours(hour, minute, 8, 0);
+            const offsetMinutes = -d.getTimezoneOffset();
+            const sign = offsetMinutes >= 0 ? "+" : "-";
+            const pad = (n: number) => String(Math.abs(n)).padStart(2, "0");
+            const stamp = `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`
+                + `T${pad(d.getHours())}:${pad(d.getMinutes())}:08.752504`
+                + `${sign}${pad(Math.trunc(offsetMinutes / 60))}:${pad(offsetMinutes % 60)}`;
+            return stamp;
+        };
+
+        setMockResponse("get_all_bookings", () => [
+            createBookingWithGuest({
+                id: "b-su-huijan",
+                room_id: "1B",
+                guest_name: "Su Huijan",
+                status: "checked_out",
+                check_in_at: atLocalOffset(-1, 16, 33),
+                expected_checkout: atLocalOffset(1, 16, 33),
+                actual_checkout: atLocalOffset(0, 9, 54),
+            }),
+        ]);
+
+        render(<Reservations />);
+
+        const bar = await screen.findByTestId("booking-bar-b-su-huijan");
+        // Cột đầu = hôm nay − 3. Nhận phòng hôm qua → cột 2 → left (2 + 0.5) × 80 = 200px.
+        // Kết thúc tại actual_checkout (hôm nay, cột 3) → width (3.5 − 2.5) × 80 = 80px.
+        // Bản chưa vá vẽ tới expected_checkout (ngày mai, cột 4) → width 160px.
+        expect(bar.style.left).toBe("200px");
+        expect(bar.style.width).toBe("80px");
+        expect(bar.style.width).not.toBe("160px");
+    });
+
     it("bấm ô hôm nay mở check-in với phòng và số đêm", async () => {
         render(<Reservations />);
         const cell = await screen.findByTestId("cell-1A-3"); // cột 3 = hôm nay
