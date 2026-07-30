@@ -49,9 +49,18 @@ const ROOM_GUEST_PRICING_SQL: &str = "SELECT COALESCE(max_guests, 2) AS max_gues
             COALESCE(extra_person_fee, 0) AS extra_person_fee
      FROM rooms WHERE id = ?";
 
+/// Guest limits for a room type, derived the same way the type price is.
+///
+/// `ORDER BY id` for the reason `FALLBACK_BASE_PRICE_SQL` has it: no room is
+/// chosen yet, so a room of the type has to stand in for it, and *which* room
+/// must not depend on how SQLite feels about page order. Without it a type whose
+/// rooms disagree about `max_guests` quotes one extra-person surcharge today and
+/// a different one after a restart — and it is the lowest id that supplies the
+/// base price, so anything else here would take the two halves of one quote from
+/// two different rooms.
 const ROOM_GUEST_PRICING_BY_TYPE_SQL: &str = "SELECT COALESCE(max_guests, 2) AS max_guests,
             COALESCE(extra_person_fee, 0) AS extra_person_fee
-     FROM rooms WHERE LOWER(type) = ? LIMIT 1";
+     FROM rooms WHERE LOWER(type) = ? ORDER BY id LIMIT 1";
 
 const SPECIAL_UPLIFT_SQL: &str =
     "SELECT CAST(uplift_pct AS REAL) FROM special_dates WHERE date = ?";
