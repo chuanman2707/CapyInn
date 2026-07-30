@@ -7,6 +7,7 @@ import { Input } from "@/components/ui/input";
 import EmptyState from "@/components/shared/EmptyState";
 import SlideDrawer from "@/components/shared/SlideDrawer";
 import { formatAppError } from "@/lib/appError";
+import { BALANCE_TONE_CLASS, balanceDisplay } from "@/lib/bookingBalance";
 import { fmtMoney, fmtDateShort } from "@/lib/format";
 import { toast } from "sonner";
 import { Users, Plus, Trash2, FileText, LogOut, ChevronRight } from "lucide-react";
@@ -347,12 +348,20 @@ export default function GroupManagement() {
                                 <span>Đã thanh toán</span>
                                 <span className="font-semibold text-emerald-600">{fmtMoney(detail.paid_amount)}</span>
                             </div>
-                            <div className="flex justify-between text-sm">
-                                <span>Còn lại</span>
-                                <span className="font-bold text-red-500">
-                                    {fmtMoney(detail.grand_total - detail.paid_amount)}
-                                </span>
-                            </div>
+                            {(() => {
+                                // Cùng một hàm với `RoomDetailPanel` và với luật
+                                // chặn trả phòng, nên ba chỗ không thể mô tả một
+                                // trạng thái theo ba kiểu nữa.
+                                const balance = balanceDisplay(detail.grand_total, detail.paid_amount);
+                                return (
+                                    <div className="flex justify-between text-sm">
+                                        <span>{balance.label}</span>
+                                        <span className={`font-bold ${BALANCE_TONE_CLASS[balance.tone]}`}>
+                                            {balance.text}
+                                        </span>
+                                    </div>
+                                );
+                            })()}
                         </div>
 
                         {/* Invoice button */}

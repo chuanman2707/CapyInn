@@ -147,3 +147,66 @@ describe("RoomDetailPanel nightly rate", () => {
         expect(screen.getByTestId("room-detail-nightly-rate").textContent).toBe("—");
     });
 });
+
+describe("RoomDetailPanel payment balance", () => {
+    function renderWithPayment(totalPrice: number, paidAmount: number) {
+        return render(
+            <RoomDetailPanel
+                mode="page"
+                roomDetail={{
+                    room: {
+                        id: "101",
+                        name: "101",
+                        type: "standard",
+                        floor: 1,
+                        has_balcony: false,
+                        base_price: 500000,
+                        max_guests: 2,
+                        extra_person_fee: 0,
+                        status: "occupied",
+                    },
+                    booking: {
+                        id: "B700",
+                        room_id: "101",
+                        primary_guest_id: "G1",
+                        check_in_at: "2026-04-20T08:00:00+07:00",
+                        expected_checkout: "2026-04-22T12:00:00+07:00",
+                        nights: 2,
+                        total_price: totalPrice,
+                        paid_amount: paidAmount,
+                        status: "active",
+                        created_at: "2026-04-20T08:00:00+07:00",
+                    },
+                    guests: [],
+                }}
+            />,
+        );
+    }
+
+    /// The panel rendered "Còn nợ −3.800.000đ" in slate grey, which reads as
+    /// *nothing owed*. Meanwhile `CheckoutSettlementModal` refuses to check the
+    /// booking out until the refund is handled — so the screen the desk looks at
+    /// first gave no sign of the state that blocks them.
+    it("names an overpayment as money owed back to the guest", () => {
+        renderWithPayment(1_200_000, 5_000_000);
+
+        expect(screen.getByText("Trả lại khách")).toBeInTheDocument();
+        expect(screen.getByText("3.800.000đ")).toBeInTheDocument();
+        expect(screen.queryByText(/-3\.800\.000/)).not.toBeInTheDocument();
+        expect(screen.queryByText("Còn nợ")).not.toBeInTheDocument();
+    });
+
+    it("still names a real debt a debt", () => {
+        renderWithPayment(1_200_000, 500_000);
+
+        expect(screen.getByText("Còn nợ")).toBeInTheDocument();
+        expect(screen.getByText("700.000đ")).toBeInTheDocument();
+    });
+
+    it("says a fully paid booking is settled rather than owing zero", () => {
+        renderWithPayment(1_200_000, 1_200_000);
+
+        expect(screen.getByText("Đã đủ")).toBeInTheDocument();
+    });
+});
+
