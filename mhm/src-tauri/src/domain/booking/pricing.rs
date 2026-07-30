@@ -65,17 +65,24 @@ impl StoredPricingRule {
 
 /// A configured rule wins outright; otherwise derive one from the room's base
 /// price, falling back to a house default when the room has no price either.
+///
+/// Takes the three fields it reads rather than a whole `StayPricingInputs`,
+/// because resolving a type's rule does not need a stay. The rate a room card
+/// prints has to be this function's `daily_rate` and nothing else — the moment a
+/// second place decides what a type costs, the card and the bill can disagree.
 pub(crate) fn build_effective_pricing_rule(
-    inputs: &StayPricingInputs,
+    room_type: &str,
+    stored_rule: Option<&StoredPricingRule>,
+    fallback_base_price: Option<MoneyVnd>,
 ) -> crate::pricing::PricingRule {
-    if let Some(stored_rule) = &inputs.stored_rule {
+    if let Some(stored_rule) = stored_rule {
         return stored_rule.to_pricing_rule();
     }
 
-    let fallback_price = inputs.fallback_base_price.unwrap_or(350_000);
+    let fallback_price = fallback_base_price.unwrap_or(350_000);
 
     crate::pricing::PricingRule {
-        room_type: inputs.room_type.clone(),
+        room_type: room_type.to_string(),
         hourly_rate: fallback_price / 5,
         overnight_rate: fallback_price * 75 / 100,
         daily_rate: fallback_price,
@@ -127,7 +134,11 @@ fn extra_guest_charge(inputs: &StayPricingInputs, nights: i64) -> BookingResult<
 pub(crate) fn calculate_from_loaded_inputs(
     inputs: &StayPricingInputs,
 ) -> BookingResult<crate::pricing::PricingResult> {
-    let rule = build_effective_pricing_rule(inputs);
+    let rule = build_effective_pricing_rule(
+        &inputs.room_type,
+        inputs.stored_rule.as_ref(),
+        inputs.fallback_base_price,
+    );
 
     let mut result = crate::pricing::calculate_price(
         &rule,
@@ -194,7 +205,11 @@ mod tests {
             weekend_uplift_pct: 12.5,
         });
 
-        let rule = build_effective_pricing_rule(&inputs);
+        let rule = build_effective_pricing_rule(
+            &inputs.room_type,
+            inputs.stored_rule.as_ref(),
+            inputs.fallback_base_price,
+        );
 
         assert_eq!(rule.room_type, "deluxe");
         assert_eq!(rule.hourly_rate, 120_000);
@@ -215,7 +230,11 @@ mod tests {
         inputs.room_type = "deluxe".to_string();
         inputs.fallback_base_price = Some(500_000);
 
-        let rule = build_effective_pricing_rule(&inputs);
+        let rule = build_effective_pricing_rule(
+            &inputs.room_type,
+            inputs.stored_rule.as_ref(),
+            inputs.fallback_base_price,
+        );
 
         assert_eq!(rule.room_type, "deluxe");
         assert_eq!(rule.hourly_rate, 100_000);
@@ -232,7 +251,12 @@ mod tests {
 
     #[test]
     fn build_effective_pricing_rule_uses_default_price_and_metadata_when_base_price_missing() {
-        let rule = build_effective_pricing_rule(&sample_inputs());
+        let inputs = sample_inputs();
+        let rule = build_effective_pricing_rule(
+            &inputs.room_type,
+            inputs.stored_rule.as_ref(),
+            inputs.fallback_base_price,
+        );
 
         assert_eq!(rule.room_type, "standard");
         assert_eq!(rule.hourly_rate, 70_000);

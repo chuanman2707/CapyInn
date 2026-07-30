@@ -50,6 +50,33 @@ pub async fn get_pricing_rules(
     do_get_pricing_rules(&state.db).await
 }
 
+pub async fn do_get_room_type_rates(pool: &Pool<Sqlite>) -> Result<Vec<serde_json::Value>, String> {
+    let rates = pricing_service::list_room_type_rates(pool)
+        .await
+        .map_err(|e| e.to_string())?;
+
+    Ok(rates
+        .iter()
+        .map(|rate| {
+            serde_json::json!({
+                "room_type": rate.room_type,
+                "nightly_rate": rate.nightly_rate,
+                "configured": rate.configured,
+            })
+        })
+        .collect())
+}
+
+/// The listed nightly rate per room type. Not admin-gated: the room grid every
+/// receptionist works from shows it, and it is the same figure they read off a
+/// booking sheet.
+#[tauri::command]
+pub async fn get_room_type_rates(
+    state: State<'_, AppState>,
+) -> Result<Vec<serde_json::Value>, String> {
+    do_get_room_type_rates(&state.db).await
+}
+
 #[tauri::command]
 #[allow(clippy::too_many_arguments)]
 pub async fn save_pricing_rule(
@@ -184,4 +211,47 @@ pub async fn save_special_date(
     )
     .await
     .map_err(|e| e.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::do_get_room_type_rates;
+    use sqlx::{sqlite::SqlitePoolOptions, Pool, Sqlite};
+
+    async fn migrated_pool() -> Pool<Sqlite> {
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .expect("connect in-memory sqlite");
+        crate::db::run_migrations(&pool)
+            .await
+            .expect("run migrations");
+        pool
+    }
+
+    /// The three keys the room grid reads. Renaming one here is invisible to the
+    /// Rust compiler and shows up in the app as a blank price, so the contract is
+    /// pinned on this side of the wire too.
+    #[tokio::test]
+    async fn the_rate_listing_names_the_fields_the_room_grid_reads() {
+        let pool = migrated_pool().await;
+        sqlx::query(
+            "INSERT INTO rooms (id, name, type, floor, has_balcony, base_price, max_guests, extra_person_fee, status)
+             VALUES ('R-101', 'Room R-101', 'Phòng Đôi', 1, 0, 640000, 2, 0, 'vacant')",
+        )
+        .execute(&pool)
+        .await
+        .expect("seed room");
+
+        let listed = do_get_room_type_rates(&pool).await.expect("rate listing");
+
+        assert_eq!(listed.len(), 1, "one room type, one row: {listed:?}");
+        assert_eq!(listed[0]["room_type"], "Phòng Đôi");
+        assert_eq!(listed[0]["nightly_rate"], 640_000);
+        assert_eq!(
+            listed[0]["configured"], false,
+            "no pricing_rules row, so the rate is derived and must say so"
+        );
+    }
 }

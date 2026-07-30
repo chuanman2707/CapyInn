@@ -14,11 +14,27 @@ use crate::domain::booking::pricing::{StayPricingInputs, StoredPricingRule};
 use crate::domain::booking::{BookingError, BookingResult};
 use crate::money::MoneyVnd;
 
+/// Room types are matched case-insensitively, and **both sides of the
+/// comparison must be folded by the same function.**
+///
+/// Every type lookup here reads `LOWER(x) = LOWER(?)`. It used to bind
+/// `str::to_lowercase()` against SQL's `LOWER(x)`, which is two different
+/// functions: SQLite's `LOWER` is ASCII-only and leaves `Đ` alone, Rust's lowers
+/// it to `đ`. So for any type whose name carries a non-ASCII capital — `Phòng
+/// Đôi`, `Phòng Đơn`, most of a Vietnamese hotel's room list — the two strings
+/// could never be equal. Not "matched loosely": *never matched*. The configured
+/// rule was not found, no room supplied a fallback price, and the stay was quoted
+/// and charged at the 350k house default while settings showed something else.
+///
+/// Folding inside SQL keeps the two sides one function by construction. It is
+/// still ASCII-only, so `PHÒNG ĐÔI` will not match `phòng đôi` — but a type now
+/// always matches itself, which is the case that actually occurs, since callers
+/// pass a name read straight back out of `rooms.type`.
 const STORED_PRICING_RULE_SQL: &str = "SELECT room_type, hourly_rate, overnight_rate, daily_rate,
                 overnight_start, overnight_end, daily_checkin, daily_checkout,
                 early_checkin_surcharge_pct, late_checkout_surcharge_pct,
                 weekend_uplift_pct
-         FROM pricing_rules WHERE LOWER(room_type) = ?";
+         FROM pricing_rules WHERE LOWER(room_type) = LOWER(?)";
 
 const ROOM_TYPE_SQL: &str = "SELECT type FROM rooms WHERE id = ? LIMIT 1";
 
@@ -43,7 +59,7 @@ const ROOM_TYPE_SQL: &str = "SELECT type FROM rooms WHERE id = ? LIMIT 1";
 /// Both loaders share this constant, so the quote and the charge cannot
 /// disagree about which room they derived from.
 const FALLBACK_BASE_PRICE_SQL: &str =
-    "SELECT base_price FROM rooms WHERE LOWER(type) = ? ORDER BY id LIMIT 1";
+    "SELECT base_price FROM rooms WHERE LOWER(type) = LOWER(?) ORDER BY id LIMIT 1";
 
 const ROOM_GUEST_PRICING_SQL: &str = "SELECT COALESCE(max_guests, 2) AS max_guests,
             COALESCE(extra_person_fee, 0) AS extra_person_fee
@@ -60,10 +76,14 @@ const ROOM_GUEST_PRICING_SQL: &str = "SELECT COALESCE(max_guests, 2) AS max_gues
 /// two different rooms.
 const ROOM_GUEST_PRICING_BY_TYPE_SQL: &str = "SELECT COALESCE(max_guests, 2) AS max_guests,
             COALESCE(extra_person_fee, 0) AS extra_person_fee
-     FROM rooms WHERE LOWER(type) = ? ORDER BY id LIMIT 1";
+     FROM rooms WHERE LOWER(type) = LOWER(?) ORDER BY id LIMIT 1";
 
 const SPECIAL_UPLIFT_SQL: &str =
     "SELECT CAST(uplift_pct AS REAL) FROM special_dates WHERE date = ?";
+
+/// Every room type the house actually has rooms in. A type with a
+/// `pricing_rules` row but no rooms prices nothing, so it is not listed.
+const ROOM_TYPE_NAMES_SQL: &str = "SELECT DISTINCT type FROM rooms ORDER BY type";
 
 const PRICING_RULE_LISTING_SQL: &str =
     "SELECT id, room_type, hourly_rate, overnight_rate, daily_rate,
@@ -74,6 +94,16 @@ const PRICING_RULE_LISTING_SQL: &str =
 
 const SPECIAL_DATES_SQL: &str =
     "SELECT id, date, label, uplift_pct FROM special_dates ORDER BY date";
+
+/// What it takes to resolve a room type's rule, and nothing about a stay.
+///
+/// The two loaders below and the room-type rate listing all need exactly this
+/// pair, and all three must load it the same way: the fallback is only read when
+/// no rule is stored, so a configured type never touches `rooms.base_price`.
+pub(crate) struct TypeRuleInputs {
+    pub(crate) stored_rule: Option<StoredPricingRule>,
+    pub(crate) fallback_base_price: Option<MoneyVnd>,
+}
 
 /// A stored rule plus its row id, which the settings screen needs and the
 /// pricing rules themselves do not.
@@ -151,7 +181,7 @@ async fn load_room_guest_pricing_for_type(
     room_type: &str,
 ) -> BookingResult<RoomGuestPricing> {
     let row = sqlx::query(ROOM_GUEST_PRICING_BY_TYPE_SQL)
-        .bind(room_type.to_lowercase())
+        .bind(room_type)
         .fetch_optional(pool)
         .await
         .map_err(database_error)?;
@@ -233,19 +263,14 @@ pub(crate) async fn load_stay_pricing_inputs_for_room_type(
     pricing_type: &str,
     guests: Option<i32>,
 ) -> BookingResult<StayPricingInputs> {
-    let stored_rule = load_stored_pricing_rule(pool, room_type).await?;
-    let fallback_base_price = if stored_rule.is_none() {
-        load_fallback_base_price(pool, room_type).await?
-    } else {
-        None
-    };
+    let rule_inputs = load_type_rule_inputs(pool, room_type).await?;
     let special_uplift_pct = load_special_uplift(pool, check_in).await?;
     let guest_pricing = load_room_guest_pricing_for_type(pool, room_type).await?;
 
     Ok(StayPricingInputs {
         room_type: room_type.to_string(),
-        stored_rule,
-        fallback_base_price,
+        stored_rule: rule_inputs.stored_rule,
+        fallback_base_price: rule_inputs.fallback_base_price,
         special_uplift_pct,
         check_in: check_in.to_string(),
         check_out: check_out.to_string(),
@@ -273,19 +298,14 @@ pub(crate) async fn load_stay_pricing_inputs_for_room(
     guests: Option<i32>,
 ) -> BookingResult<StayPricingInputs> {
     let room_type = load_room_type(pool, room_id).await?;
-    let stored_rule = load_stored_pricing_rule(pool, &room_type).await?;
-    let fallback_base_price = if stored_rule.is_none() {
-        load_fallback_base_price(pool, &room_type).await?
-    } else {
-        None
-    };
+    let rule_inputs = load_type_rule_inputs(pool, &room_type).await?;
     let special_uplift_pct = load_special_uplift(pool, check_in).await?;
     let guest_pricing = load_room_guest_pricing(pool, room_id).await?;
 
     Ok(StayPricingInputs {
         room_type,
-        stored_rule,
-        fallback_base_price,
+        stored_rule: rule_inputs.stored_rule,
+        fallback_base_price: rule_inputs.fallback_base_price,
         special_uplift_pct,
         check_in: check_in.to_string(),
         check_out: check_out.to_string(),
@@ -321,12 +341,36 @@ async fn load_room_guest_pricing(
         .unwrap_or_default())
 }
 
+pub(crate) async fn load_room_type_names(pool: &Pool<Sqlite>) -> BookingResult<Vec<String>> {
+    sqlx::query_scalar::<_, String>(ROOM_TYPE_NAMES_SQL)
+        .fetch_all(pool)
+        .await
+        .map_err(database_error)
+}
+
+pub(crate) async fn load_type_rule_inputs(
+    pool: &Pool<Sqlite>,
+    room_type: &str,
+) -> BookingResult<TypeRuleInputs> {
+    let stored_rule = load_stored_pricing_rule(pool, room_type).await?;
+    let fallback_base_price = if stored_rule.is_none() {
+        load_fallback_base_price(pool, room_type).await?
+    } else {
+        None
+    };
+
+    Ok(TypeRuleInputs {
+        stored_rule,
+        fallback_base_price,
+    })
+}
+
 async fn load_stored_pricing_rule(
     pool: &Pool<Sqlite>,
     room_type: &str,
 ) -> BookingResult<Option<StoredPricingRule>> {
     let row = sqlx::query(STORED_PRICING_RULE_SQL)
-        .bind(room_type.to_lowercase())
+        .bind(room_type)
         .fetch_optional(pool)
         .await
         .map_err(database_error)?;
@@ -339,7 +383,7 @@ async fn load_fallback_base_price(
     room_type: &str,
 ) -> BookingResult<Option<MoneyVnd>> {
     let row = sqlx::query(FALLBACK_BASE_PRICE_SQL)
-        .bind(room_type.to_lowercase())
+        .bind(room_type)
         .fetch_optional(pool)
         .await
         .map_err(database_error)?;
@@ -404,7 +448,7 @@ async fn load_stored_pricing_rule_tx(
     room_type: &str,
 ) -> BookingResult<Option<StoredPricingRule>> {
     let row = sqlx::query(STORED_PRICING_RULE_SQL)
-        .bind(room_type.to_lowercase())
+        .bind(room_type)
         .fetch_optional(&mut **tx)
         .await
         .map_err(database_error)?;
@@ -417,7 +461,7 @@ async fn load_fallback_base_price_tx(
     room_type: &str,
 ) -> BookingResult<Option<MoneyVnd>> {
     let fallback_row = sqlx::query(FALLBACK_BASE_PRICE_SQL)
-        .bind(room_type.to_lowercase())
+        .bind(room_type)
         .fetch_optional(&mut **tx)
         .await
         .map_err(database_error)?;
