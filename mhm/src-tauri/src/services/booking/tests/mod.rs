@@ -52,6 +52,7 @@ mod groups;
 mod guests;
 mod money_guards;
 mod payments;
+mod peak_season_e2e;
 mod pricing;
 mod reporting;
 mod reservation_idempotency;
