@@ -53,6 +53,12 @@ describe("SpecialDatesSection", () => {
             label: "Lễ 30/4",
             upliftPct: 30,
         });
+
+        // Sau khi ghi thành công, màn hình phải đọc lại `get_special_dates`
+        // từ DB — không tự vá `rows` bằng dữ liệu vừa gửi đi. Đây là điều mà
+        // hộp so trùng ghi-đè dựa vào để luôn đúng.
+        await waitFor(() => expect(invoke).toHaveBeenCalledTimes(2));
+        expect(invoke).toHaveBeenLastCalledWith("get_special_dates");
     });
 
     it("khai đè lên ngày đã có thì hỏi trước, và huỷ thì không ghi gì", async () => {
@@ -164,7 +170,53 @@ describe("SpecialDatesSection", () => {
         await waitFor(() => expect(invokeWriteCommand).toHaveBeenCalledTimes(1));
         const [command, args] = invokeWriteCommand.mock.calls[0];
         expect(command).toBe("delete_special_dates");
-        expect(args.dates).toHaveLength(9);
+        // Không chỉ đúng số lượng — phải đúng từng ngày của cụm Tết, không
+        // phải một cụm khác hay một danh sách chín ngày bị xáo trộn.
+        expect(args.dates).toEqual([
+            "2026-02-14",
+            "2026-02-15",
+            "2026-02-16",
+            "2026-02-17",
+            "2026-02-18",
+            "2026-02-19",
+            "2026-02-20",
+            "2026-02-21",
+            "2026-02-22",
+        ]);
+
+        // Sau khi xoá thành công, màn hình phải tải lại từ DB (không tự vá
+        // state) — đọc lại `get_special_dates` chứ không tin state cũ.
+        await waitFor(() => expect(invoke).toHaveBeenCalledTimes(2));
+        expect(invoke).toHaveBeenLastCalledWith("get_special_dates");
+    });
+
+    it("hộp xoá đang treo cho một cụm bị bỏ dở nếu người dùng lưu một yêu cầu khác trong lúc đó", async () => {
+        render(<SpecialDatesSection />);
+        await screen.findByText("Tết Nguyên đán");
+
+        // Bấm Xoá trên cụm Tết để mở hộp xoá — nhưng không xác nhận.
+        fireEvent.click(screen.getByRole("button", { name: "Xoá" }));
+        expect(await screen.findByRole("button", { name: "Xoá đợt này" })).toBeInTheDocument();
+
+        // Trong lúc đó, khai một cụm Hè đè lên đuôi cụm Tết (20–22/02) và xác
+        // nhận ghi đè — mô phỏng đúng kịch bản: chủ nhà bỏ dở việc xoá, quay
+        // sang lưu một yêu cầu khác chẳng liên quan.
+        fireEvent.change(screen.getByLabelText("Tên đợt"), { target: { value: "Hè" } });
+        fireEvent.change(screen.getByLabelText("Từ ngày"), { target: { value: "2026-02-20" } });
+        fireEvent.change(screen.getByLabelText("Đến ngày"), { target: { value: "2026-02-28" } });
+        fireEvent.change(screen.getByLabelText("% phụ thu"), { target: { value: "25" } });
+        fireEvent.click(screen.getByRole("button", { name: "Thêm" }));
+
+        fireEvent.click(await screen.findByRole("button", { name: "Tiếp tục" }));
+
+        await waitFor(() => expect(invokeWriteCommand).toHaveBeenCalledTimes(1));
+
+        // Hộp xoá của cụm Tết (bản chụp cũ) phải biến mất khỏi màn hình. Nếu
+        // nó còn đó, bấm "Xoá đợt này" bây giờ sẽ gửi delete_special_dates
+        // cho 9 ngày Tết cũ — xoá luôn 20, 21, 22/02 mà cụm Hè vừa mới ghi.
+        await waitFor(() =>
+            expect(screen.queryByRole("button", { name: "Xoá đợt này" })).not.toBeInTheDocument(),
+        );
     });
 
     it("sửa cụm cho ngắn lại thì ngày rơi ra đi trong `remove`, không có lệnh xoá riêng", async () => {

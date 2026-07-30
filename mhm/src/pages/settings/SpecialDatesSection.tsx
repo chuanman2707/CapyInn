@@ -59,6 +59,16 @@ export default function SpecialDatesSection() {
 
     useEffect(reload, [reload]);
 
+    // `deleting` là một bản chụp đông cứng của một cụm. Bất cứ khi nào `rows`
+    // đổi — sau một lần ghi thành công, sau một lần xoá, sau một lần tải lại
+    // bất kỳ — bản chụp ấy có thể không còn khớp với DB nữa (cụm đã bị cắt,
+    // gộp, hay biến mất). Đóng hộp xoá theo `rows` chứ không chỉ theo từng
+    // hành động rời bỏ riêng lẻ, để không bỏ sót một đường tải lại nào trong
+    // tương lai mà quên tắt hộp theo.
+    useEffect(() => {
+        setDeleting(null);
+    }, [rows]);
+
     const ranges = groupSpecialDates(rows);
 
     const resetForm = () => {
@@ -69,6 +79,7 @@ export default function SpecialDatesSection() {
         setUpliftPct("30");
         setClashes(null);
         setPending(null);
+        setDeleting(null);
     };
 
     const startEdit = (range: SpecialDateRange) => {
@@ -80,8 +91,11 @@ export default function SpecialDatesSection() {
         // Sửa một cụm khác phải bỏ hộp ghi-đè (và yêu cầu đã chốt bên trong
         // nó) của cụm trước — nếu không, "Tiếp tục" của hộp cũ vẫn còn sống
         // và sẽ ghi một yêu cầu chẳng liên quan gì đến form đang hiển thị.
+        // Cùng lý do, hộp xoá của một cụm khác cũng phải tắt — nó không còn
+        // liên quan gì tới form đang hiển thị.
         setClashes(null);
         setPending(null);
+        setDeleting(null);
     };
 
     const write = async (request: PendingWrite) => {
