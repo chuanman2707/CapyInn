@@ -112,9 +112,23 @@ function getStatusLabel(status: BookingStatus): string {
     return status;
 }
 
+// `get_all_bookings` là lệnh ĐỌC: chữ ký của nó là `Result<_, String>`, nên
+// thứ về tới đây là một chuỗi thô, không phải phong bì AppError.
+// `normalizeAppError` chỉ nhận diện phong bì và quy mọi thứ khác về một câu
+// chung chung, nên `formatAppError` dùng một mình ở đây sẽ nuốt mất dòng chẩn
+// đoán duy nhất — đúng thứ đã chỉ ra "no such column: b.guests" hôm 31/07/2026.
+// Phong bì thật thì vẫn để formatAppError lo, vì nó còn gắn mã hỗ trợ và mã
+// theo dõi.
+function describeLoadError(error: unknown): string {
+    if (typeof error === "string") return error;
+    if (error instanceof Error) return error.message;
+    return formatAppError(error);
+}
+
 export default function Reservations() {
     const { rooms, fetchRooms, setCheckinOpen } = useHotelStore();
     const [bookings, setBookings] = useState<BookingWithGuest[]>([]);
+    const [loadError, setLoadError] = useState<string | null>(null);
     const [searchQuery, setSearchQuery] = useState("");
     const [dateOffset, setDateOffset] = useState(0);
     const [sheetOpen, setSheetOpen] = useState(false);
@@ -131,10 +145,24 @@ export default function Reservations() {
 
     useEffect(() => { fetchRooms(); }, []);
 
+    // Lỗi đọc booking phải hiện ra, không được nuốt. Bản trước làm
+    // `.catch(() => setBookings([]))`, biến mọi thất bại thành đúng cái màn
+    // hình mà một khách sạn chưa có booking nào cũng thấy. Ngày 31/07/2026,
+    // cột `bookings.guests` thiếu trên máy chủ khách sạn (migration v22 bị bỏ
+    // qua vì schema_version đã là 23) nên query đổ lỗi "no such column:
+    // b.guests"; chủ khách sạn đọc màn hình trống ra là mất sạch dữ liệu và đi
+    // tìm bản backup, trong khi 25 booking vẫn nằm nguyên trong database.
+    //
+    // `setBookings` cũng không bị đụng tới ở nhánh lỗi: một lần nạp lại hỏng
+    // (ổ đĩa bận, database khoá) mà xoá sạch lịch là tự tay biến sự cố tạm
+    // thời thành cảnh mất dữ liệu.
     const loadBookings = () => {
         invoke<BookingWithGuest[]>("get_all_bookings", { filter: null })
-            .then(setBookings)
-            .catch(() => setBookings([]));
+            .then((rows) => {
+                setBookings(rows);
+                setLoadError(null);
+            })
+            .catch((e) => setLoadError(describeLoadError(e)));
     };
 
     useEffect(() => { loadBookings(); }, []);
@@ -464,7 +492,25 @@ export default function Reservations() {
                         </div>
                     ))}
 
-                    {visibleBookings.length === 0 && (
+                    {/* Lỗi thắng ô trống: "Chưa có booking nào" chỉ đúng khi
+                        đọc THÀNH CÔNG và kết quả rỗng thật. */}
+                    {loadError && (
+                        <div className="mx-4 my-4 rounded-xl border border-red-200 bg-red-50 p-4 text-sm text-red-700">
+                            <div className="font-semibold">Không đọc được danh sách booking</div>
+                            <div className="mt-1 whitespace-pre-line opacity-90">{loadError}</div>
+                            <div className="mt-2 text-xs opacity-80">
+                                Dữ liệu vẫn nằm trong máy — đây là lỗi lúc đọc, không phải mất booking.
+                            </div>
+                            <Button
+                                className="mt-3 h-9 rounded-lg text-sm font-semibold"
+                                onClick={loadBookings}
+                            >
+                                Thử lại
+                            </Button>
+                        </div>
+                    )}
+
+                    {!loadError && visibleBookings.length === 0 && (
                         <div className="flex items-center justify-center py-20 text-brand-muted">
                             {bookings.length === 0
                                 ? 'Chưa có booking nào — Nhấn "+ Đặt phòng" để tạo reservation'

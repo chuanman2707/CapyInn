@@ -439,3 +439,70 @@ describe("Reservations checked-out bookings", () => {
     expect(await screen.findByText("invoice-dialog")).toBeTruthy();
   });
 });
+
+// Ca thật, ngày 31/07/2026: cột `bookings.guests` thiếu trên máy chủ khách sạn
+// (migration v22 bị bỏ qua vì schema_version đã là 23), nên `get_all_bookings`
+// đổ lỗi "no such column: b.guests". `.catch(() => setBookings([]))` nuốt trọn
+// nó và trang hiện "Chưa có booking nào" — chủ đọc ra là mất sạch dữ liệu, đi
+// tìm bản backup, trong khi 25 booking vẫn nằm nguyên trong database.
+describe("Reservations load errors", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    resetEventMocks();
+    invokeWriteCommand.mockResolvedValue(undefined);
+    createCorrelationId.mockReturnValue("COR-5E6F7A8B");
+  });
+
+  function failBookingsWith(message: string) {
+    invoke.mockImplementation(async (command: string) => {
+      if (command === "get_all_bookings") throw new Error(message);
+      return undefined;
+    });
+  }
+
+  it("hiện lỗi thật thay vì giả vờ là chưa có booking nào", async () => {
+    failBookingsWith("in prepare, no such column: b.guests");
+
+    render(<Reservations />);
+
+    expect(await screen.findByText(/no such column: b\.guests/i)).toBeTruthy();
+    // Câu này là thứ đã đánh lừa chủ khách sạn. Nó chỉ được phép xuất hiện khi
+    // đọc THÀNH CÔNG và kết quả rỗng thật.
+    expect(screen.queryByText(/Chưa có booking nào/i)).toBeNull();
+  });
+
+  it("giữ nguyên booking đang hiện khi một lần nạp lại thất bại", async () => {
+    invoke.mockImplementation(async (command: string) => {
+      if (command === "get_all_bookings") return [bookedReservation()];
+      return undefined;
+    });
+
+    render(<Reservations />);
+    expect(await screen.findByTestId("booking-bar-B101")).toBeTruthy();
+
+    // Lần nạp lại sau một lệnh ghi bị hỏng. Xoá sạch lịch vì một sự cố tạm
+    // thời là tự tay biến nó thành cảnh mất dữ liệu.
+    failBookingsWith("database is locked");
+    await emitTestEvent("db-updated", { entity: "bookings" });
+
+    expect(await screen.findByText(/database is locked/i)).toBeTruthy();
+    expect(screen.getByTestId("booking-bar-B101")).toBeTruthy();
+  });
+
+  it("cho thử lại, và gỡ thông báo lỗi khi đọc lại được", async () => {
+    const user = userEvent.setup();
+    failBookingsWith("database is locked");
+
+    render(<Reservations />);
+    expect(await screen.findByText(/database is locked/i)).toBeTruthy();
+
+    invoke.mockImplementation(async (command: string) => {
+      if (command === "get_all_bookings") return [bookedReservation()];
+      return undefined;
+    });
+    await user.click(screen.getByRole("button", { name: /thử lại/i }));
+
+    expect(await screen.findByTestId("booking-bar-B101")).toBeTruthy();
+    expect(screen.queryByText(/database is locked/i)).toBeNull();
+  });
+});
