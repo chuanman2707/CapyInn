@@ -1,6 +1,7 @@
 use chrono::{Duration, NaiveDate};
 use sqlx::{Pool, Row, Sqlite};
 
+use super::local_day::{date_plus_days_sql, date_sql, local_date_sql};
 use crate::{
     db::row::get_money_vnd,
     models::{
@@ -415,16 +416,4 @@ fn recognized_room_revenue_filter_sql(column_prefix: &str) -> String {
          AND {check_in_date} < {range_end_exclusive}
          AND DATE({recognized_checkout}) > {range_start}"
     )
-}
-
-pub(crate) fn local_date_sql(expression: &str) -> String {
-    format!("substr(NULLIF({expression}, ''), 1, 10)")
-}
-
-fn date_sql(expression: &str) -> String {
-    format!("DATE({})", local_date_sql(expression))
-}
-
-fn date_plus_days_sql(expression: &str, days: i64) -> String {
-    format!("DATE({}, '+{days} day')", local_date_sql(expression))
 }

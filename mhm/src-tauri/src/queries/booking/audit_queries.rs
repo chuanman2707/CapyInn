@@ -5,6 +5,7 @@ use crate::{
     models::{AuditLog, BookingExportRow, NightAuditSnapshot},
 };
 
+use super::local_day::{date_plus_days_sql, date_sql};
 use super::revenue_queries;
 
 pub async fn load_night_audit_snapshot(
@@ -30,10 +31,9 @@ pub async fn load_night_audit_snapshot(
         .await?;
 
     let occupancy_checkout = revenue_queries::occupancy_checkout_date_sql("");
-    let check_in_date = format!("DATE({})", revenue_queries::local_date_sql("check_in_at"));
-    let audit_date_start = format!("DATE({})", revenue_queries::local_date_sql("?2"));
-    let audit_date_end_exclusive =
-        format!("DATE({}, '+1 day')", revenue_queries::local_date_sql("?1"));
+    let check_in_date = date_sql("check_in_at");
+    let audit_date_start = date_sql("?2");
+    let audit_date_end_exclusive = date_plus_days_sql("?1", 1);
     let rooms_sold_query = format!(
         "SELECT COUNT(DISTINCT room_id)
          FROM bookings
@@ -100,11 +100,10 @@ pub async fn load_booking_export_rows(
     to_date: &str,
 ) -> Result<Vec<BookingExportRow>, sqlx::Error> {
     let reporting_checkout = revenue_queries::recognized_checkout_date_sql("b.");
-    let from_date_sql = format!("DATE({})", revenue_queries::local_date_sql("?1"));
-    let to_date_sql = format!("DATE({})", revenue_queries::local_date_sql("?2"));
-    let check_in_date_sql = format!("DATE({})", revenue_queries::local_date_sql("b.check_in_at"));
-    let cancellation_created_date_sql =
-        format!("DATE({})", revenue_queries::local_date_sql("tx.created_at"));
+    let from_date_sql = date_sql("?1");
+    let to_date_sql = date_sql("?2");
+    let check_in_date_sql = date_sql("b.check_in_at");
+    let cancellation_created_date_sql = date_sql("tx.created_at");
     let export_checkout = format!(
         "CASE
             WHEN b.status = 'checked_out' THEN {reporting_checkout}
