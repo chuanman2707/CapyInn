@@ -235,12 +235,11 @@ describe("09 — Reservations", () => {
     it("kéo 2 ô tương lai mở form đặt phòng với ngày điền sẵn", async () => {
         render(<Reservations />);
         const start = await screen.findByTestId("cell-1A-5");
-        const end = await screen.findByTestId("cell-1A-6");
-        fireEvent.mouseDown(start, { button: 0 });
-        // React derives onMouseEnter from the mouseout/mouseover pair at its root —
-        // testing-library's mouseEnter dispatches a non-bubbling event React never
-        // sees there. mouseOver is what actually reaches handleCellMouseEnter.
-        fireEvent.mouseOver(end);
+        fireEvent.mouseDown(start, { button: 0, clientX: 400 });
+        // Vùng chọn mở rộng theo TOẠ ĐỘ chuột, không theo sự kiện hover: WebKit
+        // ngưng bắn hover khi đang giữ nút chuột. Mỗi cột rộng 80px và trong
+        // jsdom mọi rect đều bằng 0, nên clientX 500 rơi vào cột 6.
+        fireEvent.mouseMove(window, { clientX: 500 });
         fireEvent.mouseUp(window);
 
         expect(await screen.findByText("Đặt phòng trước")).toBeInTheDocument();
@@ -278,9 +277,8 @@ describe("09 — Reservations", () => {
     it("nhấn Escape khi đang kéo sẽ huỷ selection, không mở form nào", async () => {
         render(<Reservations />);
         const start = await screen.findByTestId("cell-1A-5");
-        const end = await screen.findByTestId("cell-1A-6");
-        fireEvent.mouseDown(start, { button: 0 });
-        fireEvent.mouseOver(end);
+        fireEvent.mouseDown(start, { button: 0, clientX: 400 });
+        fireEvent.mouseMove(window, { clientX: 500 }); // cột 6
         fireEvent.keyDown(window, { key: "Escape" });
         fireEvent.mouseUp(window);
 
@@ -299,9 +297,8 @@ describe("09 — Reservations", () => {
     it("thả chuột ngoài cửa sổ (window blur) huỷ selection đang kéo", async () => {
         render(<Reservations />);
         const start = await screen.findByTestId("cell-1A-5");
-        const end = await screen.findByTestId("cell-1A-6");
-        fireEvent.mouseDown(start, { button: 0 });
-        fireEvent.mouseOver(end);
+        fireEvent.mouseDown(start, { button: 0, clientX: 400 });
+        fireEvent.mouseMove(window, { clientX: 500 }); // cột 6
         fireEvent(window, new Event("blur"));
         // mouseUp xảy ra sau khi quay lại cửa sổ — selection phải đã bị xoá từ blur,
         // nên mouseUp này không được mở form nào.
@@ -309,5 +306,66 @@ describe("09 — Reservations", () => {
 
         expect(useHotelStore.getState().isCheckinOpen).toBe(false);
         expect(screen.queryByText("Đặt phòng trước")).not.toBeInTheDocument();
+    });
+});
+
+
+// WebKit (WKWebView — engine của app trên macOS) KHÔNG cập nhật hover khi đang
+// giữ nút chuột: nó ngưng bắn cặp mouseover/mouseout suốt cú kéo. `onMouseEnter`
+// của React được suy ra chính từ cặp đó, nên bản cũ đứng nguyên ở ô đầu và cú
+// kéo của chủ khách sạn (2/8 → 5/8 phòng 1B) không mở rộng được vùng chọn.
+// Chromium bắn bình thường nên bug vô hình ở đó — và jsdom thì không có engine
+// nào cả, nên `fireEvent.mouseOver` chỉ chứng minh được đúng cái cơ chế đã hỏng.
+//
+// Test này kéo mà KHÔNG phát một sự kiện hover nào: chỉ mousedown, mousemove
+// trên window, mouseup — đúng những sự kiện mà mọi engine đều bắn khi kéo.
+describe("09 — Reservations kéo chọn không dựa vào hover", () => {
+    beforeEach(() => {
+        clearMockResponses();
+        invoke.mockClear();
+        useHotelStore.setState({
+            rooms: mockRooms,
+            isCheckinOpen: false,
+            checkinRoomId: null,
+            checkinNights: null,
+        });
+        setMockResponse("get_rooms", () => mockRooms);
+        setMockResponse("get_all_bookings", () => []);
+        setMockResponse("check_availability", () => ({ available: true, conflicts: [], max_nights: null }));
+    });
+
+    const iso = (offsetDays: number) => {
+        const d = new Date();
+        d.setDate(d.getDate() + offsetDays);
+        return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+    };
+
+    it("mở rộng vùng chọn theo toạ độ chuột, không cần sự kiện hover", async () => {
+        render(<Reservations />);
+
+        // Cột 0 = hôm nay − 3, mỗi cột rộng 80px. Trong jsdom mọi
+        // getBoundingClientRect đều bằng 0, nên clientX chính là toạ độ trong
+        // lưới: cột 5 = 400..479, cột 8 = 640..719.
+        fireEvent.mouseDown(await screen.findByTestId("cell-1B-5"), { button: 0, clientX: 400 });
+        fireEvent.mouseMove(window, { clientX: 500 }); // cột 6
+        fireEvent.mouseMove(window, { clientX: 660 }); // cột 8
+        fireEvent.mouseUp(window);
+
+        expect(await screen.findByText("Đặt phòng trước")).toBeInTheDocument();
+        // Kéo 4 ô (cột 5→8) = 4 đêm: đến hôm nay+2, đi hôm nay+6.
+        expect(screen.getByDisplayValue(iso(2))).toBeInTheDocument();
+        expect(screen.getByDisplayValue(iso(6))).toBeInTheDocument();
+    });
+
+    it("không mở rộng sang phòng khác khi chuột trượt lên hàng trên", async () => {
+        render(<Reservations />);
+
+        fireEvent.mouseDown(await screen.findByTestId("cell-1B-5"), { button: 0, clientX: 400 });
+        // Chuột trượt sang cột 8 nhưng ở hàng khác: cú kéo vẫn thuộc phòng 1B.
+        fireEvent.mouseMove(window, { clientX: 660, clientY: -500 });
+        fireEvent.mouseUp(window);
+
+        expect(await screen.findByText("Đặt phòng trước")).toBeInTheDocument();
+        expect((screen.getByLabelText(/^Phòng$/) as HTMLSelectElement).value).toBe("1B");
     });
 });
