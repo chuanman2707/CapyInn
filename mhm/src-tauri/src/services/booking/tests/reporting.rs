@@ -540,6 +540,45 @@ async fn run_night_audit_uses_canonical_room_and_folio_revenue() {
     assert_eq!(audited, 1);
 }
 
+/// Closing a day must not stamp a stay that belongs to the next one.
+///
+/// `mark_bookings_audited_tx` selected on `DATE(check_in_at)`, and SQLite's
+/// `DATE()` converts an offset stamp to **UTC**: a 02:00 arrival on the 17th is
+/// 19:00 on the 16th in UTC, so it read as the 16th and the audit for the 16th
+/// swept it up. That is every check-in before 07:00 local, every day — the late
+/// arrivals a small hotel actually takes — and it is a write, so the wrong day
+/// is recorded on the row rather than merely displayed.
+#[tokio::test]
+async fn the_night_audit_does_not_stamp_a_stay_that_arrived_after_local_midnight() {
+    let pool = test_pool().await;
+    seed_room(&pool, "R304").await.unwrap();
+    seed_active_booking(&pool, "B304", "R304").await.unwrap();
+    sqlx::query(
+        "UPDATE bookings
+         SET check_in_at = '2026-04-17T02:00:00+07:00',
+             expected_checkout = '2026-04-18T10:00:00+07:00'
+         WHERE id = ?",
+    )
+    .bind("B304")
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    audit_service::run_night_audit(&pool, "2026-04-16", None, "admin-1")
+        .await
+        .unwrap();
+
+    let audited: i32 = sqlx::query_scalar("SELECT is_audited FROM bookings WHERE id = ?")
+        .bind("B304")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(
+        audited, 0,
+        "a stay that checked in at 02:00 on the 17th is not part of the 16th",
+    );
+}
+
 #[tokio::test]
 async fn billing_and_export_queries_preserve_canonical_revenue_columns() {
     let pool = test_pool().await;

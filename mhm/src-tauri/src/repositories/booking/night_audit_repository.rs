@@ -1,5 +1,7 @@
 use sqlx::{Pool, Sqlite, Transaction};
 
+use crate::db::local_day::local_date_sql;
+
 use crate::{
     domain::booking::BookingResult,
     models::{AuditLog, NightAuditSnapshot},
@@ -61,16 +63,25 @@ pub async fn insert_night_audit_log_tx(
     })
 }
 
+/// Stamps every stay up to and including `audit_date` as audited.
+///
+/// The day comes from `local_day`, not from `DATE()` on the raw stamp. `DATE()`
+/// converts an offset stamp to UTC, so a 02:00 arrival on the 17th read as the
+/// 16th and a close of the 16th stamped it — every check-in before 07:00 local,
+/// and a write rather than a display.
 pub async fn mark_bookings_audited_tx(
     tx: &mut Transaction<'_, Sqlite>,
     audit_date: &str,
 ) -> Result<(), sqlx::Error> {
-    sqlx::query(
+    let check_in_day = local_date_sql("check_in_at");
+    let audit_day = local_date_sql("?");
+
+    sqlx::query(&format!(
         "UPDATE bookings
          SET is_audited = 1
-         WHERE DATE(check_in_at) <= DATE(?)
+         WHERE {check_in_day} <= {audit_day}
            AND status IN ('active', 'checked_out')",
-    )
+    ))
     .bind(audit_date)
     .execute(&mut **tx)
     .await?;

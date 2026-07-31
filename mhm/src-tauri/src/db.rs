@@ -12,6 +12,7 @@ mod agent;
 mod command_safety;
 mod core_extensions;
 pub mod declaration;
+pub mod local_day;
 mod migrations;
 mod money;
 mod outbox;
