@@ -888,6 +888,18 @@ async fn confirm_reservation_keeps_the_extra_guest_charge() {
     seed_room_with_guest_pricing(&pool, "R311", 500_000, 2, 50_000)
         .await
         .unwrap();
+    // `seed_room_with_guest_pricing` là helper seed DUY NHẤT không chèn dòng
+    // `pricing_rules` nào, nên phòng nó tạo rơi về `PricingRule::default()` —
+    // vốn mang phụ thu cuối tuần 20%. Kỳ ở dưới đây bắt đầu từ HÔM NAY thật và
+    // không đổi được: `confirm_reservation_tx` định giá lại từ lúc xác nhận đến
+    // ngày đi, nên đẩy ngày đến ra một mốc cố định chỉ kéo dài kỳ ở. Vậy nên
+    // chạy vào thứ Sáu/Bảy/Chủ nhật là có đêm cuối tuần lọt vào, cộng thêm
+    // 500.000 × 20% = 100.000 và kỳ vọng 1.200.000 dưới kia đỏ — 3 ngày trong 7.
+    //
+    // Bảng giá tường minh này khoá phụ thu cuối tuần về 0 đúng như mọi helper
+    // seed khác vẫn làm, giữ nguyên giá ngày 500.000. Test nói về phụ thu thêm
+    // người; cuối tuần là biến lạ, không phải thứ nó kiểm.
+    seed_pricing_rule(&pool, "standard", 500_000).await.unwrap();
 
     let today = Local::now().date_naive();
     let check_in = today.format("%Y-%m-%d").to_string();
