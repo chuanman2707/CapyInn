@@ -154,27 +154,36 @@ export default function ReservationSheet({ open, onOpenChange, preSelectedRoomId
         if (room) setGuests(room.max_guests);
     }, [isEditMode, editBooking, rooms, guestsTouched]);
 
-    const vacantRooms = rooms.filter((r) => r.status === "vacant" || r.status === "booked");
+    // Mọi phòng đều liệt kê được. Trạng thái phòng (`vacant`/`occupied`/
+    // `cleaning`/`booked`) mô tả HÔM NAY, còn đặt phòng trước hỏi về một
+    // khoảng ngày khác hẳn — lọc theo nó là trả lời sai câu hỏi. Một phòng
+    // đang có khách trả phòng ngày 3/8 vẫn trống nguyên từ 12/8, nhưng vẫn
+    // biến mất khỏi ô chọn, và chủ khách sạn không có cách nào đặt cho nó.
+    //
+    // Việc gác đúng chiều thời gian đã có sẵn hai lớp: useAvailability gọi
+    // `check_availability` theo đúng khoảng ngày đang chọn (hiện danh sách
+    // ngày vướng + số đêm tối đa ngay dưới ô ngày, và tắt nút gửi), còn
+    // `create_reservation_tx` đọc lại room_calendar trong chính transaction
+    // ghi nên hai người đặt cùng lúc vẫn không trùng phòng được. Lọc ở đây
+    // không thêm an toàn nào, chỉ giấu mất phòng.
 
-    // Kéo một ô lịch TƯƠNG LAI của phòng đang có khách (khách rời sau hai hôm)
-    // mở sheet này với đúng roomId đó, mà danh sách chỉ liệt kê vacant/booked —
-    // <select> không có option khớp nên hiện trống, còn state vẫn giữ id đó và
-    // nút gửi vẫn sáng vì nó gác trên `!roomId`, mà id vô hình kia là truthy.
-    // Cùng cách xử lý như BackfillSheet.tsx.
+    // roomId không ứng với phòng nào (phòng bị xoá trong Cài đặt khi sheet
+    // đang mở): <select> không có option khớp nên hiện trống, còn state vẫn
+    // giữ id đó và nút gửi vẫn sáng vì nó gác trên `!roomId`, mà id vô hình
+    // kia là truthy.
     //
     // Chế độ sửa được miễn: phòng ở đó lấy từ chính booking đang sửa và ô
-    // select bị disable — phòng đang có khách là chuyện bình thường, xoá đi sẽ
-    // chặn luôn việc lưu thay đổi.
+    // select bị disable, nên xoá đi chỉ chặn việc lưu thay đổi.
     useEffect(() => {
         if (isEditMode) return;
         // `rooms.length > 0`: các sheet này gọi fetchRooms() lúc mở, nên có một
         // khoảnh khắc danh sách còn rỗng. Không có vế này, một phòng hợp lệ
         // truyền vào bị xoá ngay trước khi rooms kịp về, và effect nạp
         // preSelected không chạy lại để đặt lại nó.
-        if (rooms.length > 0 && roomId && !vacantRooms.some((r) => r.id === roomId)) {
+        if (rooms.length > 0 && roomId && !rooms.some((r) => r.id === roomId)) {
             setRoomId("");
         }
-    }, [isEditMode, rooms, roomId, vacantRooms]);
+    }, [isEditMode, rooms, roomId]);
 
     async function handleSubmit() {
         if (!roomId || !checkInDate || !checkOutDate) {
@@ -301,7 +310,7 @@ export default function ReservationSheet({ open, onOpenChange, preSelectedRoomId
                             disabled={isEditMode}
                         >
                             <option value="">— Chọn phòng —</option>
-                            {vacantRooms.map((r) => (
+                            {rooms.map((r) => (
                                 <option key={r.id} value={r.id}>
                                     {/* Không kèm `base_price`: giá gắn với loại phòng,
                                         nên con số theo từng phòng đứng cạnh tổng do
