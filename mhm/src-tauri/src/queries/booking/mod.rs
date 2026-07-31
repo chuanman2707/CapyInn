@@ -4,7 +4,6 @@ pub mod billing_queries;
 pub mod booking_list_queries;
 pub mod ceo_read_queries;
 pub mod expense_queries;
-pub mod local_day;
 pub mod pricing_queries;
 pub mod revenue_queries;
 pub mod room_queries;
