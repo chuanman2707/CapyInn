@@ -6,6 +6,8 @@
 
 use sqlx::{Pool, Row, Sqlite};
 
+use super::local_day::local_date_sql;
+
 use crate::db::row::{get_money_vnd, get_optional_money_vnd};
 use crate::models::{BookingFilter, BookingWithGuest};
 
@@ -41,12 +43,35 @@ pub async fn load_bookings_with_guest(
         if let Some(status) = filter.status.as_deref().and_then(status_clause) {
             sql.push_str(status);
         }
+        // Both sides of each comparison go through `local_date_sql`, and both
+        // for the same reason: the columns hold a bare `YYYY-MM-DD` on some rows
+        // and a full local stamp on others, and the caller may send either shape
+        // too (the gateway tool documents these only as "ISO datetime").
+        //
+        // Compared as raw text, `'2026-04-12T12:00:00+07:00' <= '2026-04-12'` is
+        // false while `'2026-04-12' <= '2026-04-12'` is true — so the upper bound
+        // silently dropped every stay whose checkout was stamped, on the very day
+        // it was asked about. These are day bounds; fold them to days first.
+        //
+        // Folding both sides is deliberately more than the minimum: with the bind
+        // already a bare date, `>=` would answer the same unfolded, and with the
+        // column already folded, `<=` would too. Relying on that leaves each bound
+        // correct only because of what the *other* side happens to be, which is
+        // how this broke in the first place. Date vs date, both sides, always.
         if let Some(from) = &filter.from {
-            sql.push_str(" AND b.check_in_at >= ?");
+            sql.push_str(&format!(
+                " AND {} >= {}",
+                local_date_sql("b.check_in_at"),
+                local_date_sql("?")
+            ));
             binds.push(from.clone());
         }
         if let Some(to) = &filter.to {
-            sql.push_str(" AND b.expected_checkout <= ?");
+            sql.push_str(&format!(
+                " AND {} <= {}",
+                local_date_sql("b.expected_checkout"),
+                local_date_sql("?")
+            ));
             binds.push(to.clone());
         }
     }
@@ -265,5 +290,119 @@ mod tests {
         .expect("load combined");
         let ids: Vec<&str> = bookings.iter().map(|b| b.id.as_str()).collect();
         assert_eq!(ids, vec!["B-ACTIVE"]);
+    }
+
+    /// The bound above is only ever tested from *inside* the range: `to` is the
+    /// 13th while the checkout is the 12th, so `'2026-04-12T12:00:00+07:00' <=
+    /// '2026-04-13'` compares true on the calendar and as text alike. The
+    /// boundary — asking for the checkout's own day — is where those two stop
+    /// agreeing, because `'2026-04-12T12:00:00+07:00'` sorts *after* the bare
+    /// `'2026-04-12'` that is its own date.
+    #[tokio::test]
+    async fn the_upper_bound_includes_a_checkout_on_that_very_day() {
+        let pool = seeded_pool().await;
+
+        let bookings = load_bookings_with_guest(&pool, filter(None, None, Some("2026-04-12")))
+            .await
+            .expect("load to");
+
+        let ids: Vec<&str> = bookings.iter().map(|b| b.id.as_str()).collect();
+        assert!(
+            ids.contains(&"B-ACTIVE"),
+            "a stay checking out on the 12th is inside a range ending the 12th, \
+             but the filter returned {ids:?}"
+        );
+    }
+
+    /// Both shapes are in the live database on the same column: some rows carry
+    /// a bare `YYYY-MM-DD`, others a full local rfc3339 stamp. A filter is
+    /// supposed to answer a question about *days*, so which shape a row happened
+    /// to be written in must not decide whether it is in the answer.
+    #[tokio::test]
+    async fn a_row_is_filtered_by_its_day_not_by_the_shape_it_was_written_in() {
+        let pool = seeded_pool().await;
+
+        for (id, checkout) in [
+            ("B-DATE-ONLY", "2026-04-12"),
+            ("B-TIMESTAMPED", "2026-04-12T12:00:00+07:00"),
+        ] {
+            sqlx::query(
+                "INSERT INTO bookings (
+                    id, room_id, primary_guest_id, check_in_at, expected_checkout, nights,
+                    total_price, paid_amount, status, booking_type, pricing_type, created_at
+                 ) VALUES (?, 'R1', 'G1', '2026-04-11T14:00:00+07:00', ?, 1, 300000, 0,
+                           'active', 'walk-in', 'nightly', '2026-04-01T00:00:00+07:00')",
+            )
+            .bind(id)
+            .bind(checkout)
+            .execute(&pool)
+            .await
+            .expect("seed booking");
+        }
+
+        let bookings = load_bookings_with_guest(&pool, filter(None, None, Some("2026-04-12")))
+            .await
+            .expect("load to");
+        let ids: Vec<&str> = bookings.iter().map(|b| b.id.as_str()).collect();
+
+        assert!(
+            ids.contains(&"B-DATE-ONLY") && ids.contains(&"B-TIMESTAMPED"),
+            "the same checkout day, written two ways, filtered differently: {ids:?}"
+        );
+    }
+
+    /// The lower bound fails the other way round. A stamped row beats a bare date
+    /// as text, so `from` looked fine while the column held stamps — but a row
+    /// stored as a bare `YYYY-MM-DD` sorts *before* any stamp on its own day, so
+    /// asking from that morning dropped a stay that checked in that morning.
+    #[tokio::test]
+    async fn the_lower_bound_includes_a_date_only_arrival_on_that_very_day() {
+        let pool = seeded_pool().await;
+
+        sqlx::query(
+            "INSERT INTO bookings (
+                id, room_id, primary_guest_id, check_in_at, expected_checkout, nights,
+                total_price, paid_amount, status, booking_type, pricing_type, created_at
+             ) VALUES ('B-ARRIVED', 'R1', 'G1', '2026-04-10', '2026-04-12T12:00:00+07:00', 2,
+                       600000, 0, 'active', 'walk-in', 'nightly', '2026-04-01T00:00:00+07:00')",
+        )
+        .execute(&pool)
+        .await
+        .expect("seed booking");
+
+        let bookings =
+            load_bookings_with_guest(&pool, filter(None, Some("2026-04-10T08:00:00+07:00"), None))
+                .await
+                .expect("load from");
+
+        let ids: Vec<&str> = bookings.iter().map(|b| b.id.as_str()).collect();
+        assert!(
+            ids.contains(&"B-ARRIVED"),
+            "a stay checking in on the 10th is inside a range starting the 10th, \
+             but the filter returned {ids:?}"
+        );
+    }
+
+    /// The argument is the other half of the same comparison, and the gateway
+    /// tool that supplies it documents the field only as "ISO datetime" — so a
+    /// caller may hand over either shape too.
+    #[tokio::test]
+    async fn the_bound_means_the_same_day_whichever_shape_the_caller_sends() {
+        let pool = seeded_pool().await;
+
+        let as_date = load_bookings_with_guest(&pool, filter(None, None, Some("2026-04-12")))
+            .await
+            .expect("load date bound");
+        let as_stamp =
+            load_bookings_with_guest(&pool, filter(None, None, Some("2026-04-12T23:59:59+07:00")))
+                .await
+                .expect("load stamp bound");
+
+        let date_ids: Vec<&str> = as_date.iter().map(|b| b.id.as_str()).collect();
+        let stamp_ids: Vec<&str> = as_stamp.iter().map(|b| b.id.as_str()).collect();
+        assert_eq!(
+            date_ids, stamp_ids,
+            "the same day asked for two ways gave two answers"
+        );
     }
 }
