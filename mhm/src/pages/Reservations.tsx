@@ -1,4 +1,4 @@
-import { useState, useEffect, useMemo, type MouseEvent as ReactMouseEvent } from "react";
+import { useState, useEffect, useMemo, useRef, type MouseEvent as ReactMouseEvent } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { Search, ChevronLeft, ChevronRight, Plus } from "lucide-react";
 import { Input } from "@/components/ui/input";
@@ -282,18 +282,38 @@ export default function Reservations() {
         }
     }
 
-    function handleCellMouseDown(roomId: string, colIndex: number, event: ReactMouseEvent) {
+    // Dải ô của đúng hàng đang kéo, ghim lúc nhấn chuột. Đọc lại rect ở mỗi
+    // lần chuột nhúc nhích chứ không nhớ sẵn một con số: lịch cuộn ngang được,
+    // và cuộn giữa chừng cú kéo sẽ làm mọi toạ độ nhớ sẵn thành sai.
+    const dragGridRef = useRef<HTMLElement | null>(null);
+
+    function handleCellMouseDown(roomId: string, colIndex: number, event: ReactMouseEvent<HTMLDivElement>) {
         if (event.button !== 0) return;
         event.preventDefault(); // chặn select text khi kéo
+        dragGridRef.current = event.currentTarget.parentElement;
         setDragSel({ roomId, startIndex: colIndex, endIndex: colIndex });
     }
 
-    function handleCellMouseEnter(roomId: string, colIndex: number) {
-        setDragSel((prev) => (prev && prev.roomId === roomId ? { ...prev, endIndex: colIndex } : prev));
-    }
-
+    // Cột dưới con trỏ, suy từ TOẠ ĐỘ chuột — không phải từ sự kiện hover.
+    //
+    // Bản trước gắn onMouseEnter lên từng ô. WebKit (WKWebView, engine của app
+    // trên macOS) không cập nhật hover khi đang giữ nút chuột: nó ngưng bắn cặp
+    // mouseover/mouseout suốt cú kéo, mà React suy ra onMouseEnter chính từ cặp
+    // đó. Hệ quả: giữ chuột kéo qua các ô kế tiếp thì không ô nào nhận được gì,
+    // vùng chọn đứng nguyên ở ô đầu, và cú kéo 2/8 → 5/8 ra một đêm thay vì
+    // bốn. Chromium bắn hover bình thường nên bug vô hình khi thử ngoài app.
+    //
+    // `mousemove` thì mọi engine đều bắn suốt cú kéo, nên tính cột từ clientX
+    // là cách duy nhất không phụ thuộc engine.
     useEffect(() => {
         if (!dragSel) return;
+        const onMouseMove = (event: MouseEvent) => {
+            const grid = dragGridRef.current;
+            if (!grid) return;
+            const col = Math.floor((event.clientX - grid.getBoundingClientRect().left) / COL_WIDTH);
+            const clamped = Math.max(0, Math.min(DAYS.length - 1, col));
+            setDragSel((prev) => (prev && prev.endIndex !== clamped ? { ...prev, endIndex: clamped } : prev));
+        };
         const onMouseUp = () => {
             const resolved = resolveSelection(dragSel, DAYS, localDateIso(new Date()));
             setDragSel(null);
@@ -315,10 +335,12 @@ export default function Reservations() {
             if (event.key === "Escape") setDragSel(null);
         };
         const onBlur = () => setDragSel(null);
+        window.addEventListener("mousemove", onMouseMove);
         window.addEventListener("mouseup", onMouseUp);
         window.addEventListener("keydown", onKeyDown);
         window.addEventListener("blur", onBlur);
         return () => {
+            window.removeEventListener("mousemove", onMouseMove);
             window.removeEventListener("mouseup", onMouseUp);
             window.removeEventListener("keydown", onKeyDown);
             window.removeEventListener("blur", onBlur);
@@ -448,7 +470,6 @@ export default function Reservations() {
                                                         key={colIndex}
                                                         data-testid={`cell-${room.id}-${colIndex}`}
                                                         onMouseDown={(event) => handleCellMouseDown(room.id, colIndex, event)}
-                                                        onMouseEnter={() => handleCellMouseEnter(room.id, colIndex)}
                                                         className={`w-[80px] shrink-0 border-r border-slate-200 select-none cursor-pointer ${inSelection ? "bg-blue-100/70" : d.isToday ? "bg-blue-50/10" : ""} group-hover:bg-slate-50/30 transition-colors`}
                                                     />
                                                 );
