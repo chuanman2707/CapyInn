@@ -24,6 +24,7 @@ import SlideDrawer from "@/components/shared/SlideDrawer";
 import { Button } from "@/components/ui/button";
 import { useInvoiceDialog } from "@/hooks/useInvoiceDialog";
 import { formatAppError } from "@/lib/appError";
+import { isFullySettled } from "@/lib/bookingBalance";
 import { getRoomTypeLabel } from "@/lib/constants";
 import { fmtDateShort, fmtMoney } from "@/lib/format";
 import { nightlyRateDisplay } from "@/lib/roomTypeRate";
@@ -173,7 +174,7 @@ export default function RoomDrawer({ open, onClose, roomId }: RoomDrawerProps) {
     const guestSection = <RoomGuestsSection guests={guests} mode="sheet" />;
 
     const paymentStatusClass =
-        booking && booking.paid_amount >= booking.total_price
+        booking && isFullySettled(booking.total_price, booking.paid_amount)
             ? "text-emerald-600"
             : "text-orange-600";
 

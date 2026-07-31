@@ -31,9 +31,10 @@ pub struct GetSettingsInput {
 pub struct GetBookingsInput {
     /// Filter by status: "active", "completed", "booked", or omit for all
     pub status: Option<String>,
-    /// Filter start date (ISO datetime)
+    /// Earliest check-in day, `YYYY-MM-DD`. Whole days: a time of day is ignored.
     pub from: Option<String>,
-    /// Filter end date (ISO datetime)
+    /// Latest checkout day, `YYYY-MM-DD`, inclusive. Whole days: a time of day is
+    /// ignored.
     pub to: Option<String>,
 }
 

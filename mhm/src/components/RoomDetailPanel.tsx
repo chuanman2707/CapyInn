@@ -25,7 +25,7 @@ import { Button } from "@/components/ui/button";
 import { useInvoiceDialog } from "@/hooks/useInvoiceDialog";
 import { formatAppError } from "@/lib/appError";
 import { getRoomTypeLabel } from "@/lib/constants";
-import { BALANCE_TONE_CLASS, balanceDisplay } from "@/lib/bookingBalance";
+import { BALANCE_TONE_CLASS, balanceDisplay, isFullySettled } from "@/lib/bookingBalance";
 import { fmtDate, fmtDateShort, fmtMoney } from "@/lib/format";
 import { nightlyRateDisplay } from "@/lib/roomTypeRate";
 import { useHotelStore } from "@/stores/useHotelStore";
@@ -260,7 +260,7 @@ export default function RoomDetailPanel({
             </div>
             <div className="flex items-center justify-between pt-2 border-t border-slate-200">
               <span className="text-sm font-medium text-brand-muted">Đã thanh toán</span>
-              <span className={`text-sm font-bold ${booking.paid_amount >= booking.total_price ? "text-emerald-600" : "text-orange-600"}`}>
+              <span className={`text-sm font-bold ${isFullySettled(booking.total_price, booking.paid_amount) ? "text-emerald-600" : "text-orange-600"}`}>
                 {fmtMoney(booking.paid_amount)} / {fmtMoney(booking.total_price)}
               </span>
             </div>

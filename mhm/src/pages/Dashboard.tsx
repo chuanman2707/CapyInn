@@ -9,6 +9,7 @@ import { Area, AreaChart, ResponsiveContainer, Tooltip, XAxis, YAxis } from "rec
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { Badge } from "@/components/ui/badge";
 import { Users, DoorOpen, Paintbrush, TrendingUp, ShieldCheck } from "lucide-react";
+import { isFullySettled } from "@/lib/bookingBalance";
 import { invokeCommand } from "@/lib/invokeCommand";
 import { invoke } from "@tauri-apps/api/core";
 import { fmtDateShort, fmtMoney, fmtNumber } from "@/lib/format";
@@ -181,8 +182,8 @@ export default function Dashboard() {
                 <TableRow key={b.id} className="border-b border-slate-50 hover:bg-slate-50/50 transition-colors">
                   <TableCell className="font-semibold text-brand-text py-3">{b.guest_name}</TableCell>
                   <TableCell className="py-3">
-                    <Badge variant="paid" className={`border-0 rounded-md py-0.5 px-2 font-semibold ${b.paid_amount >= b.total_price ? "bg-emerald-50 text-emerald-600" : "bg-orange-50 text-orange-600"}`}>
-                      {b.paid_amount >= b.total_price ? "Paid" : "Unpaid"}
+                    <Badge variant="paid" className={`border-0 rounded-md py-0.5 px-2 font-semibold ${isFullySettled(b.total_price, b.paid_amount) ? "bg-emerald-50 text-emerald-600" : "bg-orange-50 text-orange-600"}`}>
+                      {isFullySettled(b.total_price, b.paid_amount) ? "Paid" : "Unpaid"}
                     </Badge>
                   </TableCell>
                   <TableCell className="font-semibold text-brand-text py-3">{b.room_id}</TableCell>
