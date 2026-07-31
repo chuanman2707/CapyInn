@@ -342,3 +342,105 @@ fn the_domain_layer_does_not_talk_to_sqlite() {
         violations.join("\n")
     );
 }
+
+/// Columns written as `chrono::Local::now().to_rfc3339()` — a stamp carrying a
+/// `+07:00` offset.
+///
+/// SQLite's `DATE()` converts such a stamp to **UTC** before taking the day, so
+/// `DATE('2026-08-01T02:00:00+07:00')` is `2026-07-31`. For the seven hours of
+/// every Vietnamese day when those differ, the answer is a day the desk never
+/// worked. `db::local_day` takes the first ten characters instead, which is
+/// already the local date.
+///
+/// Date-only columns are deliberately absent: `expense_date`, `audit_date` and
+/// `scheduled_checkin`/`scheduled_checkout` hold `YYYY-MM-DD`, and `DATE()` on
+/// those is the identity.
+const LOCAL_STAMP_COLUMNS: [&str; 5] = [
+    "check_in_at",
+    "expected_checkout",
+    "actual_checkout",
+    "created_at",
+    "updated_at",
+];
+
+/// Every `DATE(<column>)` in `source` that names a local-stamp column.
+///
+/// Matches an optional table alias, so `DATE(b.check_in_at)` is caught too.
+/// `DATE({...})` — the `format!` hole that `db::local_day::date_sql` produces
+/// around an already-folded expression — does not match, because a `{` is not
+/// the start of a column name.
+fn utc_day_conversions(source: &str) -> Vec<String> {
+    let mut found = Vec::new();
+
+    for (offset, _) in source.match_indices("DATE(") {
+        let rest = &source[offset + "DATE(".len()..];
+        let argument: String = rest
+            .chars()
+            .take_while(|c| c.is_alphanumeric() || *c == '_' || *c == '.')
+            .collect();
+        let column = argument.rsplit('.').next().unwrap_or(&argument);
+
+        if LOCAL_STAMP_COLUMNS.contains(&column) {
+            found.push(format!("DATE({argument})"));
+        }
+    }
+
+    found
+}
+
+/// A day must come from `db::local_day`, never from `DATE()` on a raw stamp.
+///
+/// This has been the same bug four times — the check-in sheets, the night audit
+/// default, the booking-list filter, and `mark_bookings_audited_tx`, which wrote
+/// the wrong day onto the row. Each was found by reading; this makes the next one
+/// a red test.
+#[test]
+fn a_local_day_never_comes_from_date_on_a_raw_stamp() {
+    let mut violations = Vec::new();
+
+    for layer in ["queries", "repositories", "services", "commands", "domain"] {
+        for file in rust_files_in_layer(layer) {
+            let name = relative(&file).replace('\\', "/");
+            // Test modules seed and assert on fixed dates, where `DATE()` on a
+            // literal is unambiguous. `production_source` only strips inline
+            // `#[cfg(test)]` blocks, so whole test *files* need this too.
+            if is_test_module(&name) {
+                continue;
+            }
+            let source = fs::read_to_string(&file).expect("read source file");
+
+            for hit in utc_day_conversions(&production_source(&source)) {
+                violations.push(format!("{name}: {hit}"));
+            }
+        }
+    }
+
+    assert!(
+        violations.is_empty(),
+        "`DATE()` on a local rfc3339 stamp takes the UTC day, which is the wrong \
+         day for seven hours of every day here. Use `db::local_day::local_date_sql` \
+         (or `date_sql` / `date_plus_days_sql`, which build on it).\n\n{}",
+        violations.join("\n")
+    );
+}
+
+#[test]
+fn the_utc_day_detector_reads_aliases_and_ignores_folded_expressions() {
+    // The shape the bug took in `mark_bookings_audited_tx`.
+    assert_eq!(
+        utc_day_conversions("WHERE DATE(check_in_at) <= DATE(?)"),
+        vec!["DATE(check_in_at)".to_string()],
+    );
+    // A table alias must not hide it.
+    assert_eq!(
+        utc_day_conversions("AND DATE(b.expected_checkout) > x"),
+        vec!["DATE(b.expected_checkout)".to_string()],
+    );
+    // `date_sql` wraps an already-folded expression through a `format!` hole —
+    // that is the correct construction and must stay quiet, or the guard is
+    // noise and gets switched off.
+    assert!(utc_day_conversions("DATE({check_in_day}) <= x").is_empty());
+    assert!(utc_day_conversions("substr(NULLIF(check_in_at, ''), 1, 10)").is_empty());
+    // Date-only columns are not stamps.
+    assert!(utc_day_conversions("DATE(expense_date) BETWEEN DATE(?) AND DATE(?)").is_empty());
+}
