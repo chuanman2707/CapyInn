@@ -369,3 +369,48 @@ describe("09 — Reservations kéo chọn không dựa vào hover", () => {
         expect((screen.getByLabelText(/^Phòng$/) as HTMLSelectElement).value).toBe("1B");
     });
 });
+
+// Chủ khách sạn: "nhấn đè chuột ở 1 ô thì không hiện ô xanh, phải rê xuống
+// phòng khác rồi lắc lại thì mới hiện".
+//
+// Ô lịch mang cả `bg-blue-100/70` (màu vùng chọn) lẫn `group-hover:bg-slate-50/30`
+// (màu hover của hàng). Selector `group-hover:` có độ ưu tiên CSS cao hơn nên nó
+// THẮNG — đo trong trình duyệt thật với con trỏ thật đặt trên ô đã chọn:
+// backgroundColor = oklab(0.984 … / 0.3), tức slate-50/30, không phải xanh.
+// Kéo thì con trỏ luôn nằm trên chính hàng đang kéo, nên vùng chọn vô hình
+// suốt cú kéo và chỉ lộ ra khi con trỏ rời sang hàng khác.
+//
+// jsdom không tính CSS của Tailwind, nên test khẳng định đúng cái điều kiện gây
+// ra nó: ô đang được chọn không được mang lớp hover nào để mà bị đè.
+describe("09 — Reservations màu vùng chọn", () => {
+    beforeEach(() => {
+        clearMockResponses();
+        invoke.mockClear();
+        useHotelStore.setState({ rooms: mockRooms, isCheckinOpen: false, checkinRoomId: null, checkinNights: null });
+        setMockResponse("get_rooms", () => mockRooms);
+        setMockResponse("get_all_bookings", () => []);
+        setMockResponse("check_availability", () => ({ available: true, conflicts: [], max_nights: null }));
+    });
+
+    it("ô đang chọn mang màu vùng chọn và không mang lớp hover đè lên nó", async () => {
+        render(<Reservations />);
+        const cell = await screen.findByTestId("cell-1B-5");
+
+        expect(cell.className).toContain("group-hover:bg-");
+
+        fireEvent.mouseDown(cell, { button: 0, clientX: 400 });
+
+        expect(cell.className).toContain("bg-blue-100/70");
+        expect(cell.className).not.toContain("group-hover:bg-");
+    });
+
+    it("ô không được chọn vẫn giữ hiệu ứng hover của hàng", async () => {
+        render(<Reservations />);
+        const selected = await screen.findByTestId("cell-1B-5");
+        const other = await screen.findByTestId("cell-2B-5");
+
+        fireEvent.mouseDown(selected, { button: 0, clientX: 400 });
+
+        expect(other.className).toContain("group-hover:bg-");
+    });
+});

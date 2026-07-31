@@ -470,7 +470,16 @@ export default function Reservations() {
                                                         key={colIndex}
                                                         data-testid={`cell-${room.id}-${colIndex}`}
                                                         onMouseDown={(event) => handleCellMouseDown(room.id, colIndex, event)}
-                                                        className={`w-[80px] shrink-0 border-r border-slate-200 select-none cursor-pointer ${inSelection ? "bg-blue-100/70" : d.isToday ? "bg-blue-50/10" : ""} group-hover:bg-slate-50/30 transition-colors`}
+                                                        // Ô đang chọn KHÔNG mang lớp hover: `group-hover:` có
+                                                        // độ ưu tiên CSS cao hơn `bg-blue-100/70` nên nó đè mất
+                                                        // màu vùng chọn. Mà kéo thì con trỏ luôn nằm trên chính
+                                                        // hàng đang kéo, nên trước đây vùng chọn vô hình suốt cú
+                                                        // kéo và chỉ lộ ra khi con trỏ rời sang hàng khác — đo
+                                                        // trong trình duyệt thật: nền ô đã chọn ra slate-50/30.
+                                                        className={`w-[80px] shrink-0 border-r border-slate-200 select-none cursor-pointer transition-colors ${inSelection
+                                                            ? "bg-blue-100/70"
+                                                            : `${d.isToday ? "bg-blue-50/10" : ""} group-hover:bg-slate-50/30`
+                                                            }`}
                                                     />
                                                 );
                                             })}
