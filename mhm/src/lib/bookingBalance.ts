@@ -27,6 +27,21 @@ export function bookingBalance(total: MoneyVnd, paid: MoneyVnd): BookingBalance 
   return { kind: "owed", amount: total - paid };
 }
 
+/**
+ * Đã thu đủ chưa — tức **không còn nợ**, gộp cả "đủ" lẫn "thu quá".
+ *
+ * Bốn chỗ tự viết lại `paid_amount >= booking.total_price` bằng tay: thẻ phòng,
+ * ngăn kéo phòng, và hai lần trong Dashboard. Cùng một câu hỏi, phát biểu bốn
+ * lần — y như vị từ "thu quá" mà `bookingBalance` đã gom lại.
+ *
+ * Viết theo `kind` chứ không phải `>=` để quan hệ với ba trạng thái là hiển
+ * nhiên: "đã thu đủ" đúng là "không phải `owed`". Ai đó đổi ranh giới nợ/đủ thì
+ * chỉ có một chỗ phải sửa.
+ */
+export function isFullySettled(total: MoneyVnd, paid: MoneyVnd): boolean {
+  return bookingBalance(total, paid).kind !== "owed";
+}
+
 export type BalanceTone = "owed" | "settled" | "overpaid";
 
 export interface BalanceDisplay {

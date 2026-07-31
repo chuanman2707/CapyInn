@@ -1,6 +1,43 @@
 import { describe, expect, it } from "vitest";
 
-import { BALANCE_TONE_CLASS, balanceDisplay, bookingBalance } from "./bookingBalance";
+import {
+    BALANCE_TONE_CLASS,
+    balanceDisplay,
+    bookingBalance,
+    isFullySettled,
+} from "./bookingBalance";
+
+describe("isFullySettled", () => {
+    it("is false while anything is still owed", () => {
+        expect(isFullySettled(1_200_000, 1_199_999)).toBe(false);
+        expect(isFullySettled(1_200_000, 0)).toBe(false);
+    });
+
+    it("is true the moment the balance is exactly covered", () => {
+        expect(isFullySettled(1_200_000, 1_200_000)).toBe(true);
+    });
+
+    it("stays true when the guest has overpaid", () => {
+        // "Đã thu đủ" gộp cả `settled` lẫn `overpaid`: thu quá thì vẫn không nợ.
+        // Bốn chỗ cũ viết `paid >= total` cũng gộp đúng như vậy — chỗ này giữ
+        // nguyên hành vi đó, chỉ là phát biểu một lần.
+        expect(isFullySettled(1_200_000, 5_000_000)).toBe(true);
+    });
+
+    it("agrees with bookingBalance rather than re-deriving the boundary", () => {
+        for (const [total, paid] of [
+            [1_200_000, 0],
+            [1_200_000, 1_199_999],
+            [1_200_000, 1_200_000],
+            [1_200_000, 1_200_001],
+            [0, 0],
+        ] as const) {
+            expect(isFullySettled(total, paid)).toBe(
+                bookingBalance(total, paid).kind !== "owed",
+            );
+        }
+    });
+});
 
 describe("bookingBalance", () => {
     it("reports what is still owed", () => {
