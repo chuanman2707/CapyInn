@@ -26,6 +26,7 @@ pub fn minimal_checkin_request(room_id: &str) -> CheckInRequest {
         notes: Some("test check-in".to_string()),
         paid_amount: None,
         pricing_type: Some("nightly".to_string()),
+        guest_count: None,
     }
 }
 

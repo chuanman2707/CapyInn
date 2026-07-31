@@ -51,7 +51,7 @@ interface HotelStore {
   markDashboardDataChanged: () => void;
   setTab: (tab: HotelTab) => void;
   setCheckinOpen: (open: boolean, roomId?: string | null, nights?: number | null) => void;
-  checkIn: (roomId: string, guests: CheckInGuestInput[], nights: number, paidAmount?: MoneyVnd, source?: string, notes?: string) => Promise<void>;
+  checkIn: (roomId: string, guests: CheckInGuestInput[], nights: number, paidAmount?: MoneyVnd, source?: string, notes?: string, guestCount?: number | null) => Promise<void>;
   checkOut: (
     bookingId: string,
     settlementMode: CheckoutSettlementMode,
@@ -138,7 +138,7 @@ export const useHotelStore = create<HotelStore>((set, get) => {
         checkinNights: open ? nights : null,
       }),
 
-    checkIn: async (roomId, guests, nights, paidAmount, source, notes) => {
+    checkIn: async (roomId, guests, nights, paidAmount, source, notes, guestCount) => {
       beginAction();
       try {
         const correlationId = createCorrelationId();
@@ -152,6 +152,9 @@ export const useHotelStore = create<HotelStore>((set, get) => {
               source,
               notes,
               paid_amount: optionalMoneyVnd(paidAmount, "paid_amount"),
+              // Bỏ trống thì backend hiểu là một người. Gửi `null` chứ không
+              // gửi 1 ở đây, để chỗ quyết định "trống nghĩa là mấy" chỉ có một.
+              guest_count: guestCount ?? null,
             },
           },
           {

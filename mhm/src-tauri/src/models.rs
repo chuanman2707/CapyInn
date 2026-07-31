@@ -198,6 +198,13 @@ pub struct CheckInRequest {
     pub notes: Option<String>,
     pub paid_amount: Option<MoneyVnd>,
     pub pricing_type: Option<String>,
+    /// Số người thực sự ở, hỏi ở quầy nhưng không bắt buộc điền.
+    ///
+    /// Khác với `guests` phía trên: danh sách kia là hồ sơ khai báo lưu trú, còn
+    /// đây là con số dùng để tính phụ thu vượt mốc. Bỏ trống nghĩa là **một
+    /// người** — không phải "chưa biết", vì một báo giá không được phép treo.
+    #[serde(default)]
+    pub guest_count: Option<i32>,
 }
 
 /// Ghi bù một lượt khách đã ở nhưng chưa được nhập máy.

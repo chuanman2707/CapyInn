@@ -296,13 +296,17 @@ async fn check_in_tx(
         )));
     }
 
+    // Bỏ trống là một người. Truyền `None` xuống engine sẽ là "không biết", và
+    // engine hiểu "không biết" thành "không tính phụ thu" — đó chính là lý do
+    // phụ thu thêm người chưa bao giờ chạy trên đường nhận khách trực tiếp.
+    let guest_count = req.guest_count.unwrap_or(1);
     let pricing = calculate_stay_price_tx(
         tx,
         &req.room_id,
         &check_in_at,
         &expected_checkout,
         &pricing_type,
-        None,
+        Some(guest_count),
     )
     .await?;
     let total_price = pricing.total;
@@ -316,8 +320,9 @@ async fn check_in_tx(
         "INSERT INTO bookings (
             id, room_id, primary_guest_id, check_in_at, expected_checkout,
             actual_checkout, nights, total_price, paid_amount, status, source,
-            notes, created_by, booking_type, pricing_type, pricing_snapshot, created_at
-        ) VALUES (?, ?, ?, ?, ?, NULL, ?, ?, 0, ?, ?, ?, ?, 'walk-in', ?, NULL, ?)",
+            notes, created_by, booking_type, pricing_type, pricing_snapshot, created_at,
+            guests
+        ) VALUES (?, ?, ?, ?, ?, NULL, ?, ?, 0, ?, ?, ?, ?, 'walk-in', ?, NULL, ?, ?)",
     )
     .bind(&booking_id)
     .bind(&req.room_id)
@@ -332,6 +337,7 @@ async fn check_in_tx(
     .bind(user_id)
     .bind(&pricing_type)
     .bind(&check_in_at)
+    .bind(guest_count)
     .execute(&mut **tx)
     .await
     .map_err(BookingError::from)

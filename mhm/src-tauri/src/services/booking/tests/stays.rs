@@ -558,3 +558,77 @@ async fn checkout_fails_when_second_pool_checked_out_booking_first() {
     pool_b.close().await;
     let _ = std::fs::remove_file(db_path);
 }
+
+/// Khách vãng lai vượt mốc phải bị tính phụ thu, y như khách đặt trước.
+///
+/// `check_in_tx` từng truyền `None` làm số khách, nên phụ thu thêm người **không
+/// bao giờ** chạy trên đường nhận khách trực tiếp — trong khi đường đặt trước lại
+/// tính. Cùng một phòng, cùng số người, hai giá, tuỳ khách đi vào bằng cửa nào.
+#[tokio::test]
+async fn a_walk_in_over_the_base_headcount_pays_the_extra_person_fee() {
+    let pool = test_pool().await;
+    seed_room_with_guest_pricing(&pool, "R-WALKIN", 500_000, 2, 50_000)
+        .await
+        .unwrap();
+    seed_pricing_rule(&pool, "standard", 500_000).await.unwrap();
+
+    let mut req = minimal_checkin_request("R-WALKIN");
+    req.guest_count = Some(4);
+
+    let booking = stay_lifecycle::check_in(&pool, req, None).await.unwrap();
+
+    // 2 đêm × (500.000 + 2 khách vượt mốc × 50.000) = 1.200.000
+    assert_eq!(booking.total_price, 1_200_000);
+}
+
+/// "Không bắt buộc điền": bỏ trống là một người, không phải là "không biết".
+#[tokio::test]
+async fn a_walk_in_with_no_headcount_entered_is_priced_as_one_guest() {
+    let pool = test_pool().await;
+    seed_room_with_guest_pricing(&pool, "R-BLANK", 500_000, 2, 50_000)
+        .await
+        .unwrap();
+    seed_pricing_rule(&pool, "standard", 500_000).await.unwrap();
+
+    let mut req = minimal_checkin_request("R-BLANK");
+    req.guest_count = None;
+
+    let booking = stay_lifecycle::check_in(&pool, req, None).await.unwrap();
+
+    // Một người thì không ai vượt mốc 2, nên chỉ có tiền phòng.
+    assert_eq!(booking.total_price, 1_000_000);
+
+    // Và phải ghi đúng **một**, không phải 0 và không phải để trống. Giá không
+    // phân biệt được hai thứ đó — dưới mốc thì đằng nào cũng không có phụ thu —
+    // nên nếu chỉ khẳng định số tiền thì quy tắc "trống là một người" không có
+    // gì giữ. Hoá đơn và báo cáo đọc lại chính cột này.
+    let stored: Option<i32> = sqlx::query_scalar("SELECT guests FROM bookings WHERE id = ?")
+        .bind(&booking.id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(stored, Some(1));
+}
+
+/// Số khách phải được **ghi lại**, không chỉ dùng để tính rồi vứt đi: hoá đơn và
+/// báo cáo sau này đọc lại cột này. Cả 27 lượt trong máy thật đang để trống.
+#[tokio::test]
+async fn the_headcount_is_recorded_on_the_booking() {
+    let pool = test_pool().await;
+    seed_room_with_guest_pricing(&pool, "R-REC", 500_000, 2, 50_000)
+        .await
+        .unwrap();
+    seed_pricing_rule(&pool, "standard", 500_000).await.unwrap();
+
+    let mut req = minimal_checkin_request("R-REC");
+    req.guest_count = Some(3);
+
+    let booking = stay_lifecycle::check_in(&pool, req, None).await.unwrap();
+
+    let stored: Option<i32> = sqlx::query_scalar("SELECT guests FROM bookings WHERE id = ?")
+        .bind(&booking.id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(stored, Some(3));
+}
