@@ -847,50 +847,78 @@ describe("ReservationSheet", () => {
     expect(checkInAfterRerender.value).toBe("2026-08-10");
   });
 
-  // Ô lịch tương lai của một phòng ĐANG CÓ KHÁCH vẫn kéo được (khách rời sau
-  // hai hôm), và cú kéo truyền thẳng roomId vào đây. Danh sách chỉ liệt kê
-  // vacant/booked, nên phòng đó không có option nào khớp: ô "Phòng" hiện
-  // trống trong khi state vẫn giữ id — và nút gửi vẫn sáng, vì nó gác trên
-  // `!roomId`, mà id vô hình kia là truthy.
-  it("bỏ chọn phòng khi phòng kéo từ lịch không nằm trong danh sách chọn được", async () => {
+  // Ca chủ khách sạn báo: phòng 5A đang có khách, khách trả ngày 3/8. Đặt
+  // trước cho 12–13/8 thì 5A không hề xuất hiện trong ô chọn phòng — nó là
+  // phòng duy nhất `occupied`, và cũng là phòng duy nhất biến mất.
+  //
+  // Trạng thái phòng nói về HÔM NAY; đặt phòng trước hỏi về một khoảng ngày
+  // khác hẳn. Cửa chặn đúng chiều thời gian là check_availability (theo
+  // khoảng ngày) và chốt chặn trong transaction ở create_reservation_tx —
+  // danh sách phòng không được đoán thay chúng.
+  it.each(["occupied", "cleaning"])(
+    "vẫn liệt kê phòng đang %s để đặt trước cho ngày phòng đó đã trống",
+    async (status) => {
+      rooms = [ORIGINAL_ROOMS[0], { ...ORIGINAL_ROOMS[1], status }];
+      render(<ReservationSheet open onOpenChange={vi.fn()} />);
+
+      await waitFor(() => {
+        expect(fetchRooms).toHaveBeenCalledTimes(1);
+      });
+
+      expect(
+        Array.from(
+          (screen.getByLabelText(/^Phòng$/) as HTMLSelectElement).options,
+        ).map((o) => o.value),
+      ).toContain("R102");
+    },
+  );
+
+  // Ô lịch TƯƠNG LAI của một phòng đang có khách vẫn kéo được, và cú kéo
+  // truyền thẳng roomId đó vào đây. Phòng phải ở nguyên trong ô chọn: xoá đi
+  // là biến một cú kéo hợp lệ thành một form trống không rõ lý do.
+  it("giữ nguyên phòng kéo từ lịch dù phòng đó đang có khách", async () => {
     rooms = [
       ORIGINAL_ROOMS[0],
       { ...ORIGINAL_ROOMS[1], status: "occupied" },
     ];
-    const { rerender } = render(
-      <ReservationSheet open onOpenChange={vi.fn()} preSelectedRoomId="R102" />,
+    render(
+      <ReservationSheet
+        open
+        onOpenChange={vi.fn()}
+        preSelectedRoomId="R102"
+        prefillDates={{ checkIn: "2026-08-12", checkOut: "2026-08-13" }}
+      />,
     );
 
     const roomSelect = screen.getByLabelText(/^Phòng$/) as HTMLSelectElement;
     await waitFor(() => {
-      expect(roomSelect).toHaveValue("");
+      expect(roomSelect).toHaveValue("R102");
     });
-    // Điền tên khách trước — nút gửi cũng khoá bởi `!isEditMode && !guestName`
-    // (xem disabled expression trong ReservationSheet.tsx), nên nếu bỏ qua
-    // bước này, assertion dưới đúng bất kể roomId có bị xoá hay không và
-    // không chứng minh được gì cho chính bug đang test. Điền tên vào rồi thì
-    // việc phòng bị xoá mới là lý do DUY NHẤT còn giữ nút tắt.
+
+    // Nút gửi phải bật lên được: với phòng còn nguyên và tên khách đã điền,
+    // không còn gì chặn chủ khách sạn đặt phòng cho 12–13/8.
     fireEvent.change(screen.getByPlaceholderText(/họ và tên/i), {
       target: { value: "Nguyễn Nhật Huy" },
     });
-    // Nút gửi phải tắt: bật lên với một phòng vô hình chỉ dẫn tới một cú từ
-    // chối ở backend.
-    expect(screen.getByRole("button", { name: /Đặt phòng/ })).toBeDisabled();
+    expect(screen.getByRole("button", { name: /Đặt phòng/ })).toBeEnabled();
+  });
 
-    // Ô trống chưa chứng minh gì — jsdom cũng hiện trống khi state còn giữ
-    // R102 mà option đã bị lọc mất. Cho R102 trở lại danh sách: state chưa bị
-    // xoá thật thì select tự nhảy về "R102" dù chủ chưa hề chọn lại.
-    rooms = ORIGINAL_ROOMS.map((r) => ({ ...r }));
-    rerender(<ReservationSheet open onOpenChange={vi.fn()} preSelectedRoomId="R102" />);
+  // Vế còn lại của cùng effect: một roomId KHÔNG phải phòng nào cả (phòng bị
+  // xoá trong Cài đặt khi sheet đang mở) vẫn phải bị bỏ chọn — ô select hiện
+  // trống trong khi state giữ một id truthy sẽ bật nút gửi, vì nút chỉ gác
+  // trên `!roomId`.
+  it("bỏ chọn roomId không còn tồn tại trong danh sách phòng", async () => {
+    render(
+      <ReservationSheet open onOpenChange={vi.fn()} preSelectedRoomId="R999" />,
+    );
 
     await waitFor(() => {
-      expect(
-        Array.from((screen.getByLabelText(/^Phòng$/) as HTMLSelectElement).options).map(
-          (o) => o.value,
-        ),
-      ).toContain("R102");
+      expect(screen.getByLabelText(/^Phòng$/)).toHaveValue("");
     });
-    expect(screen.getByLabelText(/^Phòng$/)).toHaveValue("");
+    fireEvent.change(screen.getByPlaceholderText(/họ và tên/i), {
+      target: { value: "Nguyễn Nhật Huy" },
+    });
+    expect(screen.getByRole("button", { name: /Đặt phòng/ })).toBeDisabled();
   });
 
   // Chế độ sửa: phòng lấy từ chính booking đang sửa, ô select bị disable, và
