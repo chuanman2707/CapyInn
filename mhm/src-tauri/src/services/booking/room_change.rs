@@ -12,11 +12,12 @@ use chrono::{Local, NaiveDate};
 use sqlx::{Pool, Row, Sqlite, Transaction};
 
 use crate::{
-    domain::booking::{BookingError, BookingResult},
+    domain::booking::{BookingError, BookingResult, OriginSideEffect},
     models::{status, RoomChangeOption, RoomChangeOptions},
 };
 
 use super::{
+    billing_service::{record_charge_tx, record_charge_with_origin_tx},
     pricing_service::calculate_stay_price_tx,
     support::{begin_tx, ensure_one_row_affected, invalid_state_transition, read_money_vnd_or_zero},
 };
@@ -204,11 +205,17 @@ pub async fn load_options(
 /// `calculate_stay_price_tx` nhận mốc nhận phòng và trả phòng, không nhận đêm đầu/cuối.
 /// Đêm cuối là `to_date` nên mốc trả phòng là ngày kế tiếp.
 fn pricing_range(nights: &RemainingNights) -> (String, String) {
-    let last_night = NaiveDate::parse_from_str(&nights.to_date, "%Y-%m-%d")
+    date_range_for_pricing(&nights.from_date, &nights.to_date)
+}
+
+/// Như `pricing_range`, nhưng nhận thẳng cặp ngày thay vì `RemainingNights` —
+/// dùng ở nơi đã có sẵn `from_date`/`to_date` mà không cần dựng cả struct.
+fn date_range_for_pricing(from_date: &str, to_date: &str) -> (String, String) {
+    let last_night = NaiveDate::parse_from_str(to_date, "%Y-%m-%d")
         .expect("to_date lấy từ room_calendar nên luôn đúng dạng");
     let checkout = last_night + chrono::Duration::days(1);
     (
-        format!("{}T14:00:00+07:00", nights.from_date),
+        format!("{from_date}T14:00:00+07:00"),
         format!("{}T12:00:00+07:00", checkout.format("%Y-%m-%d")),
     )
 }
@@ -220,23 +227,32 @@ fn pricing_range(nights: &RemainingNights) -> (String, String) {
 /// `date >= today` mới chuyển. Việc này giữ báo cáo công suất và hóa đơn đúng
 /// sự thật.
 ///
-/// Task này chưa đụng tới tiền: không nhận `keep_price`, không ghi `transactions`,
-/// không sửa `total_price`. Task 3 sẽ thêm.
+/// Khi `keep_price == false`, khoản chênh lệch giữa giá phòng mới và phòng cũ
+/// cho các đêm còn lại (cùng khoảng ngày nên các hệ số cuối tuần/lễ tự triệt
+/// tiêu, chỉ còn lại phần chênh theo hạng phòng) được cộng vào `total_price` và
+/// ghi một dòng `transactions`. Đây KHÔNG phải định giá lại toàn bộ kỳ ở: nó
+/// cộng thêm phần chênh lên trên mức giá khách đang trả, nên khách đang có giá
+/// ưu đãi vẫn giữ nguyên ưu đãi đó.
 #[allow(dead_code)]
 pub(super) async fn change_room_tx(
     tx: &mut Transaction<'_, Sqlite>,
     booking_id: &str,
     new_room_id: &str,
+    keep_price: bool,
     reason: Option<&str>,
     today: NaiveDate,
+    origin_key: Option<String>,
 ) -> BookingResult<()> {
     let today_str = today.format("%Y-%m-%d").to_string();
 
-    let booking = sqlx::query("SELECT room_id, status, notes FROM bookings WHERE id = ?")
-        .bind(booking_id)
-        .fetch_optional(&mut **tx)
-        .await?
-        .ok_or_else(|| BookingError::not_found(format!("Không tìm thấy booking {booking_id}")))?;
+    let booking =
+        sqlx::query("SELECT room_id, status, notes, total_price FROM bookings WHERE id = ?")
+            .bind(booking_id)
+            .fetch_optional(&mut **tx)
+            .await?
+            .ok_or_else(|| {
+                BookingError::not_found(format!("Không tìm thấy booking {booking_id}"))
+            })?;
 
     let booking_status: String = booking.get("status");
     if booking_status != status::booking::ACTIVE && booking_status != status::booking::BOOKED {
@@ -302,6 +318,74 @@ pub(super) async fn change_room_tx(
         return Err(BookingError::validation(format!(
             "Phòng {new_room_id} chỉ chứa tối đa {max_guests} khách"
         )));
+    }
+
+    // Tiền chênh lệch phải tính trước khi đổi room_id: cần old_room_id và
+    // total_price đọc lúc mở hàm.
+    if !keep_price {
+        let pricing_type: String = sqlx::query_scalar(
+            "SELECT COALESCE(pricing_type, 'nightly') FROM bookings WHERE id = ?",
+        )
+        .bind(booking_id)
+        .fetch_one(&mut **tx)
+        .await?;
+
+        let (range_start, range_end) = date_range_for_pricing(&from_date, &to_date);
+
+        let old_price = calculate_stay_price_tx(
+            tx,
+            &old_room_id,
+            &range_start,
+            &range_end,
+            &pricing_type,
+            Some(guests.max(1)),
+        )
+        .await?
+        .total;
+        let new_price = calculate_stay_price_tx(
+            tx,
+            new_room_id,
+            &range_start,
+            &range_end,
+            &pricing_type,
+            Some(guests.max(1)),
+        )
+        .await?
+        .total;
+
+        let difference = new_price - old_price;
+        if difference != 0 {
+            let current_total = read_money_vnd_or_zero(&booking, "total_price");
+            let new_total = current_total
+                .checked_add(difference)
+                .ok_or_else(|| BookingError::validation("total_price overflowed".to_string()))?;
+
+            let result = sqlx::query("UPDATE bookings SET total_price = ? WHERE id = ?")
+                .bind(new_total)
+                .bind(booking_id)
+                .execute(&mut **tx)
+                .await?;
+            ensure_one_row_affected(
+                result,
+                format!("booking {booking_id} changed before room-change repricing"),
+            )?;
+
+            let note =
+                format!("Chuyển phòng {old_room_id} → {new_room_id}: chênh {remaining} đêm");
+            let created_at = Local::now().to_rfc3339();
+            match &origin_key {
+                Some(key) => {
+                    let origin = OriginSideEffect::new(key.clone(), 0)?;
+                    record_charge_with_origin_tx(
+                        tx, booking_id, difference, note, created_at, &origin,
+                    )
+                    .await?;
+                }
+                None => {
+                    record_charge_tx(tx, booking_id, difference, note, created_at).await?;
+                }
+            }
+        }
     }
 
     // Chuyển đêm từ hôm nay trở đi.
@@ -390,11 +474,21 @@ pub async fn change_room(
     pool: &Pool<Sqlite>,
     booking_id: &str,
     new_room_id: &str,
+    keep_price: bool,
     reason: Option<&str>,
     today: NaiveDate,
 ) -> BookingResult<Booking> {
     let mut tx = begin_immediate_tx(pool).await?;
-    change_room_tx(&mut tx, booking_id, new_room_id, reason, today).await?;
+    change_room_tx(
+        &mut tx,
+        booking_id,
+        new_room_id,
+        keep_price,
+        reason,
+        today,
+        None,
+    )
+    .await?;
     tx.commit().await.map_err(BookingError::from)?;
 
     fetch_booking(

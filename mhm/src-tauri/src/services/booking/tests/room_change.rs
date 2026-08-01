@@ -142,6 +142,7 @@ async fn change_room_keeps_past_nights_on_the_old_room() {
         &pool,
         "B-OPT",
         "R-NEW",
+        true,
         None,
         NaiveDate::from_ymd_opt(2026, 4, 16).unwrap(),
     )
@@ -183,6 +184,7 @@ async fn change_room_sends_the_old_room_to_cleaning() {
         &pool,
         "B-OPT",
         "R-NEW",
+        true,
         None,
         NaiveDate::from_ymd_opt(2026, 4, 16).unwrap(),
     )
@@ -219,10 +221,124 @@ async fn change_room_rejects_the_same_room() {
         &pool,
         "B-OPT",
         "R-OLD",
+        true,
         None,
         NaiveDate::from_ymd_opt(2026, 4, 16).unwrap(),
     )
     .await;
 
     assert!(matches!(result, Err(BookingError::Validation(_))));
+}
+
+#[tokio::test]
+async fn change_room_charges_only_the_difference_for_remaining_nights() {
+    let pool = test_pool().await;
+    seed_stay_in_progress(&pool).await;
+    // R-NEW hạng deluxe, đắt hơn 100.000/đêm. Còn 2 đêm ⇒ chênh 200.000.
+
+    let booking = room_change::change_room(
+        &pool,
+        "B-OPT",
+        "R-NEW",
+        false,
+        None,
+        NaiveDate::from_ymd_opt(2026, 4, 16).unwrap(),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(booking.total_price, 750_000 + 200_000);
+
+    let charge: i64 = sqlx::query_scalar(
+        "SELECT amount FROM transactions WHERE booking_id = 'B-OPT' AND type = 'charge'",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(charge, 200_000);
+}
+
+#[tokio::test]
+async fn change_room_with_keep_price_records_no_money_at_all() {
+    let pool = test_pool().await;
+    seed_stay_in_progress(&pool).await;
+
+    let booking = room_change::change_room(
+        &pool,
+        "B-OPT",
+        "R-NEW",
+        true,
+        None,
+        NaiveDate::from_ymd_opt(2026, 4, 16).unwrap(),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(booking.total_price, 750_000, "giữ giá cũ thì tổng không đổi");
+
+    let count: i32 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM transactions WHERE booking_id = 'B-OPT' AND type = 'charge'",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(count, 0);
+}
+
+#[tokio::test]
+async fn change_room_to_a_cheaper_room_records_a_negative_charge() {
+    let pool = test_pool().await;
+    seed_stay_in_progress(&pool).await;
+    // Hạ giá hạng deluxe xuống dưới standard: 150.000 so với 250.000.
+    // Sửa `pricing_rules`, không sửa `rooms.base_price` — engine đọc bảng này.
+    sqlx::query("UPDATE pricing_rules SET daily_rate = 150000 WHERE room_type = 'deluxe'")
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    let booking = room_change::change_room(
+        &pool,
+        "B-OPT",
+        "R-NEW",
+        false,
+        None,
+        NaiveDate::from_ymd_opt(2026, 4, 16).unwrap(),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(booking.total_price, 750_000 - 200_000);
+
+    let charge: i64 = sqlx::query_scalar(
+        "SELECT amount FROM transactions WHERE booking_id = 'B-OPT' AND type = 'charge'",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(charge, -200_000);
+}
+
+#[tokio::test]
+async fn change_room_appends_the_move_to_booking_notes() {
+    let pool = test_pool().await;
+    seed_stay_in_progress(&pool).await;
+
+    room_change::change_room(
+        &pool,
+        "B-OPT",
+        "R-NEW",
+        true,
+        Some("máy lạnh hỏng"),
+        NaiveDate::from_ymd_opt(2026, 4, 16).unwrap(),
+    )
+    .await
+    .unwrap();
+
+    let notes: String = sqlx::query_scalar("SELECT notes FROM bookings WHERE id = 'B-OPT'")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert!(notes.starts_with("seed booking |"), "ghi chú cũ phải còn");
+    assert!(notes.contains("Chuyển phòng R-OLD → R-NEW ngày 16/04/2026"));
+    assert!(notes.contains("máy lạnh hỏng"));
 }
