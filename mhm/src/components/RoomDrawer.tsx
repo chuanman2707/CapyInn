@@ -45,6 +45,7 @@ export default function RoomDrawer({ open, onClose, roomId }: RoomDrawerProps) {
         fetchRooms,
         updateHousekeeping,
         roomTypeRates,
+        setBookingRate,
     } = useHotelStore();
 
     const [roomDetail, setRoomDetail] = useState<RoomWithBooking | null>(null);
@@ -190,6 +191,18 @@ export default function RoomDrawer({ open, onClose, roomId }: RoomDrawerProps) {
         await openInvoice(booking.id);
     };
 
+    const handleSaveRate = async (ratePerNight: number) => {
+        if (!booking) return;
+        try {
+            await setBookingRate(booking.id, ratePerNight);
+            await refreshRoomDetail();
+            toast.success("Đã cập nhật giá phòng!");
+        } catch (err) {
+            toast.error("Lỗi sửa giá: " + formatAppError(err));
+            throw err;
+        }
+    };
+
     const handleHousekeepingUpdate = async (newStatus: string) => {
         if (!housekeepingTask) return;
         try {
@@ -229,6 +242,7 @@ export default function RoomDrawer({ open, onClose, roomId }: RoomDrawerProps) {
             booking={booking}
             onInvoice={handleInvoice}
             invoiceLoading={invoiceLoading}
+            onSaveRate={handleSaveRate}
         />
     ) : null;
 
