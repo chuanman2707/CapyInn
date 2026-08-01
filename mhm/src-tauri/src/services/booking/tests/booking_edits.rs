@@ -63,6 +63,170 @@ async fn set_booking_rate_records_the_difference_as_a_charge() {
 }
 
 #[tokio::test]
+async fn set_booking_rate_raises_the_total_and_records_a_positive_charge() {
+    let pool = test_pool().await;
+    seed_two_night_booking(&pool, "B811", "R811").await.unwrap();
+
+    stay_lifecycle::set_booking_rate(&pool, "B811", 600_000)
+        .await
+        .unwrap();
+
+    let total: i64 = sqlx::query_scalar("SELECT total_price FROM bookings WHERE id = ?")
+        .bind("B811")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(total, 1_200_000, "2 đêm x 600.000 phải nâng tổng tiền lên");
+
+    let amount: i64 = sqlx::query_scalar(
+        "SELECT amount FROM transactions WHERE booking_id = ? AND type = 'charge'",
+    )
+    .bind("B811")
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    // Mọi test khác ở đây đều giảm giá hoặc giữ nguyên; nếu tham số của
+    // `checked_sub_money` bị đảo (new_total, current_total) → (current_total,
+    // new_total), test giảm giá vẫn xanh vì trị tuyệt đối trùng nhau, chỉ có
+    // ca tăng giá này mới lộ dấu bị lật.
+    assert_eq!(
+        amount, 200_000,
+        "1.000.000 → 1.200.000 là chênh lệch +200.000"
+    );
+}
+
+#[tokio::test]
+async fn set_booking_rate_rejects_a_corrupted_zero_nights_booking() {
+    let pool = test_pool().await;
+    seed_two_night_booking(&pool, "B813", "R813").await.unwrap();
+
+    // `bookings.nights` has no CHECK constraint at the schema level — corrupt
+    // it directly via SQL to simulate a value the app itself would never
+    // write, mirroring the equivalent guard test in `shorten_stay.rs`.
+    sqlx::query("UPDATE bookings SET nights = 0 WHERE id = ?")
+        .bind("B813")
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    let error = stay_lifecycle::set_booking_rate(&pool, "B813", 450_000)
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(error, BookingError::Validation(_)),
+        "mong đợi lỗi validation cho nights=0, nhận được: {error:?}"
+    );
+
+    let row = sqlx::query("SELECT nights, total_price FROM bookings WHERE id = ?")
+        .bind("B813")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(
+        row.get::<i32, _>("nights"),
+        0,
+        "thất bại thì không được đổi giá trị nights đã hỏng"
+    );
+    assert_eq!(
+        row.get::<i64, _>("total_price"),
+        1_000_000,
+        "thất bại thì total_price không đổi"
+    );
+
+    let charges: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM transactions WHERE booking_id = ? AND type = 'charge'",
+    )
+    .bind("B813")
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(charges, 0, "thất bại thì không được ghi giao dịch nào");
+}
+
+#[tokio::test]
+async fn set_booking_rate_rejects_a_corrupted_negative_nights_booking() {
+    let pool = test_pool().await;
+    seed_two_night_booking(&pool, "B814", "R814").await.unwrap();
+
+    // Same defence-in-depth guard, negative side: without it, `rate_per_night
+    // * nights` still "succeeds" arithmetically but flips the sign, inventing
+    // a negative total_price and a matching negative audit row instead of
+    // rejecting the corrupt row.
+    sqlx::query("UPDATE bookings SET nights = -1 WHERE id = ?")
+        .bind("B814")
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    let error = stay_lifecycle::set_booking_rate(&pool, "B814", 450_000)
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(error, BookingError::Validation(_)),
+        "mong đợi lỗi validation cho nights âm, nhận được: {error:?}"
+    );
+
+    let row = sqlx::query("SELECT nights, total_price FROM bookings WHERE id = ?")
+        .bind("B814")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(
+        row.get::<i32, _>("nights"),
+        -1,
+        "thất bại thì không được đổi giá trị nights đã hỏng"
+    );
+    assert_eq!(
+        row.get::<i64, _>("total_price"),
+        1_000_000,
+        "thất bại thì total_price không được bịa thêm tiền"
+    );
+
+    let charges: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM transactions WHERE booking_id = ? AND type = 'charge'",
+    )
+    .bind("B814")
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        charges, 0,
+        "thất bại thì không được ghi giao dịch phát sinh tiền ảo nào"
+    );
+}
+
+#[tokio::test]
+async fn set_booking_rate_idempotent_retry_applies_the_rate_change_once() {
+    let pool = test_pool().await;
+    seed_two_night_booking(&pool, "B815", "R815").await.unwrap();
+
+    let ctx = cmd("set_booking_rate", "rate-key-1");
+
+    stay_lifecycle::set_booking_rate_idempotent(&pool, &ctx, "B815", 450_000)
+        .await
+        .unwrap();
+    stay_lifecycle::set_booking_rate_idempotent(&pool, &ctx, "B815", 450_000)
+        .await
+        .unwrap();
+
+    let total: i64 = sqlx::query_scalar("SELECT total_price FROM bookings WHERE id = ?")
+        .bind("B815")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(total, 900_000, "gửi lại không được áp lại giá lần hai");
+
+    let charges: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM transactions WHERE booking_id = ? AND type = 'charge'",
+    )
+    .bind("B815")
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(charges, 1, "chỉ được một dòng đối ứng duy nhất");
+}
+
+#[tokio::test]
 async fn set_booking_rate_writes_no_charge_when_the_total_is_unchanged() {
     let pool = test_pool().await;
     seed_two_night_booking(&pool, "B803", "R803").await.unwrap();
@@ -206,24 +370,38 @@ async fn set_booking_rate_leaves_the_room_calendar_alone() {
     let pool = test_pool().await;
     seed_two_night_booking(&pool, "B810", "R810").await.unwrap();
 
-    let before: i64 =
-        sqlx::query_scalar("SELECT COUNT(*) FROM room_calendar WHERE booking_id = ?")
-            .bind("B810")
-            .fetch_one(&pool)
-            .await
-            .unwrap();
+    // So khớp toàn bộ nội dung dòng, không chỉ đếm số dòng — một UPDATE
+    // room_calendar SET status = ... tại chỗ vẫn giữ nguyên COUNT(*) nhưng
+    // đổi status, nên phải so cả cột mới bắt được.
+    let before: Vec<(String, String, Option<String>, String)> = sqlx::query_as(
+        "SELECT room_id, date, booking_id, status FROM room_calendar
+         WHERE booking_id = ? ORDER BY date",
+    )
+    .bind("B810")
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    assert!(
+        !before.is_empty(),
+        "seed phải tạo ít nhất một dòng lịch phòng để test này có ý nghĩa"
+    );
 
     stay_lifecycle::set_booking_rate(&pool, "B810", 450_000)
         .await
         .unwrap();
 
-    let after: i64 =
-        sqlx::query_scalar("SELECT COUNT(*) FROM room_calendar WHERE booking_id = ?")
-            .bind("B810")
-            .fetch_one(&pool)
-            .await
-            .unwrap();
-    assert_eq!(before, after, "sửa giá không được đụng tới lịch phòng");
+    let after: Vec<(String, String, Option<String>, String)> = sqlx::query_as(
+        "SELECT room_id, date, booking_id, status FROM room_calendar
+         WHERE booking_id = ? ORDER BY date",
+    )
+    .bind("B810")
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        before, after,
+        "sửa giá không được đụng tới lịch phòng, kể cả sửa tại chỗ giữ nguyên số dòng"
+    );
 }
 
 #[tokio::test]

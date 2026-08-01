@@ -1607,6 +1607,20 @@ async fn set_booking_rate_tx(
     let nights: i32 = booking.get("nights");
     let current_total = read_money_vnd_or_zero(&booking, "total_price");
 
+    // `bookings.nights` không có CHECK constraint ở schema, nên đây là một giá
+    // trị DB chưa được kiểm chứng: nights = 0 sẽ khiến tổng tiền mới biến
+    // thành 0 thay vì phản ánh giá mới thật, còn nights âm sẽ vẫn "nhân" ra
+    // được nhưng lật dấu tổng tiền (giá dương x đêm âm = tổng âm). Không
+    // đường đi nào trong code hôm nay có thể tạo ra giá trị như vậy cho
+    // booking đang active, nhưng chặn tường minh ở đây để phòng thủ theo
+    // chiều sâu (defence in depth), giống guard tương ứng ở `shorten_stay_tx`
+    // phía trên.
+    if nights <= 0 {
+        return Err(BookingError::validation(format!(
+            "Số đêm hiện tại của booking không hợp lệ ({nights}), không thể tính giá mới"
+        )));
+    }
+
     let new_total =
         crate::pricing::checked_mul_money(rate_per_night, i64::from(nights), "total_price")
             .map_err(BookingError::validation)?;
@@ -1633,11 +1647,7 @@ async fn set_booking_rate_tx(
         .map_err(BookingError::validation)?;
 
     if delta != 0 {
-        let old_rate = if nights > 0 {
-            current_total / i64::from(nights)
-        } else {
-            current_total
-        };
+        let old_rate = current_total / i64::from(nights);
         let note = format!("Đổi giá: {} → {}", old_rate, rate_per_night);
 
         if let Some(origin_key) = origin_key {
