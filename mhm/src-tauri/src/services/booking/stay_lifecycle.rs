@@ -1304,6 +1304,32 @@ async fn shorten_stay_tx(
     // Pricing engine trả giá hôm nay, còn đêm này đã thu theo giá lúc đặt; nâng giá
     // phòng giữa chừng sẽ khiến ta hoàn nhiều hơn số đã thu. Không có bản ghi giá
     // từng đêm để tra (pricing_snapshot chỉ ghi lúc check-out).
+    //
+    // Bất đối xứng có chủ đích với `extend_stay_tx` (phía trên): extend tính đêm
+    // thêm theo giá HÔM NAY từ pricing engine, còn shorten hoàn theo giá TRUNG
+    // BÌNH của chính booking. Hai công thức chỉ trùng nhau khi mọi đêm cùng giá.
+    // Nếu extend diễn ra giữa một đợt tăng giá rồi bị shorten rút lại, khoản hoàn
+    // sẽ thấp hơn khoản mới thu — đây là đánh đổi sản phẩm đã được chấp nhận,
+    // không phải bug.
+    //
+    // Chia số nguyên luôn làm tròn về 0, nên khoản hoàn không bao giờ vượt quá
+    // trung bình thật; phần dư (tối đa `nights - 1` VND trên toàn bộ vòng rút)
+    // luôn ở lại phía khách sạn. Với booking giá không đều theo từng đêm, mức
+    // trung bình này cũng có thể hoàn NHIỀU hơn giá thật của một đêm rẻ cụ thể —
+    // cũng là đánh đổi sản phẩm đã chấp nhận, không phải lỗi.
+    //
+    // `bookings.nights` không có CHECK constraint ở schema, nên đây là một giá
+    // trị DB chưa được kiểm chứng: nights = 0 sẽ panic chia cho 0, nights âm sẽ
+    // vẫn "tính" ra được nhưng bịa tiền (removed_total âm khiến new_total tăng
+    // thay vì giảm). Không đường đi nào trong code hôm nay có thể tạo ra giá trị
+    // như vậy cho booking đang active, nhưng chặn tường minh ở đây để phòng thủ
+    // theo chiều sâu (defence in depth), giống cách `recognized_room_revenue_amount_sql`
+    // ở `queries/booking/revenue_queries.rs` bảo vệ cùng phép chia này.
+    if current_nights <= 0 {
+        return Err(BookingError::validation(format!(
+            "Số đêm hiện tại của booking không hợp lệ ({current_nights}), không thể tính tiền hoàn"
+        )));
+    }
     let removed_total = current_total / i64::from(current_nights);
 
     let new_total = crate::pricing::checked_sub_money(current_total, removed_total, "total_price")

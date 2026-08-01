@@ -390,6 +390,111 @@ async fn shorten_stay_credits_the_booking_average_not_the_current_rate() {
 }
 
 #[tokio::test]
+async fn shorten_stay_rejects_a_zero_nights_booking_instead_of_panicking() {
+    let pool = test_pool().await;
+    seed_room(&pool, "R710").await.unwrap();
+    seed_future_booking(&pool, "B710", "R710", 3).await.unwrap();
+
+    // `bookings.nights` has no CHECK constraint at the schema level — corrupt
+    // it directly via SQL to simulate a value the app itself would never
+    // write, and pin that the guard in shorten_stay_tx turns this into a
+    // validation error instead of "attempt to divide by zero".
+    sqlx::query("UPDATE bookings SET nights = 0 WHERE id = ?")
+        .bind("B710")
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    let error = stay_lifecycle::shorten_stay(&pool, "B710")
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(error, BookingError::Validation(_)),
+        "mong đợi lỗi validation cho nights=0, nhận được: {error:?}"
+    );
+
+    let row = sqlx::query("SELECT nights, total_price FROM bookings WHERE id = ?")
+        .bind("B710")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(
+        row.get::<i32, _>("nights"),
+        0,
+        "thất bại thì không được đổi giá trị nights đã hỏng"
+    );
+    assert_eq!(
+        row.get::<i64, _>("total_price"),
+        750_000,
+        "thất bại thì total_price không đổi"
+    );
+
+    let charges: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM transactions WHERE booking_id = ? AND type = 'charge'",
+    )
+    .bind("B710")
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(charges, 0, "thất bại thì không được ghi giao dịch nào");
+}
+
+#[tokio::test]
+async fn shorten_stay_rejects_a_negative_nights_booking_instead_of_inventing_money() {
+    let pool = test_pool().await;
+    seed_room(&pool, "R711").await.unwrap();
+    seed_future_booking(&pool, "B711", "R711", 3).await.unwrap();
+
+    // Same defence-in-depth guard, negative side: without it, `current_total /
+    // current_nights` still "succeeds" arithmetically but flips the sign,
+    // turning a credit into a charge and inflating total_price instead of
+    // shrinking it — a reviewer measured a 750,000/3-night booking coming back
+    // with total_price = 1,500,000 and a +750,000 transaction mislabeled
+    // "Shortened stay -1 night".
+    sqlx::query("UPDATE bookings SET nights = -1 WHERE id = ?")
+        .bind("B711")
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    let error = stay_lifecycle::shorten_stay(&pool, "B711")
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(error, BookingError::Validation(_)),
+        "mong đợi lỗi validation cho nights âm, nhận được: {error:?}"
+    );
+
+    let row = sqlx::query("SELECT nights, total_price FROM bookings WHERE id = ?")
+        .bind("B711")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(
+        row.get::<i32, _>("nights"),
+        -1,
+        "thất bại thì không được đổi giá trị nights đã hỏng"
+    );
+    assert_eq!(
+        row.get::<i64, _>("total_price"),
+        750_000,
+        "thất bại thì total_price không được bịa thêm tiền"
+    );
+
+    let charges: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM transactions WHERE booking_id = ? AND type = 'charge'",
+    )
+    .bind("B711")
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        charges, 0,
+        "thất bại thì không được ghi giao dịch phát sinh tiền ảo nào"
+    );
+}
+
+#[tokio::test]
 async fn shorten_stay_leaves_everything_alone_when_the_calendar_row_is_missing() {
     let pool = test_pool().await;
     seed_room(&pool, "R707").await.unwrap();
