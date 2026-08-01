@@ -8,8 +8,8 @@
 //! with `date >= today` — not from "today until checkout" — which matters for
 //! future reservations that start days from now.
 
-use chrono::NaiveDate;
-use sqlx::{Pool, Row, Sqlite};
+use chrono::{Local, NaiveDate};
+use sqlx::{Pool, Row, Sqlite, Transaction};
 
 use crate::{
     domain::booking::{BookingError, BookingResult},
@@ -18,8 +18,16 @@ use crate::{
 
 use super::{
     pricing_service::calculate_stay_price_tx,
-    support::{begin_tx, read_money_vnd_or_zero},
+    support::{begin_tx, ensure_one_row_affected, invalid_state_transition, read_money_vnd_or_zero},
 };
+
+// `change_room` (the test-only pool-level wrapper below) is the only caller of
+// these two; production code will call `change_room_tx` directly once
+// `commands/rooms.rs` wires up the Tauri command in a later task.
+#[cfg(test)]
+use super::support::{begin_immediate_tx, fetch_booking};
+#[cfg(test)]
+use crate::models::Booking;
 
 /// Dải đêm sẽ được chuyển: các dòng `room_calendar` của booking có ngày >= `today`.
 ///
@@ -203,4 +211,197 @@ fn pricing_range(nights: &RemainingNights) -> (String, String) {
         format!("{}T14:00:00+07:00", nights.from_date),
         format!("{}T12:00:00+07:00", checkout.format("%Y-%m-%d")),
     )
+}
+
+/// Chuyển các đêm còn lại (từ `today` trở đi) của `booking_id` sang `new_room_id`,
+/// đổi `bookings.room_id`, và cập nhật trạng thái hai phòng.
+///
+/// Đêm đã ở giữ nguyên trên phòng cũ — chỉ những dòng `room_calendar` có
+/// `date >= today` mới chuyển. Việc này giữ báo cáo công suất và hóa đơn đúng
+/// sự thật.
+///
+/// Task này chưa đụng tới tiền: không nhận `keep_price`, không ghi `transactions`,
+/// không sửa `total_price`. Task 3 sẽ thêm.
+#[allow(dead_code)]
+pub(super) async fn change_room_tx(
+    tx: &mut Transaction<'_, Sqlite>,
+    booking_id: &str,
+    new_room_id: &str,
+    reason: Option<&str>,
+    today: NaiveDate,
+) -> BookingResult<()> {
+    let today_str = today.format("%Y-%m-%d").to_string();
+
+    let booking = sqlx::query("SELECT room_id, status, notes FROM bookings WHERE id = ?")
+        .bind(booking_id)
+        .fetch_optional(&mut **tx)
+        .await?
+        .ok_or_else(|| BookingError::not_found(format!("Không tìm thấy booking {booking_id}")))?;
+
+    let booking_status: String = booking.get("status");
+    if booking_status != status::booking::ACTIVE && booking_status != status::booking::BOOKED {
+        return Err(invalid_state_transition(format!(
+            "booking {booking_id} is not movable (status: {booking_status})"
+        )));
+    }
+
+    let old_room_id: String = booking.get("room_id");
+    if old_room_id == new_room_id {
+        return Err(BookingError::validation(
+            "Phòng mới trùng phòng hiện tại".to_string(),
+        ));
+    }
+
+    // Dải đêm sẽ chuyển.
+    let range = sqlx::query(
+        "SELECT MIN(date) AS from_date, MAX(date) AS to_date, COUNT(*) AS remaining
+         FROM room_calendar WHERE booking_id = ? AND date >= ?",
+    )
+    .bind(booking_id)
+    .bind(&today_str)
+    .fetch_one(&mut **tx)
+    .await?;
+    let remaining: i32 = range.get("remaining");
+    if remaining == 0 {
+        return Err(BookingError::validation(
+            "Không còn đêm nào để chuyển phòng".to_string(),
+        ));
+    }
+    let from_date: String = range.get("from_date");
+    let to_date: String = range.get("to_date");
+
+    // Kiểm lại trong transaction, không tin danh sách giao diện gửi lên.
+    let conflict: Option<String> = sqlx::query_scalar(
+        "SELECT date FROM room_calendar
+         WHERE room_id = ? AND date >= ? AND date <= ? AND booking_id != ?
+         ORDER BY date LIMIT 1",
+    )
+    .bind(new_room_id)
+    .bind(&from_date)
+    .bind(&to_date)
+    .bind(booking_id)
+    .fetch_optional(&mut **tx)
+    .await?;
+    if let Some(date) = conflict {
+        return Err(BookingError::conflict(format!(
+            "Phòng {new_room_id} đã có lịch cho ngày {date}"
+        )));
+    }
+
+    let guests: i32 = sqlx::query_scalar("SELECT COUNT(*) FROM booking_guests WHERE booking_id = ?")
+        .bind(booking_id)
+        .fetch_one(&mut **tx)
+        .await?;
+    let max_guests: Option<i32> = sqlx::query_scalar("SELECT max_guests FROM rooms WHERE id = ?")
+        .bind(new_room_id)
+        .fetch_optional(&mut **tx)
+        .await?;
+    let max_guests = max_guests
+        .ok_or_else(|| BookingError::not_found(format!("Không tìm thấy phòng {new_room_id}")))?;
+    if guests.max(1) > max_guests {
+        return Err(BookingError::validation(format!(
+            "Phòng {new_room_id} chỉ chứa tối đa {max_guests} khách"
+        )));
+    }
+
+    // Chuyển đêm từ hôm nay trở đi.
+    sqlx::query("UPDATE room_calendar SET room_id = ? WHERE booking_id = ? AND date >= ?")
+        .bind(new_room_id)
+        .bind(booking_id)
+        .bind(&today_str)
+        .execute(&mut **tx)
+        .await?;
+
+    let mut note_line = format!(
+        "Chuyển phòng {old_room_id} → {new_room_id} ngày {}",
+        today.format("%d/%m/%Y")
+    );
+    if let Some(reason) = reason.map(str::trim).filter(|value| !value.is_empty()) {
+        note_line.push_str(&format!(" ({reason})"));
+    }
+    let existing_notes: Option<String> = booking.get("notes");
+    let merged_notes = match existing_notes.as_deref().map(str::trim) {
+        Some(existing) if !existing.is_empty() => format!("{existing} | {note_line}"),
+        _ => note_line,
+    };
+
+    let result = sqlx::query(
+        "UPDATE bookings SET room_id = ?, notes = ? WHERE id = ? AND status = ? AND room_id = ?",
+    )
+    .bind(new_room_id)
+    .bind(&merged_notes)
+    .bind(booking_id)
+    .bind(&booking_status)
+    .bind(&old_room_id)
+    .execute(&mut **tx)
+    .await?;
+    ensure_one_row_affected(
+        result,
+        format!("booking {booking_id} changed before room-change"),
+    )?;
+
+    // Trạng thái phòng chỉ đổi khi khách đang ở thật. Mirrors the check-out /
+    // check-in room-status transitions (stay_lifecycle.rs): every UPDATE
+    // carries the old-state condition and is checked with
+    // ensure_one_row_affected, so a room that already changed status under us
+    // fails loudly instead of silently overwriting it.
+    if booking_status == status::booking::ACTIVE {
+        let result = sqlx::query("UPDATE rooms SET status = ? WHERE id = ? AND status = ?")
+            .bind(status::room::CLEANING)
+            .bind(&old_room_id)
+            .bind(status::room::OCCUPIED)
+            .execute(&mut **tx)
+            .await?;
+        ensure_one_row_affected(
+            result,
+            format!("room {old_room_id} is no longer occupied"),
+        )?;
+
+        let now = Local::now().to_rfc3339();
+        sqlx::query(
+            "INSERT INTO housekeeping (id, room_id, status, note, triggered_at, cleaned_at, created_at)
+             VALUES (?, ?, 'needs_cleaning', ?, ?, NULL, ?)",
+        )
+        .bind(uuid::Uuid::new_v4().to_string())
+        .bind(&old_room_id)
+        .bind(format!("Khách chuyển sang phòng {new_room_id}"))
+        .bind(&now)
+        .bind(&now)
+        .execute(&mut **tx)
+        .await?;
+
+        let result = sqlx::query("UPDATE rooms SET status = ? WHERE id = ? AND status = ?")
+            .bind(status::room::OCCUPIED)
+            .bind(new_room_id)
+            .bind(status::room::VACANT)
+            .execute(&mut **tx)
+            .await?;
+        ensure_one_row_affected(
+            result,
+            format!("room {new_room_id} is no longer vacant"),
+        )?;
+    }
+
+    Ok(())
+}
+
+#[cfg(test)]
+pub async fn change_room(
+    pool: &Pool<Sqlite>,
+    booking_id: &str,
+    new_room_id: &str,
+    reason: Option<&str>,
+    today: NaiveDate,
+) -> BookingResult<Booking> {
+    let mut tx = begin_immediate_tx(pool).await?;
+    change_room_tx(&mut tx, booking_id, new_room_id, reason, today).await?;
+    tx.commit().await.map_err(BookingError::from)?;
+
+    fetch_booking(
+        pool,
+        booking_id,
+        format!("Không tìm thấy booking {booking_id}"),
+        read_money_vnd_or_zero,
+    )
+    .await
 }

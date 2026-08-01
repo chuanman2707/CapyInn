@@ -132,3 +132,97 @@ async fn load_options_hides_a_dirty_room_when_the_guest_moves_in_tonight() {
     let ids: Vec<&str> = options.rooms.iter().map(|r| r.room_id.as_str()).collect();
     assert!(!ids.contains(&"R-NEW"), "không đưa khách vào phòng chưa dọn");
 }
+
+#[tokio::test]
+async fn change_room_keeps_past_nights_on_the_old_room() {
+    let pool = test_pool().await;
+    seed_stay_in_progress(&pool).await;
+
+    room_change::change_room(
+        &pool,
+        "B-OPT",
+        "R-NEW",
+        None,
+        NaiveDate::from_ymd_opt(2026, 4, 16).unwrap(),
+    )
+    .await
+    .unwrap();
+
+    let old_nights: Vec<String> = sqlx::query_scalar(
+        "SELECT date FROM room_calendar WHERE booking_id = 'B-OPT' AND room_id = 'R-OLD' ORDER BY date",
+    )
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    assert_eq!(old_nights, vec!["2026-04-15".to_string()]);
+
+    let new_nights: Vec<String> = sqlx::query_scalar(
+        "SELECT date FROM room_calendar WHERE booking_id = 'B-OPT' AND room_id = 'R-NEW' ORDER BY date",
+    )
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        new_nights,
+        vec!["2026-04-16".to_string(), "2026-04-17".to_string()]
+    );
+
+    let room_id: String = sqlx::query_scalar("SELECT room_id FROM bookings WHERE id = 'B-OPT'")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(room_id, "R-NEW");
+}
+
+#[tokio::test]
+async fn change_room_sends_the_old_room_to_cleaning() {
+    let pool = test_pool().await;
+    seed_stay_in_progress(&pool).await;
+
+    room_change::change_room(
+        &pool,
+        "B-OPT",
+        "R-NEW",
+        None,
+        NaiveDate::from_ymd_opt(2026, 4, 16).unwrap(),
+    )
+    .await
+    .unwrap();
+
+    let old_status: String = sqlx::query_scalar("SELECT status FROM rooms WHERE id = 'R-OLD'")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(old_status, "cleaning");
+
+    let new_status: String = sqlx::query_scalar("SELECT status FROM rooms WHERE id = 'R-NEW'")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(new_status, "occupied");
+
+    let task_count: i32 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM housekeeping WHERE room_id = 'R-OLD' AND status = 'needs_cleaning'",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(task_count, 1, "phòng cũ phải sinh đúng một phiếu dọn");
+}
+
+#[tokio::test]
+async fn change_room_rejects_the_same_room() {
+    let pool = test_pool().await;
+    seed_stay_in_progress(&pool).await;
+
+    let result = room_change::change_room(
+        &pool,
+        "B-OPT",
+        "R-OLD",
+        None,
+        NaiveDate::from_ymd_opt(2026, 4, 16).unwrap(),
+    )
+    .await;
+
+    assert!(matches!(result, Err(BookingError::Validation(_))));
+}
