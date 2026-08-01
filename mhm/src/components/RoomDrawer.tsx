@@ -1,12 +1,10 @@
 import { useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import {
-    CalendarDays,
     CalendarPlus,
     Check,
     CheckCircle2,
     Clipboard,
-    FileText,
     LogOut,
     Play,
     Sparkles,
@@ -15,6 +13,7 @@ import { toast } from "sonner";
 
 import InvoiceDialog from "@/components/InvoiceDialog";
 import CheckoutSettlementModal from "@/components/CheckoutSettlementModal";
+import BookingSummary from "@/components/shared/BookingSummary";
 import InfoItem from "@/components/shared/InfoItem";
 import ActionBtn from "@/components/shared/ActionBtn";
 import RoomGuestsSection from "@/components/shared/RoomGuestsSection";
@@ -24,9 +23,7 @@ import SlideDrawer from "@/components/shared/SlideDrawer";
 import { Button } from "@/components/ui/button";
 import { useInvoiceDialog } from "@/hooks/useInvoiceDialog";
 import { formatAppError } from "@/lib/appError";
-import { isFullySettled } from "@/lib/bookingBalance";
 import { getRoomTypeLabel } from "@/lib/constants";
-import { fmtDateShort, fmtMoney } from "@/lib/format";
 import { nightlyRateDisplay } from "@/lib/roomTypeRate";
 import { useHotelStore } from "@/stores/useHotelStore";
 import type { CheckoutSettlementPayload, RoomWithBooking, HousekeepingTask } from "@/types";
@@ -173,35 +170,12 @@ export default function RoomDrawer({ open, onClose, roomId }: RoomDrawerProps) {
 
     const guestSection = <RoomGuestsSection guests={guests} mode="sheet" />;
 
-    const paymentStatusClass =
-        booking && isFullySettled(booking.total_price, booking.paid_amount)
-            ? "text-emerald-600"
-            : "text-orange-600";
-
     const bookingSection = booking ? (
-        <Section icon={CalendarDays} title="Booking hiện tại" className="bg-slate-50 rounded-2xl p-5 space-y-3">
-            <div className="grid grid-cols-2 gap-3">
-                <InfoItem label="Check-in" value={fmtDateShort(booking.check_in_at)} />
-                <InfoItem label="Checkout" value={fmtDateShort(booking.expected_checkout)} />
-                <InfoItem label="Số đêm" value={booking.nights} />
-                <InfoItem label="Tổng tiền" value={fmtMoney(booking.total_price)} />
-            </div>
-            <div className="flex items-center justify-between pt-2 border-t border-slate-200">
-                <span className="text-sm font-medium text-brand-muted">Đã thanh toán</span>
-                <span className={"text-sm font-bold " + paymentStatusClass}>
-                    {fmtMoney(booking.paid_amount)} / {fmtMoney(booking.total_price)}
-                </span>
-            </div>
-            <Button
-                variant="outline"
-                className="w-full mt-3 gap-2 text-sm font-semibold cursor-pointer"
-                onClick={handleInvoice}
-                disabled={invoiceLoading}
-            >
-                <FileText className="w-4 h-4" />
-                {invoiceLoading ? "Đang tạo..." : "📄 Invoice"}
-            </Button>
-        </Section>
+        <BookingSummary
+            booking={booking}
+            onInvoice={handleInvoice}
+            invoiceLoading={invoiceLoading}
+        />
     ) : null;
 
     const getHkBadgeClass = () => {
