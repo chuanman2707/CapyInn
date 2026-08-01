@@ -1,4 +1,4 @@
-import { render, screen, waitFor } from "@testing-library/react";
+import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
 
@@ -114,5 +114,104 @@ describe("BookingSummary rate editing", () => {
     await userEvent.type(input, "0");
 
     expect(screen.getByRole("button", { name: "Lưu giá" })).toBeDisabled();
+  });
+});
+
+describe("BookingSummary notes and overpayment", () => {
+  it("hiện chữ mờ khi chưa có ghi chú", () => {
+    render(<BookingSummary {...baseProps} onSaveNotes={vi.fn()} />);
+
+    expect(screen.getByText("Chưa có ghi chú")).toBeInTheDocument();
+  });
+
+  it("hiện nội dung ghi chú đang có", () => {
+    render(
+      <BookingSummary
+        {...baseProps}
+        booking={{ ...booking, notes: "Hẹn trả phòng 14h" }}
+        onSaveNotes={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByText("Hẹn trả phòng 14h")).toBeInTheDocument();
+  });
+
+  it("gọi onSaveNotes với nội dung đã gõ", async () => {
+    const onSaveNotes = vi.fn().mockResolvedValue(undefined);
+    render(<BookingSummary {...baseProps} onSaveNotes={onSaveNotes} />);
+
+    await userEvent.click(screen.getByRole("button", { name: /sửa ghi chú/i }));
+    await userEvent.type(screen.getByLabelText("Ghi chú"), "Khách xin thêm gối");
+    await userEvent.click(screen.getByRole("button", { name: "Lưu ghi chú" }));
+
+    expect(onSaveNotes).toHaveBeenCalledWith("Khách xin thêm gối");
+  });
+
+  it("huỷ ghi chú thì không lưu và bỏ nội dung vừa gõ", async () => {
+    const onSaveNotes = vi.fn();
+    render(<BookingSummary {...baseProps} onSaveNotes={onSaveNotes} />);
+
+    await userEvent.click(screen.getByRole("button", { name: /sửa ghi chú/i }));
+    await userEvent.type(screen.getByLabelText("Ghi chú"), "gõ nhầm");
+    await userEvent.click(screen.getByRole("button", { name: "Huỷ ghi chú" }));
+
+    expect(onSaveNotes).not.toHaveBeenCalled();
+    expect(screen.queryByLabelText("Ghi chú")).toBeNull();
+  });
+
+  it("hiện số phải trả lại khi khách trả dư", () => {
+    render(
+      <BookingSummary
+        {...baseProps}
+        booking={{ ...booking, paid_amount: 5_000_000 }}
+      />,
+    );
+
+    // "500.000đ" cũng trùng với "Giá/đêm" của fixture này (4.500.000 / 9 đêm),
+    // nên scope theo đúng dòng "Trả lại khách" thay vì getByText toàn trang.
+    const balanceLabel = screen.getByText("Trả lại khách");
+    const balanceRow = balanceLabel.closest("div");
+    expect(balanceRow).not.toBeNull();
+    expect(within(balanceRow!).getByText("500.000đ")).toBeInTheDocument();
+  });
+
+  it("hiện số còn nợ khi khách chưa trả đủ", () => {
+    render(
+      <BookingSummary
+        {...baseProps}
+        booking={{ ...booking, paid_amount: 1_000_000 }}
+      />,
+    );
+
+    expect(screen.getByText("Còn nợ")).toBeInTheDocument();
+    expect(screen.queryByText("Trả lại khách")).toBeNull();
+  });
+
+  it("hiện Đã đủ khi khách trả vừa khít", () => {
+    render(
+      <BookingSummary
+        {...baseProps}
+        booking={{ ...booking, paid_amount: 4_500_000 }}
+      />,
+    );
+
+    expect(screen.getByText("Đã đủ")).toBeInTheDocument();
+  });
+
+  it("khi onSaveNotes reject: không phát sinh unhandled rejection, ô sửa ghi chú vẫn mở với nội dung đã gõ", async () => {
+    // Giống hệt submitRate: RoomDrawer.handleSaveNotes hiện toast lỗi rồi
+    // re-throw có chủ đích để giữ ô sửa ghi chú mở. submitNotes phải tự nuốt
+    // lỗi này, nếu không rejection sẽ lọt ra khỏi onClick async không ai await.
+    const onSaveNotes = vi.fn().mockRejectedValue(new Error("Lỗi lưu ghi chú"));
+    render(<BookingSummary {...baseProps} onSaveNotes={onSaveNotes} />);
+
+    await userEvent.click(screen.getByRole("button", { name: /sửa ghi chú/i }));
+    await userEvent.type(screen.getByLabelText("Ghi chú"), "Khách xin thêm gối");
+    await userEvent.click(screen.getByRole("button", { name: "Lưu ghi chú" }));
+
+    await waitFor(() => expect(onSaveNotes).toHaveBeenCalledWith("Khách xin thêm gối"));
+
+    // Ô sửa ghi chú vẫn còn mở, nội dung đã gõ được giữ nguyên.
+    expect(screen.getByLabelText("Ghi chú")).toHaveValue("Khách xin thêm gối");
   });
 });

@@ -4,17 +4,19 @@ import { CalendarDays, Check, FileText, Pencil, X } from "lucide-react";
 import InfoItem from "@/components/shared/InfoItem";
 import Section from "@/components/shared/Section";
 import { Button } from "@/components/ui/button";
-import { isFullySettled } from "@/lib/bookingBalance";
+import { BALANCE_TONE_CLASS, balanceDisplay, isFullySettled } from "@/lib/bookingBalance";
 import { fmtDateShort, fmtMoney } from "@/lib/format";
 import type { Booking } from "@/types";
 
 const MAX_RATE_PER_NIGHT = 100_000_000;
+const MAX_NOTES_LEN = 2_000;
 
 interface BookingSummaryProps {
     booking: Booking;
     onInvoice: () => void;
     invoiceLoading: boolean;
     onSaveRate?: (ratePerNight: number) => Promise<void>;
+    onSaveNotes?: (notes: string) => Promise<void>;
 }
 
 export default function BookingSummary({
@@ -22,14 +24,21 @@ export default function BookingSummary({
     onInvoice,
     invoiceLoading,
     onSaveRate,
+    onSaveNotes,
 }: BookingSummaryProps) {
     const [editingRate, setEditingRate] = useState(false);
     const [rateInput, setRateInput] = useState("");
     const [savingRate, setSavingRate] = useState(false);
 
+    const [editingNotes, setEditingNotes] = useState(false);
+    const [notesInput, setNotesInput] = useState("");
+    const [savingNotes, setSavingNotes] = useState(false);
+
     const paymentStatusClass = isFullySettled(booking.total_price, booking.paid_amount)
         ? "text-emerald-600"
         : "text-orange-600";
+    const balance = balanceDisplay(booking.total_price, booking.paid_amount);
+    const notesValid = notesInput.length <= MAX_NOTES_LEN;
 
     // `total_price` là cột duy nhất được lưu — không có cột giá/đêm. Giá hiển
     // thị luôn suy ra bằng phép chia, làm tròn xuống VNĐ nguyên. Khi phụ thu
@@ -68,6 +77,34 @@ export default function BookingSummary({
             // thất bại thành một crash JS thật.
         } finally {
             setSavingRate(false);
+        }
+    };
+
+    const openNotesEditor = () => {
+        setNotesInput(booking.notes ?? "");
+        setEditingNotes(true);
+    };
+
+    const closeNotesEditor = () => {
+        setEditingNotes(false);
+        setNotesInput("");
+    };
+
+    const submitNotes = async () => {
+        if (!onSaveNotes || !notesValid || savingNotes) return;
+        setSavingNotes(true);
+        try {
+            await onSaveNotes(notesInput.trim());
+            closeNotesEditor();
+        } catch {
+            // Caller (RoomDrawer.handleSaveNotes) đã hiện toast lỗi và re-throw
+            // có chủ đích để giữ ô sửa ghi chú mở cho người dùng sửa lại. Nuốt
+            // lỗi ở đây — nếu không, rejection sẽ lọt khỏi onClick async (không
+            // ai await), và window "unhandledrejection" handler trong
+            // lib/crashReporting/globalHandlers.ts sẽ báo nhầm mỗi lần lưu ghi
+            // chú thất bại thành một crash JS thật.
+        } finally {
+            setSavingNotes(false);
         }
     };
 
@@ -157,6 +194,77 @@ export default function BookingSummary({
                     {fmtMoney(booking.paid_amount)} / {fmtMoney(booking.total_price)}
                 </span>
             </div>
+            <div className="flex items-center justify-between">
+                <span className="text-sm font-medium text-brand-muted">{balance.label}</span>
+                <span className={"text-sm font-bold " + BALANCE_TONE_CLASS[balance.tone]}>
+                    {balance.text}
+                </span>
+            </div>
+
+            {onSaveNotes && (
+                <div className="pt-2 border-t border-slate-200 space-y-2">
+                    <div className="flex items-center justify-between">
+                        <span className="text-[11px] font-medium text-brand-muted uppercase tracking-wider">
+                            Ghi chú
+                        </span>
+                        {!editingNotes && (
+                            <button
+                                type="button"
+                                aria-label="Sửa ghi chú"
+                                onClick={openNotesEditor}
+                                className="text-slate-400 hover:text-blue-600 cursor-pointer"
+                            >
+                                <Pencil size={12} />
+                            </button>
+                        )}
+                    </div>
+
+                    {editingNotes ? (
+                        <>
+                            <textarea
+                                aria-label="Ghi chú"
+                                rows={3}
+                                value={notesInput}
+                                onChange={(event) => setNotesInput(event.target.value)}
+                                className="w-full rounded-lg border border-slate-200 px-3 py-2 text-sm"
+                            />
+                            {!notesValid && (
+                                <p className="text-[12px] text-red-600">
+                                    Ghi chú tối đa {MAX_NOTES_LEN} ký tự
+                                </p>
+                            )}
+                            <div className="flex gap-2">
+                                <Button
+                                    size="sm"
+                                    aria-label="Lưu ghi chú"
+                                    disabled={!notesValid || savingNotes}
+                                    onClick={submitNotes}
+                                    className="flex-1 gap-1.5 cursor-pointer"
+                                >
+                                    <Check className="w-3.5 h-3.5" /> Lưu
+                                </Button>
+                                <Button
+                                    size="sm"
+                                    variant="outline"
+                                    aria-label="Huỷ ghi chú"
+                                    onClick={closeNotesEditor}
+                                    className="flex-1 gap-1.5 cursor-pointer"
+                                >
+                                    <X className="w-3.5 h-3.5" /> Huỷ
+                                </Button>
+                            </div>
+                        </>
+                    ) : (
+                        <p
+                            className={
+                                "text-sm " + (booking.notes ? "text-slate-700" : "text-slate-400")
+                            }
+                        >
+                            {booking.notes || "Chưa có ghi chú"}
+                        </p>
+                    )}
+                </div>
+            )}
 
             <Button
                 variant="outline"
