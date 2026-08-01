@@ -49,8 +49,15 @@ export default function BookingSummary({
     const isAverage = booking.total_price % nights !== 0;
 
     const parsedRate = Number(rateInput);
-    const rateValid =
+    const parsedRateValid =
         Number.isInteger(parsedRate) && parsedRate > 0 && parsedRate <= MAX_RATE_PER_NIGHT;
+    const newTotalFromRate = parsedRateValid ? parsedRate * nights : 0;
+    // Đảo ngược quyết định trước đó: hạ giá từng được phép đưa tổng tiền
+    // xuống dưới số khách đã trả. Backend (set_booking_rate_tx) giờ từ chối
+    // thẳng ca đó — khoá luôn nút Lưu ở đây thay vì để người dùng bấm rồi
+    // nhận lỗi.
+    const belowPaidAmount = parsedRateValid && newTotalFromRate < booking.paid_amount;
+    const rateValid = parsedRateValid && !belowPaidAmount;
 
     const openRateEditor = () => {
         setRateInput(String(derivedRate));
@@ -159,12 +166,18 @@ export default function BookingSummary({
                         className="w-full rounded-lg border border-slate-200 px-3 py-2 text-sm"
                     />
                     <p className="text-[12px] text-slate-500">
-                        {rateValid
+                        {parsedRateValid
                             ? `${nights} đêm × ${fmtMoney(parsedRate)} = ${fmtMoney(
-                                  parsedRate * nights,
+                                  newTotalFromRate,
                               )}`
                             : "Giá mỗi đêm không hợp lệ"}
                     </p>
+                    {belowPaidAmount && (
+                        <p className="text-[12px] text-red-600">
+                            Khách đã thanh toán {fmtMoney(booking.paid_amount)}, cao hơn tổng
+                            tiền mới — cần xử lý hoàn tiền trước khi đổi giá
+                        </p>
+                    )}
                     <div className="flex gap-2">
                         <Button
                             size="sm"

@@ -300,7 +300,7 @@ async fn set_booking_rate_rejects_a_rate_above_the_cap() {
 }
 
 #[tokio::test]
-async fn set_booking_rate_allows_a_total_below_what_the_guest_already_paid() {
+async fn set_booking_rate_refuses_a_total_below_what_the_guest_already_paid() {
     let pool = test_pool().await;
     seed_two_night_booking(&pool, "B807", "R807").await.unwrap();
     sqlx::query("UPDATE bookings SET paid_amount = 1000000 WHERE id = ?")
@@ -309,21 +309,92 @@ async fn set_booking_rate_allows_a_total_below_what_the_guest_already_paid() {
         .await
         .unwrap();
 
-    stay_lifecycle::set_booking_rate(&pool, "B807", 300_000)
+    // Đảo ngược quyết định cũ: hạ giá từng được phép đưa tổng tiền xuống dưới
+    // số khách đã trả (2 đêm x 300.000 = 600.000 < 1.000.000 đã thu), với giả
+    // định lễ tân sẽ hoàn tiền mặt tại quầy. Giả định đó sai — check_out_tx
+    // (stay_lifecycle.rs) từ chối thẳng khi already_paid > final_total, nên
+    // booking rơi vào trạng thái không lối thoát. Quyết định mới: từ chối
+    // ngay tại đây, trước khi ghi bất kỳ thay đổi nào.
+    let error = stay_lifecycle::set_booking_rate(&pool, "B807", 300_000)
         .await
-        .unwrap();
+        .unwrap_err();
+    assert!(
+        matches!(error, BookingError::Validation(ref message) if message.contains("hoàn tiền")),
+        "mong đợi lỗi validation nhắc hoàn tiền, nhận được: {error:?}"
+    );
 
     let row = sqlx::query("SELECT total_price, paid_amount FROM bookings WHERE id = ?")
         .bind("B807")
         .fetch_one(&pool)
         .await
         .unwrap();
-    assert_eq!(row.get::<i64, _>("total_price"), 600_000);
+    assert_eq!(
+        row.get::<i64, _>("total_price"),
+        1_000_000,
+        "bị từ chối thì tổng tiền không được đổi"
+    );
     assert_eq!(
         row.get::<i64, _>("paid_amount"),
         1_000_000,
-        "trả dư là hợp lệ; số đã trả không bị đụng tới"
+        "bị từ chối thì số đã trả không bị đụng tới"
     );
+
+    let charges: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM transactions WHERE booking_id = ? AND type = 'charge'",
+    )
+    .bind("B807")
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(charges, 0, "bị từ chối thì không được ghi giao dịch nào");
+}
+
+#[tokio::test]
+async fn set_booking_rate_allows_a_total_that_still_covers_what_the_guest_already_paid() {
+    let pool = test_pool().await;
+    seed_two_night_booking(&pool, "B816", "R816").await.unwrap();
+    sqlx::query("UPDATE bookings SET paid_amount = 500000 WHERE id = ?")
+        .bind("B816")
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    // 2 đêm x 300.000 = 600.000, vẫn >= 500.000 đã trả — phải cho qua.
+    stay_lifecycle::set_booking_rate(&pool, "B816", 300_000)
+        .await
+        .unwrap();
+
+    let row = sqlx::query("SELECT total_price, paid_amount FROM bookings WHERE id = ?")
+        .bind("B816")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(row.get::<i64, _>("total_price"), 600_000);
+    assert_eq!(row.get::<i64, _>("paid_amount"), 500_000);
+}
+
+#[tokio::test]
+async fn set_booking_rate_allows_a_total_exactly_equal_to_paid_amount() {
+    let pool = test_pool().await;
+    seed_two_night_booking(&pool, "B817", "R817").await.unwrap();
+    sqlx::query("UPDATE bookings SET paid_amount = 600000 WHERE id = ?")
+        .bind("B817")
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    // Biên chính xác: 2 đêm x 300.000 = 600.000, đúng bằng số đã trả — guard
+    // dùng `<` chứ không phải `<=`, nên ca vừa khít này phải được cho qua.
+    stay_lifecycle::set_booking_rate(&pool, "B817", 300_000)
+        .await
+        .unwrap();
+
+    let total: i64 = sqlx::query_scalar("SELECT total_price FROM bookings WHERE id = ?")
+        .bind("B817")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(total, 600_000);
 }
 
 #[tokio::test]

@@ -1392,7 +1392,7 @@ async fn shorten_stay_tx(
     origin_key: Option<String>,
 ) -> BookingResult<Booking> {
     let booking = sqlx::query(
-        "SELECT room_id, nights, total_price, check_in_at, expected_checkout, status
+        "SELECT room_id, nights, total_price, paid_amount, check_in_at, expected_checkout, status
          FROM bookings WHERE id = ?",
     )
     .bind(booking_id)
@@ -1418,6 +1418,7 @@ async fn shorten_stay_tx(
     )?;
     let current_nights: i32 = booking.get("nights");
     let current_total = read_money_vnd_or_zero(&booking, "total_price");
+    let paid_amount = read_money_vnd_or_zero(&booking, "paid_amount");
     let check_in_at: String = booking.get("check_in_at");
     let old_expected_checkout: String = booking.get("expected_checkout");
 
@@ -1477,6 +1478,20 @@ async fn shorten_stay_tx(
 
     let new_total = crate::pricing::checked_sub_money(current_total, removed_total, "total_price")
         .map_err(BookingError::validation)?;
+
+    // Đảo ngược quyết định trước đó: rút đêm từng được phép đưa tổng tiền
+    // xuống dưới số khách đã trả, với giả định lễ tân sẽ hoàn tiền mặt tại
+    // quầy. Giả định đó sai — check_out_tx từ chối thẳng khi already_paid >
+    // final_total, nên booking rơi vào trạng thái không có lối thoát nào cho
+    // tới khi bị undo hoặc check-out ở mức tổng tiền chưa giảm (thổi phồng
+    // doanh thu). Chặn ngay tại đây, trước UPDATE, để không tạo ra trạng thái
+    // đó nữa.
+    if new_total < paid_amount {
+        return Err(BookingError::validation(format!(
+            "Khách đã thanh toán {paid_amount}đ, cao hơn tổng tiền {new_total}đ sau khi rút đêm này — cần xử lý hoàn tiền cho khách trước khi rút đêm"
+        )));
+    }
+
     let new_checkout = new_expected.to_rfc3339();
 
     let result = sqlx::query(
@@ -1588,13 +1603,15 @@ async fn set_booking_rate_tx(
         ));
     }
 
-    let booking = sqlx::query("SELECT nights, total_price, status FROM bookings WHERE id = ?")
-        .bind(booking_id)
-        .fetch_optional(&mut **tx)
-        .await?
-        .ok_or_else(|| {
-            BookingError::not_found(format!("Không tìm thấy booking đang active {}", booking_id))
-        })?;
+    let booking = sqlx::query(
+        "SELECT nights, total_price, paid_amount, status FROM bookings WHERE id = ?",
+    )
+    .bind(booking_id)
+    .fetch_optional(&mut **tx)
+    .await?
+    .ok_or_else(|| {
+        BookingError::not_found(format!("Không tìm thấy booking đang active {}", booking_id))
+    })?;
 
     let booking_status: String = booking.get("status");
     if booking_status != status::booking::ACTIVE {
@@ -1605,6 +1622,7 @@ async fn set_booking_rate_tx(
 
     let nights: i32 = booking.get("nights");
     let current_total = read_money_vnd_or_zero(&booking, "total_price");
+    let paid_amount = read_money_vnd_or_zero(&booking, "paid_amount");
 
     // `bookings.nights` không có CHECK constraint ở schema, nên đây là một giá
     // trị DB chưa được kiểm chứng: nights = 0 sẽ khiến tổng tiền mới biến
@@ -1623,6 +1641,19 @@ async fn set_booking_rate_tx(
     let new_total =
         crate::pricing::checked_mul_money(rate_per_night, i64::from(nights), "total_price")
             .map_err(BookingError::validation)?;
+
+    // Đảo ngược quyết định trước đó: hạ giá từng được phép đưa tổng tiền
+    // xuống dưới số khách đã trả, với giả định lễ tân sẽ hoàn tiền mặt tại
+    // quầy. Giả định đó sai — check_out_tx từ chối thẳng khi already_paid >
+    // final_total, nên booking rơi vào trạng thái không có lối thoát nào cho
+    // tới khi bị undo hoặc check-out ở mức tổng tiền chưa giảm (thổi phồng
+    // doanh thu). Chặn ngay tại đây, trước UPDATE, để không tạo ra trạng thái
+    // đó nữa. Cùng một guard, cùng lý do, với `shorten_stay_tx` phía trên.
+    if new_total < paid_amount {
+        return Err(BookingError::validation(format!(
+            "Khách đã thanh toán {paid_amount}đ, cao hơn tổng tiền mới {new_total}đ — cần xử lý hoàn tiền cho khách trước khi đổi giá"
+        )));
+    }
 
     let result = sqlx::query(
         "UPDATE bookings

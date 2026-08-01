@@ -115,6 +115,92 @@ describe("BookingSummary rate editing", () => {
 
     expect(screen.getByRole("button", { name: "Lưu giá" })).toBeDisabled();
   });
+
+  describe("guard against dropping the total below paid_amount", () => {
+    // Reversal: set_booking_rate used to be allowed to push total_price
+    // below paid_amount (front desk would hand back cash). check_out_tx
+    // refuses that state outright, so Save must now stay disabled instead of
+    // letting the click fail. Fixture: 9 nights, 4,500,000 total (500,000/night).
+    it("khoá nút Lưu khi giá mới x số đêm thấp hơn số đã thanh toán, kèm giải thích", async () => {
+      render(
+        <BookingSummary
+          {...baseProps}
+          booking={{ ...booking, paid_amount: 4_100_000 }}
+          onSaveRate={vi.fn()}
+        />,
+      );
+
+      await userEvent.click(screen.getByRole("button", { name: /sửa giá/i }));
+      const input = screen.getByLabelText("Giá mỗi đêm");
+      await userEvent.clear(input);
+      // 9 đêm × 400.000 = 3.600.000, thấp hơn 4.100.000 đã thanh toán.
+      await userEvent.type(input, "400000");
+
+      expect(screen.getByRole("button", { name: "Lưu giá" })).toBeDisabled();
+      expect(
+        screen.getByText(/cao hơn tổng tiền mới.*cần xử lý hoàn tiền trước khi đổi giá/),
+      ).toBeInTheDocument();
+    });
+
+    it("mở lại nút Lưu khi giá mới x số đêm vẫn đủ trả số đã thanh toán", async () => {
+      render(
+        <BookingSummary
+          {...baseProps}
+          booking={{ ...booking, paid_amount: 4_100_000 }}
+          onSaveRate={vi.fn()}
+        />,
+      );
+
+      await userEvent.click(screen.getByRole("button", { name: /sửa giá/i }));
+      const input = screen.getByLabelText("Giá mỗi đêm");
+      await userEvent.clear(input);
+      // 9 đêm × 500.000 = 4.500.000, đủ trả 4.100.000 đã thanh toán.
+      await userEvent.type(input, "500000");
+
+      expect(screen.getByRole("button", { name: "Lưu giá" })).not.toBeDisabled();
+      expect(
+        screen.queryByText(/cần xử lý hoàn tiền trước khi đổi giá/),
+      ).toBeNull();
+    });
+
+    it("mở lại nút Lưu khi tổng mới đúng bằng số đã thanh toán", async () => {
+      render(
+        <BookingSummary
+          {...baseProps}
+          // 9 đêm × 450.000 = 4.050.000, đúng bằng số đã trả — guard dùng
+          // `<`, không phải `<=`, nên ca vừa khít này phải hợp lệ.
+          booking={{ ...booking, paid_amount: 4_050_000 }}
+          onSaveRate={vi.fn()}
+        />,
+      );
+
+      await userEvent.click(screen.getByRole("button", { name: /sửa giá/i }));
+      const input = screen.getByLabelText("Giá mỗi đêm");
+      await userEvent.clear(input);
+      await userEvent.type(input, "450000");
+
+      expect(screen.getByRole("button", { name: "Lưu giá" })).not.toBeDisabled();
+    });
+
+    it("không gọi onSaveRate khi bị khoá bởi guard hoàn tiền, kể cả khi bấm nút", async () => {
+      const onSaveRate = vi.fn();
+      render(
+        <BookingSummary
+          {...baseProps}
+          booking={{ ...booking, paid_amount: 4_100_000 }}
+          onSaveRate={onSaveRate}
+        />,
+      );
+
+      await userEvent.click(screen.getByRole("button", { name: /sửa giá/i }));
+      const input = screen.getByLabelText("Giá mỗi đêm");
+      await userEvent.clear(input);
+      await userEvent.type(input, "400000");
+      await userEvent.click(screen.getByRole("button", { name: "Lưu giá" }));
+
+      expect(onSaveRate).not.toHaveBeenCalled();
+    });
+  });
 });
 
 describe("BookingSummary notes and overpayment", () => {

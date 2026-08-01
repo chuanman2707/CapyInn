@@ -544,6 +544,116 @@ async fn shorten_stay_leaves_everything_alone_when_the_calendar_row_is_missing()
 }
 
 #[tokio::test]
+async fn shorten_stay_refuses_a_credit_that_would_drop_the_total_below_paid_amount() {
+    let pool = test_pool().await;
+    seed_room(&pool, "R712").await.unwrap();
+    seed_future_booking(&pool, "B712", "R712", 3).await.unwrap();
+    // 3 đêm x 250.000 = 750.000. Rút 1 đêm hoàn 250.000, tổng mới còn
+    // 500.000 — thấp hơn 600.000 khách đã trả.
+    sqlx::query("UPDATE bookings SET paid_amount = 600000 WHERE id = ?")
+        .bind("B712")
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    // Đảo ngược quyết định cũ: rút đêm từng được phép đưa tổng tiền xuống
+    // dưới số khách đã trả, với giả định lễ tân sẽ hoàn tiền mặt tại quầy.
+    // Giả định đó sai — check_out_tx từ chối thẳng khi already_paid >
+    // final_total, nên booking rơi vào trạng thái không lối thoát. Quyết
+    // định mới: từ chối ngay tại đây, trước khi ghi bất kỳ thay đổi nào.
+    let error = stay_lifecycle::shorten_stay(&pool, "B712")
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(error, BookingError::Validation(ref message) if message.contains("hoàn tiền")),
+        "mong đợi lỗi validation nhắc hoàn tiền, nhận được: {error:?}"
+    );
+
+    let row = sqlx::query("SELECT nights, total_price, paid_amount FROM bookings WHERE id = ?")
+        .bind("B712")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(row.get::<i32, _>("nights"), 3, "bị từ chối thì số đêm không đổi");
+    assert_eq!(
+        row.get::<i64, _>("total_price"),
+        750_000,
+        "bị từ chối thì tổng tiền không đổi"
+    );
+    assert_eq!(
+        row.get::<i64, _>("paid_amount"),
+        600_000,
+        "bị từ chối thì số đã trả không bị đụng tới"
+    );
+
+    let calendar_rows: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM room_calendar WHERE booking_id = ?")
+            .bind("B712")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(
+        calendar_rows, 3,
+        "bị từ chối thì lịch phòng không được nhả đêm nào"
+    );
+
+    let charges: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM transactions WHERE booking_id = ? AND type = 'charge'",
+    )
+    .bind("B712")
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(charges, 0, "bị từ chối thì không được ghi giao dịch nào");
+}
+
+#[tokio::test]
+async fn shorten_stay_allows_a_credit_that_still_covers_paid_amount() {
+    let pool = test_pool().await;
+    seed_room(&pool, "R713").await.unwrap();
+    seed_future_booking(&pool, "B713", "R713", 3).await.unwrap();
+    // Tổng mới sau rút đêm là 500.000, vẫn >= 400.000 đã trả — phải cho qua.
+    sqlx::query("UPDATE bookings SET paid_amount = 400000 WHERE id = ?")
+        .bind("B713")
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    stay_lifecycle::shorten_stay(&pool, "B713").await.unwrap();
+
+    let row = sqlx::query("SELECT nights, total_price FROM bookings WHERE id = ?")
+        .bind("B713")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(row.get::<i32, _>("nights"), 2);
+    assert_eq!(row.get::<i64, _>("total_price"), 500_000);
+}
+
+#[tokio::test]
+async fn shorten_stay_allows_a_credit_that_lands_the_total_exactly_on_paid_amount() {
+    let pool = test_pool().await;
+    seed_room(&pool, "R714").await.unwrap();
+    seed_future_booking(&pool, "B714", "R714", 3).await.unwrap();
+    // Biên chính xác: tổng mới sau rút đêm đúng bằng 500.000 đã trả — guard
+    // dùng `<` chứ không phải `<=`, nên ca vừa khít này phải được cho qua.
+    sqlx::query("UPDATE bookings SET paid_amount = 500000 WHERE id = ?")
+        .bind("B714")
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    stay_lifecycle::shorten_stay(&pool, "B714").await.unwrap();
+
+    let total: i64 = sqlx::query_scalar("SELECT total_price FROM bookings WHERE id = ?")
+        .bind("B714")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(total, 500_000);
+}
+
+#[tokio::test]
 async fn shorten_stay_idempotent_retry_replays_without_removing_a_second_night() {
     let pool = test_pool().await;
     seed_room(&pool, "R706").await.unwrap();

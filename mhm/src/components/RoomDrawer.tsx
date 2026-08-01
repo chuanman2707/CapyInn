@@ -110,16 +110,34 @@ export default function RoomDrawer({ open, onClose, roomId }: RoomDrawerProps) {
     checkoutDay?.setHours(0, 0, 0, 0);
     const todayStart = new Date();
     todayStart.setHours(0, 0, 0, 0);
+
+    // Đảo ngược quyết định trước đó: rút đêm từng được phép đưa tổng tiền
+    // xuống dưới số khách đã trả. Backend (shorten_stay_tx) giờ từ chối thẳng
+    // ca đó — khoá luôn nút ở đây thay vì để người dùng bấm rồi nhận lỗi.
+    // Công thức tiền hoàn 1 đêm phải khớp CHÍNH XÁC công thức backend dùng
+    // (chia nguyên, làm tròn xuống): `current_total / current_nights`.
+    const nightCredit = booking ? Math.floor(booking.total_price / booking.nights) : 0;
+    const totalAfterShorten = booking ? booking.total_price - nightCredit : 0;
+    const wouldUnderpayAfterShorten = Boolean(
+        booking && totalAfterShorten < booking.paid_amount,
+    );
+
     const canShorten = Boolean(
         booking &&
             booking.nights > 1 &&
             checkoutDay !== null &&
-            checkoutDay.getTime() > todayStart.getTime(),
+            checkoutDay.getTime() > todayStart.getTime() &&
+            !wouldUnderpayAfterShorten,
     );
+    // Thứ tự ưu tiên khi nhiều điều kiện cùng chặn: cấu trúc (số đêm tối
+    // thiểu, đêm cuối đã tới) đi trước lý do tiền — hai cái đầu là bất khả
+    // thi tuyệt đối bất kể tiền nong, nên tooltip nên nói lý do "gốc" hơn.
     const shortenDisabledReason =
         booking && booking.nights <= 1
             ? "Lưu trú tối thiểu 1 đêm"
-            : "Đêm cuối là hôm nay — dùng Check-out";
+            : checkoutDay !== null && checkoutDay.getTime() <= todayStart.getTime()
+                ? "Đêm cuối là hôm nay — dùng Check-out"
+                : `Khách đã thanh toán ${fmtMoney(booking?.paid_amount ?? 0)}, cao hơn tổng tiền sau khi rút đêm (${fmtMoney(totalAfterShorten)}) — cần xử lý hoàn tiền trước`;
 
     const refreshRoomDetail = async () => {
         const detail = await invoke<RoomWithBooking>("get_room_detail", { roomId: room.id });

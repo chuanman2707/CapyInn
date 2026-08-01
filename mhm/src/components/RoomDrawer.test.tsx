@@ -165,6 +165,7 @@ describe("RoomDrawer nights stepper", () => {
         nights: number;
         expected_checkout: string;
         total_price: number;
+        paid_amount: number;
     }>;
 
     function buildDetail(bookingOverrides: BookingOverrides = {}) {
@@ -273,6 +274,82 @@ describe("RoomDrawer nights stepper", () => {
 
             expect(shorten).toBeDisabled();
             expect(shorten).toHaveAttribute("title", MIN_NIGHTS_REASON);
+        });
+    });
+
+    describe("paid-amount boundary", () => {
+        // Reversal: shortening used to be allowed to push total_price below
+        // paid_amount (front desk would hand back cash). check_out_tx refuses
+        // that state outright, so the button itself must now stay disabled
+        // instead of letting the click fail. The credit for one night must
+        // match the backend's exact formula in shorten_stay_tx: integer
+        // division, floored — `total_price / nights`.
+        it("disables −1 đêm when the credit would drop the total below paid_amount", async () => {
+            // total_price=2,500,000 / nights=5 → credit=500,000 →
+            // total after shorten = 2,000,000, below paid_amount=2,100,000.
+            const { shorten } = await renderDrawer({
+                expected_checkout: TOMORROW_AT_TEN,
+                nights: 5,
+                total_price: 2_500_000,
+                paid_amount: 2_100_000,
+            });
+
+            expect(shorten).toBeDisabled();
+            expect(shorten).toHaveAttribute(
+                "title",
+                `Khách đã thanh toán ${fmtMoney(2_100_000)}, cao hơn tổng tiền sau khi rút đêm (${fmtMoney(2_000_000)}) — cần xử lý hoàn tiền trước`,
+            );
+        });
+
+        it("enables −1 đêm when the total after the credit still covers paid_amount", async () => {
+            const { shorten } = await renderDrawer({
+                expected_checkout: TOMORROW_AT_TEN,
+                nights: 5,
+                total_price: 2_500_000,
+                paid_amount: 1_500_000,
+            });
+
+            expect(shorten).not.toBeDisabled();
+            expect(shorten).not.toHaveAttribute("title");
+        });
+
+        it("enables −1 đêm when the total after the credit lands exactly on paid_amount", async () => {
+            // total after shorten = 2,000,000, exactly equal to paid_amount —
+            // the guard uses `<`, not `<=`, so this exact-boundary case must
+            // stay enabled.
+            const { shorten } = await renderDrawer({
+                expected_checkout: TOMORROW_AT_TEN,
+                nights: 5,
+                total_price: 2_500_000,
+                paid_amount: 2_000_000,
+            });
+
+            expect(shorten).not.toBeDisabled();
+            expect(shorten).not.toHaveAttribute("title");
+        });
+
+        it("reports the minimum-nights reason, not the paid-amount reason, when both apply", async () => {
+            const { shorten } = await renderDrawer({
+                expected_checkout: TOMORROW_AT_TEN,
+                nights: 1,
+                total_price: 2_500_000,
+                paid_amount: 999_999_999,
+            });
+
+            expect(shorten).toBeDisabled();
+            expect(shorten).toHaveAttribute("title", MIN_NIGHTS_REASON);
+        });
+
+        it("reports the checkout-today reason, not the paid-amount reason, when both apply", async () => {
+            const { shorten } = await renderDrawer({
+                expected_checkout: TODAY_AT_MIDDAY,
+                nights: 5,
+                total_price: 2_500_000,
+                paid_amount: 999_999_999,
+            });
+
+            expect(shorten).toBeDisabled();
+            expect(shorten).toHaveAttribute("title", CHECKOUT_TODAY_REASON);
         });
     });
 
