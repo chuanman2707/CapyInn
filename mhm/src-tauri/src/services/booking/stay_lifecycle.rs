@@ -55,6 +55,45 @@ fn ensure_locked_room_matches_booking(
     }
 }
 
+struct StayResolvedGuard {
+    room_id: String,
+    _guard: crate::aggregate_locks::AggregateLockGuard,
+}
+
+/// `check_out`, `extend_stay`, `shorten_stay` và `set_booking_rate` đều khoá
+/// cùng một bộ ba: booking, phòng của nó, và folio. Trước đây mỗi lệnh chép lại
+/// nguyên closure này. Khuôn theo `resolve_reservation_lock` ở
+/// `reservation_lifecycle.rs`, chỉ khác là bộ khoá ở đây có thêm folio.
+async fn resolve_stay_lock(
+    pool: Pool<Sqlite>,
+    booking_id: String,
+) -> CommandResult<ResolvedWriteCommandGuard<StayResolvedGuard>> {
+    let room_id = lookup_booking_room_id(&pool, &booking_id)
+        .await
+        .map_err(map_check_out_command_error)?;
+
+    let lock_keys = vec![
+        crate::aggregate_locks::booking_key(&booking_id)?,
+        crate::aggregate_locks::room_key(&room_id)?,
+        crate::aggregate_locks::folio_key(&booking_id)?,
+    ];
+    let guard = crate::aggregate_locks::global_manager()
+        .acquire(lock_keys.clone())
+        .await?;
+
+    Ok(ResolvedWriteCommandGuard::new(
+        StayResolvedGuard {
+            room_id,
+            _guard: guard,
+        },
+        lock_keys,
+    ))
+}
+
+fn stay_command_origin_key(ctx: &WriteCommandContext) -> String {
+    format!("{}:{}", ctx.command_name, ctx.idempotency_key)
+}
+
 pub(super) fn map_check_in_command_error(error: BookingError) -> CommandError {
     match error {
         BookingError::Validation(message) => {
@@ -948,34 +987,19 @@ pub async fn check_out_idempotent(
             &["bookings", "rooms", "folio"],
         )?);
 
-    let pool_for_lookup = pool.clone();
-    let booking_id_for_lookup = req.booking_id.clone();
-    let origin_key = format!("{}:{}", ctx.command_name, ctx.idempotency_key);
+    let pool_for_guard = pool.clone();
+    let booking_id_for_guard = req.booking_id.clone();
+    let origin_key = stay_command_origin_key(ctx);
 
     WriteCommandExecutor::new(pool.clone())
         .execute_with_resolved_guard(
             ctx,
             request,
-            move || async move {
-                let room_id = lookup_booking_room_id(&pool_for_lookup, &booking_id_for_lookup)
-                    .await
-                    .map_err(map_check_out_command_error)?;
-                let lock_keys = vec![
-                    crate::aggregate_locks::booking_key(&booking_id_for_lookup)?,
-                    crate::aggregate_locks::room_key(&room_id)?,
-                    crate::aggregate_locks::folio_key(&booking_id_for_lookup)?,
-                ];
-                let guard = crate::aggregate_locks::global_manager()
-                    .acquire(lock_keys.clone())
-                    .await?;
-
-                Ok(ResolvedWriteCommandGuard::new((guard, room_id), lock_keys))
-            },
-            move |tx, resolved| {
+            move || resolve_stay_lock(pool_for_guard, booking_id_for_guard),
+            move |tx, guard| {
                 Box::pin(async move {
-                    let (_guard, locked_room_id) = resolved;
                     let response =
-                        check_out_tx(tx, req, Local::now(), &locked_room_id, Some(origin_key))
+                        check_out_tx(tx, req, Local::now(), &guard.room_id, Some(origin_key))
                             .await
                             .map_err(map_check_out_command_error)?;
                     serde_json::to_value(&response).map_err(system_error)
@@ -1158,37 +1182,22 @@ pub async fn extend_stay_idempotent(
             &["bookings", "rooms", "folio"],
         )?);
 
-    let pool_for_lookup = pool.clone();
-    let booking_id_for_lookup = booking_id.to_string();
+    let pool_for_guard = pool.clone();
+    let booking_id_for_guard = booking_id.to_string();
     let booking_id_for_service = booking_id.to_string();
-    let origin_key = format!("{}:{}", ctx.command_name, ctx.idempotency_key);
+    let origin_key = stay_command_origin_key(ctx);
 
     WriteCommandExecutor::new(pool.clone())
         .execute_with_resolved_guard(
             ctx,
             request,
-            move || async move {
-                let room_id = lookup_booking_room_id(&pool_for_lookup, &booking_id_for_lookup)
-                    .await
-                    .map_err(map_extend_stay_command_error)?;
-                let lock_keys = vec![
-                    crate::aggregate_locks::booking_key(&booking_id_for_lookup)?,
-                    crate::aggregate_locks::room_key(&room_id)?,
-                    crate::aggregate_locks::folio_key(&booking_id_for_lookup)?,
-                ];
-                let guard = crate::aggregate_locks::global_manager()
-                    .acquire(lock_keys.clone())
-                    .await?;
-
-                Ok(ResolvedWriteCommandGuard::new((guard, room_id), lock_keys))
-            },
-            move |tx, resolved| {
+            move || resolve_stay_lock(pool_for_guard, booking_id_for_guard),
+            move |tx, guard| {
                 Box::pin(async move {
-                    let (_guard, locked_room_id) = resolved;
                     let booking = extend_stay_tx(
                         tx,
                         &booking_id_for_service,
-                        &locked_room_id,
+                        &guard.room_id,
                         Some(origin_key),
                     )
                     .await
