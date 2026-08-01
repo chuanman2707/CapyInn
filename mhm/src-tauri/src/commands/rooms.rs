@@ -429,6 +429,74 @@ pub async fn shorten_stay(
     Ok(booking)
 }
 
+// ─── Set Booking Rate ───
+
+fn set_booking_rate_failure_context(booking_id: &str) -> Value {
+    json!({
+        "booking_id": booking_id,
+        "operation": "set_booking_rate",
+    })
+}
+
+#[tauri::command]
+pub async fn set_booking_rate(
+    state: State<'_, AppState>,
+    booking_id: String,
+    rate_per_night: i64,
+    app: tauri::AppHandle,
+    correlation_id: Option<String>,
+    idempotency_key: String,
+) -> CommandResult<Booking> {
+    let effective_correlation_id = normalize_correlation_id(correlation_id);
+    let error_context = set_booking_rate_failure_context(&booking_id);
+    let actor_id = get_user_id(&state)
+        .ok_or_else(|| CommandError::user(codes::AUTH_NOT_AUTHENTICATED, "Chưa đăng nhập"))?;
+    let mut write_command_context = WriteCommandContext::for_scoped_command(
+        effective_correlation_id.value.clone(),
+        idempotency_key,
+        "set_booking_rate",
+    )?;
+    write_command_context.actor_id = Some(actor_id);
+    log::info!(
+        "set_booking_rate start correlation_id={} booking_id={}",
+        effective_correlation_id.value,
+        booking_id
+    );
+    let result = stay_lifecycle::set_booking_rate_idempotent(
+        &state.db,
+        &write_command_context,
+        &booking_id,
+        rate_per_night,
+    )
+    .await
+    .inspect_err(|command_error| {
+        record_command_failure_with_db_group(
+            "set_booking_rate",
+            command_error,
+            &effective_correlation_id.value,
+            None,
+            error_context.clone(),
+        );
+    })?;
+    let booking: Booking = serde_json::from_value(result.response).map_err(|error| {
+        CommandError::system(
+            codes::SYSTEM_INTERNAL_ERROR,
+            format!("Invalid set_booking_rate idempotent response: {error}"),
+        )
+        .with_request_id(write_command_context.request_id.clone())
+    })?;
+
+    log::info!(
+        "set_booking_rate success correlation_id={} booking_id={}",
+        effective_correlation_id.value,
+        booking.id
+    );
+
+    emit_db_update(&app, "rooms");
+
+    Ok(booking)
+}
+
 // ─── Housekeeping Commands ───
 
 #[tauri::command]

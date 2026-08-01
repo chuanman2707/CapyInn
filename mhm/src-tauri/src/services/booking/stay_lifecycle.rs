@@ -215,6 +215,14 @@ fn build_shorten_stay_hash_payload(booking_id: &str) -> serde_json::Value {
     })
 }
 
+fn build_set_booking_rate_hash_payload(booking_id: &str, rate_per_night: MoneyVnd) -> serde_json::Value {
+    json!({
+        "schema": "stay.set_rate.v1",
+        "booking_id": booking_id,
+        "rate_per_night": rate_per_night,
+    })
+}
+
 fn check_in_lock_keys_from_payload(hash_payload: &serde_json::Value) -> CommandResult<Vec<String>> {
     let room_id = hash_payload
         .get("room_id")
@@ -256,6 +264,19 @@ fn shorten_stay_initial_lock_keys_from_payload(
         .get("booking_id")
         .and_then(serde_json::Value::as_str)
         .ok_or_else(|| system_error("shorten-stay lock payload missing booking_id"))?;
+    Ok(vec![
+        crate::aggregate_locks::booking_key(booking_id)?,
+        crate::aggregate_locks::folio_key(booking_id)?,
+    ])
+}
+
+fn set_booking_rate_initial_lock_keys_from_payload(
+    hash_payload: &serde_json::Value,
+) -> CommandResult<Vec<String>> {
+    let booking_id = hash_payload
+        .get("booking_id")
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| system_error("set-booking-rate lock payload missing booking_id"))?;
     Ok(vec![
         crate::aggregate_locks::booking_key(booking_id)?,
         crate::aggregate_locks::folio_key(booking_id)?,
@@ -1283,6 +1304,60 @@ pub async fn shorten_stay_idempotent(
         .await
 }
 
+pub async fn set_booking_rate_idempotent(
+    pool: &Pool<Sqlite>,
+    ctx: &WriteCommandContext,
+    booking_id: &str,
+    rate_per_night: MoneyVnd,
+) -> CommandResult<IdempotentCommandResult<serde_json::Value>> {
+    let hash_payload = build_set_booking_rate_hash_payload(booking_id, rate_per_night);
+    let ledger_intent = SanitizedLedgerIntent::from_pairs([
+        ("schema", json!("stay.set_rate.v1")),
+        ("booking_present", json!(true)),
+        ("operation", json!("set_booking_rate")),
+    ])?;
+    let summary = CommandLedgerSummary::new("Set booking rate")?.with_aggregate_ref(
+        "booking",
+        "booking",
+        None::<String>,
+    )?;
+    let request = WriteCommandRequest::new_sanitized(hash_payload, ledger_intent, summary)?
+        .with_primary_aggregate_key(format!("booking:{booking_id}"))
+        .with_lock_key_deriver(set_booking_rate_initial_lock_keys_from_payload)
+        .with_success_summary(CommandLedgerResultSummary::success("Booking rate set")?)
+        .with_outbox_event(OutboxEventSpec::new(
+            "booking.rate_changed",
+            OutboxAggregateKeySource::response_field("booking", "id"),
+            &["bookings", "folio"],
+        )?);
+
+    let pool_for_guard = pool.clone();
+    let booking_id_for_guard = booking_id.to_string();
+    let booking_id_for_service = booking_id.to_string();
+    let origin_key = stay_command_origin_key(ctx);
+
+    WriteCommandExecutor::new(pool.clone())
+        .execute_with_resolved_guard(
+            ctx,
+            request,
+            move || resolve_stay_lock(pool_for_guard, booking_id_for_guard),
+            move |tx, _guard| {
+                Box::pin(async move {
+                    let booking = set_booking_rate_tx(
+                        tx,
+                        &booking_id_for_service,
+                        rate_per_night,
+                        Some(origin_key),
+                    )
+                    .await
+                    .map_err(map_extend_stay_command_error)?;
+                    serde_json::to_value(&booking).map_err(system_error)
+                })
+            },
+        )
+        .await
+}
+
 #[cfg(test)]
 pub async fn extend_stay(pool: &Pool<Sqlite>, booking_id: &str) -> BookingResult<Booking> {
     let locked_room_id = lookup_booking_room_id(pool, booking_id).await?;
@@ -1488,6 +1563,119 @@ pub async fn shorten_stay(pool: &Pool<Sqlite>, booking_id: &str) -> BookingResul
 
     let _booking = shorten_stay_tx(&mut tx, booking_id, &locked_room_id, None).await?;
 
+    tx.commit().await.map_err(BookingError::from)?;
+
+    fetch_booking(
+        pool,
+        booking_id,
+        format!("Không tìm thấy booking {}", booking_id),
+        read_money_vnd_or_zero,
+    )
+    .await
+}
+
+/// Trần chống gõ nhầm thừa số 0, không phải giới hạn nghiệp vụ.
+pub const MAX_RATE_PER_NIGHT_VND: MoneyVnd = 100_000_000;
+
+async fn set_booking_rate_tx(
+    tx: &mut Transaction<'_, Sqlite>,
+    booking_id: &str,
+    rate_per_night: MoneyVnd,
+    origin_key: Option<String>,
+) -> BookingResult<Booking> {
+    if rate_per_night <= 0 || rate_per_night > MAX_RATE_PER_NIGHT_VND {
+        return Err(BookingError::validation(
+            "Giá mỗi đêm không hợp lệ".to_string(),
+        ));
+    }
+
+    let booking = sqlx::query("SELECT nights, total_price, status FROM bookings WHERE id = ?")
+        .bind(booking_id)
+        .fetch_optional(&mut **tx)
+        .await?
+        .ok_or_else(|| {
+            BookingError::not_found(format!("Không tìm thấy booking đang active {}", booking_id))
+        })?;
+
+    let booking_status: String = booking.get("status");
+    if booking_status != status::booking::ACTIVE {
+        return Err(invalid_state_transition(format!(
+            "booking {booking_id} is not active for rate change (status: {booking_status})"
+        )));
+    }
+
+    let nights: i32 = booking.get("nights");
+    let current_total = read_money_vnd_or_zero(&booking, "total_price");
+
+    let new_total =
+        crate::pricing::checked_mul_money(rate_per_night, i64::from(nights), "total_price")
+            .map_err(BookingError::validation)?;
+
+    let result = sqlx::query(
+        "UPDATE bookings
+         SET total_price = ?
+         WHERE id = ? AND status = ? AND total_price = ?",
+    )
+    .bind(new_total)
+    .bind(booking_id)
+    .bind(status::booking::ACTIVE)
+    .bind(current_total)
+    .execute(&mut **tx)
+    .await
+    .map_err(BookingError::from)
+    .map_err(mark_write_db_error)?;
+    ensure_one_row_affected(
+        result,
+        format!("booking {booking_id} changed before rate change"),
+    )?;
+
+    let delta = crate::pricing::checked_sub_money(new_total, current_total, "rate_delta")
+        .map_err(BookingError::validation)?;
+
+    if delta != 0 {
+        let old_rate = if nights > 0 {
+            current_total / i64::from(nights)
+        } else {
+            current_total
+        };
+        let note = format!("Đổi giá: {} → {}", old_rate, rate_per_night);
+
+        if let Some(origin_key) = origin_key {
+            let origin = OriginSideEffect::new(origin_key, 0)?;
+            record_charge_with_origin_tx(
+                tx,
+                booking_id,
+                delta,
+                note,
+                Local::now().to_rfc3339(),
+                &origin,
+            )
+            .await
+            .map_err(mark_write_db_error)?;
+        } else {
+            record_charge_tx(tx, booking_id, delta, note, Local::now().to_rfc3339())
+                .await
+                .map_err(mark_write_db_error)?;
+        }
+    }
+
+    fetch_booking_tx(tx, booking_id).await
+}
+
+#[cfg(test)]
+pub async fn set_booking_rate(
+    pool: &Pool<Sqlite>,
+    booking_id: &str,
+    rate_per_night: MoneyVnd,
+) -> BookingResult<Booking> {
+    let _lock_guard = crate::aggregate_locks::global_manager()
+        .acquire([crate::aggregate_locks::booking_key(booking_id)
+            .map_err(|error| BookingError::validation(error.message))?])
+        .await
+        .map_err(|error| BookingError::validation(error.message))?;
+
+    let mut tx = begin_immediate_tx(pool).await?;
+    let _booking = set_booking_rate_tx(&mut tx, booking_id, rate_per_night, None).await?;
     tx.commit().await.map_err(BookingError::from)?;
 
     fetch_booking(

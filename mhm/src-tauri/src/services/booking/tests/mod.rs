@@ -43,6 +43,7 @@ mod prelude {
 }
 
 mod backfill;
+mod booking_edits;
 mod checkout_settlement;
 mod extend_stay;
 mod folio;
