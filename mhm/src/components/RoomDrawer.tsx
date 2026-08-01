@@ -166,6 +166,11 @@ export default function RoomDrawer({ open, onClose, roomId }: RoomDrawerProps) {
         setNightsBusy(true);
         try {
             await shortenStay(booking.id);
+            // Gọi invoke trực tiếp thay vì dùng lại refreshRoomDetail(): hàm đó
+            // set state rồi trả về void, còn toast bên dưới cần chính con số
+            // vừa refetch (đêm còn lại, tổng tiền mới). State setter không đọc
+            // lại được trong cùng tick, nên nếu tái dùng refreshRoomDetail(),
+            // toast sẽ hiện số liệu cũ trước khi rút đêm — sai mà không lỗi rõ.
             const detail = await invoke<RoomWithBooking>("get_room_detail", {
                 roomId: room.id,
             });
