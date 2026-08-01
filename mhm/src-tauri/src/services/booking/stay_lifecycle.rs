@@ -33,7 +33,6 @@ use super::{
     },
 };
 
-#[cfg(test)]
 use super::support::{begin_immediate_tx, fetch_booking};
 
 pub(super) fn mark_write_db_error(error: BookingError) -> BookingError {
@@ -150,7 +149,7 @@ pub(super) fn map_check_out_command_error(error: BookingError) -> CommandError {
     }
 }
 
-pub(super) fn map_extend_stay_command_error(error: BookingError) -> CommandError {
+pub fn map_extend_stay_command_error(error: BookingError) -> CommandError {
     match error {
         BookingError::Conflict(message) => {
             if is_room_unavailable_conflict_message(&message) {
@@ -1686,6 +1685,60 @@ pub async fn set_booking_rate(
 
     let mut tx = begin_immediate_tx(pool).await?;
     let _booking = set_booking_rate_tx(&mut tx, booking_id, rate_per_night, None).await?;
+    tx.commit().await.map_err(BookingError::from)?;
+
+    fetch_booking(
+        pool,
+        booking_id,
+        format!("Không tìm thấy booking {}", booking_id),
+        read_money_vnd_or_zero,
+    )
+    .await
+}
+
+pub const MAX_BOOKING_NOTES_LEN: usize = 2_000;
+
+/// Ghi chú không đụng tiền và không đụng lịch phòng, nên không cần bộ máy
+/// idempotency — theo tiền lệ của `add_folio_line`. Chỉ khoá booking.
+pub async fn update_booking_notes(
+    pool: &Pool<Sqlite>,
+    booking_id: &str,
+    notes: Option<String>,
+) -> BookingResult<Booking> {
+    let trimmed = notes
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty());
+
+    if let Some(ref value) = trimmed {
+        if value.chars().count() > MAX_BOOKING_NOTES_LEN {
+            return Err(BookingError::validation(format!(
+                "Ghi chú tối đa {} ký tự",
+                MAX_BOOKING_NOTES_LEN
+            )));
+        }
+    }
+
+    let _lock_guard = crate::aggregate_locks::global_manager()
+        .acquire([crate::aggregate_locks::booking_key(booking_id)
+            .map_err(|error| BookingError::validation(error.message))?])
+        .await
+        .map_err(|error| BookingError::validation(error.message))?;
+
+    let mut tx = begin_immediate_tx(pool).await?;
+
+    let result = sqlx::query("UPDATE bookings SET notes = ? WHERE id = ? AND status = ?")
+        .bind(trimmed.as_deref())
+        .bind(booking_id)
+        .bind(status::booking::ACTIVE)
+        .execute(&mut *tx)
+        .await
+        .map_err(BookingError::from)
+        .map_err(mark_write_db_error)?;
+    ensure_one_row_affected(
+        result,
+        format!("Không tìm thấy booking đang active {booking_id}"),
+    )?;
+
     tx.commit().await.map_err(BookingError::from)?;
 
     fetch_booking(

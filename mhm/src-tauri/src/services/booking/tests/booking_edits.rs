@@ -424,3 +424,85 @@ async fn set_booking_rate_refuses_a_booking_that_is_not_active() {
         BookingError::Conflict(_)
     ));
 }
+
+#[tokio::test]
+async fn update_booking_notes_trims_and_saves() {
+    let pool = test_pool().await;
+    seed_two_night_booking(&pool, "B901", "R901").await.unwrap();
+
+    stay_lifecycle::update_booking_notes(
+        &pool,
+        "B901",
+        Some("  Khách xin thêm gối  ".to_string()),
+    )
+    .await
+    .unwrap();
+
+    let notes: Option<String> = sqlx::query_scalar("SELECT notes FROM bookings WHERE id = ?")
+        .bind("B901")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(notes.as_deref(), Some("Khách xin thêm gối"));
+}
+
+#[tokio::test]
+async fn update_booking_notes_stores_blank_input_as_null() {
+    let pool = test_pool().await;
+    seed_two_night_booking(&pool, "B902", "R902").await.unwrap();
+
+    stay_lifecycle::update_booking_notes(&pool, "B902", Some("   ".to_string()))
+        .await
+        .unwrap();
+
+    let notes: Option<String> = sqlx::query_scalar("SELECT notes FROM bookings WHERE id = ?")
+        .bind("B902")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(notes, None);
+}
+
+#[tokio::test]
+async fn update_booking_notes_rejects_notes_over_the_limit() {
+    let pool = test_pool().await;
+    seed_two_night_booking(&pool, "B903", "R903").await.unwrap();
+
+    let too_long = "a".repeat(2_001);
+    let error = stay_lifecycle::update_booking_notes(&pool, "B903", Some(too_long))
+        .await
+        .unwrap_err();
+    assert!(matches!(error, BookingError::Validation(_)));
+
+    let notes: Option<String> = sqlx::query_scalar("SELECT notes FROM bookings WHERE id = ?")
+        .bind("B903")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(
+        notes.as_deref(),
+        Some("seed booking"),
+        "bị từ chối thì ghi chú cũ phải còn nguyên, không bị cắt bớt"
+    );
+}
+
+#[tokio::test]
+async fn update_booking_notes_refuses_a_booking_that_is_not_active() {
+    let pool = test_pool().await;
+    seed_two_night_booking(&pool, "B904", "R904").await.unwrap();
+    sqlx::query("UPDATE bookings SET status = 'checked_out' WHERE id = ?")
+        .bind("B904")
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    let error = stay_lifecycle::update_booking_notes(&pool, "B904", Some("x".to_string()))
+        .await
+        .unwrap_err();
+    // `update_booking_notes` has no separate SELECT+status check before the
+    // UPDATE — it relies on `WHERE status = ACTIVE` plus `ensure_one_row_affected`,
+    // same as `set_booking_rate`'s equivalent test above. That path always
+    // reports a state-transition problem via `invalid_state_transition`, i.e.
+    // `BookingError::Conflict`, never `Validation`/`NotFound`.
+    assert!(matches!(error, BookingError::Conflict(_)));
+}

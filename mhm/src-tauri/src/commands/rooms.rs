@@ -497,6 +497,24 @@ pub async fn set_booking_rate(
     Ok(booking)
 }
 
+// ─── Update Booking Notes ───
+
+#[tauri::command]
+pub async fn update_booking_notes(
+    state: State<'_, AppState>,
+    booking_id: String,
+    notes: Option<String>,
+    app: tauri::AppHandle,
+) -> CommandResult<Booking> {
+    let booking = stay_lifecycle::update_booking_notes(&state.db, &booking_id, notes)
+        .await
+        .map_err(stay_lifecycle::map_extend_stay_command_error)?;
+
+    emit_db_update(&app, "rooms");
+
+    Ok(booking)
+}
+
 // ─── Housekeeping Commands ───
 
 #[tauri::command]
