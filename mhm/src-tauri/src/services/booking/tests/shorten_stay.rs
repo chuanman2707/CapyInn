@@ -542,3 +542,36 @@ async fn shorten_stay_leaves_everything_alone_when_the_calendar_row_is_missing()
     .unwrap();
     assert_eq!(credits, 0, "rollback thì không được để lại dòng đối ứng nào");
 }
+
+#[tokio::test]
+async fn shorten_stay_idempotent_retry_replays_without_removing_a_second_night() {
+    let pool = test_pool().await;
+    seed_room(&pool, "R706").await.unwrap();
+    seed_future_booking(&pool, "B706", "R706", 3).await.unwrap();
+
+    let ctx = cmd("shorten_stay", "shorten-key-1");
+
+    stay_lifecycle::shorten_stay_idempotent(&pool, &ctx, "B706")
+        .await
+        .unwrap();
+    stay_lifecycle::shorten_stay_idempotent(&pool, &ctx, "B706")
+        .await
+        .unwrap();
+
+    let row = sqlx::query("SELECT nights, total_price FROM bookings WHERE id = ?")
+        .bind("B706")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(row.get::<i32, _>("nights"), 2, "gửi lại chỉ được rút một đêm");
+    assert_eq!(row.get::<i64, _>("total_price"), 500_000);
+
+    let credits: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM transactions WHERE booking_id = ? AND note = 'Shortened stay -1 night'",
+    )
+    .bind("B706")
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(credits, 1, "chỉ được một dòng đối ứng duy nhất");
+}

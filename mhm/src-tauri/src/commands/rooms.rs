@@ -76,6 +76,13 @@ fn extend_stay_failure_context(booking_id: &str) -> Value {
     })
 }
 
+fn shorten_stay_failure_context(booking_id: &str) -> Value {
+    json!({
+        "booking_id": booking_id,
+        "operation": "remove_one_night",
+    })
+}
+
 fn should_request_checkout_backup(replayed: bool) -> bool {
     !replayed
 }
@@ -352,6 +359,65 @@ pub async fn extend_stay(
 
     log::info!(
         "extend_stay success correlation_id={} source={:?} booking_id={} room_id={}",
+        effective_correlation_id.value,
+        effective_correlation_id.source,
+        booking.id,
+        booking.room_id
+    );
+
+    emit_db_update(&app, "rooms");
+
+    Ok(booking)
+}
+
+// ─── Shorten Stay ───
+
+#[tauri::command]
+pub async fn shorten_stay(
+    state: State<'_, AppState>,
+    booking_id: String,
+    app: tauri::AppHandle,
+    correlation_id: Option<String>,
+    idempotency_key: String,
+) -> CommandResult<Booking> {
+    let effective_correlation_id = normalize_correlation_id(correlation_id);
+    let error_context = shorten_stay_failure_context(&booking_id);
+    let actor_id = get_user_id(&state)
+        .ok_or_else(|| CommandError::user(codes::AUTH_NOT_AUTHENTICATED, "Chưa đăng nhập"))?;
+    let mut write_command_context = WriteCommandContext::for_scoped_command(
+        effective_correlation_id.value.clone(),
+        idempotency_key,
+        "shorten_stay",
+    )?;
+    write_command_context.actor_id = Some(actor_id);
+    log::info!(
+        "shorten_stay start correlation_id={} source={:?} booking_id={}",
+        effective_correlation_id.value,
+        effective_correlation_id.source,
+        booking_id
+    );
+    let result =
+        stay_lifecycle::shorten_stay_idempotent(&state.db, &write_command_context, &booking_id)
+            .await
+            .inspect_err(|command_error| {
+                record_command_failure_with_db_group(
+                    "shorten_stay",
+                    command_error,
+                    &effective_correlation_id.value,
+                    None,
+                    error_context.clone(),
+                );
+            })?;
+    let booking: Booking = serde_json::from_value(result.response).map_err(|error| {
+        CommandError::system(
+            codes::SYSTEM_INTERNAL_ERROR,
+            format!("Invalid shorten_stay idempotent response: {error}"),
+        )
+        .with_request_id(write_command_context.request_id.clone())
+    })?;
+
+    log::info!(
+        "shorten_stay success correlation_id={} source={:?} booking_id={} room_id={}",
         effective_correlation_id.value,
         effective_correlation_id.source,
         booking.id,

@@ -479,12 +479,6 @@ pub(crate) fn checked_add_money(a: MoneyVnd, b: MoneyVnd, field: &str) -> Result
 /// See `checked_mul_money` — same reasoning. `shorten_stay` needs the mirror of
 /// `checked_add_money` so a removed night goes through the same transport-safe
 /// guard as the night that added it.
-///
-/// `#[allow(dead_code)]`: only `shorten_stay_tx` calls this so far, and that
-/// function is itself only reachable from the `#[cfg(test)]` wrapper until the
-/// Tauri command wrapper lands in a later task. Remove once that wrapper wires
-/// a non-test caller.
-#[allow(dead_code)]
 pub(crate) fn checked_sub_money(a: MoneyVnd, b: MoneyVnd, field: &str) -> Result<MoneyVnd, String> {
     let value = a
         .checked_sub(b)

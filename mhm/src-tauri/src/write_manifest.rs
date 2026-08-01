@@ -49,6 +49,11 @@ pub const WRITE_COMMAND_MANIFEST: &[WriteCommandMeta] = &[
         enforced_in_foundation: true,
     },
     WriteCommandMeta {
+        command_name: "shorten_stay",
+        lock_deriver: LockDeriverId::BookingAndRoomFromBooking,
+        enforced_in_foundation: true,
+    },
+    WriteCommandMeta {
         command_name: "group_checkin",
         lock_deriver: LockDeriverId::GroupCheckinRooms,
         enforced_in_foundation: true,

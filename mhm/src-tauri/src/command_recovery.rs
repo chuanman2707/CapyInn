@@ -45,6 +45,7 @@ pub fn command_recovery_risk_level(command_name: &str) -> RecoveryRiskLevel {
         | "confirm_reservation"
         | "check_in"
         | "extend_stay"
+        | "shorten_stay"
         | "group_checkin"
         | "group_checkout"
         | "generate_invoice"

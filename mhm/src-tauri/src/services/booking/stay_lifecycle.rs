@@ -207,6 +207,14 @@ fn build_extend_stay_hash_payload(booking_id: &str) -> serde_json::Value {
     })
 }
 
+fn build_shorten_stay_hash_payload(booking_id: &str) -> serde_json::Value {
+    json!({
+        "schema": "stay.shorten.v1",
+        "booking_id": booking_id,
+        "operation": "remove_one_night",
+    })
+}
+
 fn check_in_lock_keys_from_payload(hash_payload: &serde_json::Value) -> CommandResult<Vec<String>> {
     let room_id = hash_payload
         .get("room_id")
@@ -235,6 +243,19 @@ fn extend_stay_initial_lock_keys_from_payload(
         .get("booking_id")
         .and_then(serde_json::Value::as_str)
         .ok_or_else(|| system_error("extend-stay lock payload missing booking_id"))?;
+    Ok(vec![
+        crate::aggregate_locks::booking_key(booking_id)?,
+        crate::aggregate_locks::folio_key(booking_id)?,
+    ])
+}
+
+fn shorten_stay_initial_lock_keys_from_payload(
+    hash_payload: &serde_json::Value,
+) -> CommandResult<Vec<String>> {
+    let booking_id = hash_payload
+        .get("booking_id")
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| system_error("shorten-stay lock payload missing booking_id"))?;
     Ok(vec![
         crate::aggregate_locks::booking_key(booking_id)?,
         crate::aggregate_locks::folio_key(booking_id)?,
@@ -1209,6 +1230,59 @@ pub async fn extend_stay_idempotent(
         .await
 }
 
+pub async fn shorten_stay_idempotent(
+    pool: &Pool<Sqlite>,
+    ctx: &WriteCommandContext,
+    booking_id: &str,
+) -> CommandResult<IdempotentCommandResult<serde_json::Value>> {
+    let hash_payload = build_shorten_stay_hash_payload(booking_id);
+    let ledger_intent = SanitizedLedgerIntent::from_pairs([
+        ("schema", json!("stay.shorten.v1")),
+        ("booking_present", json!(true)),
+        ("operation", json!("remove_one_night")),
+    ])?;
+    let summary = CommandLedgerSummary::new("Shorten stay")?.with_aggregate_ref(
+        "booking",
+        "booking",
+        None::<String>,
+    )?;
+    let request = WriteCommandRequest::new_sanitized(hash_payload, ledger_intent, summary)?
+        .with_primary_aggregate_key(format!("booking:{booking_id}"))
+        .with_lock_key_deriver(shorten_stay_initial_lock_keys_from_payload)
+        .with_success_summary(CommandLedgerResultSummary::success("Stay shortened")?)
+        .with_outbox_event(OutboxEventSpec::new(
+            "booking.stay_shortened",
+            OutboxAggregateKeySource::response_field("booking", "id"),
+            &["bookings", "rooms", "folio"],
+        )?);
+
+    let pool_for_guard = pool.clone();
+    let booking_id_for_guard = booking_id.to_string();
+    let booking_id_for_service = booking_id.to_string();
+    let origin_key = stay_command_origin_key(ctx);
+
+    WriteCommandExecutor::new(pool.clone())
+        .execute_with_resolved_guard(
+            ctx,
+            request,
+            move || resolve_stay_lock(pool_for_guard, booking_id_for_guard),
+            move |tx, guard| {
+                Box::pin(async move {
+                    let booking = shorten_stay_tx(
+                        tx,
+                        &booking_id_for_service,
+                        &guard.room_id,
+                        Some(origin_key),
+                    )
+                    .await
+                    .map_err(map_extend_stay_command_error)?;
+                    serde_json::to_value(&booking).map_err(system_error)
+                })
+            },
+        )
+        .await
+}
+
 #[cfg(test)]
 pub async fn extend_stay(pool: &Pool<Sqlite>, booking_id: &str) -> BookingResult<Booking> {
     let locked_room_id = lookup_booking_room_id(pool, booking_id).await?;
@@ -1237,11 +1311,6 @@ pub async fn extend_stay(pool: &Pool<Sqlite>, booking_id: &str) -> BookingResult
     .await
 }
 
-/// `#[allow(dead_code)]`: the only caller right now is the `#[cfg(test)]`
-/// `shorten_stay` wrapper below — the Tauri command wrapper (and its
-/// idempotent entry point, mirroring `extend_stay_idempotent`) lands in a
-/// later task. Remove once that wrapper calls this from non-test code.
-#[allow(dead_code)]
 async fn shorten_stay_tx(
     tx: &mut Transaction<'_, Sqlite>,
     booking_id: &str,
