@@ -559,8 +559,8 @@ async fn the_migrated_special_dates_table_matches_what_the_code_assumes() {
     db.close().await;
 }
 
-/// Nhánh này không được thêm hay sửa migration nào: phiên bản schema phải đứng
-/// yên ở 22, đúng như trên `main`.
+/// Nhánh này không được thêm hay sửa migration nào ngoài phạm vi của nó: phiên
+/// bản schema sau khi migrate phải khớp `LATEST_SCHEMA_VERSION` hiện hành.
 #[tokio::test]
 async fn the_branch_does_not_move_the_schema_version() {
     let db = migrated_db("schema-version").await;
@@ -570,7 +570,11 @@ async fn the_branch_does_not_move_the_schema_version() {
         .await
         .expect("đọc schema_version");
 
-    assert_eq!(version, 23, "nhánh mùa cao điểm không đụng vào migration");
+    assert_eq!(
+        version,
+        i64::from(crate::db::LATEST_SCHEMA_VERSION),
+        "nhánh mùa cao điểm không đụng vào migration"
+    );
 
     db.close().await;
 }

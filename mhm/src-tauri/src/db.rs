@@ -145,7 +145,7 @@ async fn ensure_setting_default(
 /// Schema version a database reaches after `run_migrations` finishes on this
 /// build. Bump this together with every new migration block below; the
 /// `migrations_run_to_latest_schema_version` test fails otherwise.
-pub(crate) const LATEST_SCHEMA_VERSION: i32 = 23;
+pub(crate) const LATEST_SCHEMA_VERSION: i32 = 24;
 
 async fn get_schema_version(pool: &Pool<Sqlite>) -> Result<i32, sqlx::Error> {
     sqlx::query(
@@ -322,9 +322,10 @@ pub(crate) async fn run_migrations(pool: &Pool<Sqlite>) -> Result<(), sqlx::Erro
         core_extensions::migrate_v22_booking_guest_count(pool).await?;
     }
 
-    // -- V23: dấu thời gian đổi giá thủ công trên booking --
-    if current < 23 {
-        core_extensions::migrate_v23_booking_rate_override(pool).await?;
+    // -- V24: dấu thời gian đổi giá thủ công trên booking --
+    // (v23 đã bị nhánh kbtt chiếm — xem migrate_v24_booking_rate_override)
+    if current < 24 {
+        core_extensions::migrate_v24_booking_rate_override(pool).await?;
     }
     Ok(())
 }
@@ -877,7 +878,7 @@ mod tests {
             .await
             .expect("reads final schema version");
 
-        assert_eq!(version, 23);
+        assert_eq!(version, 24);
 
         assert_table_group_exists(&pool, "PMS core", PMS_CORE_TABLES).await;
         assert_table_group_exists(&pool, "command safety", COMMAND_SAFETY_TABLES).await;
@@ -898,7 +899,7 @@ mod tests {
             .expect("reads version")
             .get("version");
 
-        assert_eq!(version, 23);
+        assert_eq!(version, 24);
         assert_money_columns_are_integer(&pool).await;
     }
 
@@ -1186,7 +1187,7 @@ mod tests {
             .expect("reads final schema version")
             .get("version");
 
-        assert_eq!(version, 23);
+        assert_eq!(version, 24);
     }
 
     #[tokio::test]
@@ -1253,7 +1254,7 @@ mod tests {
             .expect("reads final schema version")
             .get("version");
 
-        assert_eq!(version, 23);
+        assert_eq!(version, 24);
     }
 
     #[tokio::test]
@@ -1333,7 +1334,7 @@ mod tests {
         );
 
         let version = get_schema_version(&pool).await.expect("schema version");
-        assert_eq!(version, 23);
+        assert_eq!(version, 24);
     }
 
     #[tokio::test]
@@ -1373,7 +1374,7 @@ mod tests {
 
         assert_outbox_shape(&pool).await;
         let version = get_schema_version(&pool).await.expect("schema version");
-        assert_eq!(version, 23);
+        assert_eq!(version, 24);
     }
 
     #[tokio::test]
@@ -1391,7 +1392,7 @@ mod tests {
 
         assert_outbox_shape(&pool).await;
         let version = get_schema_version(&pool).await.expect("schema version");
-        assert_eq!(version, 23);
+        assert_eq!(version, 24);
     }
 
     #[tokio::test]
@@ -1421,7 +1422,7 @@ mod tests {
             1
         );
         let version = get_schema_version(&pool).await.expect("schema version");
-        assert_eq!(version, 23);
+        assert_eq!(version, 24);
     }
 
     #[tokio::test]
@@ -1434,7 +1435,7 @@ mod tests {
 
         assert_agent_safety_shape(&pool).await;
         let version = get_schema_version(&pool).await.expect("schema version");
-        assert_eq!(version, 23);
+        assert_eq!(version, 24);
     }
 
     #[tokio::test]
@@ -1467,7 +1468,7 @@ mod tests {
 
         assert_agent_digest_runs_shape(&pool).await;
         let version = get_schema_version(&pool).await.expect("schema version");
-        assert_eq!(version, 23);
+        assert_eq!(version, 24);
     }
 
     #[tokio::test]
@@ -1491,11 +1492,11 @@ mod tests {
 
         assert_agent_safety_shape(&pool).await;
         let version = get_schema_version(&pool).await.expect("schema version");
-        assert_eq!(version, 23);
+        assert_eq!(version, 24);
     }
 
     #[tokio::test]
-    async fn migration_v23_leaves_existing_bookings_with_a_null_rate_override() {
+    async fn migration_v24_leaves_existing_bookings_with_a_null_rate_override() {
         let pool = SqlitePool::connect("sqlite::memory:")
             .await
             .expect("connects in-memory sqlite");
@@ -1530,14 +1531,14 @@ mod tests {
         .await
         .expect("seeds booking");
 
-        // Giả lập DB thật đang ở v22, chưa từng thấy migration v23 — rồi cho
+        // Giả lập DB thật đang ở v23, chưa từng thấy migration v24 — rồi cho
         // chạy lại migrations như lúc app khởi động với bản build mới.
-        sqlx::query("UPDATE schema_version SET version = 22")
+        sqlx::query("UPDATE schema_version SET version = 23")
             .execute(&pool)
             .await
             .expect("rewinds schema version");
 
-        run_migrations(&pool).await.expect("v23 migration runs against a populated database");
+        run_migrations(&pool).await.expect("v24 migration runs against a populated database");
 
         let rate_overridden_at: Option<String> =
             sqlx::query_scalar("SELECT rate_overridden_at FROM bookings WHERE id = 'B23'")
@@ -1550,7 +1551,96 @@ mod tests {
         );
 
         let version = get_schema_version(&pool).await.expect("schema version");
-        assert_eq!(version, 23);
+        assert_eq!(version, 24);
+    }
+
+    /// Migration test trên hoạt động bằng cách rewind `schema_version` SAU KHI
+    /// `run_migrations` đã tạo sẵn cột `rate_overridden_at` — nên ALTER TABLE
+    /// ở lần chạy lại luôn đụng "duplicate column" và bị `execute_compat_alter`
+    /// nuốt lỗi. Nó không bao giờ chạy đường ALTER thật, nên không phát hiện
+    /// được lỗi va số hiệu schema_version như production build này từng gặp:
+    /// nếu `migrate_v24_booking_rate_override` không chạy (vì gate sai số,
+    /// hoặc số hiệu 24 đã bị migration khác chiếm mất), test rewind vẫn xanh
+    /// vì cột đã có sẵn từ trước.
+    ///
+    /// Test này dựng một DB thật sự chưa từng thấy cột `rate_overridden_at`
+    /// (DROP COLUMN sau khi migrate lên latest, rồi rewind `schema_version`
+    /// về 23) trước khi seed dữ liệu và chạy lại `run_migrations` — buộc
+    /// `execute_compat_alter` phải đi qua nhánh ALTER thật, không phải nhánh
+    /// nuốt lỗi duplicate-column.
+    #[tokio::test]
+    async fn migration_v24_alter_actually_runs_on_a_genuinely_pre_v24_database() {
+        let pool = SqlitePool::connect("sqlite::memory:")
+            .await
+            .expect("connects in-memory sqlite");
+
+        run_migrations(&pool).await.expect("runs migrations to latest");
+
+        // Xoá cột mà v24 tạo ra, để mô phỏng trung thực một DB thật sự chưa
+        // từng chạy qua migrate_v24_booking_rate_override — chứ không chỉ
+        // giả vờ bằng cách rewind schema_version trong khi cột vẫn còn đó.
+        sqlx::query("ALTER TABLE bookings DROP COLUMN rate_overridden_at")
+            .execute(&pool)
+            .await
+            .expect("drops rate_overridden_at to simulate a pre-v24 database");
+
+        sqlx::query(
+            "INSERT INTO rooms (
+                id, name, type, floor, has_balcony, base_price, max_guests, extra_person_fee, status
+             ) VALUES ('R24', 'Room R24', 'standard', 1, 0, 250000, 2, 0, 'vacant')",
+        )
+        .execute(&pool)
+        .await
+        .expect("seeds room");
+        sqlx::query(
+            "INSERT INTO guests (id, guest_type, full_name, doc_number, created_at)
+             VALUES ('G24', 'domestic', 'Existing Guest', 'DOC24', '2026-04-30T08:00:00+07:00')",
+        )
+        .execute(&pool)
+        .await
+        .expect("seeds guest");
+        sqlx::query(
+            "INSERT INTO bookings (
+                id, room_id, primary_guest_id, check_in_at, expected_checkout,
+                nights, total_price, status, created_at
+             ) VALUES ('B24', 'R24', 'G24', '2026-04-30', '2026-05-01', 1, 250000, 'active', '2026-04-30T08:00:00+07:00')",
+        )
+        .execute(&pool)
+        .await
+        .expect("seeds booking");
+
+        sqlx::query("UPDATE schema_version SET version = 23")
+            .execute(&pool)
+            .await
+            .expect("rewinds schema version to a genuinely pre-v24 state");
+
+        run_migrations(&pool)
+            .await
+            .expect("v24 migration adds the column back via a real ALTER TABLE");
+
+        let column_count = sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM pragma_table_info('bookings') WHERE name = 'rate_overridden_at'",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("reads pragma_table_info");
+        assert_eq!(
+            column_count, 1,
+            "ALTER TABLE thật phải chạy và tạo lại cột rate_overridden_at"
+        );
+
+        let rate_overridden_at: Option<String> =
+            sqlx::query_scalar("SELECT rate_overridden_at FROM bookings WHERE id = 'B24'")
+                .fetch_one(&pool)
+                .await
+                .expect("reads rate_overridden_at");
+        assert_eq!(
+            rate_overridden_at, None,
+            "cột mới thêm phải backfill NULL cho booking có sẵn, không suy diễn đã đổi giá tay"
+        );
+
+        let version = get_schema_version(&pool).await.expect("schema version");
+        assert_eq!(version, 24);
     }
 
     #[tokio::test]
