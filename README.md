@@ -116,6 +116,9 @@ CapyInn is built for a narrow but practical use case: small hotels that need a s
 
 - Dashboard organized around the configured room layout
 - Check-in, check-out, extend-stay, and reservation flows in one desktop app
+- Reservation calendar timeline: click or drag across empty cells to open a check-in or a reservation with those dates already filled in
+- Backfill sheet for recording a stay that already happened, opened from the same calendar
+- Read-only detail popup for a booking that has already checked out, including its issued invoice
 - Support for multiple guests on the same booking
 - Fast copy flow for guest registration details
 
@@ -125,9 +128,13 @@ CapyInn is built for a narrow but practical use case: small hotels that need a s
 - Watches `~/CapyInn/Scans/` for new scan files
 - Extracts guest name, national ID number, birth date, and address for check-in
 
-### Billing, payments, and reporting
+### Pricing, billing, and reporting
 
-- Night-based pricing by room type
+- Rates are a property of the room type, not of the individual room: hourly, overnight, and nightly/daily models, with an hourly total capped at the cheaper block
+- Weekend uplift, peak-season uplift, and early check-in / late check-out surcharges
+- Peak seasons are declared in Settings as date ranges; the uplift is charged only for the nights that fall inside one
+- Extra-person surcharge per guest per night above the room's included headcount — reservations carry a guest count and are quoted with it
+- Prices shown before a stay come from the backend preview that will charge it, never from arithmetic in the UI
 - Charge, payment, deposit, and balance tracking
 - Revenue analytics, expense tracking, and CSV export
 
