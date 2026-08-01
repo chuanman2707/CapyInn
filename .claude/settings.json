@@ -1,0 +1,14 @@
+{
+  "permissions": {
+    "deny": [
+      "Read(./mhm/src-tauri/target/**)",
+      "Read(./mhm/Scans/**)",
+      "Read(./mhm/package-lock.json)",
+      "Read(./**/*.db)"
+    ]
+  },
+  "worktree": {
+    "sparsePaths": [".claude", "docs", "mhm"],
+    "symlinkDirectories": ["mhm/node_modules"]
+  }
+}
