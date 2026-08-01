@@ -1249,8 +1249,7 @@ async fn shorten_stay_tx(
     origin_key: Option<String>,
 ) -> BookingResult<Booking> {
     let booking = sqlx::query(
-        "SELECT room_id, nights, total_price, check_in_at, expected_checkout,
-                pricing_type, guests, status
+        "SELECT room_id, nights, total_price, check_in_at, expected_checkout, status
          FROM bookings WHERE id = ?",
     )
     .bind(booking_id)
@@ -1278,10 +1277,6 @@ async fn shorten_stay_tx(
     let current_total = read_money_vnd_or_zero(&booking, "total_price");
     let check_in_at: String = booking.get("check_in_at");
     let old_expected_checkout: String = booking.get("expected_checkout");
-    let pricing_type = booking
-        .get::<Option<String>, _>("pricing_type")
-        .unwrap_or_else(|| "nightly".to_string());
-    let guests: Option<i32> = booking.get("guests");
 
     let old_expected = parse_booking_datetime(&old_expected_checkout)?;
     let check_in = parse_booking_datetime(&check_in_at)?;
@@ -1305,27 +1300,11 @@ async fn shorten_stay_tx(
         ));
     }
 
-    let removed_pricing = calculate_stay_price_tx(
-        tx,
-        &room_id,
-        &new_expected.to_rfc3339(),
-        &old_expected_checkout,
-        &pricing_type,
-        guests,
-    )
-    .await?;
-    let removed_total = removed_pricing.total;
-
-    // Giá phòng có thể đã tăng kể từ lúc nhận phòng (base_price đổi, thêm
-    // pricing_rules, hoặc special_dates) — khoản hoàn cho đêm bị rút không
-    // được vượt quá tổng tiền hiện tại của booking, nếu không total_price sẽ
-    // âm. Chặn ở đây, trước bất kỳ câu UPDATE nào, để không ghi gì cả.
-    if removed_total > current_total {
-        return Err(BookingError::validation(
-            "Giá phòng đã thay đổi kể từ lúc nhận phòng nên không thể tự động hoàn tiền đêm này — vui lòng điều chỉnh thủ công"
-                .to_string(),
-        ));
-    }
+    // Tiền hoàn lấy từ trung bình của CHÍNH booking này, không hỏi pricing engine.
+    // Pricing engine trả giá hôm nay, còn đêm này đã thu theo giá lúc đặt; nâng giá
+    // phòng giữa chừng sẽ khiến ta hoàn nhiều hơn số đã thu. Không có bản ghi giá
+    // từng đêm để tra (pricing_snapshot chỉ ghi lúc check-out).
+    let removed_total = current_total / i64::from(current_nights);
 
     let new_total = crate::pricing::checked_sub_money(current_total, removed_total, "total_price")
         .map_err(BookingError::validation)?;

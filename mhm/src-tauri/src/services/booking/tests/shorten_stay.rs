@@ -336,37 +336,32 @@ async fn shorten_stay_refuses_a_booking_that_is_not_active() {
 }
 
 #[tokio::test]
-async fn shorten_stay_refuses_when_the_credit_would_exceed_the_total() {
+async fn shorten_stay_credits_the_booking_average_not_the_current_rate() {
     let pool = test_pool().await;
     seed_room(&pool, "R709").await.unwrap();
     let (check_in, _checkout) = seed_future_booking(&pool, "B709", "R709", 2)
         .await
         .unwrap();
 
-    // Kịch bản reviewer nêu: booking 2 đêm x 250,000 (tổng 500,000) được chốt
-    // giá lúc nhận phòng, sau đó một dòng pricing_rules đẩy giá phòng lên
-    // 900,000/đêm. Rút một đêm ở mức giá mới sẽ đòi hoàn nhiều hơn cả tổng
-    // tiền của booking — phải bị chặn, không được để total_price âm.
+    // Booking 2 đêm x 250,000 (tổng 500,000) được chốt giá lúc nhận phòng.
+    // Sau đó một dòng pricing_rules đẩy giá phòng lên 900,000/đêm — nếu
+    // shorten_stay hỏi lại pricing engine, nó sẽ hoàn 900,000 cho một đêm chỉ
+    // thu có 250,000. Quyết định của product owner: hoàn theo trung bình của
+    // CHÍNH booking này (500,000 / 2 = 250,000), bỏ qua giá mới hoàn toàn.
     seed_pricing_rule(&pool, "standard", 900_000).await.unwrap();
 
-    let error = stay_lifecycle::shorten_stay(&pool, "B709")
-        .await
-        .unwrap_err();
-    assert!(
-        matches!(error, BookingError::Validation(_)),
-        "mong đợi lỗi validation vì khoản hoàn vượt tổng tiền, nhận được: {error:?}"
-    );
+    stay_lifecycle::shorten_stay(&pool, "B709").await.unwrap();
 
     let row = sqlx::query("SELECT nights, total_price FROM bookings WHERE id = ?")
         .bind("B709")
         .fetch_one(&pool)
         .await
         .unwrap();
-    assert_eq!(row.get::<i32, _>("nights"), 2, "thất bại thì số đêm không đổi");
+    assert_eq!(row.get::<i32, _>("nights"), 1);
     assert_eq!(
         row.get::<i64, _>("total_price"),
-        500_000,
-        "thất bại thì tổng tiền không đổi"
+        250_000,
+        "khoản hoàn phải bằng trung bình gốc của booking (250,000), không phải giá mới (900,000)"
     );
 
     let check_in_date = date_from_rfc3339(&check_in);
@@ -379,16 +374,19 @@ async fn shorten_stay_refuses_when_the_credit_would_exceed_the_total() {
     .fetch_one(&pool)
     .await
     .unwrap();
-    assert_eq!(calendar_rows, 1, "thất bại thì lịch phòng không đổi");
+    assert_eq!(calendar_rows, 0, "đêm bị rút phải được nhả khỏi lịch phòng");
 
-    let charge_rows: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM transactions WHERE booking_id = ? AND type = 'charge'",
+    let credit: i64 = sqlx::query_scalar(
+        "SELECT amount FROM transactions WHERE booking_id = ? AND note = 'Shortened stay -1 night'",
     )
     .bind("B709")
     .fetch_one(&pool)
     .await
     .unwrap();
-    assert_eq!(charge_rows, 0, "thất bại thì không được tạo dòng charge nào");
+    assert_eq!(
+        credit, -250_000,
+        "dòng charge phải trừ đúng trung bình gốc, không phải giá mới sau khi pricing_rules đổi"
+    );
 }
 
 #[tokio::test]
