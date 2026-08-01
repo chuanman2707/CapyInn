@@ -57,5 +57,6 @@ mod pricing;
 mod reporting;
 mod reservation_idempotency;
 mod reservations;
+mod shorten_stay;
 mod stay_error_mapping;
 mod stays;

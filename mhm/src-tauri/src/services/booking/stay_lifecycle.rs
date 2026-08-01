@@ -1237,6 +1237,178 @@ pub async fn extend_stay(pool: &Pool<Sqlite>, booking_id: &str) -> BookingResult
     .await
 }
 
+/// `#[allow(dead_code)]`: the only caller right now is the `#[cfg(test)]`
+/// `shorten_stay` wrapper below — the Tauri command wrapper (and its
+/// idempotent entry point, mirroring `extend_stay_idempotent`) lands in a
+/// later task. Remove once that wrapper calls this from non-test code.
+#[allow(dead_code)]
+async fn shorten_stay_tx(
+    tx: &mut Transaction<'_, Sqlite>,
+    booking_id: &str,
+    locked_room_id: &str,
+    origin_key: Option<String>,
+) -> BookingResult<Booking> {
+    let booking = sqlx::query(
+        "SELECT room_id, nights, total_price, check_in_at, expected_checkout,
+                pricing_type, guests, status
+         FROM bookings WHERE id = ?",
+    )
+    .bind(booking_id)
+    .fetch_optional(&mut **tx)
+    .await?;
+
+    let booking = booking.ok_or_else(|| {
+        BookingError::not_found(format!("Không tìm thấy booking đang active {}", booking_id))
+    })?;
+
+    let booking_status: String = booking.get("status");
+    if booking_status != status::booking::ACTIVE {
+        return Err(invalid_state_transition(format!(
+            "booking {booking_id} is not active for shorten-stay (status: {booking_status})"
+        )));
+    }
+
+    let room_id: String = booking.get("room_id");
+    ensure_locked_room_matches_booking(
+        locked_room_id,
+        &room_id,
+        format!("booking {booking_id} changed rooms before shorten-stay"),
+    )?;
+    let current_nights: i32 = booking.get("nights");
+    let current_total = read_money_vnd_or_zero(&booking, "total_price");
+    let check_in_at: String = booking.get("check_in_at");
+    let old_expected_checkout: String = booking.get("expected_checkout");
+    let pricing_type = booking
+        .get::<Option<String>, _>("pricing_type")
+        .unwrap_or_else(|| "nightly".to_string());
+    let guests: Option<i32> = booking.get("guests");
+
+    let old_expected = parse_booking_datetime(&old_expected_checkout)?;
+    let check_in = parse_booking_datetime(&check_in_at)?;
+    let new_expected = old_expected - Duration::days(1);
+    let freed_date = new_expected.date_naive();
+
+    if freed_date <= check_in.date_naive() {
+        return Err(BookingError::validation(
+            "Lưu trú tối thiểu 1 đêm".to_string(),
+        ));
+    }
+
+    if freed_date < Local::now().date_naive() {
+        return Err(BookingError::validation(
+            "Đêm cuối là hôm nay — dùng Check-out để cho khách đi".to_string(),
+        ));
+    }
+
+    let removed_pricing = calculate_stay_price_tx(
+        tx,
+        &room_id,
+        &new_expected.to_rfc3339(),
+        &old_expected_checkout,
+        &pricing_type,
+        guests,
+    )
+    .await?;
+    let removed_total = removed_pricing.total;
+
+    let new_total = crate::pricing::checked_sub_money(current_total, removed_total, "total_price")
+        .map_err(BookingError::validation)?;
+    let new_checkout = new_expected.to_rfc3339();
+
+    let result = sqlx::query(
+        "UPDATE bookings
+         SET nights = ?, total_price = ?, expected_checkout = ?
+         WHERE id = ? AND status = ? AND expected_checkout = ?",
+    )
+    .bind(current_nights - 1)
+    .bind(new_total)
+    .bind(&new_checkout)
+    .bind(booking_id)
+    .bind(status::booking::ACTIVE)
+    .bind(&old_expected_checkout)
+    .execute(&mut **tx)
+    .await
+    .map_err(BookingError::from)
+    .map_err(mark_write_db_error)?;
+    ensure_one_row_affected(
+        result,
+        format!("booking {booking_id} changed before shorten-stay"),
+    )?;
+
+    let calendar_result = sqlx::query(
+        "DELETE FROM room_calendar WHERE room_id = ? AND date = ? AND booking_id = ?",
+    )
+    .bind(&room_id)
+    .bind(freed_date.format("%Y-%m-%d").to_string())
+    .bind(booking_id)
+    .execute(&mut **tx)
+    .await
+    .map_err(BookingError::from)
+    .map_err(mark_write_db_error)?;
+    ensure_one_row_affected(
+        calendar_result,
+        format!("lịch phòng của booking {booking_id} đã thay đổi trước khi rút đêm"),
+    )?;
+
+    let credit = 0i64
+        .checked_sub(removed_total)
+        .ok_or_else(|| BookingError::validation("credit amount overflowed".to_string()))?;
+
+    if let Some(origin_key) = origin_key {
+        let origin = OriginSideEffect::new(origin_key, 0)?;
+        record_charge_with_origin_tx(
+            tx,
+            booking_id,
+            credit,
+            "Shortened stay -1 night",
+            Local::now().to_rfc3339(),
+            &origin,
+        )
+        .await
+        .map_err(mark_write_db_error)?;
+    } else {
+        record_charge_tx(
+            tx,
+            booking_id,
+            credit,
+            "Shortened stay -1 night",
+            Local::now().to_rfc3339(),
+        )
+        .await
+        .map_err(mark_write_db_error)?;
+    }
+
+    fetch_booking_tx(tx, booking_id).await
+}
+
+#[cfg(test)]
+pub async fn shorten_stay(pool: &Pool<Sqlite>, booking_id: &str) -> BookingResult<Booking> {
+    let locked_room_id = lookup_booking_room_id(pool, booking_id).await?;
+    let _lock_guard = crate::aggregate_locks::global_manager()
+        .acquire([
+            crate::aggregate_locks::booking_key(booking_id)
+                .map_err(|error| BookingError::validation(error.message))?,
+            crate::aggregate_locks::room_key(&locked_room_id)
+                .map_err(|error| BookingError::validation(error.message))?,
+        ])
+        .await
+        .map_err(|error| BookingError::validation(error.message))?;
+
+    let mut tx = begin_immediate_tx(pool).await?;
+
+    let _booking = shorten_stay_tx(&mut tx, booking_id, &locked_room_id, None).await?;
+
+    tx.commit().await.map_err(BookingError::from)?;
+
+    fetch_booking(
+        pool,
+        booking_id,
+        format!("Không tìm thấy booking {}", booking_id),
+        read_money_vnd_or_zero,
+    )
+    .await
+}
+
 fn validate_check_in_request(req: &CheckInRequest) -> BookingResult<()> {
     if req.guests.is_empty() {
         return Err(BookingError::validation(
