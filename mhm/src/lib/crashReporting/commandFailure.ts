@@ -17,7 +17,7 @@ export type MonitoringContext =
       settlement_mode: string;
     }
   | {
-      operation: "add_one_night";
+      operation: "add_one_night" | "remove_one_night" | "set_booking_rate";
     }
   | {
       nights: number;
