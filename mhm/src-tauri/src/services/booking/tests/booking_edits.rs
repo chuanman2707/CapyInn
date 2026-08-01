@@ -641,3 +641,200 @@ async fn update_booking_notes_refuses_a_booking_that_is_not_active() {
     // `BookingError::Conflict`, never `Validation`/`NotFound`.
     assert!(matches!(error, BookingError::Conflict(_)));
 }
+
+/// `update_booking_notes_idempotent` là con đường mà Tauri command thật sự đi
+/// qua (xem `commands/rooms.rs`). Test này đọc ngược từ `command_idempotency`
+/// để chứng minh có một dòng ledger ghi lại actor đã sửa ghi chú — đúng câu
+/// hỏi "ai đã sửa ghi chú hoá đơn này" mà finding yêu cầu trả lời được không
+/// cần bảng log riêng.
+#[tokio::test]
+async fn update_booking_notes_idempotent_records_the_actor_in_the_command_ledger() {
+    let pool = test_pool().await;
+    seed_two_night_booking(&pool, "B905", "R905").await.unwrap();
+
+    let mut ctx = crate::command_idempotency::WriteCommandContext::new_internal(
+        "update_booking_notes",
+    );
+    ctx.actor_id = Some("staff-905".to_string());
+
+    stay_lifecycle::update_booking_notes_idempotent(
+        &pool,
+        &ctx,
+        "B905",
+        Some("Khách yêu cầu dọn phòng sớm".to_string()),
+    )
+    .await
+    .unwrap();
+
+    let row = sqlx::query(
+        "SELECT actor_id, command_name, primary_aggregate_key
+         FROM command_idempotency
+         WHERE idempotency_key = ?",
+    )
+    .bind(&ctx.idempotency_key)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(row.get::<Option<String>, _>("actor_id").as_deref(), Some("staff-905"));
+    assert_eq!(
+        row.get::<String, _>("command_name"),
+        "update_booking_notes"
+    );
+    assert_eq!(
+        row.get::<Option<String>, _>("primary_aggregate_key").as_deref(),
+        Some("booking:B905")
+    );
+
+    let notes: Option<String> = sqlx::query_scalar("SELECT notes FROM bookings WHERE id = ?")
+        .bind("B905")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(notes.as_deref(), Some("Khách yêu cầu dọn phòng sớm"));
+}
+
+/// Ghi chú không đụng tiền/lịch phòng nên KHÔNG cần đăng ký vào
+/// `write_manifest.rs` (chỉ dành cho MCP write-tool chính sách rủi ro cao) và
+/// KHÔNG cần liệt vào danh sách rủi ro cao của `command_recovery.rs` —
+/// `command_recovery_risk_level` phải rơi về mặc định `Low` cho một command
+/// không có mặt trong danh sách đó.
+#[test]
+fn update_booking_notes_stays_out_of_the_write_manifest_and_recovery_high_risk_list() {
+    assert!(
+        crate::write_manifest::meta_for("update_booking_notes").is_none(),
+        "update_booking_notes không thuộc write_manifest — nó không phải MCP write-tool rủi ro cao"
+    );
+    assert_eq!(
+        crate::command_recovery::command_recovery_risk_level("update_booking_notes"),
+        crate::command_recovery::RecoveryRiskLevel::Low
+    );
+}
+
+/// `update_booking_notes_idempotent` tự sinh idempotency key qua
+/// `WriteCommandContext::new_internal` — phía gọi (Tauri command) không cần
+/// truyền idempotency key, khác với `add_folio_line`/`set_booking_rate`.
+#[test]
+fn update_booking_notes_context_generates_its_own_idempotency_key_without_caller_input() {
+    let ctx = crate::command_idempotency::WriteCommandContext::new_internal(
+        "update_booking_notes",
+    );
+
+    assert!(!ctx.idempotency_key.trim().is_empty());
+    assert_eq!(ctx.command_name, "update_booking_notes");
+}
+
+/// Đổi giá khoá optimistic-concurrency giống hệt `shorten_stay_tx`: chốt
+/// `total_price` đọc được TRƯỚC khi khoá booking, rồi yêu cầu UPDATE cuối cùng
+/// khớp đúng giá trị đó (`AND total_price = ?`). Lái một cuộc đua THẬT qua pool
+/// thứ hai bằng cách giữ đúng aggregate lock mà `set_booking_rate` cần, đợi lệnh
+/// gọi claim xong rồi mới cho pool_b ghi thẳng — xem chú thích đầy đủ ở
+/// `shorten_stay_fails_when_second_pool_moves_the_checkout_while_the_lock_is_held`.
+///
+/// Nếu bỏ `AND total_price = ?` khỏi UPDATE, test này FAIL: set_booking_rate sẽ
+/// nhả lock, đọc lại total_price mới nhất, rồi đổi giá êm ru trên một tổng tiền
+/// mà lễ tân chưa từng thấy — không có lỗi nào nổi lên.
+#[tokio::test]
+async fn set_booking_rate_fails_when_second_pool_moves_the_total_while_the_lock_is_held() {
+    let (pool_a, pool_b, db_path) =
+        shared_file_test_pools("second-pool-rate-total-price").await;
+    seed_two_night_booking(&pool_a, "B-2POOL-RATE", "R-2POOL-RATE")
+        .await
+        .unwrap();
+
+    let ctx = cmd("set_booking_rate", "idem-rate-2pool-total");
+
+    let held_lock = crate::aggregate_locks::global_manager()
+        .acquire([
+            crate::aggregate_locks::booking_key("B-2POOL-RATE").unwrap(),
+            crate::aggregate_locks::room_key("R-2POOL-RATE").unwrap(),
+            crate::aggregate_locks::folio_key("B-2POOL-RATE").unwrap(),
+        ])
+        .await
+        .unwrap();
+
+    let pool_a_for_task = pool_a.clone();
+    let ctx_for_task = ctx.clone();
+    let handle = tokio::spawn(async move {
+        stay_lifecycle::set_booking_rate_idempotent(
+            &pool_a_for_task,
+            &ctx_for_task,
+            "B-2POOL-RATE",
+            450_000,
+        )
+        .await
+    });
+
+    let mut claim_seen = false;
+    for _ in 0..50 {
+        let in_progress_count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM command_idempotency
+             WHERE idempotency_key = ? AND status = 'in_progress'",
+        )
+        .bind(&ctx.idempotency_key)
+        .fetch_one(&pool_a)
+        .await
+        .unwrap();
+        if in_progress_count == 1 {
+            claim_seen = true;
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    assert!(
+        claim_seen,
+        "set_booking_rate phải claim xong trước khi bị chặn ở lock"
+    );
+
+    // Một actor thật sự khác đổi total_price trong lúc set_booking_rate đang
+    // bị chặn ở lock.
+    sqlx::query("UPDATE bookings SET total_price = ? WHERE id = ?")
+        .bind(1_500_000_i64)
+        .bind("B-2POOL-RATE")
+        .execute(&pool_b)
+        .await
+        .unwrap();
+
+    drop(held_lock);
+
+    let error = handle
+        .await
+        .unwrap()
+        .expect_err("set_booking_rate phải từ chối khi total_price đã đổi trong lúc chờ lock");
+
+    assert_eq!(error.code, crate::app_error::codes::BOOKING_INVALID_STATE);
+    assert!(
+        error
+            .message
+            .contains("Booking vừa được cập nhật bởi thao tác khác"),
+        "message thực tế: {}",
+        error.message
+    );
+
+    let row = sqlx::query("SELECT total_price, rate_overridden_at FROM bookings WHERE id = ?")
+        .bind("B-2POOL-RATE")
+        .fetch_one(&pool_a)
+        .await
+        .unwrap();
+    assert_eq!(
+        row.get::<i64, _>("total_price"),
+        1_500_000,
+        "bị chặn thì total_price phải giữ đúng giá trị pool_b vừa ghi, không bị set_booking_rate ghi đè"
+    );
+    assert!(
+        row.get::<Option<String>, _>("rate_overridden_at").is_none(),
+        "bị chặn thì không được đóng dấu đổi giá"
+    );
+
+    let charge_count: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM transactions WHERE booking_id = ? AND type = 'charge'",
+    )
+    .bind("B-2POOL-RATE")
+    .fetch_one(&pool_a)
+    .await
+    .unwrap();
+    assert_eq!(charge_count, 0, "bị chặn thì không được để lại dòng đối ứng");
+
+    pool_a.close().await;
+    pool_b.close().await;
+    let _ = std::fs::remove_file(db_path);
+}

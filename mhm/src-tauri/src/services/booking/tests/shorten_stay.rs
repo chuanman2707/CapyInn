@@ -685,3 +685,120 @@ async fn shorten_stay_idempotent_retry_replays_without_removing_a_second_night()
     .unwrap();
     assert_eq!(credits, 1, "chỉ được một dòng đối ứng duy nhất");
 }
+
+/// Rút đêm khoá optimistic-concurrency: `shorten_stay_tx` chốt `expected_checkout`
+/// đọc được TRƯỚC khi khoá booking, rồi mới yêu cầu UPDATE cuối cùng khớp đúng
+/// giá trị đó (`AND expected_checkout = ?`). Test này lái một cuộc đua THẬT qua
+/// pool thứ hai — không giả lập: giữ đúng aggregate lock mà `shorten_stay`
+/// (pool_a) cần để mở transaction, spawn lệnh gọi đó, đợi tới khi nó đã claim
+/// xong (đọc `expected_checkout` khoá xong, đang chờ lock) rồi mới cho pool_b
+/// ghi thẳng xuống DB — giống hệt kỹ thuật ở
+/// `group_checkin_duplicate_in_flight_does_not_wait_for_room_lock`.
+///
+/// Nếu bỏ `AND expected_checkout = ?` khỏi UPDATE, test này FAIL: shorten_stay
+/// sẽ nhả lock, đọc lại total/nights mới nhất, rồi rút đêm êm ru trên booking
+/// mà lễ tân chưa từng thấy — không có lỗi nào nổi lên.
+#[tokio::test]
+async fn shorten_stay_fails_when_second_pool_moves_the_checkout_while_the_lock_is_held() {
+    let (pool_a, pool_b, db_path) = shared_file_test_pools("second-pool-shorten-checkout").await;
+    seed_room(&pool_a, "R-2POOL-SHORTEN").await.unwrap();
+    seed_future_booking(&pool_a, "B-2POOL-SHORTEN", "R-2POOL-SHORTEN", 3)
+        .await
+        .unwrap();
+
+    let ctx = cmd("shorten_stay", "idem-shorten-2pool-checkout");
+
+    // Giữ đúng bộ khoá mà `resolve_stay_lock` bên trong `shorten_stay_idempotent`
+    // cần để mở transaction — cho tới khi ta chủ động nhả, lệnh gọi bên dưới
+    // không thể vượt qua bước này.
+    let held_lock = crate::aggregate_locks::global_manager()
+        .acquire([
+            crate::aggregate_locks::booking_key("B-2POOL-SHORTEN").unwrap(),
+            crate::aggregate_locks::room_key("R-2POOL-SHORTEN").unwrap(),
+            crate::aggregate_locks::folio_key("B-2POOL-SHORTEN").unwrap(),
+        ])
+        .await
+        .unwrap();
+
+    let pool_a_for_task = pool_a.clone();
+    let ctx_for_task = ctx.clone();
+    let handle = tokio::spawn(async move {
+        stay_lifecycle::shorten_stay_idempotent(&pool_a_for_task, &ctx_for_task, "B-2POOL-SHORTEN")
+            .await
+    });
+
+    // Đợi tới khi lệnh gọi đã claim xong trong `command_idempotency` — nghĩa là
+    // nó đã đọc xong `expected_checkout` "trước khi khoá" và đang thật sự bị
+    // chặn ở bước xin lock, không phải đoán bằng sleep suông.
+    let mut claim_seen = false;
+    for _ in 0..50 {
+        let in_progress_count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM command_idempotency
+             WHERE idempotency_key = ? AND status = 'in_progress'",
+        )
+        .bind(&ctx.idempotency_key)
+        .fetch_one(&pool_a)
+        .await
+        .unwrap();
+        if in_progress_count == 1 {
+            claim_seen = true;
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    assert!(
+        claim_seen,
+        "shorten_stay phải claim xong trước khi bị chặn ở lock"
+    );
+
+    // Một actor thật sự khác (đi thẳng qua SQL, không qua service layer) đổi
+    // expected_checkout trong lúc shorten_stay đang bị chặn ở lock.
+    sqlx::query("UPDATE bookings SET expected_checkout = ? WHERE id = ?")
+        .bind("2099-01-01T12:00:00+07:00")
+        .bind("B-2POOL-SHORTEN")
+        .execute(&pool_b)
+        .await
+        .unwrap();
+
+    drop(held_lock);
+
+    let error = handle
+        .await
+        .unwrap()
+        .expect_err("shorten_stay phải từ chối khi expected_checkout đã đổi trong lúc chờ lock");
+
+    assert_eq!(error.code, crate::app_error::codes::BOOKING_INVALID_STATE);
+    assert!(
+        error
+            .message
+            .contains("Booking vừa được cập nhật bởi thao tác khác"),
+        "message thực tế: {}",
+        error.message
+    );
+
+    let row = sqlx::query("SELECT nights, total_price, expected_checkout FROM bookings WHERE id = ?")
+        .bind("B-2POOL-SHORTEN")
+        .fetch_one(&pool_a)
+        .await
+        .unwrap();
+    assert_eq!(
+        row.get::<String, _>("expected_checkout"),
+        "2099-01-01T12:00:00+07:00",
+        "bị chặn thì checkout phải giữ đúng giá trị pool_b vừa ghi, không bị shorten_stay ghi đè"
+    );
+    assert_eq!(row.get::<i32, _>("nights"), 3, "bị chặn thì không được rút đêm");
+    assert_eq!(row.get::<i64, _>("total_price"), 750_000, "bị chặn thì tổng tiền không được đổi");
+
+    let credit_count: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM transactions WHERE booking_id = ? AND note = 'Shortened stay -1 night'",
+    )
+    .bind("B-2POOL-SHORTEN")
+    .fetch_one(&pool_a)
+    .await
+    .unwrap();
+    assert_eq!(credit_count, 0, "bị chặn thì không được để lại dòng đối ứng");
+
+    pool_a.close().await;
+    pool_b.close().await;
+    let _ = std::fs::remove_file(db_path);
+}

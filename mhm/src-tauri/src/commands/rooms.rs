@@ -499,6 +499,10 @@ pub async fn set_booking_rate(
 
 // ─── Update Booking Notes ───
 
+fn require_update_booking_notes_actor_id(user_id: Option<String>) -> CommandResult<String> {
+    user_id.ok_or_else(|| CommandError::user(codes::AUTH_NOT_AUTHENTICATED, "Chưa đăng nhập"))
+}
+
 #[tauri::command]
 pub async fn update_booking_notes(
     state: State<'_, AppState>,
@@ -506,9 +510,24 @@ pub async fn update_booking_notes(
     notes: Option<String>,
     app: tauri::AppHandle,
 ) -> CommandResult<Booking> {
-    let booking = stay_lifecycle::update_booking_notes(&state.db, &booking_id, notes)
-        .await
-        .map_err(stay_lifecycle::map_extend_stay_command_error)?;
+    let actor_id = require_update_booking_notes_actor_id(get_user_id(&state))?;
+    let mut write_command_context = WriteCommandContext::new_internal("update_booking_notes");
+    write_command_context.actor_id = Some(actor_id);
+
+    let result = stay_lifecycle::update_booking_notes_idempotent(
+        &state.db,
+        &write_command_context,
+        &booking_id,
+        notes,
+    )
+    .await?;
+    let booking: Booking = serde_json::from_value(result.response).map_err(|error| {
+        CommandError::system(
+            codes::SYSTEM_INTERNAL_ERROR,
+            format!("Invalid update_booking_notes idempotent response: {error}"),
+        )
+        .with_request_id(write_command_context.request_id.clone())
+    })?;
 
     emit_db_update(&app, "rooms");
 
@@ -640,8 +659,8 @@ pub async fn scan_image(path: String) -> Result<crate::ocr::CccdInfo, String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        check_in_failure_context, check_out_failure_context, should_request_checkout_backup,
-        validate_create_expense_request,
+        check_in_failure_context, check_out_failure_context, require_update_booking_notes_actor_id,
+        should_request_checkout_backup, validate_create_expense_request,
     };
     use crate::app_error::{
         codes, correlation_context, log_system_error, record_command_failure_with_db_group,
@@ -670,6 +689,21 @@ mod tests {
             Some(value) => std::env::set_var("CAPYINN_RUNTIME_ROOT", value),
             None => std::env::remove_var("CAPYINN_RUNTIME_ROOT"),
         }
+    }
+
+    #[test]
+    fn update_booking_notes_requires_authenticated_actor() {
+        let error = require_update_booking_notes_actor_id(None).expect_err("missing user rejects");
+
+        assert_eq!(error.code, codes::AUTH_NOT_AUTHENTICATED);
+    }
+
+    #[test]
+    fn update_booking_notes_accepts_authenticated_actor() {
+        let actor_id = require_update_booking_notes_actor_id(Some("user-1".to_string()))
+            .expect("authenticated user is accepted");
+
+        assert_eq!(actor_id, "user-1");
     }
 
     #[test]

@@ -28,11 +28,13 @@ use super::{
     pricing_service::calculate_stay_price_tx,
     support::{
         begin_tx, ensure_one_row_affected, insert_room_calendar_rows, invalid_state_transition,
-        lookup_booking_room_id, map_room_calendar_insert_error, parse_booking_datetime,
-        read_money_vnd_or_zero, validate_non_negative_booking_money,
+        lookup_booking_expected_checkout, lookup_booking_room_id, lookup_booking_total_price,
+        map_room_calendar_insert_error, parse_booking_datetime, read_money_vnd_or_zero,
+        validate_non_negative_booking_money,
     },
 };
 
+#[cfg(test)]
 use super::support::{begin_immediate_tx, fetch_booking};
 
 pub(super) fn mark_write_db_error(error: BookingError) -> BookingError {
@@ -1256,6 +1258,14 @@ pub async fn shorten_stay_idempotent(
     ctx: &WriteCommandContext,
     booking_id: &str,
 ) -> CommandResult<IdempotentCommandResult<serde_json::Value>> {
+    // Đọc `expected_checkout` NGOÀI transaction, trước bất cứ bước khoá/claim
+    // nào — đây là giá trị "trước khi khoá" mà `shorten_stay_tx` sẽ dùng để
+    // chốt optimistic-concurrency guard ở UPDATE cuối cùng. Xem chú thích tại
+    // `lookup_booking_expected_checkout` và bên trong `shorten_stay_tx`.
+    let locked_expected_checkout = lookup_booking_expected_checkout(pool, booking_id)
+        .await
+        .map_err(map_extend_stay_command_error)?;
+
     let hash_payload = build_shorten_stay_hash_payload(booking_id);
     let ledger_intent = SanitizedLedgerIntent::from_pairs([
         ("schema", json!("stay.shorten.v1")),
@@ -1293,6 +1303,7 @@ pub async fn shorten_stay_idempotent(
                         tx,
                         &booking_id_for_service,
                         &guard.room_id,
+                        &locked_expected_checkout,
                         Some(origin_key),
                     )
                     .await
@@ -1310,6 +1321,14 @@ pub async fn set_booking_rate_idempotent(
     booking_id: &str,
     rate_per_night: MoneyVnd,
 ) -> CommandResult<IdempotentCommandResult<serde_json::Value>> {
+    // Đọc `total_price` NGOÀI transaction, trước bất cứ bước khoá/claim nào —
+    // giá trị "trước khi khoá" mà `set_booking_rate_tx` dùng để chốt
+    // optimistic-concurrency guard ở UPDATE cuối cùng. Cùng kỹ thuật với
+    // `shorten_stay_idempotent` phía trên.
+    let locked_total_price = lookup_booking_total_price(pool, booking_id)
+        .await
+        .map_err(map_extend_stay_command_error)?;
+
     let hash_payload = build_set_booking_rate_hash_payload(booking_id, rate_per_night);
     let ledger_intent = SanitizedLedgerIntent::from_pairs([
         ("schema", json!("stay.set_rate.v1")),
@@ -1347,6 +1366,7 @@ pub async fn set_booking_rate_idempotent(
                         tx,
                         &booking_id_for_service,
                         rate_per_night,
+                        locked_total_price,
                         Some(origin_key),
                     )
                     .await
@@ -1390,6 +1410,7 @@ async fn shorten_stay_tx(
     tx: &mut Transaction<'_, Sqlite>,
     booking_id: &str,
     locked_room_id: &str,
+    locked_expected_checkout: &str,
     origin_key: Option<String>,
 ) -> BookingResult<Booking> {
     let booking = sqlx::query(
@@ -1406,21 +1427,29 @@ async fn shorten_stay_tx(
 
     let booking_status: String = booking.get("status");
     if booking_status != status::booking::ACTIVE {
-        return Err(invalid_state_transition(format!(
-            "booking {booking_id} is not active for shorten-stay (status: {booking_status})"
-        )));
+        return Err(invalid_state_transition(
+            "Booking không còn đang lưu trú nên không thể rút đêm — vui lòng tải lại trang",
+        ));
     }
 
     let room_id: String = booking.get("room_id");
     ensure_locked_room_matches_booking(
         locked_room_id,
         &room_id,
-        format!("booking {booking_id} changed rooms before shorten-stay"),
+        "Booking đã đổi phòng trước khi rút đêm — vui lòng tải lại trang và thử lại",
     )?;
     let current_nights: i32 = booking.get("nights");
     let current_total = read_money_vnd_or_zero(&booking, "total_price");
     let paid_amount = read_money_vnd_or_zero(&booking, "paid_amount");
     let check_in_at: String = booking.get("check_in_at");
+    // `old_expected_checkout` (đọc lại TRONG transaction này) dùng cho phép tính
+    // ngày tháng bên dưới — luôn phản ánh đúng dữ liệu hiện tại nên phép tính
+    // luôn đúng. `locked_expected_checkout` (tham số, đọc TRƯỚC khi mở
+    // transaction) mới là giá trị đưa vào guard `AND expected_checkout = ?` của
+    // UPDATE cuối hàm: nó chốt lại "cái tôi thấy lúc quyết định rút đêm", nên
+    // nếu một actor khác đổi checkout của booking này giữa lúc đọc trước khoá
+    // và lúc UPDATE thật sự chạy, UPDATE khớp 0 dòng thay vì âm thầm ghi đè lên
+    // một checkout mà lễ tân chưa từng thấy.
     let old_expected_checkout: String = booking.get("expected_checkout");
 
     let old_expected = parse_booking_datetime(&old_expected_checkout)?;
@@ -1505,14 +1534,14 @@ async fn shorten_stay_tx(
     .bind(&new_checkout)
     .bind(booking_id)
     .bind(status::booking::ACTIVE)
-    .bind(&old_expected_checkout)
+    .bind(locked_expected_checkout)
     .execute(&mut **tx)
     .await
     .map_err(BookingError::from)
     .map_err(mark_write_db_error)?;
     ensure_one_row_affected(
         result,
-        format!("booking {booking_id} changed before shorten-stay"),
+        "Booking vừa được cập nhật bởi thao tác khác — vui lòng tải lại trang và thử lại",
     )?;
 
     let calendar_result = sqlx::query(
@@ -1532,7 +1561,7 @@ async fn shorten_stay_tx(
 
     let credit = 0i64
         .checked_sub(removed_total)
-        .ok_or_else(|| BookingError::validation("credit amount overflowed".to_string()))?;
+        .ok_or_else(|| BookingError::validation("Số tiền hoàn vượt giới hạn tính toán".to_string()))?;
 
     if let Some(origin_key) = origin_key {
         let origin = OriginSideEffect::new(origin_key, 0)?;
@@ -1564,6 +1593,7 @@ async fn shorten_stay_tx(
 #[cfg(test)]
 pub async fn shorten_stay(pool: &Pool<Sqlite>, booking_id: &str) -> BookingResult<Booking> {
     let locked_room_id = lookup_booking_room_id(pool, booking_id).await?;
+    let locked_expected_checkout = lookup_booking_expected_checkout(pool, booking_id).await?;
     let _lock_guard = crate::aggregate_locks::global_manager()
         .acquire([
             crate::aggregate_locks::booking_key(booking_id)
@@ -1576,7 +1606,14 @@ pub async fn shorten_stay(pool: &Pool<Sqlite>, booking_id: &str) -> BookingResul
 
     let mut tx = begin_immediate_tx(pool).await?;
 
-    let _booking = shorten_stay_tx(&mut tx, booking_id, &locked_room_id, None).await?;
+    let _booking = shorten_stay_tx(
+        &mut tx,
+        booking_id,
+        &locked_room_id,
+        &locked_expected_checkout,
+        None,
+    )
+    .await?;
 
     tx.commit().await.map_err(BookingError::from)?;
 
@@ -1596,6 +1633,7 @@ async fn set_booking_rate_tx(
     tx: &mut Transaction<'_, Sqlite>,
     booking_id: &str,
     rate_per_night: MoneyVnd,
+    locked_total_price: MoneyVnd,
     origin_key: Option<String>,
 ) -> BookingResult<Booking> {
     if rate_per_night <= 0 || rate_per_night > MAX_RATE_PER_NIGHT_VND {
@@ -1616,12 +1654,17 @@ async fn set_booking_rate_tx(
 
     let booking_status: String = booking.get("status");
     if booking_status != status::booking::ACTIVE {
-        return Err(invalid_state_transition(format!(
-            "booking {booking_id} is not active for rate change (status: {booking_status})"
-        )));
+        return Err(invalid_state_transition(
+            "Booking không còn đang lưu trú nên không thể đổi giá — vui lòng tải lại trang",
+        ));
     }
 
     let nights: i32 = booking.get("nights");
+    // `current_total` (đọc lại TRONG transaction này) dùng để tính `new_total`
+    // và khoản charge chênh lệch bên dưới — luôn phản ánh đúng dữ liệu hiện
+    // tại. `locked_total_price` (tham số, đọc TRƯỚC khi mở transaction) mới là
+    // giá trị đưa vào guard `AND total_price = ?` của UPDATE cuối hàm — cùng lý
+    // do với `locked_expected_checkout` ở `shorten_stay_tx`.
     let current_total = read_money_vnd_or_zero(&booking, "total_price");
     let paid_amount = read_money_vnd_or_zero(&booking, "paid_amount");
 
@@ -1666,14 +1709,14 @@ async fn set_booking_rate_tx(
     .bind(&overridden_at)
     .bind(booking_id)
     .bind(status::booking::ACTIVE)
-    .bind(current_total)
+    .bind(locked_total_price)
     .execute(&mut **tx)
     .await
     .map_err(BookingError::from)
     .map_err(mark_write_db_error)?;
     ensure_one_row_affected(
         result,
-        format!("booking {booking_id} changed before rate change"),
+        "Booking vừa được cập nhật bởi thao tác khác — vui lòng tải lại trang và thử lại",
     )?;
 
     let delta = crate::pricing::checked_sub_money(new_total, current_total, "rate_delta")
@@ -1711,6 +1754,7 @@ pub async fn set_booking_rate(
     booking_id: &str,
     rate_per_night: MoneyVnd,
 ) -> BookingResult<Booking> {
+    let locked_total_price = lookup_booking_total_price(pool, booking_id).await?;
     let _lock_guard = crate::aggregate_locks::global_manager()
         .acquire([crate::aggregate_locks::booking_key(booking_id)
             .map_err(|error| BookingError::validation(error.message))?])
@@ -1718,7 +1762,14 @@ pub async fn set_booking_rate(
         .map_err(|error| BookingError::validation(error.message))?;
 
     let mut tx = begin_immediate_tx(pool).await?;
-    let _booking = set_booking_rate_tx(&mut tx, booking_id, rate_per_night, None).await?;
+    let _booking = set_booking_rate_tx(
+        &mut tx,
+        booking_id,
+        rate_per_night,
+        locked_total_price,
+        None,
+    )
+    .await?;
     tx.commit().await.map_err(BookingError::from)?;
 
     fetch_booking(
@@ -1732,13 +1783,7 @@ pub async fn set_booking_rate(
 
 pub const MAX_BOOKING_NOTES_LEN: usize = 2_000;
 
-/// Ghi chú không đụng tiền và không đụng lịch phòng, nên không cần bộ máy
-/// idempotency — theo tiền lệ của `add_folio_line`. Chỉ khoá booking.
-pub async fn update_booking_notes(
-    pool: &Pool<Sqlite>,
-    booking_id: &str,
-    notes: Option<String>,
-) -> BookingResult<Booking> {
+fn validate_and_trim_booking_notes(notes: Option<String>) -> BookingResult<Option<String>> {
     let trimmed = notes
         .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty());
@@ -1752,19 +1797,19 @@ pub async fn update_booking_notes(
         }
     }
 
-    let _lock_guard = crate::aggregate_locks::global_manager()
-        .acquire([crate::aggregate_locks::booking_key(booking_id)
-            .map_err(|error| BookingError::validation(error.message))?])
-        .await
-        .map_err(|error| BookingError::validation(error.message))?;
+    Ok(trimmed)
+}
 
-    let mut tx = begin_immediate_tx(pool).await?;
-
+async fn update_booking_notes_tx(
+    tx: &mut Transaction<'_, Sqlite>,
+    booking_id: &str,
+    trimmed_notes: Option<&str>,
+) -> BookingResult<Booking> {
     let result = sqlx::query("UPDATE bookings SET notes = ? WHERE id = ? AND status = ?")
-        .bind(trimmed.as_deref())
+        .bind(trimmed_notes)
         .bind(booking_id)
         .bind(status::booking::ACTIVE)
-        .execute(&mut *tx)
+        .execute(&mut **tx)
         .await
         .map_err(BookingError::from)
         .map_err(mark_write_db_error)?;
@@ -1773,15 +1818,101 @@ pub async fn update_booking_notes(
         format!("Không tìm thấy booking đang active {booking_id}"),
     )?;
 
+    fetch_booking_tx(tx, booking_id).await
+}
+
+fn build_update_booking_notes_hash_payload(
+    booking_id: &str,
+    notes_present: bool,
+) -> serde_json::Value {
+    json!({
+        "schema": "stay.update_notes.v1",
+        "booking_id": booking_id,
+        "notes_present": notes_present,
+    })
+}
+
+fn update_booking_notes_lock_keys_from_payload(
+    hash_payload: &serde_json::Value,
+) -> CommandResult<Vec<String>> {
+    let booking_id = hash_payload
+        .get("booking_id")
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| system_error("update-booking-notes lock payload missing booking_id"))?;
+    Ok(vec![crate::aggregate_locks::booking_key(booking_id)?])
+}
+
+/// Ghi chú không đụng tiền và không đụng lịch phòng, nên không cần bộ máy
+/// idempotency đầy đủ (không vào `write_manifest.rs`, không vào
+/// `command_recovery.rs`, không cần idempotency key từ phía gọi) — theo tiền
+/// lệ của `add_folio_line`. Vẫn cần một actor đã đăng nhập và một dòng trong
+/// command ledger, vì ghi chú này in thẳng lên hoá đơn của khách: "Ai đã sửa
+/// ghi chú này?" phải trả lời được mà không cần bảng log riêng.
+/// `WriteCommandContext::new_internal` tự sinh idempotency key nội bộ — phía
+/// gọi (Tauri command) không cần biết tới khái niệm idempotency key.
+pub async fn update_booking_notes_idempotent(
+    pool: &Pool<Sqlite>,
+    ctx: &WriteCommandContext,
+    booking_id: &str,
+    notes: Option<String>,
+) -> CommandResult<IdempotentCommandResult<serde_json::Value>> {
+    let trimmed = validate_and_trim_booking_notes(notes).map_err(|error| {
+        map_extend_stay_command_error(error).with_request_id(ctx.request_id.clone())
+    })?;
+
+    let notes_present = trimmed.is_some();
+    let hash_payload = build_update_booking_notes_hash_payload(booking_id, notes_present);
+    let ledger_intent = SanitizedLedgerIntent::from_pairs([
+        ("schema", json!("stay.update_notes.v1")),
+        ("booking_present", json!(true)),
+        ("notes_present", json!(notes_present)),
+    ])?;
+    let summary = CommandLedgerSummary::new("Update booking notes")?.with_aggregate_ref(
+        "booking",
+        "booking",
+        None::<String>,
+    )?;
+    let request = WriteCommandRequest::new_sanitized(hash_payload, ledger_intent, summary)?
+        .with_primary_aggregate_key(format!("booking:{booking_id}"))
+        .with_lock_key_deriver(update_booking_notes_lock_keys_from_payload)
+        .with_success_summary(CommandLedgerResultSummary::success("Booking notes updated")?);
+
+    let booking_id_for_service = booking_id.to_string();
+
+    WriteCommandExecutor::new(pool.clone())
+        .execute_atomic(ctx, request, move |tx| {
+            Box::pin(async move {
+                let booking =
+                    update_booking_notes_tx(tx, &booking_id_for_service, trimmed.as_deref())
+                        .await
+                        .map_err(map_extend_stay_command_error)?;
+                serde_json::to_value(&booking).map_err(system_error)
+            })
+        })
+        .await
+}
+
+#[cfg(test)]
+pub async fn update_booking_notes(
+    pool: &Pool<Sqlite>,
+    booking_id: &str,
+    notes: Option<String>,
+) -> BookingResult<Booking> {
+    let trimmed = validate_and_trim_booking_notes(notes)?;
+
+    let _lock_guard = crate::aggregate_locks::global_manager()
+        .acquire([crate::aggregate_locks::booking_key(booking_id)
+            .map_err(|error| BookingError::validation(error.message))?])
+        .await
+        .map_err(|error| BookingError::validation(error.message))?;
+
+    let mut tx = begin_immediate_tx(pool).await?;
+
+    let booking = update_booking_notes_tx(&mut tx, booking_id, trimmed.as_deref()).await?;
+
     tx.commit().await.map_err(BookingError::from)?;
 
-    fetch_booking(
-        pool,
-        booking_id,
-        format!("Không tìm thấy booking {}", booking_id),
-        read_money_vnd_or_zero,
-    )
-    .await
+    Ok(booking)
 }
 
 fn validate_check_in_request(req: &CheckInRequest) -> BookingResult<()> {
