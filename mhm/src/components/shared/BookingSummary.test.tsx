@@ -1,4 +1,4 @@
-import { render, screen } from "@testing-library/react";
+import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
 
@@ -82,6 +82,27 @@ describe("BookingSummary rate editing", () => {
 
     expect(onSaveRate).not.toHaveBeenCalled();
     expect(screen.queryByLabelText("Giá mỗi đêm")).toBeNull();
+  });
+
+  it("khi onSaveRate reject: không phát sinh unhandled rejection, ô sửa giá vẫn mở với giá đã gõ", async () => {
+    // RoomDrawer.handleSaveRate hiện toast lỗi rồi re-throw có chủ đích để
+    // giữ ô sửa giá mở. Mô phỏng đúng hành vi đó ở đây: onSaveRate reject.
+    // submitRate phải tự nuốt lỗi này (đã được caller xử lý xong), nếu không
+    // rejection sẽ lọt ra khỏi onClick async mà không ai await, và Vitest sẽ
+    // báo "Unhandled Rejection" cho chính test này.
+    const onSaveRate = vi.fn().mockRejectedValue(new Error("Lỗi sửa giá"));
+    render(<BookingSummary {...baseProps} onSaveRate={onSaveRate} />);
+
+    await userEvent.click(screen.getByRole("button", { name: /sửa giá/i }));
+    const input = screen.getByLabelText("Giá mỗi đêm");
+    await userEvent.clear(input);
+    await userEvent.type(input, "450000");
+    await userEvent.click(screen.getByRole("button", { name: "Lưu giá" }));
+
+    await waitFor(() => expect(onSaveRate).toHaveBeenCalledWith(450000));
+
+    // Ô sửa giá vẫn còn mở, giá trị đã gõ được giữ nguyên.
+    expect(screen.getByLabelText("Giá mỗi đêm")).toHaveValue("450000");
   });
 
   it("khoá nút Lưu khi giá không hợp lệ", async () => {

@@ -59,6 +59,13 @@ export default function BookingSummary({
         try {
             await onSaveRate(parsedRate);
             closeRateEditor();
+        } catch {
+            // Caller (RoomDrawer.handleSaveRate) đã hiện toast lỗi và re-throw
+            // có chủ đích để giữ ô sửa giá mở cho người dùng sửa lại. Nuốt lỗi
+            // ở đây — nếu không, rejection sẽ lọt khỏi onClick async (không ai
+            // await), và window "unhandledrejection" handler trong
+            // lib/crashReporting/globalHandlers.ts sẽ báo nhầm mỗi lần lưu giá
+            // thất bại thành một crash JS thật.
         } finally {
             setSavingRate(false);
         }
@@ -116,8 +123,8 @@ export default function BookingSummary({
                     />
                     <p className="text-[12px] text-slate-500">
                         {rateValid
-                            ? `${booking.nights} đêm × ${fmtMoney(parsedRate)} = ${fmtMoney(
-                                  parsedRate * booking.nights,
+                            ? `${nights} đêm × ${fmtMoney(parsedRate)} = ${fmtMoney(
+                                  parsedRate * nights,
                               )}`
                             : "Giá mỗi đêm không hợp lệ"}
                     </p>
