@@ -733,6 +733,38 @@ pub struct GroupInvoiceRoomLine {
     pub guest_name: String,
 }
 
+// ── Room Change DTOs ──
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RoomChangeOption {
+    pub room_id: String,
+    pub name: String,
+    pub room_type: String,
+    pub floor: i32,
+    pub base_price: MoneyVnd,
+    pub max_guests: i32,
+    /// Chênh lệch cho toàn bộ dải ngày còn lại: giá phòng này trừ giá phòng hiện tại.
+    /// Âm khi chuyển xuống hạng thấp hơn.
+    pub price_difference: MoneyVnd,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RoomChangeOptions {
+    pub booking_id: String,
+    pub current_room_id: String,
+    pub current_room_name: String,
+    /// Đêm đầu tiên được chuyển, dạng `YYYY-MM-DD`.
+    pub from_date: String,
+    /// Đêm cuối cùng được chuyển, dạng `YYYY-MM-DD`. Bao gồm chính nó.
+    pub to_date: String,
+    pub nights_remaining: i32,
+    pub nights_stayed: i32,
+    pub guest_count: i32,
+    pub rooms: Vec<RoomChangeOption>,
+}
+
 #[cfg(test)]
 mod tests {
     use super::Booking;
