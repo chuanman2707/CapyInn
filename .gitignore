@@ -45,14 +45,17 @@ code2prompt-output.md
 # === Gemini agent internal ===
 .gemini/
 
-# === Claude agent internal ===
-.claude/
+# === Claude Code project config ===
+# Committed: settings.json and skills/ are shared project config.
+# Ignored: everything else under .claude/ is per-machine state
+# (settings.local.json, worktrees/, session data).
+.claude/*
+!.claude/settings.json
+!.claude/skills/
 
 # === Local agent/internal repo helpers ===
 .agent/
 **/.agent/
-AGENTS.md
-CLAUDE.md
 GEMINI.md
 docs/
 mhm/docs/
