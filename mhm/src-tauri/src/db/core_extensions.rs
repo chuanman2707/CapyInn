@@ -145,3 +145,27 @@ pub(super) async fn migrate_v22_booking_guest_count(
     tx.commit().await?;
     Ok(())
 }
+
+/// Thời điểm gần nhất giá/đêm của booking bị lễ tân đổi tay qua
+/// `set_booking_rate`. NULL nghĩa là booking chưa từng bị đổi giá thủ công —
+/// tổng tiền của nó vẫn là giá được tính bình thường từ pricing engine.
+///
+/// Cho phép NULL, không có default: booking có sẵn trong DB trước migration
+/// này chưa từng được đổi giá thủ công (tính năng đổi giá chưa tồn tại), nên
+/// coi chúng là "chưa từng override" là đúng thực tế — không có default nào
+/// khác an toàn hơn NULL ở đây.
+pub(super) async fn migrate_v23_booking_rate_override(
+    pool: &Pool<Sqlite>,
+) -> Result<(), sqlx::Error> {
+    let mut tx = pool.begin().await?;
+
+    execute_compat_alter(
+        &mut tx,
+        "ALTER TABLE bookings ADD COLUMN rate_overridden_at TEXT",
+    )
+    .await?;
+
+    set_schema_version(&mut tx, 23).await?;
+    tx.commit().await?;
+    Ok(())
+}

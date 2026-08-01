@@ -497,6 +497,70 @@ async fn set_booking_rate_refuses_a_booking_that_is_not_active() {
 }
 
 #[tokio::test]
+async fn set_booking_rate_stamps_rate_overridden_at() {
+    let pool = test_pool().await;
+    seed_two_night_booking(&pool, "B811", "R811").await.unwrap();
+
+    let before: Option<String> =
+        sqlx::query_scalar("SELECT rate_overridden_at FROM bookings WHERE id = ?")
+            .bind("B811")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(before, None, "booking mới tạo chưa từng bị đổi giá tay");
+
+    stay_lifecycle::set_booking_rate(&pool, "B811", 450_000)
+        .await
+        .unwrap();
+
+    let after: Option<String> =
+        sqlx::query_scalar("SELECT rate_overridden_at FROM bookings WHERE id = ?")
+            .bind("B811")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert!(
+        after.is_some(),
+        "set_booking_rate phải đóng dấu thời điểm đổi giá vào cột rate_overridden_at"
+    );
+}
+
+#[tokio::test]
+async fn a_normally_priced_booking_has_no_rate_override_stamp() {
+    let pool = test_pool().await;
+    seed_two_night_booking(&pool, "B812", "R812").await.unwrap();
+
+    // Không gọi set_booking_rate — booking này chỉ được định giá bình thường.
+    let rate_overridden_at: Option<String> =
+        sqlx::query_scalar("SELECT rate_overridden_at FROM bookings WHERE id = ?")
+            .bind("B812")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(rate_overridden_at, None);
+}
+
+#[tokio::test]
+async fn rate_override_stamp_survives_a_round_trip_through_the_query_layer() {
+    let pool = test_pool().await;
+    seed_two_night_booking(&pool, "B813", "R813").await.unwrap();
+
+    stay_lifecycle::set_booking_rate(&pool, "B813", 450_000)
+        .await
+        .unwrap();
+
+    let detail = crate::queries::booking::room_queries::load_room_detail(&pool, "R813")
+        .await
+        .unwrap();
+    let booking = detail.booking.expect("R813 has an active booking");
+    assert_eq!(booking.id, "B813");
+    assert!(
+        booking.rate_overridden_at.is_some(),
+        "map_booking phải trả về dấu đổi giá đọc được từ DB, không phải chỉ ghi được"
+    );
+}
+
+#[tokio::test]
 async fn update_booking_notes_trims_and_saves() {
     let pool = test_pool().await;
     seed_two_night_booking(&pool, "B901", "R901").await.unwrap();

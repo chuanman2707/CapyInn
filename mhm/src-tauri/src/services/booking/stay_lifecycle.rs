@@ -289,7 +289,7 @@ pub(super) async fn fetch_booking_tx(
     let row = sqlx::query(
         "SELECT id, room_id, primary_guest_id, check_in_at, expected_checkout,
                 actual_checkout, nights, total_price, paid_amount, status,
-                source, notes, created_at
+                source, notes, created_at, rate_overridden_at
          FROM bookings WHERE id = ?",
     )
     .bind(booking_id)
@@ -313,6 +313,7 @@ pub(super) async fn fetch_booking_tx(
         source: row.get("source"),
         notes: row.get("notes"),
         created_at: row.get("created_at"),
+        rate_overridden_at: row.get("rate_overridden_at"),
     })
 }
 
@@ -1655,12 +1656,14 @@ async fn set_booking_rate_tx(
         )));
     }
 
+    let overridden_at = Local::now().to_rfc3339();
     let result = sqlx::query(
         "UPDATE bookings
-         SET total_price = ?
+         SET total_price = ?, rate_overridden_at = ?
          WHERE id = ? AND status = ? AND total_price = ?",
     )
     .bind(new_total)
+    .bind(&overridden_at)
     .bind(booking_id)
     .bind(status::booking::ACTIVE)
     .bind(current_total)

@@ -122,7 +122,7 @@ where
     let row = sqlx::query(
         "SELECT id, room_id, primary_guest_id, check_in_at, expected_checkout,
                 actual_checkout, nights, total_price, paid_amount, status,
-                source, notes, created_at
+                source, notes, created_at, rate_overridden_at
          FROM bookings WHERE id = ?",
     )
     .bind(booking_id)
@@ -145,6 +145,7 @@ where
         source: row.get("source"),
         notes: row.get("notes"),
         created_at: row.get("created_at"),
+        rate_overridden_at: row.get("rate_overridden_at"),
     })
 }
 

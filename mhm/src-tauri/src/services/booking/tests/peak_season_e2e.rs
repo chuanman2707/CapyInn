@@ -570,7 +570,7 @@ async fn the_branch_does_not_move_the_schema_version() {
         .await
         .expect("đọc schema_version");
 
-    assert_eq!(version, 22, "nhánh mùa cao điểm không đụng vào migration");
+    assert_eq!(version, 23, "nhánh mùa cao điểm không đụng vào migration");
 
     db.close().await;
 }

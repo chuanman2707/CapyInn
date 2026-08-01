@@ -27,7 +27,7 @@ pub async fn load_room_detail(
     let room = map_room(&row);
 
     let booking = sqlx::query(
-        "SELECT id, room_id, primary_guest_id, check_in_at, expected_checkout, actual_checkout, nights, total_price, paid_amount, status, source, notes, created_at
+        "SELECT id, room_id, primary_guest_id, check_in_at, expected_checkout, actual_checkout, nights, total_price, paid_amount, status, source, notes, created_at, rate_overridden_at
          FROM bookings WHERE room_id = ? AND status = 'active' LIMIT 1"
     )
     .bind(room_id)
@@ -228,6 +228,7 @@ fn map_booking(row: &SqliteRow) -> Booking {
         source: row.get("source"),
         notes: row.get("notes"),
         created_at: row.get("created_at"),
+        rate_overridden_at: row.get("rate_overridden_at"),
     }
 }
 

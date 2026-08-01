@@ -145,7 +145,7 @@ async fn ensure_setting_default(
 /// Schema version a database reaches after `run_migrations` finishes on this
 /// build. Bump this together with every new migration block below; the
 /// `migrations_run_to_latest_schema_version` test fails otherwise.
-pub(crate) const LATEST_SCHEMA_VERSION: i32 = 22;
+pub(crate) const LATEST_SCHEMA_VERSION: i32 = 23;
 
 async fn get_schema_version(pool: &Pool<Sqlite>) -> Result<i32, sqlx::Error> {
     sqlx::query(
@@ -320,6 +320,11 @@ pub(crate) async fn run_migrations(pool: &Pool<Sqlite>) -> Result<(), sqlx::Erro
     // -- V22: số khách trên booking, để tính phụ thu thêm người --
     if current < 22 {
         core_extensions::migrate_v22_booking_guest_count(pool).await?;
+    }
+
+    // -- V23: dấu thời gian đổi giá thủ công trên booking --
+    if current < 23 {
+        core_extensions::migrate_v23_booking_rate_override(pool).await?;
     }
     Ok(())
 }
@@ -872,7 +877,7 @@ mod tests {
             .await
             .expect("reads final schema version");
 
-        assert_eq!(version, 22);
+        assert_eq!(version, 23);
 
         assert_table_group_exists(&pool, "PMS core", PMS_CORE_TABLES).await;
         assert_table_group_exists(&pool, "command safety", COMMAND_SAFETY_TABLES).await;
@@ -893,7 +898,7 @@ mod tests {
             .expect("reads version")
             .get("version");
 
-        assert_eq!(version, 22);
+        assert_eq!(version, 23);
         assert_money_columns_are_integer(&pool).await;
     }
 
@@ -1181,7 +1186,7 @@ mod tests {
             .expect("reads final schema version")
             .get("version");
 
-        assert_eq!(version, 22);
+        assert_eq!(version, 23);
     }
 
     #[tokio::test]
@@ -1248,7 +1253,7 @@ mod tests {
             .expect("reads final schema version")
             .get("version");
 
-        assert_eq!(version, 22);
+        assert_eq!(version, 23);
     }
 
     #[tokio::test]
@@ -1328,7 +1333,7 @@ mod tests {
         );
 
         let version = get_schema_version(&pool).await.expect("schema version");
-        assert_eq!(version, 22);
+        assert_eq!(version, 23);
     }
 
     #[tokio::test]
@@ -1368,7 +1373,7 @@ mod tests {
 
         assert_outbox_shape(&pool).await;
         let version = get_schema_version(&pool).await.expect("schema version");
-        assert_eq!(version, 22);
+        assert_eq!(version, 23);
     }
 
     #[tokio::test]
@@ -1386,7 +1391,7 @@ mod tests {
 
         assert_outbox_shape(&pool).await;
         let version = get_schema_version(&pool).await.expect("schema version");
-        assert_eq!(version, 22);
+        assert_eq!(version, 23);
     }
 
     #[tokio::test]
@@ -1416,7 +1421,7 @@ mod tests {
             1
         );
         let version = get_schema_version(&pool).await.expect("schema version");
-        assert_eq!(version, 22);
+        assert_eq!(version, 23);
     }
 
     #[tokio::test]
@@ -1429,7 +1434,7 @@ mod tests {
 
         assert_agent_safety_shape(&pool).await;
         let version = get_schema_version(&pool).await.expect("schema version");
-        assert_eq!(version, 22);
+        assert_eq!(version, 23);
     }
 
     #[tokio::test]
@@ -1462,7 +1467,7 @@ mod tests {
 
         assert_agent_digest_runs_shape(&pool).await;
         let version = get_schema_version(&pool).await.expect("schema version");
-        assert_eq!(version, 22);
+        assert_eq!(version, 23);
     }
 
     #[tokio::test]
@@ -1486,7 +1491,66 @@ mod tests {
 
         assert_agent_safety_shape(&pool).await;
         let version = get_schema_version(&pool).await.expect("schema version");
-        assert_eq!(version, 22);
+        assert_eq!(version, 23);
+    }
+
+    #[tokio::test]
+    async fn migration_v23_leaves_existing_bookings_with_a_null_rate_override() {
+        let pool = SqlitePool::connect("sqlite::memory:")
+            .await
+            .expect("connects in-memory sqlite");
+        // Chạy migrations đầy đủ trước, giống DB thật ở thời điểm bản build
+        // này ra mắt, rồi seed một booking như thể nó đã tồn tại từ trước —
+        // KHÔNG set rate_overridden_at, đúng như dữ liệu thật: booking đó
+        // chưa từng được đổi giá thủ công.
+        run_migrations(&pool).await.expect("runs migrations");
+
+        sqlx::query(
+            "INSERT INTO rooms (
+                id, name, type, floor, has_balcony, base_price, max_guests, extra_person_fee, status
+             ) VALUES ('R23', 'Room R23', 'standard', 1, 0, 250000, 2, 0, 'vacant')",
+        )
+        .execute(&pool)
+        .await
+        .expect("seeds room");
+        sqlx::query(
+            "INSERT INTO guests (id, guest_type, full_name, doc_number, created_at)
+             VALUES ('G23', 'domestic', 'Existing Guest', 'DOC23', '2026-04-30T08:00:00+07:00')",
+        )
+        .execute(&pool)
+        .await
+        .expect("seeds guest");
+        sqlx::query(
+            "INSERT INTO bookings (
+                id, room_id, primary_guest_id, check_in_at, expected_checkout,
+                nights, total_price, status, created_at
+             ) VALUES ('B23', 'R23', 'G23', '2026-04-30', '2026-05-01', 1, 250000, 'active', '2026-04-30T08:00:00+07:00')",
+        )
+        .execute(&pool)
+        .await
+        .expect("seeds booking");
+
+        // Giả lập DB thật đang ở v22, chưa từng thấy migration v23 — rồi cho
+        // chạy lại migrations như lúc app khởi động với bản build mới.
+        sqlx::query("UPDATE schema_version SET version = 22")
+            .execute(&pool)
+            .await
+            .expect("rewinds schema version");
+
+        run_migrations(&pool).await.expect("v23 migration runs against a populated database");
+
+        let rate_overridden_at: Option<String> =
+            sqlx::query_scalar("SELECT rate_overridden_at FROM bookings WHERE id = 'B23'")
+                .fetch_one(&pool)
+                .await
+                .expect("reads rate_overridden_at");
+        assert_eq!(
+            rate_overridden_at, None,
+            "booking có sẵn trước migration không được suy diễn thành đã bị đổi giá tay"
+        );
+
+        let version = get_schema_version(&pool).await.expect("schema version");
+        assert_eq!(version, 23);
     }
 
     #[tokio::test]
