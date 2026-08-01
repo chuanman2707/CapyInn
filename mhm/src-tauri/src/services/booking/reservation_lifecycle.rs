@@ -620,6 +620,12 @@ pub async fn confirm_reservation_tx(
     let total_price = pricing.total;
     let actual_nights = (effective_checkout_date - today).num_days() as i32;
     let check_in_at = now.to_rfc3339();
+    // Cột `expected_checkout` của booking đang ở phải là RFC3339, giống hệt
+    // đường walk-in trong `stay_lifecycle::check_in_tx`: `extend_stay` đọc cột
+    // này bằng `DateTime::parse_from_rfc3339`, gặp chuỗi chỉ-có-ngày là chrono
+    // báo "premature end of input". `effective_checkout` dạng ngày vẫn giữ
+    // nguyên cho phần tính giá và ghi lịch phòng bên dưới.
+    let expected_checkout = (now + chrono::Duration::days(actual_nights as i64)).to_rfc3339();
 
     sqlx::query("DELETE FROM room_calendar WHERE booking_id = ?")
         .bind(booking_id)
@@ -643,7 +649,7 @@ pub async fn confirm_reservation_tx(
     )
     .bind(status::booking::ACTIVE)
     .bind(&check_in_at)
-    .bind(&effective_checkout)
+    .bind(&expected_checkout)
     .bind(actual_nights)
     .bind(total_price)
     .bind(reservation.paid_amount)
