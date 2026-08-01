@@ -14,17 +14,17 @@ fn next_monday() -> NaiveDate {
     today + Duration::days(days_ahead)
 }
 
-/// Booking `nights` đêm bắt đầu từ thứ Hai kế tiếp, kèm đủ dòng `room_calendar`.
+/// Booking `nights` đêm bắt đầu từ `check_in`, kèm đủ dòng `room_calendar`.
 /// Trả về `(check_in_at, expected_checkout)` dạng RFC3339.
-async fn seed_future_booking(
+async fn seed_booking_from(
     pool: &Pool<Sqlite>,
     booking_id: &str,
     room_id: &str,
+    check_in: NaiveDate,
     nights: i64,
 ) -> BookingResult<(String, String)> {
     seed_active_booking(pool, booking_id, room_id).await?;
 
-    let check_in = next_monday();
     let checkout = check_in + Duration::days(nights);
     let check_in_at = format!("{}T14:00:00+07:00", check_in.format("%Y-%m-%d"));
     let expected_checkout = format!("{}T12:00:00+07:00", checkout.format("%Y-%m-%d"));
@@ -63,6 +63,25 @@ async fn seed_future_booking(
     Ok((check_in_at, expected_checkout))
 }
 
+/// Booking `nights` đêm bắt đầu từ thứ Hai kế tiếp, kèm đủ dòng `room_calendar`.
+/// Trả về `(check_in_at, expected_checkout)` dạng RFC3339.
+async fn seed_future_booking(
+    pool: &Pool<Sqlite>,
+    booking_id: &str,
+    room_id: &str,
+    nights: i64,
+) -> BookingResult<(String, String)> {
+    seed_booking_from(pool, booking_id, room_id, next_monday(), nights).await
+}
+
+/// Ngày (không giờ) từ một chuỗi `check_in_at`/`expected_checkout` RFC3339 mà
+/// các fixture ở trên trả về — dùng để tính lại đêm bị rút mà không phải gọi
+/// lại `next_monday()`/`Local::now()` một lần nữa giữa chừng test (xem mục 6
+/// trong review: gọi lại có thể lệch múi giờ nếu đồng hồ vượt qua nửa đêm).
+fn date_from_rfc3339(value: &str) -> NaiveDate {
+    NaiveDate::parse_from_str(&value[..10], "%Y-%m-%d").expect("fixture date must be YYYY-MM-DD…")
+}
+
 async fn charge_total(pool: &Pool<Sqlite>, booking_id: &str) -> i64 {
     sqlx::query_scalar(
         "SELECT COALESCE(SUM(amount), 0) FROM transactions
@@ -78,7 +97,7 @@ async fn charge_total(pool: &Pool<Sqlite>, booking_id: &str) -> i64 {
 async fn shorten_stay_drops_the_last_night_and_its_charge() {
     let pool = test_pool().await;
     seed_room(&pool, "R701").await.unwrap();
-    let (_check_in, _checkout) = seed_future_booking(&pool, "B701", "R701", 3)
+    let (check_in, checkout) = seed_future_booking(&pool, "B701", "R701", 3)
         .await
         .unwrap();
 
@@ -92,7 +111,8 @@ async fn shorten_stay_drops_the_last_night_and_its_charge() {
     assert_eq!(row.get::<i32, _>("nights"), 2);
     assert_eq!(row.get::<i64, _>("total_price"), 500_000);
 
-    let freed_night = next_monday() + Duration::days(2);
+    let check_in_date = date_from_rfc3339(&check_in);
+    let freed_night = check_in_date + Duration::days(2);
     let remaining: i64 = sqlx::query_scalar(
         "SELECT COUNT(*) FROM room_calendar WHERE booking_id = ? AND date = ?",
     )
@@ -102,6 +122,20 @@ async fn shorten_stay_drops_the_last_night_and_its_charge() {
     .await
     .unwrap();
     assert_eq!(remaining, 0, "đêm bị rút phải được nhả khỏi lịch phòng");
+
+    // Checkout mới phải lùi lại đúng 1 ngày so với checkout ban đầu — tức
+    // đúng bằng ngày của đêm vừa bị rút, giữ nguyên giờ trả phòng.
+    let original_checkout_time = &checkout[10..];
+    let expected_new_checkout = format!(
+        "{}{}",
+        freed_night.format("%Y-%m-%d"),
+        original_checkout_time
+    );
+    assert_eq!(
+        row.get::<String, _>("expected_checkout"),
+        expected_new_checkout,
+        "checkout mới phải lùi đúng 1 ngày so với checkout cũ"
+    );
 
     let credit: i64 = sqlx::query_scalar(
         "SELECT amount FROM transactions WHERE booking_id = ? AND note = 'Shortened stay -1 night'",
@@ -124,6 +158,25 @@ async fn extend_then_shorten_restores_the_booking_exactly() {
     let before_charges = charge_total(&pool, "B702").await;
 
     stay_lifecycle::extend_stay(&pool, "B702").await.unwrap();
+
+    // Chốt trạng thái trung gian: nếu cả extend lẫn shorten đều không ghi gì
+    // (vd. bug âm thầm bỏ qua record_charge_tx), so sánh mù `before_charges ==
+    // charge_total sau shorten` vẫn xanh vì cả hai đều bằng 0. Đọc lại đúng
+    // khoản charge mà extend vừa ghi để khoá chặt lỗ hổng đó.
+    let extend_charge: i64 = sqlx::query_scalar(
+        "SELECT amount FROM transactions WHERE booking_id = ? AND note = 'Extended stay +1 night'",
+    )
+    .bind("B702")
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    let after_extend_charges = charge_total(&pool, "B702").await;
+    assert_eq!(
+        after_extend_charges,
+        before_charges + extend_charge,
+        "sau extend, tổng charge phải cộng đúng khoản charge của đêm thêm"
+    );
+
     stay_lifecycle::shorten_stay(&pool, "B702").await.unwrap();
 
     let row = sqlx::query("SELECT nights, total_price, expected_checkout FROM bookings WHERE id = ?")
@@ -191,6 +244,41 @@ async fn shorten_stay_refuses_to_push_checkout_into_the_past() {
 }
 
 #[tokio::test]
+async fn shorten_stay_allows_moving_the_checkout_to_today() {
+    let pool = test_pool().await;
+    seed_room(&pool, "R708").await.unwrap();
+
+    // Checkout là ngày mai — một khách trả phòng sớm hơn 1 ngày so với dự
+    // kiến là ca hợp lệ (khách rời trong ngày hôm nay), phải được cho phép,
+    // khác với B703 ở trên nơi checkout mới sẽ rơi vào quá khứ.
+    let today = Local::now().date_naive();
+    let check_in = today - Duration::days(1);
+    let (_check_in_at, checkout) = seed_booking_from(&pool, "B708", "R708", check_in, 2)
+        .await
+        .unwrap();
+
+    let booking = stay_lifecycle::shorten_stay(&pool, "B708").await.unwrap();
+
+    let expected_new_checkout = format!("{}{}", today.format("%Y-%m-%d"), &checkout[10..]);
+    assert_eq!(
+        booking.expected_checkout, expected_new_checkout,
+        "checkout mới phải là hôm nay"
+    );
+
+    let row = sqlx::query("SELECT nights, expected_checkout FROM bookings WHERE id = ?")
+        .bind("B708")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(row.get::<i32, _>("nights"), 1);
+    assert_eq!(
+        row.get::<String, _>("expected_checkout"),
+        expected_new_checkout,
+        "trạng thái đọc lại từ DB phải khớp checkout hôm nay"
+    );
+}
+
+#[tokio::test]
 async fn shorten_stay_refuses_to_go_below_one_night() {
     let pool = test_pool().await;
     seed_room(&pool, "R704").await.unwrap();
@@ -233,18 +321,89 @@ async fn shorten_stay_refuses_a_booking_that_is_not_active() {
         matches!(error, BookingError::Conflict(_)),
         "mong đợi lỗi trạng thái không hợp lệ, nhận được: {error:?}"
     );
+
+    let row = sqlx::query("SELECT nights, total_price FROM bookings WHERE id = ?")
+        .bind("B705")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(row.get::<i32, _>("nights"), 3, "thất bại thì số đêm không đổi");
+    assert_eq!(
+        row.get::<i64, _>("total_price"),
+        750_000,
+        "thất bại thì tổng tiền không đổi"
+    );
+}
+
+#[tokio::test]
+async fn shorten_stay_refuses_when_the_credit_would_exceed_the_total() {
+    let pool = test_pool().await;
+    seed_room(&pool, "R709").await.unwrap();
+    let (check_in, _checkout) = seed_future_booking(&pool, "B709", "R709", 2)
+        .await
+        .unwrap();
+
+    // Kịch bản reviewer nêu: booking 2 đêm x 250,000 (tổng 500,000) được chốt
+    // giá lúc nhận phòng, sau đó một dòng pricing_rules đẩy giá phòng lên
+    // 900,000/đêm. Rút một đêm ở mức giá mới sẽ đòi hoàn nhiều hơn cả tổng
+    // tiền của booking — phải bị chặn, không được để total_price âm.
+    seed_pricing_rule(&pool, "standard", 900_000).await.unwrap();
+
+    let error = stay_lifecycle::shorten_stay(&pool, "B709")
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(error, BookingError::Validation(_)),
+        "mong đợi lỗi validation vì khoản hoàn vượt tổng tiền, nhận được: {error:?}"
+    );
+
+    let row = sqlx::query("SELECT nights, total_price FROM bookings WHERE id = ?")
+        .bind("B709")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(row.get::<i32, _>("nights"), 2, "thất bại thì số đêm không đổi");
+    assert_eq!(
+        row.get::<i64, _>("total_price"),
+        500_000,
+        "thất bại thì tổng tiền không đổi"
+    );
+
+    let check_in_date = date_from_rfc3339(&check_in);
+    let freed_night = check_in_date + Duration::days(1);
+    let calendar_rows: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM room_calendar WHERE booking_id = ? AND date = ?",
+    )
+    .bind("B709")
+    .bind(freed_night.format("%Y-%m-%d").to_string())
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(calendar_rows, 1, "thất bại thì lịch phòng không đổi");
+
+    let charge_rows: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM transactions WHERE booking_id = ? AND type = 'charge'",
+    )
+    .bind("B709")
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(charge_rows, 0, "thất bại thì không được tạo dòng charge nào");
 }
 
 #[tokio::test]
 async fn shorten_stay_leaves_everything_alone_when_the_calendar_row_is_missing() {
     let pool = test_pool().await;
     seed_room(&pool, "R707").await.unwrap();
-    seed_future_booking(&pool, "B707", "R707", 3).await.unwrap();
+    let (check_in, _checkout) = seed_future_booking(&pool, "B707", "R707", 3)
+        .await
+        .unwrap();
 
     // Mô phỏng ai đó động vào lịch phòng giữa chừng: xoá đúng dòng mà
     // shorten_stay sắp gỡ. Chốt `ensure_one_row_affected` trên câu DELETE phải
     // bắt được và kéo ngược toàn bộ transaction.
-    let freed_night = next_monday() + Duration::days(2);
+    let check_in_date = date_from_rfc3339(&check_in);
+    let freed_night = check_in_date + Duration::days(2);
     sqlx::query("DELETE FROM room_calendar WHERE booking_id = ? AND date = ?")
         .bind("B707")
         .bind(freed_night.format("%Y-%m-%d").to_string())

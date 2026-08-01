@@ -1288,15 +1288,20 @@ async fn shorten_stay_tx(
     let new_expected = old_expected - Duration::days(1);
     let freed_date = new_expected.date_naive();
 
-    if freed_date <= check_in.date_naive() {
+    // Kiểm tra quá khứ trước: một booking 1 đêm đã quá hạn (checkout đã ở
+    // quá khứ) phải báo dùng Check-out, không phải "tối thiểu 1 đêm" — nếu
+    // không đổi thứ tự, ca đó luôn rơi vào nhánh tối thiểu 1 đêm bên dưới
+    // trước khi chạm tới đây, vì freed_date trùng ngày check-in.
+    if freed_date < Local::now().date_naive() {
         return Err(BookingError::validation(
-            "Lưu trú tối thiểu 1 đêm".to_string(),
+            "Ngày trả phòng mới sẽ rơi vào quá khứ — dùng Check-out để cho khách rời phòng"
+                .to_string(),
         ));
     }
 
-    if freed_date < Local::now().date_naive() {
+    if freed_date <= check_in.date_naive() {
         return Err(BookingError::validation(
-            "Đêm cuối là hôm nay — dùng Check-out để cho khách đi".to_string(),
+            "Lưu trú tối thiểu 1 đêm".to_string(),
         ));
     }
 
@@ -1310,6 +1315,17 @@ async fn shorten_stay_tx(
     )
     .await?;
     let removed_total = removed_pricing.total;
+
+    // Giá phòng có thể đã tăng kể từ lúc nhận phòng (base_price đổi, thêm
+    // pricing_rules, hoặc special_dates) — khoản hoàn cho đêm bị rút không
+    // được vượt quá tổng tiền hiện tại của booking, nếu không total_price sẽ
+    // âm. Chặn ở đây, trước bất kỳ câu UPDATE nào, để không ghi gì cả.
+    if removed_total > current_total {
+        return Err(BookingError::validation(
+            "Giá phòng đã thay đổi kể từ lúc nhận phòng nên không thể tự động hoàn tiền đêm này — vui lòng điều chỉnh thủ công"
+                .to_string(),
+        ));
+    }
 
     let new_total = crate::pricing::checked_sub_money(current_total, removed_total, "total_price")
         .map_err(BookingError::validation)?;
