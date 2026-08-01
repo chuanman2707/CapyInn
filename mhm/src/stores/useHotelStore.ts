@@ -269,7 +269,7 @@ export const useHotelStore = create<HotelStore>((set, get) => {
         const correlationId = createCorrelationId();
         await invokeWriteCommand(
           "set_booking_rate",
-          { bookingId, ratePerNight },
+          { bookingId, ratePerNight: assertNonNegativeMoneyVnd(ratePerNight, "ratePerNight") },
           {
             correlationId,
             monitoringContext: {

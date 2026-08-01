@@ -122,6 +122,64 @@ describe("captureCommandFailure", () => {
     );
   });
 
+  it("sends shorten stay failures with operation metadata", async () => {
+    vi.mocked(invoke).mockResolvedValueOnce(true);
+
+    const monitoringContext = {
+      operation: "remove_one_night",
+    } as const;
+
+    await captureCommandFailure({
+      command: "shorten_stay",
+      appError: {
+        code: "BOOKING_INVALID_STATE",
+        message: "Không thể rút ngắn booking đã đóng",
+        kind: "user",
+        support_id: null,
+      },
+      correlationId: "COR-8F3A1C7D",
+      monitoringContext,
+    });
+
+    expect(invoke).toHaveBeenCalledWith("get_crash_reporting_preference");
+    expect(submitCommandFailureEvent).toHaveBeenCalledWith(
+      expect.objectContaining({
+        command: "shorten_stay",
+        correlationId: "COR-8F3A1C7D",
+        monitoringContext,
+      }),
+    );
+  });
+
+  it("sends set booking rate failures with operation metadata", async () => {
+    vi.mocked(invoke).mockResolvedValueOnce(true);
+
+    const monitoringContext = {
+      operation: "set_booking_rate",
+    } as const;
+
+    await captureCommandFailure({
+      command: "set_booking_rate",
+      appError: {
+        code: "BOOKING_INVALID_STATE",
+        message: "Không thể đổi giá booking đã đóng",
+        kind: "user",
+        support_id: null,
+      },
+      correlationId: "COR-8F3A1C7D",
+      monitoringContext,
+    });
+
+    expect(invoke).toHaveBeenCalledWith("get_crash_reporting_preference");
+    expect(submitCommandFailureEvent).toHaveBeenCalledWith(
+      expect.objectContaining({
+        command: "set_booking_rate",
+        correlationId: "COR-8F3A1C7D",
+        monitoringContext,
+      }),
+    );
+  });
+
   it("does not report commands outside the allowlist", async () => {
     await captureCommandFailure({
       command: "login",

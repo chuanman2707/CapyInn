@@ -35,6 +35,8 @@ const MONITORED_COMMANDS = new Set([
   "create_reservation",
   "extend_stay",
   "run_night_audit",
+  "shorten_stay",
+  "set_booking_rate",
 ]);
 
 function isMonitoredCommand(command: string): boolean {

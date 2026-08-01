@@ -328,6 +328,30 @@ describe("useHotelStore monitoring context", () => {
     );
   });
 
+  it("rejects fractional setBookingRate ratePerNight before invoking backend", async () => {
+    await expect(
+      useHotelStore.getState().setBookingRate("booking-1", 400000.5),
+    ).rejects.toThrow(/ratePerNight/);
+
+    expect(invokeWriteCommand).not.toHaveBeenCalledWith(
+      "set_booking_rate",
+      expect.anything(),
+      expect.anything(),
+    );
+  });
+
+  it("rejects negative setBookingRate ratePerNight before invoking backend", async () => {
+    await expect(
+      useHotelStore.getState().setBookingRate("booking-1", -1000),
+    ).rejects.toThrow(/ratePerNight/);
+
+    expect(invokeWriteCommand).not.toHaveBeenCalledWith(
+      "set_booking_rate",
+      expect.anything(),
+      expect.anything(),
+    );
+  });
+
   it("rejects fractional group money before invoking backend", async () => {
     await expect(
       useHotelStore.getState().groupCheckIn({
