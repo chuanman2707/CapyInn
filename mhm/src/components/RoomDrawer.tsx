@@ -1,7 +1,6 @@
 import { useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import {
-    CalendarPlus,
     Check,
     CheckCircle2,
     Clipboard,
@@ -16,6 +15,7 @@ import CheckoutSettlementModal from "@/components/CheckoutSettlementModal";
 import BookingSummary from "@/components/shared/BookingSummary";
 import InfoItem from "@/components/shared/InfoItem";
 import ActionBtn from "@/components/shared/ActionBtn";
+import NightsStepper from "@/components/shared/NightsStepper";
 import RoomGuestsSection from "@/components/shared/RoomGuestsSection";
 import Section from "@/components/shared/Section";
 import StatusBadge from "@/components/shared/StatusBadge";
@@ -24,6 +24,7 @@ import { Button } from "@/components/ui/button";
 import { useInvoiceDialog } from "@/hooks/useInvoiceDialog";
 import { formatAppError } from "@/lib/appError";
 import { getRoomTypeLabel } from "@/lib/constants";
+import { fmtMoney } from "@/lib/format";
 import { nightlyRateDisplay } from "@/lib/roomTypeRate";
 import { useHotelStore } from "@/stores/useHotelStore";
 import type { CheckoutSettlementPayload, RoomWithBooking, HousekeepingTask } from "@/types";
@@ -38,6 +39,7 @@ export default function RoomDrawer({ open, onClose, roomId }: RoomDrawerProps) {
     const {
         checkOut,
         extendStay,
+        shortenStay,
         getStayInfoText,
         setCheckinOpen,
         fetchRooms,
@@ -50,6 +52,7 @@ export default function RoomDrawer({ open, onClose, roomId }: RoomDrawerProps) {
     const [showCheckout, setShowCheckout] = useState(false);
     const [copied, setCopied] = useState(false);
     const [fetching, setFetching] = useState(false);
+    const [nightsBusy, setNightsBusy] = useState(false);
     const { invoiceOpen, invoiceData, invoiceLoading, openInvoice, closeInvoice } = useInvoiceDialog();
 
     useEffect(() => {
@@ -96,6 +99,31 @@ export default function RoomDrawer({ open, onClose, roomId }: RoomDrawerProps) {
     // Giá loại phòng từ engine, không phải `room.base_price`.
     const nightlyRate = nightlyRateDisplay(roomTypeRates, room.type);
 
+    // So sánh phải cắt về đầu ngày ở cả hai vế. Backend chặn khi
+    // `checkout − 1 ngày < hôm nay`, tức tương đương `checkout ≤ hôm nay`;
+    // nên nút chỉ mở khi checkout thực sự sau hôm nay. So thẳng hai đối
+    // tượng Date chưa cắt giờ sẽ sai: checkout hôm nay lúc 12:00 vẫn lớn
+    // hơn 00:00 hôm nay, nút sẽ mở trong khi backend từ chối.
+    const checkoutDay = booking ? new Date(booking.expected_checkout) : null;
+    checkoutDay?.setHours(0, 0, 0, 0);
+    const todayStart = new Date();
+    todayStart.setHours(0, 0, 0, 0);
+    const canShorten = Boolean(
+        booking &&
+            booking.nights > 1 &&
+            checkoutDay !== null &&
+            checkoutDay.getTime() > todayStart.getTime(),
+    );
+    const shortenDisabledReason =
+        booking && booking.nights <= 1
+            ? "Lưu trú tối thiểu 1 đêm"
+            : "Đêm cuối là hôm nay — dùng Check-out";
+
+    const refreshRoomDetail = async () => {
+        const detail = await invoke<RoomWithBooking>("get_room_detail", { roomId: room.id });
+        setRoomDetail(detail);
+    };
+
     const handleCopyStayInfo = async () => {
         if (!booking) return;
         const text = await getStayInfoText(booking.id);
@@ -120,14 +148,35 @@ export default function RoomDrawer({ open, onClose, roomId }: RoomDrawerProps) {
     };
 
     const handleExtend = async () => {
-        if (!booking) return;
+        if (!booking || nightsBusy) return;
+        setNightsBusy(true);
         try {
             await extendStay(booking.id);
-            const detail = await invoke<RoomWithBooking>("get_room_detail", { roomId: room.id });
-            setRoomDetail(detail);
+            await refreshRoomDetail();
             toast.success("Đã gia hạn thêm 1 đêm!");
         } catch (err) {
-            toast.error("Lỗi gia hạn: " + err);
+            toast.error("Lỗi gia hạn: " + formatAppError(err));
+        } finally {
+            setNightsBusy(false);
+        }
+    };
+
+    const handleShorten = async () => {
+        if (!booking || nightsBusy) return;
+        setNightsBusy(true);
+        try {
+            await shortenStay(booking.id);
+            const detail = await invoke<RoomWithBooking>("get_room_detail", {
+                roomId: room.id,
+            });
+            setRoomDetail(detail);
+            const nights = detail.booking?.nights ?? 0;
+            const total = detail.booking?.total_price ?? 0;
+            toast.success(`Đã rút 1 đêm — còn ${nights} đêm, ${fmtMoney(total)}`);
+        } catch (err) {
+            toast.error("Lỗi rút đêm: " + formatAppError(err));
+        } finally {
+            setNightsBusy(false);
         }
     };
 
@@ -241,7 +290,13 @@ export default function RoomDrawer({ open, onClose, roomId }: RoomDrawerProps) {
                     onClick={handleCopyStayInfo}
                     variant="ghost"
                 />
-                <ActionBtn icon={CalendarPlus} label="Extend +1 đêm" onClick={handleExtend} variant="blue" />
+                <NightsStepper
+                    canShorten={canShorten}
+                    shortenDisabledReason={shortenDisabledReason}
+                    busy={nightsBusy}
+                    onShorten={handleShorten}
+                    onExtend={handleExtend}
+                />
             </div>
             <button
                 onClick={() => setShowCheckout(true)}
