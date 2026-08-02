@@ -73,6 +73,28 @@ export interface Booking {
   created_at: string;
 }
 
+export interface RoomChangeOption {
+  roomId: string;
+  name: string;
+  roomType: string;
+  floor: number;
+  basePrice: MoneyVnd;
+  maxGuests: number;
+  priceDifference: MoneyVnd;
+}
+
+export interface RoomChangeOptions {
+  bookingId: string;
+  currentRoomId: string;
+  currentRoomName: string;
+  fromDate: string;
+  toDate: string;
+  nightsRemaining: number;
+  nightsStayed: number;
+  guestCount: number;
+  rooms: RoomChangeOption[];
+}
+
 export type CheckoutSettlementMode = "actual_nights" | "hourly" | "booked_nights";
 
 export interface CheckoutSettlementPreview {
