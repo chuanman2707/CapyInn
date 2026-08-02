@@ -5,7 +5,7 @@ import { Button } from "@/components/ui/button";
 import { useHotelStore } from "@/stores/useHotelStore";
 import { formatAppError } from "@/lib/appError";
 import { getRoomTypeLabel } from "@/lib/constants";
-import { fmtMoney, fmtNumber } from "@/lib/format";
+import { fmtDateShort, fmtMoney, fmtNumber } from "@/lib/format";
 import { toast } from "sonner";
 import type { RoomChangeOptions } from "@/types";
 
@@ -114,7 +114,7 @@ export function RoomChangeSheet() {
               <div className="rounded-xl border border-slate-200 bg-slate-50 p-3 space-y-1.5">
                 <p className="text-sm text-slate-700">
                   Còn <span className="font-semibold">{options.nightsRemaining} đêm</span> sẽ chuyển:{" "}
-                  {options.fromDate} → {options.toDate}
+                  {fmtDateShort(options.fromDate)} → {fmtDateShort(options.toDate)}
                 </p>
                 {options.nightsStayed > 0 && (
                   <p className="text-sm font-medium text-amber-700 bg-amber-50 border border-amber-200 rounded-lg px-2.5 py-1.5">
