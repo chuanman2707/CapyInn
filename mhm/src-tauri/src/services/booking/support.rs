@@ -287,7 +287,6 @@ pub fn merge_pricing_snapshot(
 /// khoá `booking` + `room`; giữ nguyên bộ khoá đó, đổi thứ tự thôi.
 pub enum FolioLock {
     Include,
-    #[allow(dead_code)]
     Skip,
 }
 
