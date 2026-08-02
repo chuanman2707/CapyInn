@@ -360,11 +360,15 @@ pub(super) async fn change_room_tx(
                 .checked_add(difference)
                 .ok_or_else(|| BookingError::validation("total_price overflowed".to_string()))?;
 
-            let result = sqlx::query("UPDATE bookings SET total_price = ? WHERE id = ?")
-                .bind(new_total)
-                .bind(booking_id)
-                .execute(&mut **tx)
-                .await?;
+            let result = sqlx::query(
+                "UPDATE bookings SET total_price = ? WHERE id = ? AND status = ? AND total_price = ?",
+            )
+            .bind(new_total)
+            .bind(booking_id)
+            .bind(&booking_status)
+            .bind(current_total)
+            .execute(&mut **tx)
+            .await?;
             ensure_one_row_affected(
                 result,
                 format!("booking {booking_id} changed before room-change repricing"),
