@@ -596,7 +596,14 @@ pub struct InvoiceData {
     pub total: MoneyVnd,
     pub balance_due: MoneyVnd,
     pub policy_text: Option<String>,
+    /// The booking's own notes, copied verbatim — front-desk shorthand, NOT
+    /// guest-facing. Neither invoice renderer prints this; see
+    /// `settlement_note` for the text that is meant to be read by the guest.
     pub notes: Option<String>,
+    /// Guest-facing explanation of how the total was reached, set only when
+    /// the breakdown splits per room (`invoice_generation.rs`). `None` on a
+    /// single-line invoice, where the breakdown line already says it.
+    pub settlement_note: Option<String>,
     pub status: String,
     pub created_at: String,
 }

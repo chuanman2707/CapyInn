@@ -49,6 +49,7 @@ struct InvoiceDataWire {
     balance_due: crate::money::MoneyVnd,
     policy_text: Option<String>,
     notes: Option<String>,
+    settlement_note: Option<String>,
     status: String,
     created_at: String,
 }
@@ -76,6 +77,7 @@ impl From<InvoiceDataWire> for InvoiceData {
             balance_due: value.balance_due,
             policy_text: value.policy_text,
             notes: value.notes,
+            settlement_note: value.settlement_note,
             status: value.status,
             created_at: value.created_at,
         }

@@ -61,7 +61,7 @@ pub async fn generate_invoice_tx(
     let total_price = get_money_vnd(&b, "total_price");
     let paid_amount = get_money_vnd(&b, "paid_amount");
     let deposit_amount = get_optional_money_vnd(&b, "deposit_amount").unwrap_or(0);
-    let mut notes: Option<String> = b.get("notes");
+    let notes: Option<String> = b.get("notes");
     let pricing_snapshot: Option<String> = b.get("pricing_snapshot");
     let snapshot_value: Option<serde_json::Value> = pricing_snapshot
         .as_deref()
@@ -124,6 +124,10 @@ pub async fn generate_invoice_tx(
         label: settlement_line_label.clone(),
         amount: total_price,
     }];
+    // Only set when the split below fires: on a single-line invoice the
+    // settlement wording IS the breakdown line, so repeating it below the
+    // table would say the same thing twice.
+    let mut settlement_note: Option<String> = None;
 
     let subtotal = total_price;
     let balance_due = (total_price - paid_amount).max(0);
@@ -211,20 +215,17 @@ pub async fn generate_invoice_tx(
 
             // The settlement wording still has to reach the guest: a moved,
             // possibly early-checked-out booking is precisely the one whose
-            // total is hardest to read. It moves to `notes`, which both
-            // renderers show as a "GHI CHÚ" block under the breakdown — text,
-            // not money, so it cannot be mistaken for another charge. The
-            // booking's own notes (which already carry the "Chuyển phòng ..."
-            // line written by `change_room_tx`) stay first.
-            let existing_notes = notes
-                .as_deref()
-                .map(str::trim)
-                .filter(|value| !value.is_empty())
-                .map(str::to_string);
-            notes = Some(match existing_notes {
-                Some(existing) => format!("{existing}\n{settlement_line_label}"),
-                None => settlement_line_label.clone(),
-            });
+            // total is hardest to read. It goes to `settlement_note`, which
+            // both renderers print as a "GHI CHÚ" block under the breakdown —
+            // text, not money, so it cannot be mistaken for another charge.
+            //
+            // Deliberately NOT merged into `notes`: that column copies
+            // `bookings.notes` verbatim, i.e. internal front-desk shorthand
+            // ("cọc 600k", "Agoda thanh toan"), which must never be printed on
+            // a guest's invoice. Keeping the printable text in its own column
+            // is what makes "render this" impossible to confuse with "render
+            // whatever the receptionist typed".
+            settlement_note = Some(settlement_line_label.clone());
         }
     }
 
@@ -257,8 +258,8 @@ pub async fn generate_invoice_tx(
         "INSERT INTO invoices (id, invoice_number, booking_id, hotel_name, hotel_address, hotel_phone,
          guest_name, guest_phone, room_name, room_type, check_in, check_out, nights,
          pricing_breakdown, subtotal, deposit_amount, total, balance_due, policy_text, notes,
-         status, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'issued', ?)"
+         settlement_note, status, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'issued', ?)"
     )
     .bind(&id).bind(&invoice_number).bind(booking_id)
     .bind(&hotel_name).bind(&hotel_address).bind(&hotel_phone)
@@ -267,7 +268,7 @@ pub async fn generate_invoice_tx(
     .bind(&check_in).bind(&check_out).bind(nights)
     .bind(&breakdown_json)
     .bind(subtotal).bind(deposit_amount).bind(total_price).bind(balance_due)
-    .bind(DEFAULT_POLICY_TEXT).bind(&notes)
+    .bind(DEFAULT_POLICY_TEXT).bind(&notes).bind(&settlement_note)
     .bind(&now)
     .execute(&mut **tx).await.map_err(|e| e.to_string())?;
 
@@ -292,6 +293,7 @@ pub async fn generate_invoice_tx(
         balance_due,
         policy_text: Some(DEFAULT_POLICY_TEXT.to_string()),
         notes,
+        settlement_note,
         status: "issued".to_string(),
         created_at: now,
     })
@@ -316,7 +318,7 @@ pub async fn get_invoice(
         "SELECT id, invoice_number, booking_id, hotel_name, hotel_address, hotel_phone,
                 guest_name, guest_phone, room_name, room_type, check_in, check_out, nights,
                 pricing_breakdown, subtotal, deposit_amount, total, balance_due,
-                policy_text, notes, status, created_at
+                policy_text, notes, settlement_note, status, created_at
          FROM invoices WHERE booking_id = ? ORDER BY created_at DESC LIMIT 1",
     )
     .bind(booking_id)
@@ -351,6 +353,7 @@ pub async fn get_invoice(
                 balance_due: get_money_vnd(&r, "balance_due"),
                 policy_text: r.get("policy_text"),
                 notes: r.get("notes"),
+                settlement_note: r.get("settlement_note"),
                 status: r.get("status"),
                 created_at: r.get("created_at"),
             }))

@@ -767,6 +767,10 @@ async fn invoice_keeps_one_line_when_no_move_happened() {
         "chưa đổi phòng thì hoá đơn chỉ có một dòng, đúng như trước đây"
     );
     assert_breakdown_sums_to_subtotal(&invoice);
+    assert_eq!(
+        invoice.settlement_note, None,
+        "hoá đơn một dòng không cần khối GHI CHÚ: dòng tiền duy nhất đã nói đúng điều đó"
+    );
 }
 
 /// The decisive regression test: `check_out_tx` deletes every `room_calendar`
@@ -839,17 +843,14 @@ async fn move_then_real_checkout_still_splits_invoice_lines() {
     // The settlement wording ("Thanh toán theo số đêm đã đặt") must survive
     // the split — this is exactly the booking whose settlement is least
     // obvious (moved mid-stay), so losing the wording that explains the total
-    // is worst here. It lands in `notes`, NOT in `pricing_breakdown`: as a
-    // money line it would be printed alongside the room lines that already
-    // sum to subtotal, and the guest would read a document adding up to twice
-    // its own stated subtotal.
-    assert!(
-        invoice
-            .notes
-            .as_deref()
-            .is_some_and(|notes| notes.contains("Thanh toán theo số đêm đã đặt")),
-        "ghi chú phải giữ lại lời quyết toán: {:?}",
-        invoice.notes
+    // is worst here. It lands in `settlement_note`, NOT in
+    // `pricing_breakdown`: as a money line it would be printed alongside the
+    // room lines that already sum to subtotal, and the guest would read a
+    // document adding up to twice its own stated subtotal.
+    assert_eq!(
+        invoice.settlement_note.as_deref(),
+        Some("Thanh toán theo số đêm đã đặt"),
+        "hoá đơn tách phòng phải giữ lời quyết toán ở settlement_note"
     );
     assert!(
         !labels
@@ -1090,11 +1091,11 @@ async fn invoice_split_remainder_lands_on_last_line_for_non_divisible_subtotal()
 }
 
 /// Finding A: the settlement wording is not allowed to just vanish when the
-/// split takes over the money lines — it moves to `notes`, which both
-/// renderers now print as a "GHI CHÚ" block. With no guest notes on the
-/// booking it must stand alone, with no stray separator or blank first line.
+/// split takes over the money lines — it moves to `settlement_note`, which
+/// both renderers print as a "GHI CHÚ" block. It must survive a re-read too:
+/// `get_invoice` is what the UI calls for an already-issued invoice.
 #[tokio::test]
-async fn split_invoice_carries_the_settlement_wording_in_notes() {
+async fn split_invoice_carries_the_settlement_wording_in_a_settlement_note() {
     let pool = test_pool().await;
     seed_stay_in_progress(&pool).await;
 
@@ -1116,14 +1117,6 @@ async fn split_invoice_carries_the_settlement_wording_in_notes() {
     .await
     .unwrap();
 
-    // `change_room_tx` appends its own "Chuyển phòng ..." line to
-    // `bookings.notes`; clear the column afterwards so this test sees the
-    // no-guest-notes branch instead of the merge branch.
-    sqlx::query("UPDATE bookings SET notes = NULL WHERE id = 'B-OPT'")
-        .execute(&pool)
-        .await
-        .unwrap();
-
     let mut tx = pool.begin().await.unwrap();
     let invoice = invoice_generation::generate_invoice_tx(&mut tx, "B-OPT")
         .await
@@ -1131,30 +1124,36 @@ async fn split_invoice_carries_the_settlement_wording_in_notes() {
     tx.commit().await.unwrap();
 
     assert_eq!(
-        invoice.notes.as_deref(),
+        invoice.settlement_note.as_deref(),
         Some("Thanh toán theo số đêm đã đặt"),
-        "không có ghi chú của khách thì lời quyết toán phải đứng một mình, \
-         không kèm dấu phân cách hay dòng trống"
+        "lời quyết toán phải đứng một mình trong settlement_note"
     );
     assert_breakdown_sums_to_subtotal(&invoice);
 
-    // Regenerating must not stack a second copy of the wording: the invoice
-    // reads `bookings.notes`, which this path never writes back to.
-    let mut tx = pool.begin().await.unwrap();
-    let again = invoice_generation::generate_invoice_tx(&mut tx, "B-OPT")
+    let reread = invoice_generation::get_invoice(&pool, "B-OPT")
         .await
-        .unwrap();
-    tx.commit().await.unwrap();
-    assert_eq!(again.notes, invoice.notes);
+        .unwrap()
+        .expect("hoá đơn vừa phát hành phải đọc lại được");
+    assert_eq!(
+        reread.settlement_note, invoice.settlement_note,
+        "settlement_note phải sống sót qua vòng ghi/đọc lại — UI mở hoá đơn cũ bằng get_invoice"
+    );
 }
 
-/// The guest's own notes are the reason `notes` is rendered at all — the
-/// settlement wording is appended to them, never on top of them.
+/// `invoices.notes` copies `bookings.notes` verbatim, and in the live database
+/// that column holds internal front-desk shorthand: "Agoda thanh toan",
+/// "cọc 600k", scribbles about who is paying. The renderers print
+/// `settlement_note` and nothing else, so the guard has to be that no scrap of
+/// the booking's own notes can ever reach that field — not merely that the
+/// renderers currently happen to read the right one.
 #[tokio::test]
-async fn split_invoice_keeps_guest_notes_above_the_settlement_wording() {
+async fn settlement_note_never_carries_the_bookings_internal_notes() {
     let pool = test_pool().await;
     seed_stay_in_progress(&pool).await;
-    sqlx::query("UPDATE bookings SET notes = 'Khách xin hoá đơn công ty' WHERE id = 'B-OPT'")
+    // Shaped after real rows in the production database.
+    let internal_note = "Agoda thanh toan | cọc 600k, chị Hằng thu";
+    sqlx::query("UPDATE bookings SET notes = ? WHERE id = 'B-OPT'")
+        .bind(internal_note)
         .execute(&pool)
         .await
         .unwrap();
@@ -1183,21 +1182,28 @@ async fn split_invoice_keeps_guest_notes_above_the_settlement_wording() {
         .unwrap();
     tx.commit().await.unwrap();
 
-    let notes = invoice.notes.clone().unwrap_or_default();
-    assert!(
-        notes.starts_with("Khách xin hoá đơn công ty"),
-        "ghi chú của khách phải đứng trước: {notes:?}"
-    );
-    assert!(
-        notes.contains("Chuyển phòng R-OLD → R-NEW"),
-        "dòng chuyển phòng do change_room_tx ghi phải còn nguyên: {notes:?}"
-    );
+    let settlement_note = invoice.settlement_note.clone().unwrap_or_default();
+    for fragment in ["Agoda", "cọc 600k", "chị Hằng", "Chuyển phòng"] {
+        assert!(
+            !settlement_note.contains(fragment),
+            "ghi chú nội bộ ({fragment:?}) không được lọt vào phần in cho khách: {settlement_note:?}"
+        );
+    }
     assert_eq!(
-        notes.lines().last(),
-        Some("Thanh toán theo số đêm đã đặt"),
-        "lời quyết toán là một dòng riêng ở cuối: {notes:?}"
+        settlement_note, "Thanh toán theo số đêm đã đặt",
+        "phần in cho khách chỉ chứa đúng lời quyết toán"
     );
-    assert_breakdown_sums_to_subtotal(&invoice);
+
+    // `notes` itself is still carried on the invoice row — it is data the back
+    // office may want; it is simply never rendered.
+    assert!(
+        invoice
+            .notes
+            .as_deref()
+            .is_some_and(|notes| notes.starts_with(internal_note)),
+        "notes vẫn giữ nguyên ghi chú của booking: {:?}",
+        invoice.notes
+    );
 }
 
 /// Finding B: a guest who moves A → B and later back to A.

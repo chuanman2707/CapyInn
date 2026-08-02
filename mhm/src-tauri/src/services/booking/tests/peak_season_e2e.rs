@@ -559,8 +559,14 @@ async fn the_migrated_special_dates_table_matches_what_the_code_assumes() {
     db.close().await;
 }
 
-/// Nhánh này không được thêm hay sửa migration nào: phiên bản schema phải đứng
-/// yên ở 22, đúng như trên `main`.
+/// Tính năng mùa cao điểm không cần migration nào của riêng nó: nó chỉ ghi vào
+/// `special_dates`, bảng đã có sẵn từ v3.
+///
+/// Con số dưới đây cố ý viết cứng chứ không đọc `LATEST_SCHEMA_VERSION` — nó là
+/// dây bẫy: bất kỳ nhánh nào thêm migration đều làm test này đỏ, buộc người sửa
+/// phải nhìn lại xem migration đó có thật sự cần không rồi mới nâng số. Lần
+/// nâng gần nhất: 22 → 23, thêm cột `invoices.settlement_note` để lời quyết
+/// toán in cho khách không phải mượn cột ghi chú nội bộ.
 #[tokio::test]
 async fn the_branch_does_not_move_the_schema_version() {
     let db = migrated_db("schema-version").await;
@@ -570,7 +576,10 @@ async fn the_branch_does_not_move_the_schema_version() {
         .await
         .expect("đọc schema_version");
 
-    assert_eq!(version, 22, "nhánh mùa cao điểm không đụng vào migration");
+    assert_eq!(
+        version, 23,
+        "một migration mới vừa xuất hiện — kiểm tra lại nó trước khi nâng số này"
+    );
 
     db.close().await;
 }

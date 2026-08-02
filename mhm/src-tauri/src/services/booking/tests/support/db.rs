@@ -394,6 +394,7 @@ pub async fn test_pool() -> Pool<Sqlite> {
             balance_due       INTEGER NOT NULL,
             policy_text       TEXT,
             notes             TEXT,
+            settlement_note   TEXT,
             status            TEXT NOT NULL DEFAULT 'issued',
             created_at        TEXT NOT NULL
         )",

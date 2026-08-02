@@ -21,7 +21,9 @@ import type { RoomChangeOptions } from "@/types";
  *
  * "cả kỳ" is not decoration: `priceDifference` covers ALL remaining nights,
  * while this row used to read "…đ/đêm", so a returning receptionist reads a
- * bare "+500.000đ" as per-night and quotes the guest the wrong number.
+ * bare "+500.000đ" as per-night and quotes the guest the wrong number. The
+ * summary panel and the confirm button carry the same qualifier as "cho cả
+ * kỳ" — they read as sentences, this dense middot-separated row does not.
  */
 function formatPriceDifference(value: number): string {
   if (value === 0) return "không đổi tiền";
@@ -210,7 +212,7 @@ export function RoomChangeSheet() {
                   <p className="text-sm font-semibold text-slate-800">
                     {difference === 0
                       ? "Không đổi tiền"
-                      : `${difference > 0 ? "+" : "−"}${fmtNumber(Math.abs(difference))}đ so với phòng cũ`}
+                      : `${difference > 0 ? "+" : "−"}${fmtNumber(Math.abs(difference))}đ cho cả kỳ so với phòng cũ`}
                   </p>
                 </div>
               )}
@@ -238,7 +240,7 @@ export function RoomChangeSheet() {
                   : selected
                     ? `Chuyển sang ${selected.name}${
                         difference !== 0
-                          ? `, ${difference > 0 ? "cộng" : "trừ"} ${fmtNumber(Math.abs(difference))}đ`
+                          ? `, ${difference > 0 ? "cộng" : "trừ"} ${fmtNumber(Math.abs(difference))}đ cho cả kỳ`
                           : ", không đổi tiền"
                       }`
                     : "Chọn một phòng để chuyển"}

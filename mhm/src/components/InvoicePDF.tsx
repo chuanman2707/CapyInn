@@ -45,7 +45,10 @@ export interface InvoiceData {
     total: number;
     balance_due: number;
     policy_text: string | null;
+    /** The booking's own notes — internal front-desk shorthand. NOT rendered. */
     notes: string | null;
+    /** Guest-facing settlement wording, set only on a per-room split invoice. */
+    settlement_note: string | null;
     status: string;
     created_at: string;
 }
@@ -354,11 +357,11 @@ export default function InvoicePDF({ data, groupData }: InvoicePDFProps) {
     const hotelName = isGroup ? groupData.hotel_name : data!.hotel_name;
     const hotelAddress = isGroup ? groupData.hotel_address : data!.hotel_address;
     const hotelPhone = isGroup ? groupData.hotel_phone : data!.hotel_phone;
-    // Trimmed up front so a blank-but-not-null `notes` renders nothing rather
-    // than an empty "GHI CHÚ" box. For a booking that changed rooms this is
-    // where the settlement wording lives (`invoice_generation.rs`), so it has
-    // to be printed, not just stored.
-    const notes = isGroup ? "" : (data!.notes ?? "").trim();
+    // Trimmed up front so a blank-but-not-null value renders nothing rather
+    // than an empty "GHI CHÚ" box. Deliberately `settlement_note`, never
+    // `notes`: `notes` copies the booking's internal front-desk shorthand
+    // ("cọc 600k", "Agoda thanh toan") and must not be printed for a guest.
+    const settlementNote = isGroup ? "" : (data!.settlement_note ?? "").trim();
 
     return (
         <Document>
@@ -566,12 +569,12 @@ export default function InvoicePDF({ data, groupData }: InvoicePDFProps) {
                             </View>
                         </View>
 
-                        {/* Notes — carries the checkout settlement wording for
-                            a booking that changed rooms */}
-                        {notes !== "" && (
+                        {/* Settlement note — how the total was reached, for a
+                            booking whose breakdown splits per room */}
+                        {settlementNote !== "" && (
                             <View style={s.notesBox}>
                                 <Text style={s.notesTitle}>GHI CHÚ</Text>
-                                <Text style={s.notesText}>{notes}</Text>
+                                <Text style={s.notesText}>{settlementNote}</Text>
                             </View>
                         )}
 

@@ -108,7 +108,9 @@ describe("RoomChangeSheet", () => {
     await userEvent.click(await screen.findByText("Phòng 2A"));
     // Chọn dòng có hậu tố "so với phòng cũ" — dòng phòng trong danh sách cũng
     // hiện chênh lệch (hậu tố "cả kỳ") nên chỉ khớp regex trần sẽ khớp cả hai.
-    expect(screen.getByText(/\+500\.000đ so với phòng cũ/)).toBeInTheDocument();
+    expect(
+      screen.getByText(/\+500\.000đ cho cả kỳ so với phòng cũ/),
+    ).toBeInTheDocument();
   });
 
   it("dòng phòng hiện chênh lệch giá, không phải basePrice", async () => {
@@ -176,8 +178,9 @@ describe("RoomChangeSheet", () => {
     });
     await userEvent.click(await screen.findByText("Phòng 3C"));
     const confirmButton = screen.getByRole("button", { name: /chuyển sang phòng 3c/i });
-    expect(confirmButton).toHaveTextContent(/50\.000/);
-    expect(confirmButton).toHaveTextContent(/trừ/);
+    // Nút này là dòng chữ cuối cùng lễ tân đọc trước khi chốt tiền, nên nó phải
+    // nói rõ 50.000đ là cho cả kỳ chứ không phải mỗi đêm.
+    expect(confirmButton).toHaveTextContent(/trừ 50\.000đ cho cả kỳ/);
   });
 
   it("nút xác nhận hiện 'không đổi tiền' khi phòng chọn không chênh lệch", async () => {
@@ -216,7 +219,7 @@ describe("RoomChangeSheet", () => {
     renderSheet(baseOptions);
     await userEvent.click(await screen.findByText("Phòng 2A"));
     const confirmButton = screen.getByRole("button", { name: /chuyển sang phòng 2a/i });
-    expect(confirmButton).toHaveTextContent(/500\.000/);
+    expect(confirmButton).toHaveTextContent(/cộng 500\.000đ cho cả kỳ/);
     expect(confirmButton.textContent?.trim().toLowerCase()).not.toBe("xác nhận");
   });
 

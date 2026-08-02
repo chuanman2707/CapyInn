@@ -226,17 +226,18 @@ export default function InvoiceDialog({ open, onOpenChange, data, groupData }: P
                                 </div>
                             </div>
 
-                            {/* Notes — for a booking that changed rooms this is
-                                where the checkout settlement wording lives
-                                (invoice_generation.rs moves it out of the
-                                money lines so they still sum to Subtotal). */}
-                            {(data!.notes ?? "").trim() !== "" && (
+                            {/* Settlement note — how the total was reached when
+                                the breakdown splits per room (invoice_generation.rs
+                                keeps it out of the money lines so they still sum
+                                to Subtotal). Never `notes`: that column holds the
+                                booking's internal front-desk shorthand. */}
+                            {(data!.settlement_note ?? "").trim() !== "" && (
                                 <div className="mx-4 mb-4 p-3 bg-muted/50 rounded-md border-l-2 border-[#2D4373]">
                                     <div className="text-[10px] uppercase tracking-wider text-[#1B2A4A] font-bold mb-2">
                                         Ghi chú
                                     </div>
                                     <div className="text-xs text-muted-foreground whitespace-pre-line leading-relaxed">
-                                        {data!.notes}
+                                        {data!.settlement_note}
                                     </div>
                                 </div>
                             )}
