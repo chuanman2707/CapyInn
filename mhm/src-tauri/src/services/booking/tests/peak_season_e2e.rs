@@ -559,16 +559,31 @@ async fn the_migrated_special_dates_table_matches_what_the_code_assumes() {
     db.close().await;
 }
 
-/// Tính năng mùa cao điểm không cần migration nào của riêng nó: nó chỉ ghi vào
-/// `special_dates`, bảng đã có sẵn từ v3.
+/// Dây bẫy số hiệu schema. Con số dưới đây cố ý viết cứng chứ không đọc
+/// `LATEST_SCHEMA_VERSION` — đọc hằng số thì test luôn xanh và chẳng canh gì cả.
 ///
-/// Con số dưới đây cố ý viết cứng chứ không đọc `LATEST_SCHEMA_VERSION` — nó là
-/// dây bẫy: bất kỳ nhánh nào thêm migration đều làm test này đỏ, buộc người sửa
-/// phải nhìn lại xem migration đó có thật sự cần không rồi mới nâng số. Lần
-/// nâng gần nhất: 22 → 23, thêm cột `invoices.settlement_note` để lời quyết
-/// toán in cho khách không phải mượn cột ghi chú nội bộ.
+/// Hợp đồng nó canh: **số hiệu này đã được dời có chủ đích, hiện là 25.** Bản
+/// thân tính năng mùa cao điểm không cần migration riêng (nó chỉ ghi vào
+/// `special_dates`, có từ v3); con số ở đây phản ánh migration mới nhất của cả
+/// repo, hiện là `migrate_v25_invoice_settlement_note`.
+///
+/// Nếu test này đỏ, nghĩa là ai đó vừa thêm migration. **Đừng tăng số này lên
+/// một rồi đi tiếp.** Số hiệu bị trùng là lỗi im lặng và chết người: gate
+/// `current < N` sai ngay trên DB đã ở N, migration không chạy, và mọi truy vấn
+/// chạm cột mới chết lúc runtime. Nhánh này từng ship đúng lỗi đó với v23 —
+/// máy khách sạn đã ở 23 do nhánh kbtt, nên cột `invoices.settlement_note`
+/// không bao giờ được tạo và toàn bộ đường hoá đơn/check-out chết ngay lần mở
+/// app đầu tiên. Nhánh `feat/room-drawer-stay-edits` cũng đã vấp y hệt (commit
+/// 4c5c1c3).
+///
+/// Việc phải làm trước khi nâng: quét MỌI ref, không chỉ `main` —
+/// `git for-each-ref --format='%(refname:short)' | xargs -I{} git show
+/// {}:mhm/src-tauri/src/db.rs | grep LATEST_SCHEMA_VERSION` — và đọc thẳng DB
+/// thật (`sqlite3 "file:…/capyinn.db?immutable=1" "SELECT MAX(version) FROM
+/// schema_version"`), đừng tin con số ai đó nói miệng. Chọn số cao hơn tất cả;
+/// bỏ trống vài số là vô hại, trùng số thì không.
 #[tokio::test]
-async fn the_branch_does_not_move_the_schema_version() {
+async fn the_schema_version_is_the_one_this_branch_deliberately_claimed() {
     let db = migrated_db("schema-version").await;
 
     let version: i64 = sqlx::query_scalar("SELECT version FROM schema_version LIMIT 1")
@@ -577,8 +592,9 @@ async fn the_branch_does_not_move_the_schema_version() {
         .expect("đọc schema_version");
 
     assert_eq!(
-        version, 23,
-        "một migration mới vừa xuất hiện — kiểm tra lại nó trước khi nâng số này"
+        version, 25,
+        "một migration mới vừa xuất hiện — quét mọi ref và đọc DB thật để chắc \
+         số hiệu chưa bị nhánh nào chiếm, rồi mới nâng con số này"
     );
 
     db.close().await;

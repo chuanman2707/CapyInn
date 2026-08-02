@@ -118,10 +118,17 @@ pub async fn generate_invoice_tx(
     } else {
         total_price
     };
-    let settlement_line_label =
-        settlement_label.unwrap_or_else(|| format!("{} night(s) x {}d", nights, per_night));
+    // `settlement_label` is `None` until checkout writes `checkout_settlement`,
+    // so an invoice printed for an in-house guest (RoomDetailPanel and
+    // RoomDrawer both offer that) falls back to a developer-shaped English
+    // string. It is tolerable as a breakdown line, which is where it has always
+    // been, but it must never reach `settlement_note` — see below.
+    let settlement_line_label = match &settlement_label {
+        Some(label) => label.clone(),
+        None => format!("{} night(s) x {}d", nights, per_night),
+    };
     let mut breakdown: Vec<crate::pricing::PricingLine> = vec![crate::pricing::PricingLine {
-        label: settlement_line_label.clone(),
+        label: settlement_line_label,
         amount: total_price,
     }];
     // Only set when the split below fires: on a single-line invoice the
@@ -225,7 +232,13 @@ pub async fn generate_invoice_tx(
             // a guest's invoice. Keeping the printable text in its own column
             // is what makes "render this" impossible to confuse with "render
             // whatever the receptionist typed".
-            settlement_note = Some(settlement_line_label.clone());
+            //
+            // `settlement_label`, not `settlement_line_label`: before checkout
+            // there is no settlement metadata and the fallback is the English
+            // developer string "3 night(s) x 250000d". Printing that under a
+            // Vietnamese "GHI CHÚ" heading is worse than printing nothing, and
+            // nothing is lost — the room lines below already state the nights.
+            settlement_note = settlement_label.clone();
         }
     }
 

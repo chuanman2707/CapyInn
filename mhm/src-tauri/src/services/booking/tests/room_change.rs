@@ -1204,6 +1204,49 @@ async fn settlement_note_never_carries_the_bookings_internal_notes() {
         "notes vẫn giữ nguyên ghi chú của booking: {:?}",
         invoice.notes
     );
+
+    assert_breakdown_sums_to_subtotal(&invoice);
+}
+
+/// An in-house guest can be handed an invoice — `RoomDetailPanel.tsx` and
+/// `RoomDrawer.tsx` both offer it — and before checkout there is no
+/// `checkout_settlement`, so the settlement label falls back to the English
+/// developer string "3 night(s) x 250000d". That is tolerable as a breakdown
+/// line (it has always been one) but not under a Vietnamese "GHI CHÚ" heading,
+/// so `settlement_note` must stay empty until checkout gives it real wording.
+#[tokio::test]
+async fn a_pre_checkout_split_invoice_has_no_settlement_note() {
+    let pool = test_pool().await;
+    seed_stay_in_progress(&pool).await;
+
+    room_change::change_room(
+        &pool,
+        "B-OPT",
+        "R-NEW",
+        true,
+        None,
+        NaiveDate::from_ymd_opt(2026, 4, 16).unwrap(),
+    )
+    .await
+    .unwrap();
+
+    // No check_out call: the guest is still in the room.
+    let mut tx = pool.begin().await.unwrap();
+    let invoice = invoice_generation::generate_invoice_tx(&mut tx, "B-OPT")
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
+
+    assert!(
+        invoice.pricing_breakdown.len() > 1,
+        "tiền đề của test: hoá đơn này phải là loại tách theo phòng"
+    );
+    assert_eq!(
+        invoice.settlement_note, None,
+        "chưa check-out thì không có lời quyết toán tiếng Việt nào để in — \
+         thà bỏ trống còn hơn in chuỗi tiếng Anh của lập trình viên"
+    );
+    assert_breakdown_sums_to_subtotal(&invoice);
 }
 
 /// Finding B: a guest who moves A → B and later back to A.
