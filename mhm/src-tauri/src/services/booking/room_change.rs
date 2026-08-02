@@ -31,7 +31,7 @@ use super::{
     stay_lifecycle::fetch_booking_tx,
     support::{
         begin_tx, ensure_one_row_affected, invalid_state_transition, lookup_booking_room_id,
-        merge_pricing_snapshot, read_money_vnd_or_zero,
+        merge_pricing_snapshot, read_money_vnd_or_zero, room_calendar_stays_tx, room_stays_to_json,
     },
 };
 
@@ -137,10 +137,17 @@ pub async fn load_options(
     // Phòng trống suốt dải đêm còn lại. Dòng của chính booking này không tính là vướng.
     // Phòng đang dọn chỉ bị loại khi khách vào ngay tối nay. Với đặt trước tuần
     // sau, tình trạng dọn dẹp hôm nay không nói lên điều gì về tuần sau.
+    //
+    // Nhưng một booking đang ACTIVE thì luôn bắt buộc phòng mới phải `vacant`,
+    // bất kể đêm chuyển đầu tiên có phải tối nay hay không — `change_room_tx`
+    // đòi hỏi điều đó vô điều kiện cho booking active (UPDATE rooms ... WHERE
+    // status = 'vacant' ở cuối hàm). Bỏ sót vế active thì danh sách gợi ý một
+    // phòng mà thao tác ghi sẽ từ chối.
     let moving_in_today = nights.from_date == today.format("%Y-%m-%d").to_string();
+    let requires_vacant_room = moving_in_today || booking_status == status::booking::ACTIVE;
 
     let candidates = sqlx::query(
-        "SELECT r.id, r.name, r.type, r.floor, r.base_price, r.max_guests
+        "SELECT r.id, r.name, r.type, r.floor, r.max_guests
          FROM rooms r
          WHERE r.id != ?
            AND r.max_guests >= ?
@@ -155,7 +162,7 @@ pub async fn load_options(
     )
     .bind(&current_room_id)
     .bind(guests)
-    .bind(i32::from(moving_in_today))
+    .bind(i32::from(requires_vacant_room))
     .bind(&nights.from_date)
     .bind(&nights.to_date)
     .bind(booking_id)
@@ -194,7 +201,6 @@ pub async fn load_options(
             name: row.get("name"),
             room_type: row.get("type"),
             floor: row.get("floor"),
-            base_price: read_money_vnd_or_zero(&row, "base_price"),
             max_guests: row.get("max_guests"),
             price_difference: candidate_price - current_price,
         });
@@ -435,39 +441,13 @@ pub(super) async fn change_room_tx(
     // room_calendar was just updated above, so this reflects the post-move
     // truth. Recomputed from scratch (not appended) so a guest who moves
     // twice ends up with three correct entries, not an append-only mess.
-    let room_stay_rows = sqlx::query(
-        "SELECT rc.room_id, r.name AS room_name, COUNT(*) AS nights, MIN(rc.date) AS first_night
-         FROM room_calendar rc
-         JOIN rooms r ON r.id = rc.room_id
-         WHERE rc.booking_id = ?
-         GROUP BY rc.room_id, r.name
-         ORDER BY MIN(rc.date)",
-    )
-    .bind(booking_id)
-    .fetch_all(&mut **tx)
-    .await?;
-
-    let room_stays: Vec<serde_json::Value> = room_stay_rows
-        .iter()
-        .map(|row| {
-            let room_id: String = row.get("room_id");
-            let room_name: String = row.get("room_name");
-            let nights: i64 = row.get("nights");
-            let first_night: String = row.get("first_night");
-            json!({
-                "room_id": room_id,
-                "room_name": room_name,
-                "nights": nights,
-                "first_night": first_night,
-            })
-        })
-        .collect();
+    let room_stay_rows = room_calendar_stays_tx(tx, booking_id).await?;
 
     let existing_snapshot: Option<String> = booking.get("pricing_snapshot");
     let merged_snapshot = merge_pricing_snapshot(
         existing_snapshot.as_deref(),
         "room_stays",
-        serde_json::Value::Array(room_stays),
+        room_stays_to_json(&room_stay_rows),
     );
 
     let result = sqlx::query(

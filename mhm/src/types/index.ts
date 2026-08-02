@@ -78,7 +78,6 @@ export interface RoomChangeOption {
   name: string;
   roomType: string;
   floor: number;
-  basePrice: MoneyVnd;
   maxGuests: number;
   priceDifference: MoneyVnd;
 }

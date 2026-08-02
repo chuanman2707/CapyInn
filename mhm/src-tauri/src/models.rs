@@ -742,10 +742,16 @@ pub struct RoomChangeOption {
     pub name: String,
     pub room_type: String,
     pub floor: i32,
-    pub base_price: MoneyVnd,
     pub max_guests: i32,
     /// Chênh lệch cho toàn bộ dải ngày còn lại: giá phòng này trừ giá phòng hiện tại.
     /// Âm khi chuyển xuống hạng thấp hơn.
+    ///
+    /// Đây là số duy nhất DTO này trả về để hiển thị giá — không có
+    /// `base_price`. `rooms.base_price` không phải giá hệ thống tính tiền
+    /// (xem `pricing_queries.rs`): tiền tính theo `room_type` qua
+    /// `pricing_rules`, `base_price` chỉ là dự phòng khi loại phòng chưa có
+    /// luật giá. Đưa `base_price` ra giao diện dễ khiến lễ tân đọc một số mà
+    /// hệ thống tính tiền khách một số khác.
     pub price_difference: MoneyVnd,
 }
 

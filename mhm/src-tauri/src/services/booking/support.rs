@@ -109,6 +109,63 @@ pub(crate) fn map_room_calendar_insert_error(error: sqlx::Error, date: NaiveDate
     BookingError::from(error)
 }
 
+/// One room a booking has occupied, derived by grouping `room_calendar` rows
+/// for that booking by room and taking the earliest night as occupancy
+/// order. Feeds `pricing_snapshot.room_stays`: written wholesale by
+/// `room_change::change_room_tx` at move time, and re-derived (then
+/// truncated to the settled night count) by `stay_lifecycle::check_out_tx`
+/// right before it deletes the booking's `room_calendar` rows.
+pub struct RoomStayRow {
+    pub room_id: String,
+    pub room_name: String,
+    pub nights: i64,
+    pub first_night: String,
+}
+
+pub async fn room_calendar_stays_tx(
+    tx: &mut Transaction<'_, Sqlite>,
+    booking_id: &str,
+) -> BookingResult<Vec<RoomStayRow>> {
+    let rows = sqlx::query(
+        "SELECT rc.room_id, r.name AS room_name, COUNT(*) AS nights, MIN(rc.date) AS first_night
+         FROM room_calendar rc
+         JOIN rooms r ON r.id = rc.room_id
+         WHERE rc.booking_id = ?
+         GROUP BY rc.room_id, r.name
+         ORDER BY MIN(rc.date)",
+    )
+    .bind(booking_id)
+    .fetch_all(&mut **tx)
+    .await?;
+
+    Ok(rows
+        .into_iter()
+        .map(|row| RoomStayRow {
+            room_id: row.get("room_id"),
+            room_name: row.get("room_name"),
+            nights: row.get("nights"),
+            first_night: row.get("first_night"),
+        })
+        .collect())
+}
+
+/// Serializes `RoomStayRow`s into the JSON shape stored under
+/// `pricing_snapshot.room_stays` and read back by `invoice_generation.rs`.
+pub fn room_stays_to_json(rows: &[RoomStayRow]) -> serde_json::Value {
+    serde_json::Value::Array(
+        rows.iter()
+            .map(|row| {
+                serde_json::json!({
+                    "room_id": row.room_id,
+                    "room_name": row.room_name,
+                    "nights": row.nights,
+                    "first_night": row.first_night,
+                })
+            })
+            .collect(),
+    )
+}
+
 #[allow(dead_code)]
 pub async fn fetch_booking<F>(
     pool: &Pool<Sqlite>,

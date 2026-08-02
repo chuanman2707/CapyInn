@@ -134,6 +134,47 @@ async fn load_options_hides_a_dirty_room_when_the_guest_moves_in_tonight() {
     assert!(!ids.contains(&"R-NEW"), "không đưa khách vào phòng chưa dọn");
 }
 
+/// `load_options` only applied the vacancy filter when `moving_in_today`. But
+/// `change_room_tx` requires the new room to be `vacant` whenever the booking
+/// is ACTIVE (see the final `UPDATE rooms ... WHERE status = 'vacant'` guard),
+/// regardless of whether the first remaining night is tonight or later. An
+/// active guest whose earliest movable night is tomorrow (not tonight) could
+/// otherwise be offered an occupied room that the write then rejects.
+///
+/// Drop the 16/04 row so the only remaining night is 17/04 — `moving_in_today`
+/// is false — while the booking stays ACTIVE.
+#[tokio::test]
+async fn load_options_requires_vacant_room_for_an_active_booking_moving_later() {
+    let pool = test_pool().await;
+    seed_stay_in_progress(&pool).await;
+    sqlx::query("DELETE FROM room_calendar WHERE booking_id = 'B-OPT' AND date = '2026-04-16'")
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE rooms SET status = 'occupied' WHERE id = 'R-NEW'")
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    let options = room_change::load_options(
+        &pool,
+        "B-OPT",
+        NaiveDate::from_ymd_opt(2026, 4, 16).unwrap(),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(
+        options.from_date, "2026-04-17",
+        "đêm chuyển đầu tiên phải là 17/04, không phải hôm nay — tiền đề của test"
+    );
+    let ids: Vec<&str> = options.rooms.iter().map(|r| r.room_id.as_str()).collect();
+    assert!(
+        !ids.contains(&"R-NEW"),
+        "booking đang active thì phòng mới phải trống, dù đêm chuyển đầu tiên không phải tối nay"
+    );
+}
+
 #[tokio::test]
 async fn change_room_keeps_past_nights_on_the_old_room() {
     let pool = test_pool().await;
@@ -680,8 +721,19 @@ async fn invoice_splits_lines_per_room_after_a_move() {
     assert!(labels.iter().any(|l| l.contains("R-OLD") && l.contains("1 đêm")));
     assert!(labels.iter().any(|l| l.contains("R-NEW") && l.contains("2 đêm")));
 
-    let sum: i64 = invoice.pricing_breakdown.iter().map(|l| l.amount).sum();
-    assert_eq!(sum, invoice.subtotal, "tổng các dòng phải khớp subtotal");
+    // breakdown[0] is the settlement line (Finding 2 keeps it alongside the
+    // room lines, not replaced by them) — only the "Phòng " lines need to sum
+    // to subtotal.
+    let room_lines_sum: i64 = invoice
+        .pricing_breakdown
+        .iter()
+        .filter(|l| l.label.starts_with("Phòng "))
+        .map(|l| l.amount)
+        .sum();
+    assert_eq!(
+        room_lines_sum, invoice.subtotal,
+        "tổng các dòng phòng phải khớp subtotal"
+    );
 }
 
 #[tokio::test]
@@ -767,8 +819,26 @@ async fn move_then_real_checkout_still_splits_invoice_lines() {
         "labels: {labels:?}"
     );
 
-    let sum: i64 = invoice.pricing_breakdown.iter().map(|l| l.amount).sum();
-    assert_eq!(sum, invoice.subtotal, "tổng các dòng phải khớp subtotal");
+    let room_lines_sum: i64 = invoice
+        .pricing_breakdown
+        .iter()
+        .filter(|l| l.label.starts_with("Phòng "))
+        .map(|l| l.amount)
+        .sum();
+    assert_eq!(
+        room_lines_sum, invoice.subtotal,
+        "tổng các dòng phòng phải khớp subtotal"
+    );
+
+    // Finding 2: the settlement line ("Thanh toán theo số đêm đã đặt") must
+    // survive the split, not get silently dropped when the invoice also
+    // breaks down by room — this is exactly the booking whose settlement is
+    // least obvious (moved mid-stay), so losing the line that explains the
+    // total is worst here.
+    assert_eq!(
+        invoice.pricing_breakdown[0].label, "Thanh toán theo số đêm đã đặt",
+        "dòng quyết toán không được biến mất khi hoá đơn tách theo phòng: {labels:?}"
+    );
 
     // checkout_settlement must survive the pricing_snapshot merge alongside
     // room_stays — revenue_queries.rs reads it via json_extract and those
@@ -808,6 +878,175 @@ async fn move_then_real_checkout_still_splits_invoice_lines() {
     );
 }
 
+/// Finding 1(a): `change_room_tx` snapshots `room_stays` at move time, but
+/// nothing refreshes it afterwards. `extend_stay_tx` inserts new
+/// `room_calendar` rows on the guest's *current* room without touching
+/// `pricing_snapshot` — so a guest who moves and then extends ends up with a
+/// snapshot that undercounts the current room's nights while `room_calendar`
+/// (still intact — checkout has not run) holds the true split. The invoice
+/// must prefer `room_calendar` over the stale snapshot whenever the calendar
+/// still has rows for this booking.
+#[tokio::test]
+async fn move_then_extend_reflects_the_real_split_not_the_stale_snapshot() {
+    let pool = test_pool().await;
+    seed_stay_in_progress(&pool).await;
+
+    room_change::change_room(
+        &pool,
+        "B-OPT",
+        "R-NEW",
+        true,
+        None,
+        NaiveDate::from_ymd_opt(2026, 4, 16).unwrap(),
+    )
+    .await
+    .unwrap();
+    // Snapshot right after the move: R-OLD × 1, R-NEW × 2 (3 nights total).
+
+    // Extend twice — both extra nights land on R-NEW, the current room.
+    // change_room_tx has no way to know about these; only room_calendar does.
+    stay_lifecycle::extend_stay(&pool, "B-OPT").await.unwrap();
+    stay_lifecycle::extend_stay(&pool, "B-OPT").await.unwrap();
+
+    let mut tx = pool.begin().await.unwrap();
+    let invoice = invoice_generation::generate_invoice_tx(&mut tx, "B-OPT")
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
+
+    let labels: Vec<String> = invoice
+        .pricing_breakdown
+        .iter()
+        .map(|line| line.label.clone())
+        .collect();
+    assert!(
+        labels.iter().any(|l| l.contains("R-OLD") && l.contains("1 đêm")),
+        "labels: {labels:?}"
+    );
+    assert!(
+        labels.iter().any(|l| l.contains("R-NEW") && l.contains("4 đêm")),
+        "phòng hiện tại phải cộng dồn cả 2 đêm gia hạn (2 gốc + 2 gia hạn = 4), \
+         không dừng lại ở snapshot 2 đêm chụp lúc chuyển phòng: {labels:?}"
+    );
+
+    let room_lines_sum: i64 = invoice
+        .pricing_breakdown
+        .iter()
+        .filter(|l| l.label.starts_with("Phòng "))
+        .map(|l| l.amount)
+        .sum();
+    assert_eq!(
+        room_lines_sum, invoice.subtotal,
+        "tổng các dòng phòng phải khớp subtotal"
+    );
+}
+
+/// Finding 1(b): the snapshot written at move time assumes the guest stays
+/// every remaining booked night. An early checkout settles fewer nights than
+/// that — `check_out_tx` must truncate `room_stays` to `settled_nights`,
+/// walking rooms in occupancy order, not leave the move-time snapshot
+/// (which oversells the new room) as the post-checkout source of truth.
+///
+/// 1 night stayed on R-OLD, 2 remaining nights moved to R-NEW (snapshot:
+/// R-OLD × 1, R-NEW × 2 ⇒ 3). Guest actually leaves after 2 real nights
+/// (ActualNights settlement, checkout 2 days after check-in) ⇒ settled_nights
+/// = 2. Truncated: R-OLD keeps its 1 (fits under the 2-night budget), R-NEW
+/// is capped to the 1 night left in the budget — not the 2 nights the stale
+/// snapshot would still claim.
+#[tokio::test]
+async fn move_then_early_checkout_truncates_room_stays_to_settled_nights() {
+    let pool = test_pool().await;
+    seed_stay_in_progress(&pool).await;
+
+    room_change::change_room(
+        &pool,
+        "B-OPT",
+        "R-NEW",
+        true,
+        None,
+        NaiveDate::from_ymd_opt(2026, 4, 16).unwrap(),
+    )
+    .await
+    .unwrap();
+
+    let checkout_at = Local
+        .with_ymd_and_hms(2026, 4, 17, 9, 0, 0)
+        .single()
+        .unwrap();
+    let preview = stay_lifecycle::preview_checkout_settlement_at(
+        &pool,
+        CheckoutSettlementPreviewRequest {
+            booking_id: "B-OPT".to_string(),
+            settlement_mode: CheckoutSettlementMode::ActualNights,
+        },
+        checkout_at,
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        preview.settled_nights, 2,
+        "tiền đề của test: khách rời sau đúng 2 đêm thật"
+    );
+
+    stay_lifecycle::check_out_at(
+        &pool,
+        checkout_req(
+            "B-OPT",
+            CheckoutSettlementMode::ActualNights,
+            preview.recommended_total,
+        ),
+        checkout_at,
+    )
+    .await
+    .unwrap();
+
+    let mut tx = pool.begin().await.unwrap();
+    let invoice = invoice_generation::generate_invoice_tx(&mut tx, "B-OPT")
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
+
+    let labels: Vec<String> = invoice
+        .pricing_breakdown
+        .iter()
+        .map(|line| line.label.clone())
+        .collect();
+    assert!(
+        labels.iter().any(|l| l.contains("R-OLD") && l.contains("1 đêm")),
+        "labels: {labels:?}"
+    );
+    assert!(
+        labels.iter().any(|l| l.contains("R-NEW") && l.contains("1 đêm")),
+        "R-NEW phải bị cắt xuống 1 đêm (ngân sách 2 đêm settled trừ 1 đêm R-OLD đã dùng), \
+         không phải 2 đêm như snapshot lúc chuyển phòng còn nhớ: {labels:?}"
+    );
+    assert!(
+        !labels.iter().any(|l| l.contains("R-NEW") && l.contains("2 đêm")),
+        "labels: {labels:?}"
+    );
+
+    let room_lines_sum: i64 = invoice
+        .pricing_breakdown
+        .iter()
+        .filter(|l| l.label.starts_with("Phòng "))
+        .map(|l| l.amount)
+        .sum();
+    assert_eq!(
+        room_lines_sum, invoice.subtotal,
+        "tổng các dòng phòng phải khớp subtotal"
+    );
+
+    // The checkout_settlement key must still be intact and still readable by
+    // revenue_queries.rs — the room_stays truncation must merge, not clobber.
+    let mode: Option<String> = sqlx::query_scalar(
+        "SELECT json_extract(pricing_snapshot, '$.checkout_settlement.mode') FROM bookings WHERE id = 'B-OPT'",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(mode.as_deref(), Some("actual_nights"));
+}
+
 /// The existing split test (750.000 / 3 nights = 250.000 exactly) never
 /// exercises the remainder-on-last-line branch. Pick a subtotal that does
 /// not divide evenly across the split nights so integer truncation would
@@ -841,13 +1080,20 @@ async fn invoice_split_remainder_lands_on_last_line_for_non_divisible_subtotal()
         .unwrap();
     tx.commit().await.unwrap();
 
-    assert_eq!(invoice.pricing_breakdown.len(), 2);
-    assert_eq!(invoice.pricing_breakdown[0].amount, 33_333);
-    assert_eq!(invoice.pricing_breakdown[1].amount, 66_667);
+    // breakdown[0] is the settlement line (Finding 2 keeps it, not replaced
+    // by the room split); the two room lines follow it.
+    assert_eq!(invoice.pricing_breakdown.len(), 3);
+    assert_eq!(invoice.pricing_breakdown[1].amount, 33_333);
+    assert_eq!(invoice.pricing_breakdown[2].amount, 66_667);
 
-    let sum: i64 = invoice.pricing_breakdown.iter().map(|l| l.amount).sum();
+    let room_lines_sum: i64 = invoice
+        .pricing_breakdown
+        .iter()
+        .filter(|l| l.label.starts_with("Phòng "))
+        .map(|l| l.amount)
+        .sum();
     assert_eq!(
-        sum, 100_000,
+        room_lines_sum, 100_000,
         "lines phải cộng đúng bằng subtotal dù chia không chẵn"
     );
 }

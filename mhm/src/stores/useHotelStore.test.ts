@@ -556,7 +556,6 @@ describe("useHotelStore room change", () => {
           name: "Phòng 2B",
           roomType: "Standard",
           floor: 2,
-          basePrice: 400000,
           maxGuests: 2,
           priceDifference: -150000,
         },

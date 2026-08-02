@@ -5,9 +5,24 @@ import { Button } from "@/components/ui/button";
 import { useHotelStore } from "@/stores/useHotelStore";
 import { formatAppError } from "@/lib/appError";
 import { getRoomTypeLabel } from "@/lib/constants";
-import { fmtDateShort, fmtMoney, fmtNumber } from "@/lib/format";
+import { fmtDateShort, fmtNumber } from "@/lib/format";
 import { toast } from "sonner";
 import type { RoomChangeOptions } from "@/types";
+
+/**
+ * `rooms.base_price` is not a price the system charges (see
+ * `pricing_queries.rs`): the charge resolves by `room_type` through
+ * `pricing_rules`, and `base_price` is only a per-room fallback for a type
+ * with no rule. Showing it in the picker risks the front desk reading one
+ * number while the guest is charged another. `priceDifference` is the number
+ * that actually matches what `change_room` will charge, so that is what the
+ * row shows instead — same "+X" / "−X" / "không đổi tiền" vocabulary already
+ * used below once a room is selected.
+ */
+function formatPriceDifference(value: number): string {
+  if (value === 0) return "không đổi tiền";
+  return `${value > 0 ? "+" : "−"}${fmtNumber(Math.abs(value))}đ`;
+}
 
 /**
  * Sheet dùng chung cho mọi lối vào chuyển phòng (Task 9). Một booking có thể
@@ -152,7 +167,8 @@ export function RoomChangeSheet() {
                             <span className="font-semibold text-sm text-slate-800">{room.name}</span>
                             <p className="text-xs text-slate-500 mt-0.5">
                               {getRoomTypeLabel(room.roomType)} · Tầng {room.floor} ·{" "}
-                              {fmtMoney(room.basePrice)}/đêm · tối đa {room.maxGuests} khách
+                              {formatPriceDifference(room.priceDifference)} · tối đa{" "}
+                              {room.maxGuests} khách
                             </p>
                           </button>
                         </li>

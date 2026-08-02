@@ -29,7 +29,8 @@ use super::{
     support::{
         begin_tx, ensure_one_row_affected, insert_room_calendar_rows, invalid_state_transition,
         lookup_booking_room_id, map_room_calendar_insert_error, merge_pricing_snapshot,
-        parse_booking_datetime, read_money_vnd_or_zero, validate_non_negative_booking_money,
+        parse_booking_datetime, read_money_vnd_or_zero, room_calendar_stays_tx, room_stays_to_json,
+        validate_non_negative_booking_money, RoomStayRow,
     },
 };
 
@@ -627,6 +628,37 @@ fn checkout_settlement_value(
     })
 }
 
+/// Caps the cumulative night count in `rows` (already ordered by occupancy —
+/// `room_calendar_stays_tx` orders by `MIN(date)`) to `settled_nights`,
+/// walking rooms in that order. A room's own night count can only shrink,
+/// never grow: the first room keeps up to its full count, the next room gets
+/// whatever budget is left, and any room past the point the budget hits zero
+/// is dropped entirely — the guest never reached it under the nights actually
+/// being settled.
+fn truncate_room_stays_to_settled_nights(
+    rows: &[RoomStayRow],
+    settled_nights: i32,
+) -> Vec<RoomStayRow> {
+    let mut remaining = i64::from(settled_nights.max(0));
+    let mut truncated = Vec::new();
+
+    for row in rows {
+        if remaining <= 0 {
+            break;
+        }
+        let nights_here = row.nights.min(remaining);
+        truncated.push(RoomStayRow {
+            room_id: row.room_id.clone(),
+            room_name: row.room_name.clone(),
+            nights: nights_here,
+            first_night: row.first_night.clone(),
+        });
+        remaining -= nights_here;
+    }
+
+    truncated
+}
+
 async fn preview_checkout_settlement_tx(
     tx: &mut Transaction<'_, Sqlite>,
     req: &CheckoutSettlementPreviewRequest,
@@ -871,6 +903,23 @@ async fn check_out_tx(
         settlement.pricing_snapshot.as_deref(),
         "checkout_settlement",
         settlement_value,
+    );
+
+    // Re-derive `room_stays` from `room_calendar` — the live truth — before
+    // the DELETE below wipes it. The snapshot `change_room_tx` wrote at move
+    // time assumed the guest would stay every remaining *booked* night;
+    // settlement may charge fewer than that (early checkout), so truncate
+    // the per-room split down to `settled_nights`, walking rooms in
+    // occupancy order and capping the running total. Reuses the same
+    // `merge_pricing_snapshot` helper as `checkout_settlement` above — no
+    // second snapshot writer.
+    let room_stays_from_calendar = room_calendar_stays_tx(tx, &req.booking_id).await?;
+    let truncated_room_stays =
+        truncate_room_stays_to_settled_nights(&room_stays_from_calendar, settlement.settled_nights);
+    let pricing_snapshot = merge_pricing_snapshot(
+        Some(&pricing_snapshot),
+        "room_stays",
+        room_stays_to_json(&truncated_room_stays),
     );
 
     let result = sqlx::query(

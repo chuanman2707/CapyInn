@@ -126,60 +126,64 @@ pub async fn generate_invoice_tx(
     let subtotal = total_price;
     let balance_due = (total_price - paid_amount).max(0);
 
-    // If the booking moved rooms mid-stay, replace the single combined room
-    // line with one line per room actually occupied, grouped by the night the
-    // guest first slept there, in occupancy order.
+    // If the booking moved rooms mid-stay, append one line per room actually
+    // occupied to the settlement line already in `breakdown`, grouped by the
+    // night the guest first slept there, in occupancy order.
     //
     // Resolution order for the (room name, nights) pairs:
-    //  1. `pricing_snapshot.room_stays`, written by `change_room_tx`
-    //     (room_change.rs) at move time — authoritative once present and
-    //     non-empty, and the ONLY source left once the guest has checked out:
-    //     `check_out_tx` (stay_lifecycle.rs) deletes every `room_calendar`
-    //     row for the booking, so a booking invoiced after checkout has
-    //     nothing left in `room_calendar` to group.
-    //  2. `room_calendar`, grouped by room — still correct for a booking
-    //     invoiced while the guest is in-house (checkout hasn't run yet).
+    //  1. `room_calendar`, grouped by room — the LIVE truth whenever this
+    //     booking still has rows there, i.e. checkout has not run yet.
+    //     `pricing_snapshot.room_stays` is a snapshot taken at move time and
+    //     nothing refreshes it afterwards: `extend_stay_tx`
+    //     (stay_lifecycle.rs) inserts new `room_calendar` rows on the
+    //     guest's current room without touching the snapshot, so after a
+    //     move-then-extend the snapshot undercounts the current room while
+    //     `room_calendar` has the real count. Preferring the calendar here
+    //     fixes that.
+    //  2. `pricing_snapshot.room_stays`, written by `change_room_tx`
+    //     (room_change.rs) at move time and re-derived (then truncated to
+    //     the settled night count) by `check_out_tx` (stay_lifecycle.rs)
+    //     immediately before it deletes the booking's `room_calendar` rows
+    //     — the ONLY source left once the guest has checked out.
     //  3. Neither present ⇒ the pre-existing single line built above.
-    let room_stays_from_snapshot: Vec<(String, i64)> = snapshot_value
-        .as_ref()
-        .and_then(|value| value.get("room_stays"))
-        .and_then(|value| value.as_array())
-        .map(|entries| {
-            entries
-                .iter()
-                .filter_map(|entry| {
-                    let room_name = entry.get("room_name")?.as_str()?.to_string();
-                    let nights = entry.get("nights")?.as_i64()?;
-                    Some((room_name, nights))
-                })
-                .collect::<Vec<(String, i64)>>()
-        })
-        .unwrap_or_default();
+    let room_entries_from_calendar: Vec<(String, i64)> = sqlx::query(
+        "SELECT rc.room_id, r.name AS room_name, COUNT(*) AS nights
+         FROM room_calendar rc
+         JOIN rooms r ON r.id = rc.room_id
+         WHERE rc.booking_id = ?
+         GROUP BY rc.room_id, r.name
+         ORDER BY MIN(rc.date)",
+    )
+    .bind(booking_id)
+    .fetch_all(&mut **tx)
+    .await
+    .map_err(|e| e.to_string())?
+    .into_iter()
+    .map(|row| {
+        let room_name: String = row.get("room_name");
+        let nights: i64 = row.get("nights");
+        (room_name, nights)
+    })
+    .collect();
 
-    let room_entries: Vec<(String, i64)> = if !room_stays_from_snapshot.is_empty() {
-        room_stays_from_snapshot
+    let room_entries: Vec<(String, i64)> = if !room_entries_from_calendar.is_empty() {
+        room_entries_from_calendar
     } else {
-        let room_nights = sqlx::query(
-            "SELECT rc.room_id, r.name AS room_name, COUNT(*) AS nights
-             FROM room_calendar rc
-             JOIN rooms r ON r.id = rc.room_id
-             WHERE rc.booking_id = ?
-             GROUP BY rc.room_id, r.name
-             ORDER BY MIN(rc.date)",
-        )
-        .bind(booking_id)
-        .fetch_all(&mut **tx)
-        .await
-        .map_err(|e| e.to_string())?;
-
-        room_nights
-            .into_iter()
-            .map(|row| {
-                let room_name: String = row.get("room_name");
-                let nights: i64 = row.get("nights");
-                (room_name, nights)
+        snapshot_value
+            .as_ref()
+            .and_then(|value| value.get("room_stays"))
+            .and_then(|value| value.as_array())
+            .map(|entries| {
+                entries
+                    .iter()
+                    .filter_map(|entry| {
+                        let room_name = entry.get("room_name")?.as_str()?.to_string();
+                        let nights = entry.get("nights")?.as_i64()?;
+                        Some((room_name, nights))
+                    })
+                    .collect::<Vec<(String, i64)>>()
             })
-            .collect()
+            .unwrap_or_default()
     };
 
     if room_entries.len() > 1 {
@@ -201,12 +205,11 @@ pub async fn generate_invoice_tx(
                     amount,
                 });
             }
-            // Preserve any non-room lines already present (surcharges, etc.):
-            // only the original single combined room line is being replaced.
-            let extra_lines: Vec<crate::pricing::PricingLine> =
-                breakdown.into_iter().skip(1).collect();
-            breakdown = room_lines;
-            breakdown.extend(extra_lines);
+            // Keep the settlement line (breakdown[0]) — it explains how the
+            // total was reached, and that explanation matters most exactly
+            // for a moved (possibly early-checked-out) booking, whose total
+            // is the least obvious to read at a glance. Room lines follow it.
+            breakdown.extend(room_lines);
         }
     }
 

@@ -45,7 +45,6 @@ const baseOptions: RoomChangeOptions = {
       name: "Phòng 2A",
       roomType: "deluxe",
       floor: 2,
-      basePrice: 500000,
       maxGuests: 4,
       priceDifference: 500000,
     },
@@ -107,7 +106,88 @@ describe("RoomChangeSheet", () => {
   it("hiện chênh lệch sau khi chọn phòng", async () => {
     renderSheet(baseOptions);
     await userEvent.click(await screen.findByText("Phòng 2A"));
-    expect(screen.getByText(/\+500\.000/)).toBeInTheDocument();
+    // Chọn dòng có hậu tố "so với phòng cũ" — dòng phòng trong danh sách cũng
+    // hiện chênh lệch (không hậu tố) nên chỉ khớp regex trần sẽ khớp cả hai.
+    expect(screen.getByText(/\+500\.000đ so với phòng cũ/)).toBeInTheDocument();
+  });
+
+  it("dòng phòng hiện chênh lệch giá, không phải basePrice", async () => {
+    renderSheet(baseOptions);
+    expect(await screen.findByText(/\+500\.000đ/)).toBeInTheDocument();
+  });
+
+  it("dòng phòng hiện dấu trừ khi phòng rẻ hơn phòng hiện tại", async () => {
+    renderSheet({
+      ...baseOptions,
+      rooms: [
+        {
+          roomId: "3C",
+          name: "Phòng 3C",
+          roomType: "standard",
+          floor: 3,
+          maxGuests: 2,
+          priceDifference: -50000,
+        },
+      ],
+    });
+    expect(await screen.findByText(/−50\.000đ/)).toBeInTheDocument();
+  });
+
+  it("dòng phòng hiện 'không đổi tiền' khi chênh lệch bằng 0", async () => {
+    renderSheet({
+      ...baseOptions,
+      rooms: [
+        {
+          roomId: "4D",
+          name: "Phòng 4D",
+          roomType: "deluxe",
+          floor: 4,
+          maxGuests: 2,
+          priceDifference: 0,
+        },
+      ],
+    });
+    await screen.findByText("Phòng 4D");
+    expect(screen.getByText(/không đổi tiền/i)).toBeInTheDocument();
+  });
+
+  it("nút xác nhận hiện dấu trừ khi chọn phòng rẻ hơn", async () => {
+    renderSheet({
+      ...baseOptions,
+      rooms: [
+        {
+          roomId: "3C",
+          name: "Phòng 3C",
+          roomType: "standard",
+          floor: 3,
+          maxGuests: 2,
+          priceDifference: -50000,
+        },
+      ],
+    });
+    await userEvent.click(await screen.findByText("Phòng 3C"));
+    const confirmButton = screen.getByRole("button", { name: /chuyển sang phòng 3c/i });
+    expect(confirmButton).toHaveTextContent(/50\.000/);
+    expect(confirmButton).toHaveTextContent(/trừ/);
+  });
+
+  it("nút xác nhận hiện 'không đổi tiền' khi phòng chọn không chênh lệch", async () => {
+    renderSheet({
+      ...baseOptions,
+      rooms: [
+        {
+          roomId: "4D",
+          name: "Phòng 4D",
+          roomType: "deluxe",
+          floor: 4,
+          maxGuests: 2,
+          priceDifference: 0,
+        },
+      ],
+    });
+    await userEvent.click(await screen.findByText("Phòng 4D"));
+    const confirmButton = screen.getByRole("button", { name: /chuyển sang phòng 4d/i });
+    expect(confirmButton).toHaveTextContent(/không đổi tiền/i);
   });
 
   it("gửi keepPrice true khi chọn giữ nguyên giá cũ", async () => {
@@ -150,7 +230,6 @@ describe("RoomChangeSheet", () => {
             name: "Phòng 3C",
             roomType: "standard",
             floor: 3,
-            basePrice: 300000,
             maxGuests: 2,
             priceDifference: -100000,
           },
