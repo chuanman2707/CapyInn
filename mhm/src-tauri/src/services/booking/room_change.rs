@@ -31,7 +31,7 @@ use super::{
     stay_lifecycle::fetch_booking_tx,
     support::{
         begin_tx, ensure_one_row_affected, invalid_state_transition, lookup_booking_room_id,
-        read_money_vnd_or_zero,
+        merge_pricing_snapshot, read_money_vnd_or_zero,
     },
 };
 
@@ -239,6 +239,12 @@ fn date_range_for_pricing(from_date: &str, to_date: &str) -> (String, String) {
 /// `date >= today` mới chuyển. Việc này giữ báo cáo công suất và hóa đơn đúng
 /// sự thật.
 ///
+/// Sau khi chuyển, hàm còn nhóm lại toàn bộ `room_calendar` của booking theo
+/// phòng và ghi mảng đó vào `bookings.pricing_snapshot.room_stays` (merge,
+/// không ghi đè các khoá khác). `check_out_tx` (stay_lifecycle.rs) xoá sạch
+/// `room_calendar` khi trả phòng, nên đây là nguồn sự thật duy nhất còn lại
+/// để hóa đơn tách dòng theo phòng sau khi khách đã check-out.
+///
 /// Khi `keep_price == false`, khoản chênh lệch giữa giá phòng mới và phòng cũ
 /// cho các đêm còn lại (cùng khoảng ngày nên các hệ số cuối tuần/lễ tự triệt
 /// tiêu, chỉ còn lại phần chênh theo hạng phòng) được cộng vào `total_price` và
@@ -256,14 +262,13 @@ pub(super) async fn change_room_tx(
 ) -> BookingResult<()> {
     let today_str = today.format("%Y-%m-%d").to_string();
 
-    let booking =
-        sqlx::query("SELECT room_id, status, notes, total_price FROM bookings WHERE id = ?")
-            .bind(booking_id)
-            .fetch_optional(&mut **tx)
-            .await?
-            .ok_or_else(|| {
-                BookingError::not_found(format!("Không tìm thấy booking {booking_id}"))
-            })?;
+    let booking = sqlx::query(
+        "SELECT room_id, status, notes, total_price, pricing_snapshot FROM bookings WHERE id = ?",
+    )
+    .bind(booking_id)
+    .fetch_optional(&mut **tx)
+    .await?
+    .ok_or_else(|| BookingError::not_found(format!("Không tìm thấy booking {booking_id}")))?;
 
     let booking_status: String = booking.get("status");
     if booking_status != status::booking::ACTIVE && booking_status != status::booking::BOOKED {
@@ -424,11 +429,54 @@ pub(super) async fn change_room_tx(
         _ => note_line,
     };
 
+    // Snapshot which rooms this booking actually occupied, in occupancy
+    // order, so the invoice can split its lines correctly even after
+    // check-out deletes `room_calendar` (stay_lifecycle::check_out_tx).
+    // room_calendar was just updated above, so this reflects the post-move
+    // truth. Recomputed from scratch (not appended) so a guest who moves
+    // twice ends up with three correct entries, not an append-only mess.
+    let room_stay_rows = sqlx::query(
+        "SELECT rc.room_id, r.name AS room_name, COUNT(*) AS nights, MIN(rc.date) AS first_night
+         FROM room_calendar rc
+         JOIN rooms r ON r.id = rc.room_id
+         WHERE rc.booking_id = ?
+         GROUP BY rc.room_id, r.name
+         ORDER BY MIN(rc.date)",
+    )
+    .bind(booking_id)
+    .fetch_all(&mut **tx)
+    .await?;
+
+    let room_stays: Vec<serde_json::Value> = room_stay_rows
+        .iter()
+        .map(|row| {
+            let room_id: String = row.get("room_id");
+            let room_name: String = row.get("room_name");
+            let nights: i64 = row.get("nights");
+            let first_night: String = row.get("first_night");
+            json!({
+                "room_id": room_id,
+                "room_name": room_name,
+                "nights": nights,
+                "first_night": first_night,
+            })
+        })
+        .collect();
+
+    let existing_snapshot: Option<String> = booking.get("pricing_snapshot");
+    let merged_snapshot = merge_pricing_snapshot(
+        existing_snapshot.as_deref(),
+        "room_stays",
+        serde_json::Value::Array(room_stays),
+    );
+
     let result = sqlx::query(
-        "UPDATE bookings SET room_id = ?, notes = ? WHERE id = ? AND status = ? AND room_id = ?",
+        "UPDATE bookings SET room_id = ?, notes = ?, pricing_snapshot = ?
+         WHERE id = ? AND status = ? AND room_id = ?",
     )
     .bind(new_room_id)
     .bind(&merged_notes)
+    .bind(&merged_snapshot)
     .bind(booking_id)
     .bind(&booking_status)
     .bind(&old_room_id)

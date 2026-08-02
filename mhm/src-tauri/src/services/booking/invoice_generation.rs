@@ -63,10 +63,12 @@ pub async fn generate_invoice_tx(
     let deposit_amount = get_optional_money_vnd(&b, "deposit_amount").unwrap_or(0);
     let notes: Option<String> = b.get("notes");
     let pricing_snapshot: Option<String> = b.get("pricing_snapshot");
-
-    let checkout_settlement = pricing_snapshot
+    let snapshot_value: Option<serde_json::Value> = pricing_snapshot
         .as_deref()
-        .and_then(|raw| serde_json::from_str::<serde_json::Value>(raw).ok())
+        .and_then(|raw| serde_json::from_str::<serde_json::Value>(raw).ok());
+
+    let checkout_settlement = snapshot_value
+        .as_ref()
         .and_then(|value| value.get("checkout_settlement").cloned());
 
     let settlement_label = checkout_settlement
@@ -126,31 +128,68 @@ pub async fn generate_invoice_tx(
 
     // If the booking moved rooms mid-stay, replace the single combined room
     // line with one line per room actually occupied, grouped by the night the
-    // guest first slept there. Nights slept before a move stay on the old
-    // room in `room_calendar` (see room_change service), so this query is the
-    // source of truth for "which rooms, how many nights each, in what order".
-    let room_nights = sqlx::query(
-        "SELECT rc.room_id, r.name AS room_name, COUNT(*) AS nights
-         FROM room_calendar rc
-         JOIN rooms r ON r.id = rc.room_id
-         WHERE rc.booking_id = ?
-         GROUP BY rc.room_id, r.name
-         ORDER BY MIN(rc.date)",
-    )
-    .bind(booking_id)
-    .fetch_all(&mut **tx)
-    .await
-    .map_err(|e| e.to_string())?;
+    // guest first slept there, in occupancy order.
+    //
+    // Resolution order for the (room name, nights) pairs:
+    //  1. `pricing_snapshot.room_stays`, written by `change_room_tx`
+    //     (room_change.rs) at move time — authoritative once present and
+    //     non-empty, and the ONLY source left once the guest has checked out:
+    //     `check_out_tx` (stay_lifecycle.rs) deletes every `room_calendar`
+    //     row for the booking, so a booking invoiced after checkout has
+    //     nothing left in `room_calendar` to group.
+    //  2. `room_calendar`, grouped by room — still correct for a booking
+    //     invoiced while the guest is in-house (checkout hasn't run yet).
+    //  3. Neither present ⇒ the pre-existing single line built above.
+    let room_stays_from_snapshot: Vec<(String, i64)> = snapshot_value
+        .as_ref()
+        .and_then(|value| value.get("room_stays"))
+        .and_then(|value| value.as_array())
+        .map(|entries| {
+            entries
+                .iter()
+                .filter_map(|entry| {
+                    let room_name = entry.get("room_name")?.as_str()?.to_string();
+                    let nights = entry.get("nights")?.as_i64()?;
+                    Some((room_name, nights))
+                })
+                .collect::<Vec<(String, i64)>>()
+        })
+        .unwrap_or_default();
 
-    if room_nights.len() > 1 {
-        let total_nights: i64 = room_nights.iter().map(|r| r.get::<i64, _>("nights")).sum();
+    let room_entries: Vec<(String, i64)> = if !room_stays_from_snapshot.is_empty() {
+        room_stays_from_snapshot
+    } else {
+        let room_nights = sqlx::query(
+            "SELECT rc.room_id, r.name AS room_name, COUNT(*) AS nights
+             FROM room_calendar rc
+             JOIN rooms r ON r.id = rc.room_id
+             WHERE rc.booking_id = ?
+             GROUP BY rc.room_id, r.name
+             ORDER BY MIN(rc.date)",
+        )
+        .bind(booking_id)
+        .fetch_all(&mut **tx)
+        .await
+        .map_err(|e| e.to_string())?;
+
+        room_nights
+            .into_iter()
+            .map(|row| {
+                let room_name: String = row.get("room_name");
+                let nights: i64 = row.get("nights");
+                (room_name, nights)
+            })
+            .collect()
+    };
+
+    if room_entries.len() > 1 {
+        let total_nights: i64 = room_entries.iter().map(|(_, nights)| nights).sum();
         if total_nights > 0 {
             let mut allocated: crate::money::MoneyVnd = 0;
-            let mut room_lines = Vec::with_capacity(room_nights.len());
-            for (index, row) in room_nights.iter().enumerate() {
-                let room_name: String = row.get("room_name");
-                let nights_here: i64 = row.get("nights");
-                let amount = if index == room_nights.len() - 1 {
+            let last_index = room_entries.len() - 1;
+            let mut room_lines = Vec::with_capacity(room_entries.len());
+            for (index, (room_name, nights_here)) in room_entries.into_iter().enumerate() {
+                let amount = if index == last_index {
                     subtotal - allocated
                 } else {
                     let share = subtotal * nights_here / total_nights;

@@ -701,3 +701,153 @@ async fn invoice_keeps_one_line_when_no_move_happened() {
         "chưa đổi phòng thì hoá đơn chỉ có một dòng, đúng như trước đây"
     );
 }
+
+/// The decisive regression test: `check_out_tx` deletes every `room_calendar`
+/// row for the booking (stay_lifecycle.rs), and in the real production
+/// database invoices are always generated *after* checkout — so by the time
+/// `generate_invoice_tx` runs, `room_calendar` has nothing left to group.
+/// The split must come from `bookings.pricing_snapshot.room_stays`, written
+/// by `change_room_tx` at move time, not from `room_calendar`.
+#[tokio::test]
+async fn move_then_real_checkout_still_splits_invoice_lines() {
+    let pool = test_pool().await;
+    seed_stay_in_progress(&pool).await;
+
+    room_change::change_room(
+        &pool,
+        "B-OPT",
+        "R-NEW",
+        true,
+        None,
+        NaiveDate::from_ymd_opt(2026, 4, 16).unwrap(),
+    )
+    .await
+    .unwrap();
+
+    // Real checkout path, not a direct SQL fixture — this is what production
+    // actually runs, and it wipes room_calendar as a side effect.
+    stay_lifecycle::check_out(
+        &pool,
+        checkout_req("B-OPT", CheckoutSettlementMode::BookedNights, 750_000),
+    )
+    .await
+    .unwrap();
+
+    let calendar_rows: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM room_calendar WHERE booking_id = 'B-OPT'")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(
+        calendar_rows, 0,
+        "checkout phải xoá hết room_calendar — nếu còn dòng thì test này không còn đại diện cho path thật"
+    );
+
+    let mut tx = pool.begin().await.unwrap();
+    let invoice = invoice_generation::generate_invoice_tx(&mut tx, "B-OPT")
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
+
+    let labels: Vec<String> = invoice
+        .pricing_breakdown
+        .iter()
+        .map(|line| line.label.clone())
+        .collect();
+    assert!(
+        labels
+            .iter()
+            .any(|l| l.contains("R-OLD") && l.contains("1 đêm")),
+        "labels: {labels:?}"
+    );
+    assert!(
+        labels
+            .iter()
+            .any(|l| l.contains("R-NEW") && l.contains("2 đêm")),
+        "labels: {labels:?}"
+    );
+
+    let sum: i64 = invoice.pricing_breakdown.iter().map(|l| l.amount).sum();
+    assert_eq!(sum, invoice.subtotal, "tổng các dòng phải khớp subtotal");
+
+    // checkout_settlement must survive the pricing_snapshot merge alongside
+    // room_stays — revenue_queries.rs reads it via json_extract and those
+    // paths must keep resolving.
+    let snapshot: String =
+        sqlx::query_scalar("SELECT pricing_snapshot FROM bookings WHERE id = 'B-OPT'")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    let value: serde_json::Value = serde_json::from_str(&snapshot).unwrap();
+    assert!(
+        value.get("room_stays").is_some(),
+        "room_stays phải sống sót qua checkout: {value}"
+    );
+    assert!(
+        value.get("checkout_settlement").is_some(),
+        "checkout_settlement phải còn nguyên: {value}"
+    );
+
+    let mode: Option<String> = sqlx::query_scalar(
+        "SELECT json_extract(pricing_snapshot, '$.checkout_settlement.mode') FROM bookings WHERE id = 'B-OPT'",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(mode.as_deref(), Some("booked_nights"));
+
+    let reporting_checkout: Option<String> = sqlx::query_scalar(
+        "SELECT json_extract(pricing_snapshot, '$.checkout_settlement.reporting_checkout') FROM bookings WHERE id = 'B-OPT'",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert!(
+        reporting_checkout.is_some(),
+        "revenue_queries.rs đọc path này qua json_extract, phải còn resolve được"
+    );
+}
+
+/// The existing split test (750.000 / 3 nights = 250.000 exactly) never
+/// exercises the remainder-on-last-line branch. Pick a subtotal that does
+/// not divide evenly across the split nights so integer truncation would
+/// silently drop money if the remainder handling were wrong.
+#[tokio::test]
+async fn invoice_split_remainder_lands_on_last_line_for_non_divisible_subtotal() {
+    let pool = test_pool().await;
+    seed_stay_in_progress(&pool).await;
+
+    room_change::change_room(
+        &pool,
+        "B-OPT",
+        "R-NEW",
+        true,
+        None,
+        NaiveDate::from_ymd_opt(2026, 4, 16).unwrap(),
+    )
+    .await
+    .unwrap();
+
+    // 1 night on R-OLD, 2 nights on R-NEW ⇒ 3 nights total. 100.000 / 3 does
+    // not divide evenly (33.333,33...).
+    sqlx::query("UPDATE bookings SET total_price = 100000 WHERE id = 'B-OPT'")
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    let mut tx = pool.begin().await.unwrap();
+    let invoice = invoice_generation::generate_invoice_tx(&mut tx, "B-OPT")
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
+
+    assert_eq!(invoice.pricing_breakdown.len(), 2);
+    assert_eq!(invoice.pricing_breakdown[0].amount, 33_333);
+    assert_eq!(invoice.pricing_breakdown[1].amount, 66_667);
+
+    let sum: i64 = invoice.pricing_breakdown.iter().map(|l| l.amount).sum();
+    assert_eq!(
+        sum, 100_000,
+        "lines phải cộng đúng bằng subtotal dù chia không chẵn"
+    );
+}

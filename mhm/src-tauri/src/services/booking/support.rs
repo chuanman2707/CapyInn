@@ -186,9 +186,32 @@ pub fn validate_non_negative_booking_money(
         .map_err(|error| BookingError::validation(error.message))
 }
 
+/// Merge `value` under `key` into the JSON object held by a booking's
+/// `pricing_snapshot` column, preserving every other key already present.
+///
+/// `pricing_snapshot` is a shared scratch space (`checkout_settlement`,
+/// `room_stays`, ...); callers that write one key must never clobber the
+/// others. A booking with no prior snapshot (`existing == None`) or a
+/// snapshot that failed to parse as a JSON object starts from `{}`.
+pub fn merge_pricing_snapshot(
+    existing: Option<&str>,
+    key: &str,
+    value: serde_json::Value,
+) -> String {
+    let mut map = existing
+        .and_then(|raw| serde_json::from_str::<serde_json::Value>(raw).ok())
+        .and_then(|parsed| match parsed {
+            serde_json::Value::Object(map) => Some(map),
+            _ => None,
+        })
+        .unwrap_or_default();
+    map.insert(key.to_string(), value);
+    serde_json::Value::Object(map).to_string()
+}
+
 #[cfg(test)]
 pub mod tests {
-    use super::{begin_immediate_tx, invalid_state_transition};
+    use super::{begin_immediate_tx, invalid_state_transition, merge_pricing_snapshot};
     use sqlx::{sqlite::SqlitePoolOptions, Row};
 
     #[test]
@@ -197,6 +220,41 @@ pub mod tests {
         assert!(error
             .to_string()
             .contains(crate::app_error::codes::CONFLICT_INVALID_STATE_TRANSITION));
+    }
+
+    #[test]
+    fn merge_pricing_snapshot_starts_from_empty_object_when_none() {
+        let result = merge_pricing_snapshot(None, "room_stays", serde_json::json!([1, 2]));
+        let value: serde_json::Value = serde_json::from_str(&result).unwrap();
+        assert_eq!(value, serde_json::json!({"room_stays": [1, 2]}));
+    }
+
+    #[test]
+    fn merge_pricing_snapshot_preserves_other_keys() {
+        let existing = r#"{"checkout_settlement":{"mode":"hourly"}}"#;
+        let result = merge_pricing_snapshot(Some(existing), "room_stays", serde_json::json!([3]));
+        let value: serde_json::Value = serde_json::from_str(&result).unwrap();
+        assert_eq!(
+            value,
+            serde_json::json!({
+                "checkout_settlement": {"mode": "hourly"},
+                "room_stays": [3],
+            })
+        );
+    }
+
+    #[test]
+    fn merge_pricing_snapshot_overwrites_only_the_targeted_key() {
+        let existing = r#"{"room_stays":[1],"checkout_settlement":{"mode":"hourly"}}"#;
+        let result = merge_pricing_snapshot(Some(existing), "room_stays", serde_json::json!([2]));
+        let value: serde_json::Value = serde_json::from_str(&result).unwrap();
+        assert_eq!(
+            value,
+            serde_json::json!({
+                "checkout_settlement": {"mode": "hourly"},
+                "room_stays": [2],
+            })
+        );
     }
 
     #[tokio::test]
