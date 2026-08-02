@@ -334,4 +334,23 @@ describe("GroupManagement refresh after a room change", () => {
     expect(screen.queryByText("R102")).toBeNull();
     expect(getGroupDetail).toHaveBeenCalledTimes(2);
   });
+
+  // Nuốt lỗi ở chỗ nghe này là quay lại đúng triệu chứng nó sinh ra để chống:
+  // bảng đứng yên với phòng cũ và tổng cũ mà lễ tân không biết là đã hỏng.
+  it("báo lỗi khi nạp lại thất bại thay vì im lặng để bảng cũ trên màn hình", async () => {
+    const user = userEvent.setup();
+    getGroupDetail.mockResolvedValue(groupDetailWith("R102", 500000));
+
+    render(<GroupManagement />);
+    await user.click(screen.getByText("Đoàn A"));
+    await screen.findByText("R102");
+
+    getGroupDetail.mockRejectedValue(new Error("mất kết nối cơ sở dữ liệu"));
+    await emitTestEvent("db-updated", { entity: "bookings" });
+
+    await waitFor(() => {
+      expect(toastError).toHaveBeenCalled();
+    });
+    expect(screen.getByText("R102")).toBeTruthy();
+  });
 });

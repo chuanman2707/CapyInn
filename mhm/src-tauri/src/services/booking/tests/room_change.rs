@@ -1553,18 +1553,26 @@ fn the_repricing_update_stays_guarded_on_pre_read_state() {
         .expect("câu UPDATE định giá lại phải còn trong room_change.rs");
     let statement = &SOURCE[start..start + SOURCE[start..].find('"').expect("hết chuỗi SQL")];
 
+    // Chỉ soi phần sau WHERE. Soi cả câu thì `contains("total_price = ?")` đã
+    // được chính mệnh đề SET thoả mãn, và assert cuối trở thành vô nghĩa: xoá
+    // `AND total_price = ?` khỏi WHERE mà cả bộ test vẫn xanh.
+    let where_clause = statement
+        .split_once("WHERE")
+        .map(|(_, rest)| rest)
+        .expect("câu UPDATE định giá lại phải có mệnh đề WHERE");
+
     assert!(
-        statement.contains("WHERE id = ?"),
+        where_clause.contains("id = ?"),
         "câu UPDATE phải khoá theo booking: {statement}"
     );
     assert!(
-        statement.contains("status = ?"),
+        where_clause.contains("status = ?"),
         "thiếu điều kiện status đọc trước khi đổi — ensure_one_row_affected sẽ \
          khớp mọi dòng còn tồn tại và không phát hiện được ghi đè lên state cũ: {statement}"
     );
     assert!(
-        statement.contains("total_price = ?"),
-        "thiếu điều kiện total_price đọc trước khi đổi: {statement}"
+        where_clause.contains("total_price = ?"),
+        "thiếu điều kiện total_price đọc trước khi đổi trong WHERE: {statement}"
     );
 }
 

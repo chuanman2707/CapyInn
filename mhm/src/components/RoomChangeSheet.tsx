@@ -67,6 +67,10 @@ export function RoomChangeSheet() {
     setSelectedRoomId(null);
     setKeepPrice(false);
     setReason("");
+    // Kể cả `saving`: sheet chỉ mount một lần ở MainShell, nên nếu lễ tân đóng
+    // giữa chừng rồi mở cho khách khác, nút xác nhận của khách mới vẫn kẹt ở
+    // "Đang xử lý..." cho tới khi lệnh của khách cũ trả về.
+    setSaving(false);
     fetchRoomChangeOptions(bookingId)
       .then((result) => {
         if (!cancelled) setOptions(result);
@@ -92,7 +96,12 @@ export function RoomChangeSheet() {
     setSaving(true);
     try {
       await changeRoom(requestBookingId, selected.roomId, keepPrice, reason.trim() || undefined);
+      // `selected` là biến của lần render đã bấm nút nên câu báo luôn gọi đúng
+      // tên phòng của khách đó, kể cả khi sheet đã chuyển sang khách khác.
       toast.success(`Đã chuyển sang ${selected.name}`);
+      // Nhưng đóng sheet thì không: lúc này sheet có thể đang là của khách khác,
+      // đóng đi là mất luôn phòng họ vừa chọn.
+      if (activeBookingIdRef.current !== requestBookingId) return;
       closeAndReset(false);
     } catch (err) {
       // Phòng vừa được chọn có thể đã bị người khác lấy mất trong lúc sheet
@@ -113,7 +122,10 @@ export function RoomChangeSheet() {
         setLoadError(formatAppError(refreshErr));
       }
     } finally {
-      setSaving(false);
+      // Chỉ nhả khoá nếu sheet còn đang nói về đúng booking này. Lệnh của khách
+      // cũ trả về muộn mà nhả khoá vô điều kiện thì nó mở khoá cho lệnh của
+      // khách mới đang bay — đúng cái double-submit mà `saving` sinh ra để chặn.
+      if (activeBookingIdRef.current === requestBookingId) setSaving(false);
     }
   }
 

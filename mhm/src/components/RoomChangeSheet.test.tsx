@@ -328,6 +328,80 @@ describe("RoomChangeSheet", () => {
     ).toHaveLength(1);
   });
 
+  // Cùng vết đứt, nhánh thành công: `saving`, câu báo và lệnh đóng sheet đều là
+  // state của MỘT sheet dùng chung. Lệnh của khách A về muộn không được khoá nút
+  // của khách B, không được gọi tên phòng của B, và không được đóng sheet của B
+  // — làm mất phòng B vừa chọn.
+  it("lệnh của khách cũ về muộn không đụng vào sheet của khách mới", async () => {
+    // Mỗi lần gọi giữ resolve riêng — dùng chung một biến thì lệnh sau ghi đè
+    // lệnh trước và bài test lại hoá ra đang giải quyết đúng lệnh của khách mới.
+    const resolvers: Array<() => void> = [];
+    const requestedBookingIds: string[] = [];
+    const changeRoom = vi.fn(
+      (bookingId: string) =>
+        new Promise<void>((resolve) => {
+          requestedBookingIds.push(bookingId);
+          resolvers.push(resolve);
+        }),
+    );
+    // Khách mới được mời phòng khác, để câu báo thành công của khách cũ mà gọi
+    // nhầm tên phòng là lộ ra ngay.
+    const fetchRoomChangeOptions = vi
+      .fn()
+      .mockImplementation(async (bookingId: string) => ({
+        ...baseOptions,
+        bookingId,
+        rooms:
+          bookingId === "B2"
+            ? [
+                {
+                  roomId: "3C",
+                  name: "Phòng 3C",
+                  roomType: "standard",
+                  floor: 3,
+                  maxGuests: 2,
+                  priceDifference: -50000,
+                },
+              ]
+            : baseOptions.rooms,
+      }));
+
+    renderSheet(baseOptions, { changeRoom, fetchRoomChangeOptions });
+
+    await userEvent.click(await screen.findByText("Phòng 2A"));
+    await userEvent.click(screen.getByRole("button", { name: /chuyển sang/i }));
+    await waitFor(() => expect(changeRoom).toHaveBeenCalled());
+
+    await act(async () => {
+      useHotelStore.setState({ roomChangeBookingId: "B2" });
+    });
+    await waitFor(() =>
+      expect(fetchRoomChangeOptions).toHaveBeenCalledWith("B2"),
+    );
+
+    // Nút của khách mới phải mở ngay, không chờ lệnh của khách cũ.
+    await userEvent.click(await screen.findByText("Phòng 3C"));
+    const confirm = screen.getByRole("button", { name: /chuyển sang/i });
+    expect(confirm).toBeEnabled();
+    await userEvent.click(confirm);
+    await waitFor(() => expect(changeRoom).toHaveBeenCalledTimes(2));
+    expect(requestedBookingIds).toEqual(["B1", "B2"]);
+
+    // Giờ mới cho lệnh của khách cũ trả về.
+    await act(async () => {
+      resolvers[0]?.();
+      await Promise.resolve();
+    });
+
+    expect(toast.success).toHaveBeenCalledWith("Đã chuyển sang Phòng 2A");
+    // Không được đóng sheet — sheet lúc này là của khách mới, đóng đi là mất
+    // phòng họ vừa chọn. `setRoomChangeOpen` bị mock nên phải soi lời gọi chứ
+    // soi `isRoomChangeOpen` thì lúc nào cũng xanh.
+    expect(useHotelStore.getState().setRoomChangeOpen).not.toHaveBeenCalled();
+    // Và vẫn đang khoá cho lệnh của chính khách mới.
+    expect(screen.getByRole("button", { name: /đang xử lý/i })).toBeDisabled();
+  });
+
   it("khi đổi phòng thất bại: báo lỗi dễ đọc, nạp lại danh sách, bỏ chọn cũ", async () => {
     const fetchRoomChangeOptions = vi
       .fn()

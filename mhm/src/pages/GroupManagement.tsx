@@ -95,7 +95,12 @@ export default function GroupManagement() {
     useEffect(() => {
         const cleanup = createDeferredCleanup(
             listen<{ entity: string }>("db-updated", () => {
-                void refreshDetail();
+                // Nuốt lỗi ở đây là quay lại đúng triệu chứng chỗ nghe này sinh
+                // ra để chống: bảng đứng yên với phòng cũ và tổng cũ mà không ai
+                // biết. Báo lên như `loadDetail` vẫn làm.
+                refreshDetail().catch((err) => {
+                    toast.error(formatAppError(err));
+                });
             }),
         );
         return cleanup;
