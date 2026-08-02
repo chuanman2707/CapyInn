@@ -555,3 +555,96 @@ async fn change_room_keeps_the_group_link_intact() {
             .unwrap();
     assert_eq!(master, "B-OPT");
 }
+
+/// Same shape as `seed_stay_in_progress` (one night already stayed, two nights
+/// remaining, R-OLD standard vs. R-NEW deluxe at a 100.000/night difference),
+/// but with dates computed from the real wall clock instead of hard-coded to
+/// April 2026.
+///
+/// `change_room_idempotent` — unlike the pool-level `change_room` test helper
+/// above, which takes `today` as an explicit argument — resolves `today` from
+/// `Local::now()` (mirroring `extend_stay_idempotent`/`check_out_idempotent`),
+/// because the Tauri command has no `today` input either. A fixture pinned to
+/// a fixed past date would leave zero `room_calendar` rows with
+/// `date >= today` once the real date moves past it, and
+/// `change_room_tx` would reject the move outright.
+async fn seed_stay_in_progress_around_today(pool: &sqlx::Pool<sqlx::Sqlite>) {
+    let today = Local::now().date_naive();
+    let yesterday = today - Duration::days(1);
+    let tomorrow = today + Duration::days(1);
+
+    seed_room(pool, "R-OLD").await.unwrap();
+    seed_room(pool, "R-NEW").await.unwrap();
+    sqlx::query("UPDATE rooms SET type = 'deluxe' WHERE id = 'R-NEW'")
+        .execute(pool)
+        .await
+        .unwrap();
+    seed_pricing_rule(pool, "standard", 250_000).await.unwrap();
+    seed_pricing_rule(pool, "deluxe", 350_000).await.unwrap();
+
+    seed_active_booking_with_terms(
+        pool,
+        "B-OPT",
+        "R-OLD",
+        &format!("{}T10:00:00+07:00", yesterday.format("%Y-%m-%d")),
+        &format!(
+            "{}T10:00:00+07:00",
+            (tomorrow + Duration::days(1)).format("%Y-%m-%d")
+        ),
+        3,
+        750_000,
+        Some(0),
+    )
+    .await
+    .unwrap();
+
+    // `seed_active_booking` hard-codes a single 2026-04-15 calendar row;
+    // replace it with the three real nights of this stay.
+    sqlx::query("DELETE FROM room_calendar WHERE booking_id = 'B-OPT'")
+        .execute(pool)
+        .await
+        .unwrap();
+    for date in [yesterday, today, tomorrow] {
+        sqlx::query(
+            "INSERT INTO room_calendar (room_id, date, booking_id, status)
+             VALUES ('R-OLD', ?, 'B-OPT', 'occupied')",
+        )
+        .bind(date.format("%Y-%m-%d").to_string())
+        .execute(pool)
+        .await
+        .unwrap();
+    }
+}
+
+#[tokio::test]
+async fn change_room_idempotent_retry_does_not_charge_twice() {
+    let pool = test_pool().await;
+    seed_stay_in_progress_around_today(&pool).await;
+
+    let ctx = cmd_with_request("change_room", "req-change-room-idem", "idem-room-change-1");
+
+    let first = room_change::change_room_idempotent(&pool, &ctx, "B-OPT", "R-NEW", false, None)
+        .await
+        .unwrap();
+    let second = room_change::change_room_idempotent(&pool, &ctx, "B-OPT", "R-NEW", false, None)
+        .await
+        .unwrap();
+
+    assert_replayed_pair(&first, &second);
+
+    let charges: i32 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM transactions WHERE booking_id = 'B-OPT' AND type = 'charge'",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(charges, 1, "gọi lại cùng khoá không được tính tiền lần hai");
+
+    let total: i64 = sqlx::query_scalar("SELECT total_price FROM bookings WHERE id = 'B-OPT'")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(total, 950_000);
+
+    assert_single_outbox_event(&pool, &ctx, "booking.room_changed").await;
+}

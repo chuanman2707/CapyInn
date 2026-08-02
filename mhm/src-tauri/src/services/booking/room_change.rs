@@ -9,22 +9,35 @@
 //! future reservations that start days from now.
 
 use chrono::{Local, NaiveDate};
+use serde_json::json;
 use sqlx::{Pool, Row, Sqlite, Transaction};
 
 use crate::{
+    app_error::{codes, CommandError, CommandResult},
+    command_idempotency::{
+        system_error, CommandLedgerResultSummary, CommandLedgerSummary, IdempotentCommandResult,
+        ResolvedWriteCommandGuard, SanitizedLedgerIntent, WriteCommandContext,
+        WriteCommandExecutor, WriteCommandRequest,
+    },
+    db_error_monitoring::{classify_db_error_code, is_room_unavailable_conflict_message},
     domain::booking::{BookingError, BookingResult, OriginSideEffect},
     models::{status, RoomChangeOption, RoomChangeOptions},
+    outbox::{OutboxAggregateKeySource, OutboxEventSpec},
 };
 
 use super::{
     billing_service::{record_charge_tx, record_charge_with_origin_tx},
     pricing_service::calculate_stay_price_tx,
-    support::{begin_tx, ensure_one_row_affected, invalid_state_transition, read_money_vnd_or_zero},
+    stay_lifecycle::fetch_booking_tx,
+    support::{
+        begin_tx, ensure_one_row_affected, invalid_state_transition, lookup_booking_room_id,
+        read_money_vnd_or_zero,
+    },
 };
 
-// `change_room` (the test-only pool-level wrapper below) is the only caller of
-// these two; production code will call `change_room_tx` directly once
-// `commands/rooms.rs` wires up the Tauri command in a later task.
+// `change_room` (the test-only pool-level wrapper below) is the only other
+// caller of `change_room_tx`; production code goes through
+// `change_room_idempotent` below, which `commands/rooms.rs` wires up.
 #[cfg(test)]
 use super::support::{begin_immediate_tx, fetch_booking};
 #[cfg(test)]
@@ -90,7 +103,6 @@ async fn guest_count(pool: &Pool<Sqlite>, booking_id: &str) -> BookingResult<i32
     Ok(count.max(1))
 }
 
-#[allow(dead_code)]
 pub async fn load_options(
     pool: &Pool<Sqlite>,
     booking_id: &str,
@@ -233,7 +245,6 @@ fn date_range_for_pricing(from_date: &str, to_date: &str) -> (String, String) {
 /// ghi một dòng `transactions`. Đây KHÔNG phải định giá lại toàn bộ kỳ ở: nó
 /// cộng thêm phần chênh lên trên mức giá khách đang trả, nên khách đang có giá
 /// ưu đãi vẫn giữ nguyên ưu đãi đó.
-#[allow(dead_code)]
 pub(super) async fn change_room_tx(
     tx: &mut Transaction<'_, Sqlite>,
     booking_id: &str,
@@ -471,6 +482,141 @@ pub(super) async fn change_room_tx(
     }
 
     Ok(())
+}
+
+pub(super) fn map_change_room_command_error(error: BookingError) -> CommandError {
+    match error {
+        BookingError::Conflict(message) => {
+            if is_room_unavailable_conflict_message(&message) {
+                return CommandError::user(codes::CONFLICT_ROOM_UNAVAILABLE, message);
+            }
+            CommandError::user(codes::BOOKING_INVALID_STATE, message)
+        }
+        BookingError::Validation(message) => {
+            CommandError::user(codes::BOOKING_INVALID_STATE, message)
+        }
+        BookingError::NotFound(message) if message.starts_with("Không tìm thấy phòng ") => {
+            CommandError::user(codes::ROOM_NOT_FOUND, message)
+        }
+        BookingError::NotFound(message) => CommandError::user(codes::BOOKING_NOT_FOUND, message),
+        BookingError::DatabaseWrite(message) | BookingError::Database(message) => {
+            if classify_db_error_code(&message) == Some(codes::DB_LOCKED_RETRYABLE) {
+                return CommandError::system(codes::DB_LOCKED_RETRYABLE, message).retryable(true);
+            }
+            CommandError::system(codes::SYSTEM_INTERNAL_ERROR, message)
+        }
+        BookingError::DateTimeParse(message) => {
+            CommandError::system(codes::SYSTEM_INTERNAL_ERROR, message)
+        }
+    }
+}
+
+fn change_room_initial_lock_keys_from_payload(
+    payload: &serde_json::Value,
+) -> CommandResult<Vec<String>> {
+    let booking_id = payload
+        .get("booking_id")
+        .and_then(|value| value.as_str())
+        .ok_or_else(|| system_error("change-room lock payload missing booking_id"))?;
+    Ok(vec![crate::aggregate_locks::booking_key(booking_id)?])
+}
+
+/// Idempotent wrapper around `change_room_tx`, wired into the same
+/// idempotency key → aggregate lock → command ledger → recovery queue →
+/// outbox event pipeline as `extend_stay_idempotent` (`stay_lifecycle.rs`).
+///
+/// The lock set is four keys — booking, old room, new room, folio — resolved
+/// only once the booking's current room is known (the old room is not part of
+/// the request payload). `aggregate_locks::canonicalize_lock_keys` sorts and
+/// dedupes the resolved set, so two opposing room-change commands (A→B and
+/// B→A running concurrently) naturally acquire their locks in the same order
+/// and cannot deadlock each other.
+pub async fn change_room_idempotent(
+    pool: &Pool<Sqlite>,
+    ctx: &WriteCommandContext,
+    booking_id: &str,
+    new_room_id: &str,
+    keep_price: bool,
+    reason: Option<String>,
+) -> CommandResult<IdempotentCommandResult<serde_json::Value>> {
+    let hash_payload = json!({
+        "schema": "stay.change_room.v1",
+        "booking_id": booking_id,
+        "new_room_id": new_room_id,
+        "keep_price": keep_price,
+        "reason": reason,
+    });
+    let ledger_intent = SanitizedLedgerIntent::from_pairs([
+        ("schema", json!("stay.change_room.v1")),
+        ("booking_present", json!(true)),
+        ("operation", json!("change_room")),
+        ("keep_price", json!(keep_price)),
+        ("reason_present", json!(reason.is_some())),
+    ])?;
+    let summary = CommandLedgerSummary::new("Change room")?.with_aggregate_ref(
+        "booking",
+        "booking",
+        None::<String>,
+    )?;
+    let request = WriteCommandRequest::new_sanitized(hash_payload.clone(), ledger_intent, summary)?
+        .with_primary_aggregate_key(format!("booking:{booking_id}"))
+        .with_lock_key_deriver(change_room_initial_lock_keys_from_payload)
+        .with_success_summary(CommandLedgerResultSummary::success("Room changed")?)
+        .with_outbox_event(OutboxEventSpec::new(
+            "booking.room_changed",
+            OutboxAggregateKeySource::response_field("booking", "id"),
+            &["bookings", "rooms", "folio"],
+        )?);
+
+    let pool_for_lookup = pool.clone();
+    let booking_id_for_lookup = booking_id.to_string();
+    let booking_id_for_service = booking_id.to_string();
+    let new_room_for_lookup = new_room_id.to_string();
+    let new_room_for_service = new_room_id.to_string();
+    let origin_key = format!("{}:{}", ctx.command_name, ctx.idempotency_key);
+
+    WriteCommandExecutor::new(pool.clone())
+        .execute_with_resolved_guard(
+            ctx,
+            request,
+            move || async move {
+                let old_room_id =
+                    lookup_booking_room_id(&pool_for_lookup, &booking_id_for_lookup)
+                        .await
+                        .map_err(map_change_room_command_error)?;
+                let lock_keys = vec![
+                    crate::aggregate_locks::booking_key(&booking_id_for_lookup)?,
+                    crate::aggregate_locks::room_key(&old_room_id)?,
+                    crate::aggregate_locks::room_key(&new_room_for_lookup)?,
+                    crate::aggregate_locks::folio_key(&booking_id_for_lookup)?,
+                ];
+                let guard = crate::aggregate_locks::global_manager()
+                    .acquire(lock_keys.clone())
+                    .await?;
+                Ok(ResolvedWriteCommandGuard::new(guard, lock_keys))
+            },
+            move |tx, _resolved| {
+                Box::pin(async move {
+                    change_room_tx(
+                        tx,
+                        &booking_id_for_service,
+                        &new_room_for_service,
+                        keep_price,
+                        reason.as_deref(),
+                        Local::now().date_naive(),
+                        Some(origin_key),
+                    )
+                    .await
+                    .map_err(map_change_room_command_error)?;
+
+                    let booking = fetch_booking_tx(tx, &booking_id_for_service)
+                        .await
+                        .map_err(map_change_room_command_error)?;
+                    serde_json::to_value(&booking).map_err(system_error)
+                })
+            },
+        )
+        .await
 }
 
 #[cfg(test)]
