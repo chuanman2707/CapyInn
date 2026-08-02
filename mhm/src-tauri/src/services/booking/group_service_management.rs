@@ -271,6 +271,11 @@ async fn load_remove_group_service_lock_state(
     })
 }
 
+/// Đọc `group_services → (group_id, booking_id)` **trước** khi khoá, khác với
+/// các resolver hai pha còn lại. Cố ý: liên kết này không bao giờ bị `UPDATE`
+/// sau khi insert — service chỉ được thêm rồi xoá — nên không có cửa sổ đua để
+/// đóng. Nếu sau này có lệnh dời một service sang booking khác, chỗ này phải
+/// chuyển sang hai pha như `resolve_group_checkout_locks`.
 async fn resolve_remove_group_service_guard(
     pool: Pool<Sqlite>,
     service_id: String,
