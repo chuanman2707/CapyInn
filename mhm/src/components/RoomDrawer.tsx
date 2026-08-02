@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import {
+    ArrowRightLeft,
     CalendarDays,
     CalendarPlus,
     Check,
@@ -43,6 +44,7 @@ export default function RoomDrawer({ open, onClose, roomId }: RoomDrawerProps) {
         extendStay,
         getStayInfoText,
         setCheckinOpen,
+        setRoomChangeOpen,
         fetchRooms,
         updateHousekeeping,
         roomTypeRates,
@@ -268,6 +270,15 @@ export default function RoomDrawer({ open, onClose, roomId }: RoomDrawerProps) {
                     variant="ghost"
                 />
                 <ActionBtn icon={CalendarPlus} label="Extend +1 đêm" onClick={handleExtend} variant="blue" />
+                {/* 3 nút trong lưới 2 cột — nút cuối trải hết chiều ngang thay
+                    vì bị bỏ mồ côi một cột khi số nút lẻ. */}
+                <ActionBtn
+                    icon={ArrowRightLeft}
+                    label="Chuyển phòng"
+                    onClick={() => booking && setRoomChangeOpen(true, booking.id)}
+                    variant="ghost"
+                    className="col-span-2"
+                />
             </div>
             <button
                 onClick={() => setShowCheckout(true)}

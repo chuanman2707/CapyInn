@@ -10,7 +10,7 @@ import { formatAppError } from "@/lib/appError";
 import { BALANCE_TONE_CLASS, balanceDisplay } from "@/lib/bookingBalance";
 import { fmtMoney, fmtDateShort } from "@/lib/format";
 import { toast } from "sonner";
-import { Users, Plus, Trash2, FileText, LogOut, ChevronRight } from "lucide-react";
+import { Users, Plus, Trash2, FileText, LogOut, ChevronRight, ArrowRightLeft } from "lucide-react";
 import type { GroupDetailResponse, GroupService, BookingWithGuest, GroupInvoiceData } from "@/types";
 import InvoiceDialog from "@/components/InvoiceDialog";
 
@@ -37,7 +37,7 @@ function getLegacyErrorMessage(error: unknown): string {
 }
 
 export default function GroupManagement() {
-    const { groups, fetchGroups, getGroupDetail, groupCheckout, addGroupService, removeGroupService, generateGroupInvoice } = useHotelStore();
+    const { groups, fetchGroups, getGroupDetail, groupCheckout, addGroupService, removeGroupService, generateGroupInvoice, setRoomChangeOpen } = useHotelStore();
     const [filter, setFilter] = useState<string>("");
     const [selectedGroupId, setSelectedGroupId] = useState<string | null>(null);
     const [detail, setDetail] = useState<GroupDetailResponse | null>(null);
@@ -275,6 +275,17 @@ export default function GroupManagement() {
                                                 {b.status === "active" ? "Active" : "Checked out"}
                                             </Badge>
                                         </div>
+                                        {/* Đã trả thì hết đổi được phòng — nút chỉ hiện khi còn đang ở hoặc chưa nhận phòng. */}
+                                        {(b.status === "active" || b.status === "booked") && (
+                                            <button
+                                                onClick={() => setRoomChangeOpen(true, b.id)}
+                                                title="Chuyển phòng"
+                                                aria-label="Chuyển phòng"
+                                                className="text-slate-400 hover:text-brand-primary cursor-pointer p-1"
+                                            >
+                                                <ArrowRightLeft size={14} />
+                                            </button>
+                                        )}
                                     </div>
                                 ))}
                             </div>

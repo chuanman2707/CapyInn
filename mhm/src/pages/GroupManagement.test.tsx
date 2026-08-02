@@ -20,6 +20,7 @@ const groupCheckout = vi.hoisted(() => vi.fn());
 const addGroupService = vi.hoisted(() => vi.fn());
 const removeGroupService = vi.hoisted(() => vi.fn());
 const generateGroupInvoice = vi.hoisted(() => vi.fn());
+const setRoomChangeOpen = vi.hoisted(() => vi.fn());
 const toastError = vi.hoisted(() => vi.fn());
 const toastSuccess = vi.hoisted(() => vi.fn());
 
@@ -42,6 +43,7 @@ vi.mock("@/stores/useHotelStore", () => ({
     addGroupService,
     removeGroupService,
     generateGroupInvoice,
+    setRoomChangeOpen,
   }),
 }));
 
@@ -189,5 +191,73 @@ describe("GroupManagement", () => {
         correlation_id: correlationId,
       }),
     );
+  });
+
+  it("opens the room change sheet for an active booking in the group", async () => {
+    const user = userEvent.setup();
+
+    render(<GroupManagement />);
+
+    await user.click(screen.getByText("Đoàn A"));
+    await screen.findByText("Nguyễn Văn A");
+
+    await user.click(screen.getByRole("button", { name: /chuyển phòng/i }));
+
+    expect(setRoomChangeOpen).toHaveBeenCalledWith(true, "booking-1");
+  });
+});
+
+describe("GroupManagement room change gating", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    fetchGroups.mockResolvedValue(undefined);
+    getGroupDetail.mockResolvedValue({
+      group: {
+        id: "group-1",
+        group_name: "Đoàn A",
+        organizer_name: "Trưởng đoàn",
+        organizer_phone: "0123456789",
+        total_rooms: 1,
+        status: "completed",
+        created_at: "2026-04-22T00:00:00Z",
+      },
+      bookings: [
+        {
+          id: "booking-2",
+          room_id: "R102",
+          room_name: "R102",
+          guest_name: "Trần Thị B",
+          check_in_at: "2026-04-20T00:00:00Z",
+          expected_checkout: "2026-04-22T00:00:00Z",
+          actual_checkout: "2026-04-22T08:00:00Z",
+          nights: 2,
+          total_price: 800000,
+          paid_amount: 800000,
+          status: "checked_out",
+          source: "walk-in",
+          booking_type: "group",
+          deposit_amount: null,
+          scheduled_checkin: null,
+          scheduled_checkout: null,
+          guest_phone: null,
+        },
+      ],
+      services: [],
+      total_room_cost: 800000,
+      total_service_cost: 0,
+      grand_total: 800000,
+      paid_amount: 800000,
+    });
+  });
+
+  it("hides the room change action for a checked-out booking", async () => {
+    const user = userEvent.setup();
+
+    render(<GroupManagement />);
+
+    await user.click(screen.getByText("Đoàn A"));
+    await screen.findByText("Trần Thị B");
+
+    expect(screen.queryByRole("button", { name: /chuyển phòng/i })).toBeNull();
   });
 });
