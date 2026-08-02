@@ -10,6 +10,7 @@ pub struct AggregateLockManager {
     inner: Arc<Mutex<HashMap<String, Arc<Mutex<()>>>>>,
 }
 
+#[derive(Debug)]
 pub struct AggregateLockGuard {
     keys: Vec<String>,
     _guards: Vec<OwnedMutexGuard<()>>,
@@ -18,6 +19,67 @@ pub struct AggregateLockGuard {
 impl AggregateLockGuard {
     pub fn keys(&self) -> &[String] {
         &self.keys
+    }
+
+    fn max_rank(&self) -> u8 {
+        self.keys
+            .iter()
+            .map(|key| scope_rank(key))
+            .max()
+            .unwrap_or(0)
+    }
+
+    /// Lấy pha kế tiếp trong khi vẫn đang cầm pha này.
+    ///
+    /// Ăn `self` và trả về một guard đã gộp, nên người gọi không thể cầm hai
+    /// pha thành hai biến rời rồi thả sai thứ tự, và `keys()` luôn trả về hợp
+    /// của mọi pha — đúng cái `refresh_claim_lock_keys` cần ghi lại.
+    ///
+    /// Pha sau phải có hạng **cao hơn hẳn** mọi khoá đang cầm. Đó là bất biến
+    /// chống kẹt: mọi chuỗi lấy khoá trong tiến trình đi theo `(hạng, key)`
+    /// tăng nghiêm ngặt.
+    pub async fn acquire_next<I, S>(
+        self,
+        manager: &AggregateLockManager,
+        keys: I,
+    ) -> CommandResult<AggregateLockGuard>
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        let next_keys = canonicalize_lock_keys(keys)?;
+        let held_rank = self.max_rank();
+        let next_rank = next_keys
+            .iter()
+            .map(|key| scope_rank(key))
+            .min()
+            .unwrap_or(0);
+
+        if next_rank <= held_rank {
+            return Err(CommandError::system(
+                codes::SYSTEM_INTERNAL_ERROR,
+                format!(
+                    "Lock phase out of order: holding {:?}, requested {:?}",
+                    self.keys, next_keys
+                ),
+            ));
+        }
+
+        let next = manager.acquire(next_keys).await?;
+        let AggregateLockGuard {
+            keys: next_keys,
+            _guards: next_guards,
+        } = next;
+
+        let mut keys = self.keys;
+        keys.extend(next_keys);
+        let mut guards = self._guards;
+        guards.extend(next_guards);
+
+        Ok(AggregateLockGuard {
+            keys,
+            _guards: guards,
+        })
     }
 }
 
@@ -272,5 +334,87 @@ mod tests {
             .expect("second order");
 
         assert_eq!(first, second);
+    }
+
+    #[tokio::test]
+    async fn acquire_next_merges_keys_of_every_phase() {
+        let manager = AggregateLockManager::default();
+        let guard = manager
+            .acquire([booking_key("B1").unwrap(), folio_key("B1").unwrap()])
+            .await
+            .expect("phase one");
+        let guard = guard
+            .acquire_next(&manager, [room_key("R1").unwrap()])
+            .await
+            .expect("phase two");
+
+        assert_eq!(
+            guard.keys(),
+            vec![
+                "booking:B1".to_string(),
+                "folio:B1".to_string(),
+                "room:R1".to_string(),
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn acquire_next_rejects_a_phase_that_does_not_rank_higher() {
+        let manager = AggregateLockManager::default();
+        let guard = manager
+            .acquire([room_key("R1").unwrap()])
+            .await
+            .expect("phase one");
+
+        let error = guard
+            .acquire_next(&manager, [booking_key("B1").unwrap()])
+            .await
+            .expect_err("pha sau phải có hạng cao hơn hẳn");
+
+        assert_eq!(error.code, codes::SYSTEM_INTERNAL_ERROR);
+        assert!(!error.retryable);
+    }
+
+    #[tokio::test]
+    async fn acquire_next_rejects_a_phase_of_the_same_rank() {
+        let manager = AggregateLockManager::default();
+        let guard = manager
+            .acquire([booking_key("B1").unwrap()])
+            .await
+            .expect("phase one");
+
+        let error = guard
+            .acquire_next(&manager, [booking_key("B2").unwrap()])
+            .await
+            .expect_err("cùng hạng cũng phải bị chặn");
+
+        assert_eq!(error.code, codes::SYSTEM_INTERNAL_ERROR);
+    }
+
+    #[tokio::test]
+    async fn a_phased_holder_blocks_a_one_shot_acquirer() {
+        let manager = AggregateLockManager::default();
+        let guard = manager
+            .acquire([booking_key("B1").unwrap()])
+            .await
+            .expect("phase one");
+        let guard = guard
+            .acquire_next(&manager, [room_key("R1").unwrap()])
+            .await
+            .expect("phase two");
+
+        let contender_manager = manager.clone();
+        let contender = tokio::spawn(async move {
+            contender_manager
+                .acquire([booking_key("B1").unwrap(), room_key("R1").unwrap()])
+                .await
+                .expect("contender lock")
+        });
+
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        assert!(!contender.is_finished());
+
+        drop(guard);
+        let _contender_guard = contender.await.expect("contender joins");
     }
 }
