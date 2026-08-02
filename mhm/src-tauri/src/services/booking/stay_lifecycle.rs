@@ -1072,14 +1072,24 @@ async fn extend_stay_tx(
         .ok_or_else(|| BookingError::validation("total_price overflowed".to_string()))?;
     let new_checkout = new_expected.to_rfc3339();
 
+    // `scheduled_checkout` phải đi theo `expected_checkout`: timeline vẽ thanh
+    // booking bằng `scheduled_checkout || expected_checkout`, nên bỏ quên cột này
+    // là khách đặt trước gia hạn bao nhiêu lần thanh vẫn đứng ở ngày trả cũ.
+    // CASE giữ NULL cho khách walk-in — họ không có ngày đặt trước để dời.
+    let new_scheduled_checkout = new_expected.date_naive().format("%Y-%m-%d").to_string();
+
     let result = sqlx::query(
         "UPDATE bookings
-         SET nights = ?, total_price = ?, expected_checkout = ?
+         SET nights = ?, total_price = ?, expected_checkout = ?,
+             scheduled_checkout = CASE
+                 WHEN scheduled_checkout IS NULL THEN NULL ELSE ?
+             END
          WHERE id = ? AND status = ? AND expected_checkout = ?",
     )
     .bind(current_nights + 1)
     .bind(new_total)
     .bind(&new_checkout)
+    .bind(&new_scheduled_checkout)
     .bind(booking_id)
     .bind(status::booking::ACTIVE)
     .bind(&old_expected_checkout)

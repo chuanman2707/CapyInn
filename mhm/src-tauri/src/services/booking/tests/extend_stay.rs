@@ -83,6 +83,72 @@ async fn extend_stay_works_for_a_booking_confirmed_from_a_reservation() {
     assert_eq!(after, before + Duration::days(1));
 }
 
+/// Timeline vẽ thanh booking bằng `scheduled_checkout || expected_checkout`, nên
+/// gia hạn mà không dời `scheduled_checkout` thì thanh của khách đặt trước đứng
+/// yên ở ngày trả phòng cũ dù đã bấm gia hạn bao nhiêu lần.
+#[tokio::test]
+async fn extend_stay_moves_scheduled_checkout_for_a_reservation_booking() {
+    let pool = test_pool().await;
+    seed_booked_reservation_with_price(&pool, "B-RES-SCHED", "R-RES-SCHED", 500_000)
+        .await
+        .unwrap();
+    reservation_lifecycle::confirm_reservation(&pool, "B-RES-SCHED")
+        .await
+        .unwrap();
+
+    let before: Option<String> =
+        sqlx::query_scalar("SELECT scheduled_checkout FROM bookings WHERE id = ?")
+            .bind("B-RES-SCHED")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+
+    let extended = stay_lifecycle::extend_stay(&pool, "B-RES-SCHED")
+        .await
+        .unwrap();
+
+    let after: Option<String> =
+        sqlx::query_scalar("SELECT scheduled_checkout FROM bookings WHERE id = ?")
+            .bind("B-RES-SCHED")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+
+    let new_checkout_day = chrono::DateTime::parse_from_rfc3339(&extended.expected_checkout)
+        .unwrap()
+        .date_naive()
+        .format("%Y-%m-%d")
+        .to_string();
+    assert_ne!(
+        after, before,
+        "scheduled_checkout phải dời theo khi gia hạn"
+    );
+    assert_eq!(after, Some(new_checkout_day));
+}
+
+/// Khách walk-in không có `scheduled_checkout`; gia hạn không được tự đẻ ra giá
+/// trị cho cột đó, nếu không booking vãng lai sẽ bị nhầm thành đặt trước.
+#[tokio::test]
+async fn extend_stay_leaves_scheduled_checkout_null_for_a_walk_in() {
+    let pool = test_pool().await;
+    seed_room(&pool, "R-WALKIN-SCHED").await.unwrap();
+    seed_active_booking(&pool, "B-WALKIN-SCHED", "R-WALKIN-SCHED")
+        .await
+        .unwrap();
+
+    stay_lifecycle::extend_stay(&pool, "B-WALKIN-SCHED")
+        .await
+        .unwrap();
+
+    let after: Option<String> =
+        sqlx::query_scalar("SELECT scheduled_checkout FROM bookings WHERE id = ?")
+            .bind("B-WALKIN-SCHED")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(after, None);
+}
+
 #[tokio::test]
 async fn extend_stay_idempotent_retry_replays_without_extra_night_or_charge() {
     let pool = test_pool().await;
