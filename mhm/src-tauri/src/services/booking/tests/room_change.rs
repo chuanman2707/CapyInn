@@ -1,4 +1,5 @@
 use super::prelude::*;
+use crate::services::booking::invoice_generation;
 
 /// Khách đã ở 1 đêm (15/04), còn 2 đêm (16/04, 17/04). Hôm nay là 16/04.
 ///
@@ -647,4 +648,56 @@ async fn change_room_idempotent_retry_does_not_charge_twice() {
     assert_eq!(total, 950_000);
 
     assert_single_outbox_event(&pool, &ctx, "booking.room_changed").await;
+}
+
+#[tokio::test]
+async fn invoice_splits_lines_per_room_after_a_move() {
+    let pool = test_pool().await;
+    seed_stay_in_progress(&pool).await;
+
+    room_change::change_room(
+        &pool,
+        "B-OPT",
+        "R-NEW",
+        true,
+        None,
+        NaiveDate::from_ymd_opt(2026, 4, 16).unwrap(),
+    )
+    .await
+    .unwrap();
+
+    let mut tx = pool.begin().await.unwrap();
+    let invoice = invoice_generation::generate_invoice_tx(&mut tx, "B-OPT")
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
+
+    let labels: Vec<String> = invoice
+        .pricing_breakdown
+        .iter()
+        .map(|line| line.label.clone())
+        .collect();
+    assert!(labels.iter().any(|l| l.contains("R-OLD") && l.contains("1 đêm")));
+    assert!(labels.iter().any(|l| l.contains("R-NEW") && l.contains("2 đêm")));
+
+    let sum: i64 = invoice.pricing_breakdown.iter().map(|l| l.amount).sum();
+    assert_eq!(sum, invoice.subtotal, "tổng các dòng phải khớp subtotal");
+}
+
+#[tokio::test]
+async fn invoice_keeps_one_line_when_no_move_happened() {
+    let pool = test_pool().await;
+    seed_stay_in_progress(&pool).await;
+
+    let mut tx = pool.begin().await.unwrap();
+    let invoice = invoice_generation::generate_invoice_tx(&mut tx, "B-OPT")
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
+
+    assert_eq!(
+        invoice.pricing_breakdown.len(),
+        1,
+        "chưa đổi phòng thì hoá đơn chỉ có một dòng, đúng như trước đây"
+    );
 }

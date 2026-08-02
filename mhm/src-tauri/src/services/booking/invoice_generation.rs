@@ -116,13 +116,60 @@ pub async fn generate_invoice_tx(
     } else {
         total_price
     };
-    let breakdown: Vec<crate::pricing::PricingLine> = vec![crate::pricing::PricingLine {
+    let mut breakdown: Vec<crate::pricing::PricingLine> = vec![crate::pricing::PricingLine {
         label: settlement_label.unwrap_or_else(|| format!("{} night(s) x {}d", nights, per_night)),
         amount: total_price,
     }];
 
     let subtotal = total_price;
     let balance_due = (total_price - paid_amount).max(0);
+
+    // If the booking moved rooms mid-stay, replace the single combined room
+    // line with one line per room actually occupied, grouped by the night the
+    // guest first slept there. Nights slept before a move stay on the old
+    // room in `room_calendar` (see room_change service), so this query is the
+    // source of truth for "which rooms, how many nights each, in what order".
+    let room_nights = sqlx::query(
+        "SELECT rc.room_id, r.name AS room_name, COUNT(*) AS nights
+         FROM room_calendar rc
+         JOIN rooms r ON r.id = rc.room_id
+         WHERE rc.booking_id = ?
+         GROUP BY rc.room_id, r.name
+         ORDER BY MIN(rc.date)",
+    )
+    .bind(booking_id)
+    .fetch_all(&mut **tx)
+    .await
+    .map_err(|e| e.to_string())?;
+
+    if room_nights.len() > 1 {
+        let total_nights: i64 = room_nights.iter().map(|r| r.get::<i64, _>("nights")).sum();
+        if total_nights > 0 {
+            let mut allocated: crate::money::MoneyVnd = 0;
+            let mut room_lines = Vec::with_capacity(room_nights.len());
+            for (index, row) in room_nights.iter().enumerate() {
+                let room_name: String = row.get("room_name");
+                let nights_here: i64 = row.get("nights");
+                let amount = if index == room_nights.len() - 1 {
+                    subtotal - allocated
+                } else {
+                    let share = subtotal * nights_here / total_nights;
+                    allocated += share;
+                    share
+                };
+                room_lines.push(crate::pricing::PricingLine {
+                    label: format!("Phòng {room_name} × {nights_here} đêm"),
+                    amount,
+                });
+            }
+            // Preserve any non-room lines already present (surcharges, etc.):
+            // only the original single combined room line is being replaced.
+            let extra_lines: Vec<crate::pricing::PricingLine> =
+                breakdown.into_iter().skip(1).collect();
+            breakdown = room_lines;
+            breakdown.extend(extra_lines);
+        }
+    }
 
     // Generate invoice number: INV-YYYYMMDD-XXX
     let today = chrono::Local::now().format("%Y%m%d").to_string();
