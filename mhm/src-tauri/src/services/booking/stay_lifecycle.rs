@@ -28,9 +28,10 @@ use super::{
     pricing_service::calculate_stay_price_tx,
     support::{
         begin_tx, ensure_one_row_affected, insert_room_calendar_rows, invalid_state_transition,
-        lookup_booking_room_id, map_room_calendar_insert_error, merge_pricing_snapshot,
-        parse_booking_datetime, read_money_vnd_or_zero, room_calendar_stays_tx, room_stays_to_json,
-        validate_non_negative_booking_money, RoomStayRow,
+        lock_booking_and_read_room, lookup_booking_room_id, map_room_calendar_insert_error,
+        merge_pricing_snapshot, parse_booking_datetime, read_money_vnd_or_zero,
+        room_calendar_stays_tx, room_stays_to_json, validate_non_negative_booking_money, FolioLock,
+        RoomStayRow,
     },
 };
 
@@ -1250,17 +1251,20 @@ pub async fn extend_stay_idempotent(
             ctx,
             request,
             move || async move {
-                let room_id = lookup_booking_room_id(&pool_for_lookup, &booking_id_for_lookup)
-                    .await
-                    .map_err(map_extend_stay_command_error)?;
-                let lock_keys = vec![
-                    crate::aggregate_locks::booking_key(&booking_id_for_lookup)?,
-                    crate::aggregate_locks::room_key(&room_id)?,
-                    crate::aggregate_locks::folio_key(&booking_id_for_lookup)?,
-                ];
-                let guard = crate::aggregate_locks::global_manager()
-                    .acquire(lock_keys.clone())
+                let (guard, room_id) = lock_booking_and_read_room(
+                    &pool_for_lookup,
+                    &booking_id_for_lookup,
+                    FolioLock::Include,
+                    map_extend_stay_command_error,
+                )
+                .await?;
+                let guard = guard
+                    .acquire_next(
+                        crate::aggregate_locks::global_manager(),
+                        [crate::aggregate_locks::room_key(&room_id)?],
+                    )
                     .await?;
+                let lock_keys = guard.keys().to_vec();
 
                 Ok(ResolvedWriteCommandGuard::new((guard, room_id), lock_keys))
             },
