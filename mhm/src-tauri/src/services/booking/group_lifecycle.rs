@@ -761,24 +761,33 @@ async fn resolve_group_checkout_locks(
     pool: Pool<Sqlite>,
     req: GroupCheckoutRequest,
 ) -> CommandResult<ResolvedWriteCommandGuard<GroupCheckoutResolvedGuard>> {
+    // Pha 1: khoá group trước. Danh sách booking của group (và phòng của từng
+    // booking) chỉ đứng yên khi đã cầm khoá này.
+    let guard = crate::aggregate_locks::global_manager()
+        .acquire([crate::aggregate_locks::group_key(&req.group_id)?])
+        .await?;
+
     let unique_booking_ids = normalized_booking_ids(&req.booking_ids);
     let lock_state =
         load_group_checkout_lock_state(&pool, &req.group_id, &unique_booking_ids, req.final_paid)
             .await
             .map_err(map_group_checkout_command_error)?;
-    let mut lock_keys = vec![crate::aggregate_locks::group_key(&req.group_id)?];
 
+    // Pha 2: booking + folio + room, mọi hạng đều cao hơn `group:`.
+    let mut next_keys = Vec::new();
     for booking_id in &lock_state.booking_ids_to_lock {
-        lock_keys.push(crate::aggregate_locks::booking_key(booking_id)?);
-        lock_keys.push(crate::aggregate_locks::folio_key(booking_id)?);
+        next_keys.push(crate::aggregate_locks::booking_key(booking_id)?);
+        next_keys.push(crate::aggregate_locks::folio_key(booking_id)?);
     }
     for room_id in &lock_state.room_ids_to_lock {
-        lock_keys.push(crate::aggregate_locks::room_key(room_id)?);
+        next_keys.push(crate::aggregate_locks::room_key(room_id)?);
     }
 
-    let guard = crate::aggregate_locks::global_manager()
-        .acquire(lock_keys.clone())
+    let guard = guard
+        .acquire_next(crate::aggregate_locks::global_manager(), next_keys)
         .await?;
+    let lock_keys = guard.keys().to_vec();
+
     Ok(ResolvedWriteCommandGuard::new(
         GroupCheckoutResolvedGuard {
             _guard: guard,
