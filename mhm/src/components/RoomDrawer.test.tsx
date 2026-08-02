@@ -123,6 +123,52 @@ describe("RoomDrawer checkout settlement", () => {
 
         expect(setRoomChangeOpen).toHaveBeenCalledWith(true, "B601");
     });
+
+    // `roomDetail` là state cục bộ, effect nạp nó chỉ phụ thuộc [open, roomId]
+    // — không cái nào đổi khi khách chuyển phòng — và listener "db-updated"
+    // toàn cục chỉ làm mới rooms/stats của store. Nếu drawer không đóng thì nó
+    // đứng nguyên với phòng cũ và tổng tiền cũ, kèm nút Check-out mở
+    // CheckoutSettlementModal ghi đúng cái `roomId` cũ đó.
+    it("đóng lại sau khi bàn giao cho sheet chuyển phòng, không đứng lại với phòng cũ", async () => {
+        const user = userEvent.setup();
+        const onClose = vi.fn();
+        invoke
+            .mockResolvedValueOnce({
+                room: {
+                    id: "101",
+                    name: "101",
+                    type: "standard",
+                    floor: 1,
+                    has_balcony: false,
+                    base_price: 500000,
+                    status: "occupied",
+                },
+                booking: {
+                    id: "B601",
+                    room_id: "101",
+                    primary_guest_id: "G1",
+                    check_in_at: "2026-04-20T08:00:00+07:00",
+                    expected_checkout: "2026-04-25T12:00:00+07:00",
+                    nights: 5,
+                    total_price: 2500000,
+                    paid_amount: 0,
+                    status: "active",
+                    created_at: "2026-04-20T08:00:00+07:00",
+                },
+                guests: [],
+            })
+            .mockResolvedValueOnce([]);
+
+        render(<RoomDrawer open onClose={onClose} roomId="101" />);
+
+        await waitFor(() => {
+            expect(screen.getByRole("button", { name: /chuyển phòng/i })).toBeInTheDocument();
+        });
+        await user.click(screen.getByRole("button", { name: /chuyển phòng/i }));
+
+        expect(setRoomChangeOpen).toHaveBeenCalledWith(true, "B601");
+        expect(onClose).toHaveBeenCalled();
+    });
 });
 
 describe("RoomDrawer nightly rate", () => {

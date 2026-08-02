@@ -1484,3 +1484,138 @@ async fn group_checkout_keeps_the_room_split_for_a_booking_that_moved() {
     assert_eq!(other_invoice.pricing_breakdown.len(), 1);
     assert_breakdown_sums_to_subtotal(&other_invoice);
 }
+
+/// H4: the split must fire only on a genuine move (`len() > 1`), not on any
+/// non-empty result.
+///
+/// `invoice_keeps_one_line_when_no_move_happened` above cannot see the
+/// difference: its booking never checked out, so there is no
+/// `checkout_settlement`, the single breakdown line is the English fallback
+/// either way, and `settlement_note` is `None` in both worlds. Running the
+/// same scenario THROUGH checkout gives the settlement label something to say,
+/// and then the two behaviours diverge — relaxing the threshold rewrites the
+/// line as "Phòng … × 3 đêm" and adds a GHI CHÚ block to an invoice that never
+/// needed one.
+#[tokio::test]
+async fn a_checked_out_booking_that_never_moved_keeps_its_settlement_line() {
+    let pool = test_pool().await;
+    seed_stay_in_progress(&pool).await;
+
+    stay_lifecycle::check_out(
+        &pool,
+        checkout_req("B-OPT", CheckoutSettlementMode::BookedNights, 750_000),
+    )
+    .await
+    .unwrap();
+
+    let mut tx = pool.begin().await.unwrap();
+    let invoice = invoice_generation::generate_invoice_tx(&mut tx, "B-OPT")
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
+
+    assert_eq!(
+        invoice.pricing_breakdown.len(),
+        1,
+        "khách không đổi phòng thì không có gì để tách: {:?}",
+        invoice.pricing_breakdown
+    );
+    assert_eq!(
+        invoice.pricing_breakdown[0].label, "Thanh toán theo số đêm đã đặt",
+        "dòng duy nhất phải là lời quyết toán, không phải một dòng 'Phòng …' tự dựng"
+    );
+    assert_eq!(
+        invoice.settlement_note, None,
+        "một dòng thì không cần khối GHI CHÚ lặp lại đúng câu đó"
+    );
+    assert_breakdown_sums_to_subtotal(&invoice);
+}
+
+/// H3: pins the optimistic guard added by commit 0736d14 — the repricing
+/// `UPDATE` must stay conditioned on the `status` and `total_price` read
+/// before the change, so `ensure_one_row_affected` can actually detect a
+/// stale-state write instead of matching any existing row.
+///
+/// Deliberately a source-level assertion, which is unusual here and needs the
+/// reason stated: inside one `BEGIN IMMEDIATE` transaction nothing can change
+/// the row between the `SELECT` at the top of `change_room_tx` and this
+/// `UPDATE`, and a second writer is blocked by SQLite's write lock. The guard
+/// is therefore unreachable at runtime by construction, so no behavioural test
+/// can turn it red and a tautology mutation survives the whole suite unseen.
+/// What is testable is the property the guard exists for: that the write names
+/// the pre-read values in its `WHERE`.
+#[test]
+fn the_repricing_update_stays_guarded_on_pre_read_state() {
+    const SOURCE: &str = include_str!("../room_change.rs");
+
+    let start = SOURCE
+        .find("UPDATE bookings SET total_price = ?")
+        .expect("câu UPDATE định giá lại phải còn trong room_change.rs");
+    let statement = &SOURCE[start..start + SOURCE[start..].find('"').expect("hết chuỗi SQL")];
+
+    assert!(
+        statement.contains("WHERE id = ?"),
+        "câu UPDATE phải khoá theo booking: {statement}"
+    );
+    assert!(
+        statement.contains("status = ?"),
+        "thiếu điều kiện status đọc trước khi đổi — ensure_one_row_affected sẽ \
+         khớp mọi dòng còn tồn tại và không phát hiện được ghi đè lên state cũ: {statement}"
+    );
+    assert!(
+        statement.contains("total_price = ?"),
+        "thiếu điều kiện total_price đọc trước khi đổi: {statement}"
+    );
+}
+
+/// C2: a `room_calendar` row with a NULL `booking_id` — a maintenance block,
+/// which the schema allows since `booking_id` is nullable — must be reported
+/// as "phòng đã có lịch", not leak out as an internal error.
+///
+/// The in-transaction re-check used a bare `booking_id != ?`, and SQL
+/// three-valued logic makes `NULL != 'B-OPT'` evaluate to NULL, so the row was
+/// invisible to it. No double booking ever resulted — `PRIMARY KEY (room_id,
+/// date)` rejects the UPDATE and the transaction rolls back — but the
+/// receptionist got a `SYSTEM_INTERNAL_ERROR` for an ordinary "that room is
+/// taken", with no idea what to do next.
+#[tokio::test]
+async fn a_maintenance_block_without_a_booking_reads_as_a_room_conflict() {
+    let pool = test_pool().await;
+    seed_stay_in_progress(&pool).await;
+
+    // Phòng khoá để bảo trì: giữ chỗ trong lịch nhưng không thuộc booking nào.
+    sqlx::query(
+        "INSERT INTO room_calendar (room_id, date, booking_id, status)
+         VALUES ('R-NEW', '2026-04-17', NULL, 'blocked')",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    let error = room_change::change_room(
+        &pool,
+        "B-OPT",
+        "R-NEW",
+        true,
+        None,
+        NaiveDate::from_ymd_opt(2026, 4, 16).unwrap(),
+    )
+    .await
+    .unwrap_err();
+
+    assert!(
+        matches!(error, BookingError::Conflict(_)),
+        "phải là xung đột lịch phòng đọc được, không phải lỗi hệ thống: {error:?}"
+    );
+    assert!(
+        error.to_string().contains("đã có lịch"),
+        "thông báo phải nói rõ phòng đã có lịch: {error}"
+    );
+
+    // Và khách vẫn ở nguyên phòng cũ: giao dịch phải rollback trọn vẹn.
+    let room_id: String = sqlx::query_scalar("SELECT room_id FROM bookings WHERE id = 'B-OPT'")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(room_id, "R-OLD");
+}

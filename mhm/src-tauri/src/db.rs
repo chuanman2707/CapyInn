@@ -157,6 +157,18 @@ async fn ensure_setting_default(
 /// claiming the next number, survey every ref — `git for-each-ref` +
 /// `git show <ref>:mhm/src-tauri/src/db.rs | grep LATEST_SCHEMA_VERSION` — and
 /// read the live database, not the brief. Gaps are harmless; collisions are not.
+///
+/// **The same trap bites backwards, and that is the easier half to miss.** A
+/// branch written earlier and merged later is just as broken: once this build
+/// ships and the hotel's database reads 25, `feat/room-drawer-stay-edits` —
+/// still sitting at 24 — has a gate `current < 24` that can never fire again,
+/// so its `bookings.rate_overridden_at` would never be created. Picking a
+/// number higher than every *branch* is not enough; it must also be higher than
+/// whatever the live database has already reached by the time you merge. So the
+/// survey is not a one-off at the start of the work: re-run it immediately
+/// before merging, and if the shipped version has moved past yours, renumber
+/// above it. Nothing warns you — the app simply starts up and fails on the
+/// first query that touches the missing column.
 pub(crate) const LATEST_SCHEMA_VERSION: i32 = 25;
 
 async fn get_schema_version(pool: &Pool<Sqlite>) -> Result<i32, sqlx::Error> {

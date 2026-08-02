@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { ArrowRightLeft } from "lucide-react";
 import { Sheet, SheetContent, SheetHeader, SheetTitle } from "@/components/ui/sheet";
 import { Button } from "@/components/ui/button";
@@ -51,7 +51,15 @@ export function RoomChangeSheet() {
   const [reason, setReason] = useState("");
   const [saving, setSaving] = useState(false);
 
+  // Sheet này dùng chung cho mọi booking, nên `bookingId` đổi ngay khi lễ tân
+  // đóng rồi mở lại cho khách khác. Một `changeRoom` của khách trước vẫn đang
+  // bay lúc đó, và nhánh catch của nó vẫn còn quyền ghi state. Closure giữ giá
+  // trị cũ nên chỉ ref mới trả lời được "sheet đang nói về booking nào" tại
+  // thời điểm promise trả về — cùng vai trò với cờ `cancelled` ngay dưới đây.
+  const activeBookingIdRef = useRef<string | null>(bookingId);
+
   useEffect(() => {
+    activeBookingIdRef.current = isOpen ? bookingId : null;
     if (!isOpen || !bookingId) return;
     let cancelled = false;
     setOptions(null);
@@ -80,9 +88,10 @@ export function RoomChangeSheet() {
 
   async function handleConfirm() {
     if (!options || !selected || saving) return;
+    const requestBookingId = options.bookingId;
     setSaving(true);
     try {
-      await changeRoom(options.bookingId, selected.roomId, keepPrice, reason.trim() || undefined);
+      await changeRoom(requestBookingId, selected.roomId, keepPrice, reason.trim() || undefined);
       toast.success(`Đã chuyển sang ${selected.name}`);
       closeAndReset(false);
     } catch (err) {
@@ -90,14 +99,18 @@ export function RoomChangeSheet() {
       // đang mở — báo lỗi rồi nạp lại danh sách để lễ tân chọn tiếp, thay vì
       // để lại một lựa chọn đã chết trên màn hình.
       toast.error(formatAppError(err));
+      // ...nhưng chỉ khi sheet còn đang nói về đúng booking đó. Nếu lễ tân đã
+      // đóng và mở lại cho khách khác, danh sách phòng nạp lại ở đây là của
+      // khách cũ và sẽ nằm dưới tiêu đề của khách mới.
+      if (activeBookingIdRef.current !== requestBookingId) return;
       setSelectedRoomId(null);
-      if (bookingId) {
-        try {
-          const refreshed = await fetchRoomChangeOptions(bookingId);
-          setOptions(refreshed);
-        } catch (refreshErr) {
-          setLoadError(formatAppError(refreshErr));
-        }
+      try {
+        const refreshed = await fetchRoomChangeOptions(requestBookingId);
+        if (activeBookingIdRef.current !== requestBookingId) return;
+        setOptions(refreshed);
+      } catch (refreshErr) {
+        if (activeBookingIdRef.current !== requestBookingId) return;
+        setLoadError(formatAppError(refreshErr));
       }
     } finally {
       setSaving(false);

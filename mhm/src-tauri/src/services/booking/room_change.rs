@@ -245,11 +245,19 @@ fn date_range_for_pricing(from_date: &str, to_date: &str) -> (String, String) {
 /// `date >= today` mới chuyển. Việc này giữ báo cáo công suất và hóa đơn đúng
 /// sự thật.
 ///
-/// Sau khi chuyển, hàm còn nhóm lại toàn bộ `room_calendar` của booking theo
-/// phòng và ghi mảng đó vào `bookings.pricing_snapshot.room_stays` (merge,
-/// không ghi đè các khoá khác). `check_out_tx` (stay_lifecycle.rs) xoá sạch
-/// `room_calendar` khi trả phòng, nên đây là nguồn sự thật duy nhất còn lại
-/// để hóa đơn tách dòng theo phòng sau khi khách đã check-out.
+/// Sau khi chuyển, hàm còn dựng lại toàn bộ `room_calendar` của booking thành
+/// các **đoạn lưu trú liên tiếp theo ngày** — không phải gộp theo phòng — rồi
+/// ghi mảng đó vào `bookings.pricing_snapshot.room_stays` (merge, không ghi đè
+/// các khoá khác). Khách đi A → B → A ra ba đoạn chứ không phải hai dòng; gộp
+/// theo phòng chính là lỗi tính tiền mà `support.rs` mô tả ở `RoomStayRow`.
+///
+/// Ảnh chụp này là bản ghi lúc chuyển phòng, KHÔNG phải nguồn sự thật cuối
+/// cùng: `check_out_tx` (stay_lifecycle.rs) và `group_checkout_tx`
+/// (group_lifecycle.rs) đều dựng lại `room_stays` từ `room_calendar` ngay
+/// trước khi xoá bảng đó, và `check_out_tx` còn cắt bớt theo số đêm thực sự
+/// quyết toán. Nó chỉ là nguồn duy nhất còn lại nếu không đường check-out nào
+/// chạy — và ngay cả trước khi trả phòng, `invoice_generation.rs` vẫn ưu tiên
+/// `room_calendar` vì `extend_stay_tx` thêm đêm mà không đụng vào ảnh chụp.
 ///
 /// Khi `keep_price == false`, khoản chênh lệch giữa giá phòng mới và phòng cũ
 /// cho các đêm còn lại (cùng khoảng ngày nên các hệ số cuối tuần/lễ tự triệt
@@ -309,9 +317,17 @@ pub(super) async fn change_room_tx(
     let to_date: String = range.get("to_date");
 
     // Kiểm lại trong transaction, không tin danh sách giao diện gửi lên.
+    //
+    // `booking_id IS NULL OR ...`: SQL ba trị làm `NULL != ?` ra NULL, tức là
+    // dòng giữ chỗ không có booking (block bảo trì) sẽ tàng hình với phép kiểm
+    // này. `load_options` ở trên đã viết đúng dạng đó; nếu ở đây viết thiếu thì
+    // `PRIMARY KEY (room_id, date)` vẫn chặn được UPDATE nên không bao giờ
+    // trùng phòng thật, nhưng lễ tân nhận SYSTEM_INTERNAL_ERROR thay vì câu
+    // "phòng đã có lịch" đọc được.
     let conflict: Option<String> = sqlx::query_scalar(
         "SELECT date FROM room_calendar
-         WHERE room_id = ? AND date >= ? AND date <= ? AND booking_id != ?
+         WHERE room_id = ? AND date >= ? AND date <= ?
+           AND (booking_id IS NULL OR booking_id != ?)
          ORDER BY date LIMIT 1",
     )
     .bind(new_room_id)

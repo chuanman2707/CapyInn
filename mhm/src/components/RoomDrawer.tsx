@@ -275,7 +275,20 @@ export default function RoomDrawer({ open, onClose, roomId }: RoomDrawerProps) {
                 <ActionBtn
                     icon={ArrowRightLeft}
                     label="Chuyển phòng"
-                    onClick={() => booking && setRoomChangeOpen(true, booking.id)}
+                    onClick={() => {
+                        if (!booking) return;
+                        setRoomChangeOpen(true, booking.id);
+                        // Bàn giao hẳn cho RoomChangeSheet rồi đóng, giống hệt
+                        // nút check-in bên dưới. `roomDetail` là state cục bộ
+                        // và effect nạp nó chỉ phụ thuộc [open, roomId] — cả
+                        // hai đều không đổi khi khách chuyển phòng, còn
+                        // listener "db-updated" toàn cục chỉ làm mới
+                        // rooms/stats của store. Để drawer mở là nó vẫn khoe
+                        // phòng cũ, tổng tiền trước khi cộng chênh, và một nút
+                        // Check-out mở modal ghi "Phòng 101" cho khách đã sang
+                        // 202 — sai ngay lúc xác nhận tiền.
+                        handleClose();
+                    }}
                     variant="ghost"
                     className="col-span-2"
                 />

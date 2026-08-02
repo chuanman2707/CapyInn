@@ -102,6 +102,7 @@ vi.mock("sonner", () => ({
   },
 }));
 
+import { emitTestEvent, resetEventMocks } from "@test-mocks/tauri-event";
 import GroupManagement from "./GroupManagement";
 
 const checkoutUserError: AppError = {
@@ -114,6 +115,7 @@ const checkoutUserError: AppError = {
 describe("GroupManagement", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    resetEventMocks();
     fetchGroups.mockResolvedValue(undefined);
     getGroupDetail.mockResolvedValue({
       group: {
@@ -259,5 +261,77 @@ describe("GroupManagement room change gating", () => {
     await screen.findByText("Trần Thị B");
 
     expect(screen.queryByRole("button", { name: /chuyển phòng/i })).toBeNull();
+  });
+});
+
+describe("GroupManagement refresh after a room change", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    resetEventMocks();
+    fetchGroups.mockResolvedValue(undefined);
+    groupCheckout.mockResolvedValue(undefined);
+  });
+
+  function groupDetailWith(roomName: string, totalPrice: number) {
+    return {
+      group: {
+        id: "group-1",
+        group_name: "Đoàn A",
+        organizer_name: "Trưởng đoàn",
+        organizer_phone: "0123456789",
+        total_rooms: 1,
+        status: "active",
+        created_at: "2026-04-22T00:00:00Z",
+      },
+      bookings: [
+        {
+          id: "booking-1",
+          room_id: roomName,
+          room_name: roomName,
+          guest_name: "Nguyễn Văn A",
+          check_in_at: "2026-04-22T00:00:00Z",
+          expected_checkout: "2026-04-23T00:00:00Z",
+          actual_checkout: null,
+          nights: 1,
+          total_price: totalPrice,
+          paid_amount: 0,
+          status: "active",
+          source: "walk-in",
+          booking_type: "group",
+          deposit_amount: null,
+          scheduled_checkin: null,
+          scheduled_checkout: null,
+          guest_phone: null,
+        },
+      ],
+      services: [],
+      total_room_cost: totalPrice,
+      total_service_cost: 0,
+      grand_total: totalPrice,
+      paid_amount: 0,
+    };
+  }
+
+  // `detail` là state cục bộ và RoomChangeSheet không có callback quay về đây,
+  // nên nếu trang không nghe "db-updated" thì sau khi chuyển R102 → R105
+  // (+500.000đ) dòng vẫn ghi R102 với giá cũ và `grand_total` vẫn thiếu khoản
+  // chênh — lễ tân đọc con số đó lên là báo sai tiền cho khách.
+  it("cập nhật phòng và tổng tiền sau khi backend báo dữ liệu đổi", async () => {
+    const user = userEvent.setup();
+    getGroupDetail.mockResolvedValue(groupDetailWith("R102", 500000));
+
+    render(<GroupManagement />);
+    await user.click(screen.getByText("Đoàn A"));
+    await screen.findByText("R102");
+
+    // Khách vừa được chuyển sang R105 và bị tính thêm 500.000đ.
+    getGroupDetail.mockResolvedValue(groupDetailWith("R105", 1000000));
+    await emitTestEvent("db-updated", { entity: "bookings" });
+
+    await waitFor(() => {
+      expect(screen.getByText("R105")).toBeTruthy();
+    });
+    expect(screen.queryByText("R102")).toBeNull();
+    expect(getGroupDetail).toHaveBeenCalledTimes(2);
   });
 });

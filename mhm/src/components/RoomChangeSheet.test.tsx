@@ -1,5 +1,5 @@
 import type { ButtonHTMLAttributes, ReactNode } from "react";
-import { render, screen, waitFor } from "@testing-library/react";
+import { act, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -127,6 +127,30 @@ describe("RoomChangeSheet", () => {
     expect(screen.queryByText(/500\.000đ\/đêm/)).not.toBeInTheDocument();
   });
 
+  // Đoạn tóm tắt "Cách tính tiền" tồn tại để nói ra con số, nên nó phải nói
+  // đúng cả chiều âm: hard-code dấu "+" ở đây sẽ in "+50.000đ" cho một lần hạ
+  // hạng mà khách đang được trả lại tiền.
+  it("bảng tóm tắt hiện dấu trừ khi phòng chọn rẻ hơn", async () => {
+    renderSheet({
+      ...baseOptions,
+      rooms: [
+        {
+          roomId: "3C",
+          name: "Phòng 3C",
+          roomType: "standard",
+          floor: 3,
+          maxGuests: 2,
+          priceDifference: -50000,
+        },
+      ],
+    });
+    await userEvent.click(await screen.findByText("Phòng 3C"));
+    expect(
+      screen.getByText(/−50\.000đ cho cả kỳ so với phòng cũ/),
+    ).toBeInTheDocument();
+    expect(screen.queryByText(/\+50\.000đ cho cả kỳ so với phòng cũ/)).toBeNull();
+  });
+
   it("dòng phòng hiện dấu trừ khi phòng rẻ hơn phòng hiện tại", async () => {
     renderSheet({
       ...baseOptions,
@@ -215,6 +239,26 @@ describe("RoomChangeSheet", () => {
     );
   });
 
+  // Chỉ kiểm tham số gửi xuống backend là chưa đủ: nếu phần hiển thị quên
+  // nhánh keepPrice thì màn hình vẫn ghi "+500.000đ cho cả kỳ" trong khi
+  // backend không tính đồng nào — lễ tân thu thừa nửa triệu.
+  it("giữ nguyên giá cũ thì màn hình cũng phải về không đồng", async () => {
+    renderSheet(baseOptions);
+
+    await userEvent.click(await screen.findByText("Phòng 2A"));
+    expect(
+      screen.getByText(/\+500\.000đ cho cả kỳ so với phòng cũ/),
+    ).toBeInTheDocument();
+
+    await userEvent.click(screen.getByLabelText(/giữ nguyên giá cũ/i));
+
+    expect(screen.getByText(/^Không đổi tiền$/i)).toBeInTheDocument();
+    expect(screen.queryByText(/so với phòng cũ/)).toBeNull();
+    expect(
+      screen.getByRole("button", { name: /chuyển sang phòng 2a/i }),
+    ).toHaveTextContent(/không đổi tiền/i);
+  });
+
   it("nút xác nhận nêu rõ phòng và tiền, không phải chỉ 'Xác nhận'", async () => {
     renderSheet(baseOptions);
     await userEvent.click(await screen.findByText("Phòng 2A"));
@@ -228,6 +272,60 @@ describe("RoomChangeSheet", () => {
     expect(
       await screen.findByText(/Không phòng nào trống suốt 5 đêm còn lại/i),
     ).toBeInTheDocument();
+  });
+
+  // Sheet dùng chung: lễ tân bấm xác nhận cho khách A, đóng lại, mở cho khách
+  // B, rồi lệnh ghi của A mới rơi lỗi. Nhánh catch nạp lại danh sách phòng —
+  // nếu không kiểm booking hiện tại thì danh sách của A đắp lên tiêu đề của B.
+  // Effect nạp ở trên đã có cờ `cancelled` cho đúng tình huống này; nhánh
+  // catch phải đối xứng.
+  it("không đắp danh sách của booking cũ khi sheet đã chuyển sang booking khác", async () => {
+    let rejectChange: ((err: unknown) => void) | undefined;
+    const changeRoom = vi.fn(
+      () =>
+        new Promise<void>((_resolve, reject) => {
+          rejectChange = reject;
+        }),
+    );
+    const fetchRoomChangeOptions = vi
+      .fn()
+      .mockImplementation(async (bookingId: string) => ({
+        ...baseOptions,
+        bookingId,
+      }));
+
+    renderSheet(baseOptions, { changeRoom, fetchRoomChangeOptions });
+
+    await userEvent.click(await screen.findByText("Phòng 2A"));
+    await userEvent.click(screen.getByRole("button", { name: /chuyển sang/i }));
+    await waitFor(() => expect(changeRoom).toHaveBeenCalled());
+
+    // Lễ tân đóng sheet và mở lại cho khách khác trong lúc lệnh của B1 còn bay.
+    await act(async () => {
+      useHotelStore.setState({ roomChangeBookingId: "B2" });
+    });
+    await waitFor(() =>
+      expect(fetchRoomChangeOptions).toHaveBeenCalledWith("B2"),
+    );
+    const callsBeforeRejection = fetchRoomChangeOptions.mock.calls.length;
+
+    await act(async () => {
+      rejectChange?.(
+        createAppErrorException({
+          code: "BOOKING_INVALID_STATE",
+          message: "Phòng 2A vừa được người khác chọn.",
+          kind: "user",
+          support_id: null,
+        }),
+      );
+      await Promise.resolve();
+    });
+
+    await waitFor(() => expect(toast.error).toHaveBeenCalled());
+    expect(fetchRoomChangeOptions).toHaveBeenCalledTimes(callsBeforeRejection);
+    expect(
+      fetchRoomChangeOptions.mock.calls.filter(([id]) => id === "B1"),
+    ).toHaveLength(1);
   });
 
   it("khi đổi phòng thất bại: báo lỗi dễ đọc, nạp lại danh sách, bỏ chọn cũ", async () => {

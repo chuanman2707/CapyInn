@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { listen } from "@tauri-apps/api/event";
 import { useHotelStore } from "../stores/useHotelStore";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { Badge } from "@/components/ui/badge";
@@ -7,6 +8,7 @@ import { Input } from "@/components/ui/input";
 import EmptyState from "@/components/shared/EmptyState";
 import SlideDrawer from "@/components/shared/SlideDrawer";
 import { formatAppError } from "@/lib/appError";
+import { createDeferredCleanup } from "@/lib/deferredCleanup";
 import { BALANCE_TONE_CLASS, balanceDisplay } from "@/lib/bookingBalance";
 import { fmtMoney, fmtDateShort } from "@/lib/format";
 import { toast } from "sonner";
@@ -79,6 +81,28 @@ export default function GroupManagement() {
             fetchGroups(filter || undefined);
         }
     };
+
+    // `detail` là state cục bộ của trang này. Nút "Chuyển phòng" ở danh sách
+    // phòng trong đoàn bàn giao hẳn cho RoomChangeSheet ở MainShell, nên không
+    // có callback nào quay về đây; `useHotelStore.changeRoom` chỉ làm mới
+    // rooms/stats chứ không đụng tới `groups`, và listener toàn cục ở
+    // RuntimeStateProvider cũng vậy. Không có chỗ nghe này thì chuyển xong
+    // dòng vẫn ghi phòng cũ với `total_price` cũ, còn `grand_total` dưới chân
+    // bảng thì thiếu khoản chênh — lễ tân đọc lên là báo sai tiền cho khách.
+    // Backend phát "db-updated" sau MỌI lệnh ghi
+    // (commands/mod.rs::emit_db_update), giống hệt cách Reservations.tsx làm
+    // mới lịch của nó.
+    useEffect(() => {
+        const cleanup = createDeferredCleanup(
+            listen<{ entity: string }>("db-updated", () => {
+                void refreshDetail();
+            }),
+        );
+        return cleanup;
+        // `refreshDetail` đọc hai state này; đăng ký lại khi chúng đổi để
+        // closure không giữ mãi `selectedGroupId` của lần render đầu (null).
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [selectedGroupId, filter]);
 
     const handleAddService = async () => {
         if (!selectedGroupId || !svcName.trim()) return;

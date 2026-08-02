@@ -530,6 +530,15 @@ describe("useHotelStore room change", () => {
     expect(invoke).toHaveBeenCalledWith("get_rooms");
   });
 
+  // Cùng lý do với check-in / check-out ở trên: Dashboard chỉ nạp lại khi
+  // `dashboardRefreshVersion` nhích lên, mà chuyển phòng vừa đổi công suất
+  // từng phòng vừa đổi `total_price` — hai thứ Dashboard đang hiển thị.
+  it("chuyển phòng cũng phải nhích dashboardRefreshVersion", async () => {
+    await useHotelStore.getState().changeRoom("B1", "2B", false, undefined);
+
+    expect(useHotelStore.getState().dashboardRefreshVersion).toBe(1);
+  });
+
   it("setRoomChangeOpen mở sheet cho đúng booking", () => {
     useHotelStore.getState().setRoomChangeOpen(true, "B1");
     expect(useHotelStore.getState().isRoomChangeOpen).toBe(true);
