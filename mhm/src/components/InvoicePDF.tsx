@@ -252,6 +252,25 @@ const s = StyleSheet.create({
         color: gray600,
         lineHeight: 1.6,
     },
+    notesBox: {
+        marginTop: 16,
+        padding: 12,
+        backgroundColor: gray100,
+        borderRadius: 4,
+        borderLeft: `3px solid ${navyLight}`,
+    },
+    notesTitle: {
+        fontSize: 9,
+        fontWeight: 700,
+        color: navy,
+        marginBottom: 6,
+        letterSpacing: 0.5,
+    },
+    notesText: {
+        fontSize: 8,
+        color: gray600,
+        lineHeight: 1.6,
+    },
     footer: {
         position: "absolute",
         bottom: 30,
@@ -335,6 +354,11 @@ export default function InvoicePDF({ data, groupData }: InvoicePDFProps) {
     const hotelName = isGroup ? groupData.hotel_name : data!.hotel_name;
     const hotelAddress = isGroup ? groupData.hotel_address : data!.hotel_address;
     const hotelPhone = isGroup ? groupData.hotel_phone : data!.hotel_phone;
+    // Trimmed up front so a blank-but-not-null `notes` renders nothing rather
+    // than an empty "GHI CHÚ" box. For a booking that changed rooms this is
+    // where the settlement wording lives (`invoice_generation.rs`), so it has
+    // to be printed, not just stored.
+    const notes = isGroup ? "" : (data!.notes ?? "").trim();
 
     return (
         <Document>
@@ -541,6 +565,15 @@ export default function InvoicePDF({ data, groupData }: InvoicePDFProps) {
                                 </Text>
                             </View>
                         </View>
+
+                        {/* Notes — carries the checkout settlement wording for
+                            a booking that changed rooms */}
+                        {notes !== "" && (
+                            <View style={s.notesBox}>
+                                <Text style={s.notesTitle}>GHI CHÚ</Text>
+                                <Text style={s.notesText}>{notes}</Text>
+                            </View>
+                        )}
 
                         {/* Policy */}
                         {data!.policy_text && (

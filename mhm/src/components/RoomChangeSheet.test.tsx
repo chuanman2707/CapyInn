@@ -107,13 +107,22 @@ describe("RoomChangeSheet", () => {
     renderSheet(baseOptions);
     await userEvent.click(await screen.findByText("Phòng 2A"));
     // Chọn dòng có hậu tố "so với phòng cũ" — dòng phòng trong danh sách cũng
-    // hiện chênh lệch (không hậu tố) nên chỉ khớp regex trần sẽ khớp cả hai.
+    // hiện chênh lệch (hậu tố "cả kỳ") nên chỉ khớp regex trần sẽ khớp cả hai.
     expect(screen.getByText(/\+500\.000đ so với phòng cũ/)).toBeInTheDocument();
   });
 
   it("dòng phòng hiện chênh lệch giá, không phải basePrice", async () => {
     renderSheet(baseOptions);
     expect(await screen.findByText(/\+500\.000đ/)).toBeInTheDocument();
+  });
+
+  // `priceDifference` là chênh lệch cho TOÀN BỘ số đêm còn lại. Dòng này trước
+  // đây đọc là "…đ/đêm", nên một con số trần rất dễ bị đọc thành giá mỗi đêm và
+  // báo sai cho khách.
+  it("dòng phòng nói rõ chênh lệch là cho cả kỳ, không phải mỗi đêm", async () => {
+    renderSheet(baseOptions);
+    expect(await screen.findByText(/\+500\.000đ cả kỳ/)).toBeInTheDocument();
+    expect(screen.queryByText(/500\.000đ\/đêm/)).not.toBeInTheDocument();
   });
 
   it("dòng phòng hiện dấu trừ khi phòng rẻ hơn phòng hiện tại", async () => {
@@ -130,7 +139,7 @@ describe("RoomChangeSheet", () => {
         },
       ],
     });
-    expect(await screen.findByText(/−50\.000đ/)).toBeInTheDocument();
+    expect(await screen.findByText(/−50\.000đ cả kỳ/)).toBeInTheDocument();
   });
 
   it("dòng phòng hiện 'không đổi tiền' khi chênh lệch bằng 0", async () => {

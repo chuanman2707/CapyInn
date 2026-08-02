@@ -24,7 +24,8 @@ use super::{
     pricing_service::calculate_stay_price_tx,
     support::{
         begin_immediate_tx, ensure_one_row_affected, ensure_rows_affected,
-        insert_room_calendar_rows, invalid_state_transition, validate_non_negative_booking_money,
+        insert_room_calendar_rows, invalid_state_transition, merge_pricing_snapshot,
+        room_calendar_stays_tx, room_stays_to_json, validate_non_negative_booking_money,
     },
 };
 
@@ -997,6 +998,45 @@ pub(crate) async fn group_checkout_tx(
             .push_bind(&now);
     });
     qb.build().execute(&mut **tx).await?;
+
+    // Snapshot `room_stays` before the DELETE below wipes `room_calendar` —
+    // the same move `check_out_tx` (stay_lifecycle.rs) makes on the
+    // single-booking path, and for the same reason: after checkout the
+    // snapshot is the only place the invoice can learn that a booking slept in
+    // more than one room. `change_room_tx` did write a snapshot at move time,
+    // but nothing has refreshed it since — an `extend_stay_tx` after the move
+    // added `room_calendar` rows and left it behind — so skipping this leaves
+    // a group booking's invoice splitting its money over the wrong nights.
+    //
+    // No truncation here, unlike `check_out_tx`: group checkout never settles
+    // fewer nights than booked — it leaves `bookings.nights` and `total_price`
+    // untouched (see the status UPDATE above), so `room_calendar` already
+    // holds exactly the nights being charged. A group is at most ~10 bookings,
+    // so a per-booking UPDATE is cheap.
+    for booking_id in &unique_booking_ids {
+        let room_stays = room_calendar_stays_tx(tx, booking_id).await?;
+        if room_stays.is_empty() {
+            continue;
+        }
+
+        let existing_snapshot: Option<String> =
+            sqlx::query_scalar("SELECT pricing_snapshot FROM bookings WHERE id = ?")
+                .bind(booking_id)
+                .fetch_optional(&mut **tx)
+                .await?
+                .flatten();
+        let merged_snapshot = merge_pricing_snapshot(
+            existing_snapshot.as_deref(),
+            "room_stays",
+            room_stays_to_json(&room_stays),
+        );
+
+        sqlx::query("UPDATE bookings SET pricing_snapshot = ? WHERE id = ?")
+            .bind(&merged_snapshot)
+            .bind(booking_id)
+            .execute(&mut **tx)
+            .await?;
+    }
 
     let mut qb = sqlx::QueryBuilder::new("DELETE FROM room_calendar WHERE booking_id IN (");
     let mut sep = qb.separated(", ");

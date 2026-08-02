@@ -61,7 +61,7 @@ pub async fn generate_invoice_tx(
     let total_price = get_money_vnd(&b, "total_price");
     let paid_amount = get_money_vnd(&b, "paid_amount");
     let deposit_amount = get_optional_money_vnd(&b, "deposit_amount").unwrap_or(0);
-    let notes: Option<String> = b.get("notes");
+    let mut notes: Option<String> = b.get("notes");
     let pricing_snapshot: Option<String> = b.get("pricing_snapshot");
     let snapshot_value: Option<serde_json::Value> = pricing_snapshot
         .as_deref()
@@ -118,21 +118,23 @@ pub async fn generate_invoice_tx(
     } else {
         total_price
     };
+    let settlement_line_label =
+        settlement_label.unwrap_or_else(|| format!("{} night(s) x {}d", nights, per_night));
     let mut breakdown: Vec<crate::pricing::PricingLine> = vec![crate::pricing::PricingLine {
-        label: settlement_label.unwrap_or_else(|| format!("{} night(s) x {}d", nights, per_night)),
+        label: settlement_line_label.clone(),
         amount: total_price,
     }];
 
     let subtotal = total_price;
     let balance_due = (total_price - paid_amount).max(0);
 
-    // If the booking moved rooms mid-stay, append one line per room actually
-    // occupied to the settlement line already in `breakdown`, grouped by the
-    // night the guest first slept there, in occupancy order.
+    // If the booking moved rooms mid-stay, replace the settlement line with
+    // one line per occupancy segment (a run of consecutive nights in one
+    // room), in date order.
     //
     // Resolution order for the (room name, nights) pairs:
-    //  1. `room_calendar`, grouped by room — the LIVE truth whenever this
-    //     booking still has rows there, i.e. checkout has not run yet.
+    //  1. `room_calendar` — the LIVE truth whenever this booking still has
+    //     rows there, i.e. checkout has not run yet.
     //     `pricing_snapshot.room_stays` is a snapshot taken at move time and
     //     nothing refreshes it afterwards: `extend_stay_tx`
     //     (stay_lifecycle.rs) inserts new `room_calendar` rows on the
@@ -143,28 +145,22 @@ pub async fn generate_invoice_tx(
     //  2. `pricing_snapshot.room_stays`, written by `change_room_tx`
     //     (room_change.rs) at move time and re-derived (then truncated to
     //     the settled night count) by `check_out_tx` (stay_lifecycle.rs)
-    //     immediately before it deletes the booking's `room_calendar` rows
-    //     — the ONLY source left once the guest has checked out.
+    //     and `group_checkout_tx` (group_lifecycle.rs) immediately before
+    //     they delete the booking's `room_calendar` rows — the ONLY source
+    //     left once the guest has checked out.
     //  3. Neither present ⇒ the pre-existing single line built above.
-    let room_entries_from_calendar: Vec<(String, i64)> = sqlx::query(
-        "SELECT rc.room_id, r.name AS room_name, COUNT(*) AS nights
-         FROM room_calendar rc
-         JOIN rooms r ON r.id = rc.room_id
-         WHERE rc.booking_id = ?
-         GROUP BY rc.room_id, r.name
-         ORDER BY MIN(rc.date)",
-    )
-    .bind(booking_id)
-    .fetch_all(&mut **tx)
-    .await
-    .map_err(|e| e.to_string())?
-    .into_iter()
-    .map(|row| {
-        let room_name: String = row.get("room_name");
-        let nights: i64 = row.get("nights");
-        (room_name, nights)
-    })
-    .collect();
+    //
+    // Case 1 goes through `room_calendar_stays_tx` rather than a local query:
+    // that helper is what writes case 2's snapshot, so sharing it is what
+    // makes an invoice generated before checkout and one generated after tell
+    // the same story.
+    let room_entries_from_calendar: Vec<(String, i64)> =
+        super::support::room_calendar_stays_tx(tx, booking_id)
+            .await
+            .map_err(|error| error.to_string())?
+            .into_iter()
+            .map(|stay| (stay.room_name, stay.nights))
+            .collect();
 
     let room_entries: Vec<(String, i64)> = if !room_entries_from_calendar.is_empty() {
         room_entries_from_calendar
@@ -205,11 +201,30 @@ pub async fn generate_invoice_tx(
                     amount,
                 });
             }
-            // Keep the settlement line (breakdown[0]) — it explains how the
-            // total was reached, and that explanation matters most exactly
-            // for a moved (possibly early-checked-out) booking, whose total
-            // is the least obvious to read at a glance. Room lines follow it.
-            breakdown.extend(room_lines);
+            // REPLACE the settlement line, never append to it. Both renderers
+            // print every breakdown line with its amount and then print
+            // "Subtotal" from `total` right underneath — and the room lines
+            // already sum to exactly that subtotal. Keeping the settlement
+            // line too would hand the guest a document whose printed lines add
+            // up to twice its own stated subtotal.
+            breakdown = room_lines;
+
+            // The settlement wording still has to reach the guest: a moved,
+            // possibly early-checked-out booking is precisely the one whose
+            // total is hardest to read. It moves to `notes`, which both
+            // renderers show as a "GHI CHÚ" block under the breakdown — text,
+            // not money, so it cannot be mistaken for another charge. The
+            // booking's own notes (which already carry the "Chuyển phòng ..."
+            // line written by `change_room_tx`) stay first.
+            let existing_notes = notes
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(str::to_string);
+            notes = Some(match existing_notes {
+                Some(existing) => format!("{existing}\n{settlement_line_label}"),
+                None => settlement_line_label.clone(),
+            });
         }
     }
 

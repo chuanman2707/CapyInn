@@ -18,10 +18,14 @@ import type { RoomChangeOptions } from "@/types";
  * that actually matches what `change_room` will charge, so that is what the
  * row shows instead — same "+X" / "−X" / "không đổi tiền" vocabulary already
  * used below once a room is selected.
+ *
+ * "cả kỳ" is not decoration: `priceDifference` covers ALL remaining nights,
+ * while this row used to read "…đ/đêm", so a returning receptionist reads a
+ * bare "+500.000đ" as per-night and quotes the guest the wrong number.
  */
 function formatPriceDifference(value: number): string {
   if (value === 0) return "không đổi tiền";
-  return `${value > 0 ? "+" : "−"}${fmtNumber(Math.abs(value))}đ`;
+  return `${value > 0 ? "+" : "−"}${fmtNumber(Math.abs(value))}đ cả kỳ`;
 }
 
 /**

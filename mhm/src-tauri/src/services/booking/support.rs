@@ -109,12 +109,18 @@ pub(crate) fn map_room_calendar_insert_error(error: sqlx::Error, date: NaiveDate
     BookingError::from(error)
 }
 
-/// One room a booking has occupied, derived by grouping `room_calendar` rows
-/// for that booking by room and taking the earliest night as occupancy
-/// order. Feeds `pricing_snapshot.room_stays`: written wholesale by
-/// `room_change::change_room_tx` at move time, and re-derived (then
-/// truncated to the settled night count) by `stay_lifecycle::check_out_tx`
-/// right before it deletes the booking's `room_calendar` rows.
+/// One **occupancy segment**: a run of consecutive nights the booking spent in
+/// one room, in date order. Feeds `pricing_snapshot.room_stays`: written
+/// wholesale by `room_change::change_room_tx` at move time, and re-derived by
+/// `stay_lifecycle::check_out_tx` (then truncated to the settled night count)
+/// and `group_lifecycle::group_checkout_tx` right before they delete the
+/// booking's `room_calendar` rows.
+///
+/// A segment, not a room: a guest who moves A → B → A produces three rows, not
+/// two. Grouping by room instead would collapse the two A stays into one row
+/// carrying the *earliest* `first_night`, and every consumer that walks the
+/// list in stay order (`truncate_room_stays_to_settled_nights`, the invoice
+/// split) would then hand B's nights to A.
 pub struct RoomStayRow {
     pub room_id: String,
     pub room_name: String,
@@ -126,27 +132,37 @@ pub async fn room_calendar_stays_tx(
     tx: &mut Transaction<'_, Sqlite>,
     booking_id: &str,
 ) -> BookingResult<Vec<RoomStayRow>> {
+    // One row per night, in date order, then run-length encoded below. The
+    // `room_id` tiebreak only matters for the pathological case of two rooms
+    // holding the same booking on the same date; it keeps the output stable.
     let rows = sqlx::query(
-        "SELECT rc.room_id, r.name AS room_name, COUNT(*) AS nights, MIN(rc.date) AS first_night
+        "SELECT rc.room_id, r.name AS room_name, rc.date
          FROM room_calendar rc
          JOIN rooms r ON r.id = rc.room_id
          WHERE rc.booking_id = ?
-         GROUP BY rc.room_id, r.name
-         ORDER BY MIN(rc.date)",
+         ORDER BY rc.date, rc.room_id",
     )
     .bind(booking_id)
     .fetch_all(&mut **tx)
     .await?;
 
-    Ok(rows
-        .into_iter()
-        .map(|row| RoomStayRow {
-            room_id: row.get("room_id"),
-            room_name: row.get("room_name"),
-            nights: row.get("nights"),
-            first_night: row.get("first_night"),
-        })
-        .collect())
+    let mut segments: Vec<RoomStayRow> = Vec::new();
+    for row in rows {
+        let room_id: String = row.get("room_id");
+        let room_name: String = row.get("room_name");
+        let date: String = row.get("date");
+        match segments.last_mut() {
+            Some(last) if last.room_id == room_id => last.nights += 1,
+            _ => segments.push(RoomStayRow {
+                room_id,
+                room_name,
+                nights: 1,
+                first_night: date,
+            }),
+        }
+    }
+
+    Ok(segments)
 }
 
 /// Serializes `RoomStayRow`s into the JSON shape stored under

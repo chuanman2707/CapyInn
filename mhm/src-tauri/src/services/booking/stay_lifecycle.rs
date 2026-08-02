@@ -628,13 +628,17 @@ fn checkout_settlement_value(
     })
 }
 
-/// Caps the cumulative night count in `rows` (already ordered by occupancy —
-/// `room_calendar_stays_tx` orders by `MIN(date)`) to `settled_nights`,
-/// walking rooms in that order. A room's own night count can only shrink,
-/// never grow: the first room keeps up to its full count, the next room gets
-/// whatever budget is left, and any room past the point the budget hits zero
-/// is dropped entirely — the guest never reached it under the nights actually
-/// being settled.
+/// Caps the cumulative night count in `rows` to `settled_nights`, walking the
+/// segments in the date order `room_calendar_stays_tx` returns them: each
+/// segment keeps up to its own count, the next one gets whatever budget is
+/// left, and any segment past the point the budget hits zero is dropped
+/// entirely — the guest never reached it under the nights actually settled.
+///
+/// This is only correct because `rows` are *occupancy segments in date order*,
+/// not one row per room: a guest who moves A → B → A gets three segments, so
+/// the budget is spent on the nights actually slept first. Group by room
+/// instead and the earliest-dated A row swallows the whole budget while B
+/// silently disappears from the invoice.
 fn truncate_room_stays_to_settled_nights(
     rows: &[RoomStayRow],
     settled_nights: i32,
