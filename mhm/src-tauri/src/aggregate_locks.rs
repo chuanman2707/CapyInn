@@ -48,6 +48,24 @@ fn aggregate_key(prefix: &str, id: &str) -> CommandResult<String> {
     Ok(format!("{prefix}:{trimmed}"))
 }
 
+/// Thứ tự lấy khoá đi theo HẠNG, không theo alphabet.
+///
+/// Một lệnh nhiều pha lấy khoá theo hạng tăng nghiêm ngặt, còn một lệnh
+/// một-phát lấy cả bộ đã canonicalize — hai đường đó chỉ không kẹt nhau khi
+/// cùng đi theo một thứ tự toàn cục. Alphabet không làm được: `booking:` đứng
+/// trước `group:`, nên `remove_group_service` (lấy một phát group + booking +
+/// folio) và một `group_checkout` hai pha (group trước, booking sau) tạo thành
+/// một chu trình chờ nhau có thật.
+fn scope_rank(key: &str) -> u8 {
+    match key.split(':').next().unwrap_or_default() {
+        "group" => 0,
+        "booking" => 1,
+        "folio" => 2,
+        "room" => 3,
+        _ => 9,
+    }
+}
+
 pub fn canonicalize_lock_keys<I, S>(keys: I) -> CommandResult<Vec<String>>
 where
     I: IntoIterator<Item = S>,
@@ -66,7 +84,11 @@ where
         ));
     }
 
-    keys.sort();
+    keys.sort_by(|left, right| {
+        scope_rank(left)
+            .cmp(&scope_rank(right))
+            .then_with(|| left.cmp(right))
+    });
     keys.dedup();
     Ok(keys)
 }
@@ -152,13 +174,34 @@ mod tests {
         assert_eq!(
             left,
             vec![
+                "group:G1".to_string(),
                 "booking:B1".to_string(),
                 "booking:B2".to_string(),
                 "folio:B1".to_string(),
                 "folio:B2".to_string(),
-                "group:G1".to_string(),
                 "room:R1".to_string(),
                 "room:R2".to_string(),
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn canonicalize_lock_keys_orders_unknown_prefixes_last() {
+        let keys = canonicalize_lock_keys(vec![
+            "settings:ceo_cloud_data_opt_in".to_string(),
+            "room:R1".to_string(),
+            "group:G1".to_string(),
+            "agent_secret:telegram".to_string(),
+        ])
+        .expect("keys canonicalize");
+
+        assert_eq!(
+            keys,
+            vec![
+                "group:G1".to_string(),
+                "room:R1".to_string(),
+                "agent_secret:telegram".to_string(),
+                "settings:ceo_cloud_data_opt_in".to_string(),
             ]
         );
     }
