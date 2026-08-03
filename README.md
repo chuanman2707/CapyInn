@@ -116,6 +116,7 @@ CapyInn is built for a narrow but practical use case: small hotels that need a s
 
 - Dashboard organized around the configured room layout
 - Check-in, check-out, extend-stay, and reservation flows in one desktop app
+- Mid-stay room change for an in-house guest, listing the valid target rooms for that booking and offering a choice between keeping the original price and charging the difference
 - Reservation calendar timeline: click or drag across empty cells to open a check-in or a reservation with those dates already filled in
 - Backfill sheet for recording a stay that already happened, opened from the same calendar
 - Read-only detail popup for a booking that has already checked out, including its issued invoice

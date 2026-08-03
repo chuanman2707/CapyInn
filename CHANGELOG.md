@@ -13,6 +13,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   module, extraction and validation, XLSX and XML writers generated from the official
   template, a declaration page with a sidebar badge and reconcile loop, and a
   `--check-resources` mode on the probe CLI
+- Mid-stay room change for a guest already in house, with the valid target rooms
+  listed for the booking and an option to keep the original price or charge the
+  difference between the two rooms
 - Reservation calendar timeline: click or drag across empty cells to open a check-in
   or a reservation with those dates already prefilled
 - Backfill sheet for recording a stay that already happened, with the matching
