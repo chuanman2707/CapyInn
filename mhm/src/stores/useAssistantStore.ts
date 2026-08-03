@@ -1,6 +1,7 @@
 import { create } from "zustand";
 
 import { invokeCommand, invokeWriteCommand } from "@/lib/invokeCommand";
+import { isActionExpired } from "@/types/assistant";
 import type {
   AssistantMessage,
   AssistantSettings,
@@ -98,6 +99,13 @@ export const useAssistantStore = create<AssistantState>((set, get) => ({
   approve: async () => {
     const action = get().pendingAction;
     if (!action || get().busy) return;
+    if (isActionExpired(action, Date.now())) {
+      // Giữ nguyên thẻ: giá trên thẻ được tính cho một mốc thời gian cụ thể; nếu
+      // duyệt thẻ đã hết hạn, số tiền thu có thể lệch với giá hiện hành (ví dụ
+      // đổi ngày, đổi cuối tuần). Không tự duyệt thẳng — bắt trợ lý tính lại.
+      set({ error: "Thẻ xác nhận đã hết hạn, vui lòng yêu cầu trợ lý tính lại." });
+      return;
+    }
 
     set({ busy: true, error: null });
     try {

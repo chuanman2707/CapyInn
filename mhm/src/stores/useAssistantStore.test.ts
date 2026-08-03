@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const invokeCommand = vi.fn();
 const invokeWriteCommand = vi.fn();
@@ -10,7 +10,7 @@ vi.mock("@/lib/invokeCommand", () => ({
 }));
 
 import { useAssistantStore } from "./useAssistantStore";
-import type { ProposedAction } from "@/types/assistant";
+import type { ChatMessage, ProposedAction } from "@/types/assistant";
 import { isActionExpired, CARD_TTL_MS } from "@/types/assistant";
 
 const sampleAction: ProposedAction = {
@@ -39,8 +39,14 @@ const sampleAction: ProposedAction = {
   built_at_ms: 1_000_000,
 };
 
+// Mốc "hiện tại" giả lập cho cả file: 1 giây sau khi sampleAction được dựng,
+// nên sampleAction luôn còn hạn trừ khi một test tự dời built_at_ms đi chỗ khác.
+const NOW_MS = sampleAction.built_at_ms + 1_000;
+
 describe("useAssistantStore", () => {
   beforeEach(() => {
+    vi.useFakeTimers();
+    vi.setSystemTime(NOW_MS);
     invokeCommand.mockReset();
     invokeWriteCommand.mockReset();
     useAssistantStore.setState({
@@ -51,6 +57,10 @@ describe("useAssistantStore", () => {
       error: null,
       history: [],
     });
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
   });
 
   it("gửi kèm ngữ cảnh màn hình trong mỗi lượt", async () => {
@@ -103,5 +113,56 @@ describe("useAssistantStore", () => {
   it("thẻ quá 5 phút bị coi là hết hạn", () => {
     expect(isActionExpired(sampleAction, sampleAction.built_at_ms + CARD_TTL_MS - 1)).toBe(false);
     expect(isActionExpired(sampleAction, sampleAction.built_at_ms + CARD_TTL_MS + 1)).toBe(true);
+  });
+
+  it("thẻ đã hết hạn thì approve() từ chối, không gọi PMS và giữ nguyên thẻ", async () => {
+    const expiredAction: ProposedAction = {
+      ...sampleAction,
+      built_at_ms: NOW_MS - CARD_TTL_MS - 1,
+    };
+    useAssistantStore.setState({ pendingAction: expiredAction });
+
+    await useAssistantStore.getState().approve();
+
+    expect(invokeWriteCommand).not.toHaveBeenCalled();
+    expect(useAssistantStore.getState().pendingAction).toEqual(expiredAction);
+    expect(useAssistantStore.getState().error).toMatch(/hết hạn/);
+  });
+
+  it("phát lại lịch sử y nguyên hai chiều: gửi đúng lịch sử đã có, nhận đúng lịch sử backend trả về", async () => {
+    const seededHistory: ChatMessage[] = [
+      { role: "user", content: "phòng nào trống" },
+      {
+        role: "assistant",
+        content: null,
+        tool_calls: [
+          { id: "call_1", type: "function", function: { name: "list_rooms", arguments: "{}" } },
+        ],
+      },
+      { role: "tool", content: "[]", tool_call_id: "call_1" },
+    ];
+    const returnedHistory: ChatMessage[] = [
+      ...seededHistory,
+      { role: "user", content: "check-in phòng R1" },
+      { role: "assistant", content: "Đã tạo thẻ xác nhận." },
+    ];
+
+    useAssistantStore.setState({ history: seededHistory });
+    invokeCommand.mockResolvedValue({
+      reply: "Đã tạo thẻ xác nhận.",
+      proposed_action: null,
+      history: returnedHistory,
+    });
+
+    await useAssistantStore.getState().send("check-in phòng R1", { route: "rooms" });
+
+    // Chiều đi: lịch sử gửi lên đúng bằng lịch sử đã có trong store, không rỗng,
+    // không bị lọc bớt vai "tool".
+    expect(invokeCommand).toHaveBeenCalledWith("assistant_turn", {
+      request: expect.objectContaining({ history: seededHistory }),
+    });
+    // Chiều về: store phải thay bằng đúng lịch sử backend trả, không giữ lại
+    // lịch sử cũ và không tự chế thêm.
+    expect(useAssistantStore.getState().history).toEqual(returnedHistory);
   });
 });
