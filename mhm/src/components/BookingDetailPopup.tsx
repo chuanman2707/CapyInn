@@ -1,4 +1,4 @@
-import { CheckCircle2, XCircle, Pencil, FileText } from "lucide-react";
+import { CheckCircle2, XCircle, Pencil, FileText, ArrowRightLeft } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 import { fmtDate, fmtDateShort, fmtNumber } from "@/lib/format";
@@ -12,6 +12,7 @@ interface BookingDetailPopupProps {
     onEdit?: (booking: BookingWithGuest) => void;
     onCancel?: (bookingId: string) => void;
     onViewInvoice?: (bookingId: string) => void;
+    onRoomChange?: (bookingId: string) => void;
     invoiceLoading?: boolean;
 }
 
@@ -55,6 +56,7 @@ export default function BookingDetailPopup({
     onEdit,
     onCancel,
     onViewInvoice,
+    onRoomChange,
     invoiceLoading,
 }: BookingDetailPopupProps) {
     const isReadonly = mode === "readonly";
@@ -115,27 +117,39 @@ export default function BookingDetailPopup({
                         </Button>
                     </div>
                 ) : (
-                    <div className="flex gap-2 pt-2">
-                        <Button
-                            className="flex-1 bg-emerald-600 hover:bg-emerald-700 text-white rounded-xl h-10 gap-1.5 cursor-pointer"
-                            onClick={() => onConfirm?.(booking.id)}
-                        >
-                            <CheckCircle2 size={14} /> Check-in
-                        </Button>
-                        <Button
-                            variant="outline"
-                            className="flex-1 border-blue-200 text-blue-600 hover:bg-blue-50 rounded-xl h-10 gap-1.5 cursor-pointer"
-                            onClick={() => onEdit?.(booking)}
-                        >
-                            <Pencil size={14} /> Chỉnh sửa
-                        </Button>
-                        <Button
-                            variant="outline"
-                            className="flex-1 border-red-200 text-red-600 hover:bg-red-50 rounded-xl h-10 gap-1.5 cursor-pointer"
-                            onClick={() => onCancel?.(booking.id)}
-                        >
-                            <XCircle size={14} /> Hủy
-                        </Button>
+                    <div className="space-y-2 pt-2">
+                        <div className="flex gap-2">
+                            <Button
+                                className="flex-1 bg-emerald-600 hover:bg-emerald-700 text-white rounded-xl h-10 gap-1.5 cursor-pointer"
+                                onClick={() => onConfirm?.(booking.id)}
+                            >
+                                <CheckCircle2 size={14} /> Check-in
+                            </Button>
+                            <Button
+                                variant="outline"
+                                className="flex-1 border-blue-200 text-blue-600 hover:bg-blue-50 rounded-xl h-10 gap-1.5 cursor-pointer"
+                                onClick={() => onEdit?.(booking)}
+                            >
+                                <Pencil size={14} /> Chỉnh sửa
+                            </Button>
+                            <Button
+                                variant="outline"
+                                className="flex-1 border-red-200 text-red-600 hover:bg-red-50 rounded-xl h-10 gap-1.5 cursor-pointer"
+                                onClick={() => onCancel?.(booking.id)}
+                            >
+                                <XCircle size={14} /> Hủy
+                            </Button>
+                        </div>
+                        {/* Chỉ hiện khi còn đổi được phòng — không cho với booking đã trả. */}
+                        {(booking.status === "active" || booking.status === "booked") && (
+                            <Button
+                                variant="outline"
+                                className="w-full border-indigo-200 text-indigo-600 hover:bg-indigo-50 rounded-xl h-10 gap-1.5 cursor-pointer"
+                                onClick={() => onRoomChange?.(booking.id)}
+                            >
+                                <ArrowRightLeft size={14} /> Chuyển phòng
+                            </Button>
+                        )}
                     </div>
                 )}
             </div>

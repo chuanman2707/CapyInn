@@ -26,6 +26,7 @@ import { BackupStatusIndicator } from "@/components/BackupStatusIndicator";
 import CheckinSheet from "@/components/CheckinSheet";
 import CrashReportPrompt from "@/components/CrashReportPrompt";
 import GroupCheckinSheet from "@/components/GroupCheckinSheet";
+import { RoomChangeSheet } from "@/components/RoomChangeSheet";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { useAppUpdate } from "@/contexts/AppUpdateContext";
@@ -350,6 +351,10 @@ export function MainShell() {
 
       <CheckinSheet preSelectedRoomId={checkinRoomId ?? undefined} preSelectedNights={checkinNights ?? undefined} />
       <GroupCheckinSheet />
+      {/* Sheet dùng chung cho mọi lối vào chuyển phòng (Task 9) — render một lần
+          duy nhất ở gốc, không lặp trong từng màn hình, để tránh nhiều bản sao
+          cùng đọc một store và cùng mở một lúc. */}
+      <RoomChangeSheet />
       <AppToaster />
     </div>
   );

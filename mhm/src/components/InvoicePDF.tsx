@@ -45,7 +45,10 @@ export interface InvoiceData {
     total: number;
     balance_due: number;
     policy_text: string | null;
+    /** The booking's own notes — internal front-desk shorthand. NOT rendered. */
     notes: string | null;
+    /** Guest-facing settlement wording, set only on a per-room split invoice. */
+    settlement_note: string | null;
     status: string;
     created_at: string;
 }
@@ -252,6 +255,25 @@ const s = StyleSheet.create({
         color: gray600,
         lineHeight: 1.6,
     },
+    notesBox: {
+        marginTop: 16,
+        padding: 12,
+        backgroundColor: gray100,
+        borderRadius: 4,
+        borderLeft: `3px solid ${navyLight}`,
+    },
+    notesTitle: {
+        fontSize: 9,
+        fontWeight: 700,
+        color: navy,
+        marginBottom: 6,
+        letterSpacing: 0.5,
+    },
+    notesText: {
+        fontSize: 8,
+        color: gray600,
+        lineHeight: 1.6,
+    },
     footer: {
         position: "absolute",
         bottom: 30,
@@ -335,6 +357,11 @@ export default function InvoicePDF({ data, groupData }: InvoicePDFProps) {
     const hotelName = isGroup ? groupData.hotel_name : data!.hotel_name;
     const hotelAddress = isGroup ? groupData.hotel_address : data!.hotel_address;
     const hotelPhone = isGroup ? groupData.hotel_phone : data!.hotel_phone;
+    // Trimmed up front so a blank-but-not-null value renders nothing rather
+    // than an empty "GHI CHÚ" box. Deliberately `settlement_note`, never
+    // `notes`: `notes` copies the booking's internal front-desk shorthand
+    // ("cọc 600k", "Agoda thanh toan") and must not be printed for a guest.
+    const settlementNote = isGroup ? "" : (data!.settlement_note ?? "").trim();
 
     return (
         <Document>
@@ -541,6 +568,15 @@ export default function InvoicePDF({ data, groupData }: InvoicePDFProps) {
                                 </Text>
                             </View>
                         </View>
+
+                        {/* Settlement note — how the total was reached, for a
+                            booking whose breakdown splits per room */}
+                        {settlementNote !== "" && (
+                            <View style={s.notesBox}>
+                                <Text style={s.notesTitle}>GHI CHÚ</Text>
+                                <Text style={s.notesText}>{settlementNote}</Text>
+                            </View>
+                        )}
 
                         {/* Policy */}
                         {data!.policy_text && (

@@ -145,3 +145,28 @@ pub(super) async fn migrate_v22_booking_guest_count(
     tx.commit().await?;
     Ok(())
 }
+
+/// Lời quyết toán in cho khách trên hoá đơn tách theo phòng.
+///
+/// Cố ý KHÔNG dùng lại `invoices.notes`: cột đó chép nguyên `bookings.notes`,
+/// tức là ghi chú nội bộ của lễ tân ("cọc 600k", "Agoda thanh toan"), thứ không
+/// bao giờ được in cho khách đọc. Tách riêng một cột thì thứ hiển thị được và
+/// thứ nội bộ không thể lẫn vào nhau.
+///
+/// Cho phép NULL: hoá đơn không tách phòng không có gì để nói thêm, và hoá đơn
+/// phát hành trước phiên bản này cũng vậy.
+pub(super) async fn migrate_v25_invoice_settlement_note(
+    pool: &Pool<Sqlite>,
+) -> Result<(), sqlx::Error> {
+    let mut tx = pool.begin().await?;
+
+    execute_compat_alter(
+        &mut tx,
+        "ALTER TABLE invoices ADD COLUMN settlement_note TEXT",
+    )
+    .await?;
+
+    set_schema_version(&mut tx, 25).await?;
+    tx.commit().await?;
+    Ok(())
+}

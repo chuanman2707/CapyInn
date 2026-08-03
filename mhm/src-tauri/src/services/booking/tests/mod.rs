@@ -38,7 +38,7 @@ mod prelude {
         },
         group_lifecycle, group_service_management, guest_service, pricing_service,
         pricing_service::calculate_stay_price_tx,
-        reservation_lifecycle, stay_lifecycle,
+        reservation_lifecycle, room_change, stay_lifecycle,
     };
 }
 
@@ -57,5 +57,6 @@ mod pricing;
 mod reporting;
 mod reservation_idempotency;
 mod reservations;
+mod room_change;
 mod stay_error_mapping;
 mod stays;

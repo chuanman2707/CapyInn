@@ -8,6 +8,7 @@ const invokeWriteCommand = vi.hoisted(() => vi.fn());
 const createCorrelationId = vi.hoisted(() => vi.fn());
 const toastSuccess = vi.hoisted(() => vi.fn());
 const fetchRooms = vi.hoisted(() => vi.fn());
+const setRoomChangeOpen = vi.hoisted(() => vi.fn());
 
 vi.mock("@tauri-apps/api/core", () => ({
   invoke,
@@ -32,6 +33,7 @@ vi.mock("@/stores/useHotelStore", () => ({
       },
     ],
     fetchRooms,
+    setRoomChangeOpen,
   }),
 }));
 
@@ -179,6 +181,15 @@ describe("Reservations", () => {
     await user.click(screen.getByRole("button", { name: /chỉnh sửa/i }));
 
     expect(screen.queryByText(/Reservation — Nguyen Van A/)).toBeNull();
+  });
+
+  it("opens the room change sheet for a booked reservation", async () => {
+    const user = userEvent.setup();
+    await openBookedReservationActions(user);
+
+    await user.click(screen.getByRole("button", { name: /chuyển phòng/i }));
+
+    expect(setRoomChangeOpen).toHaveBeenCalledWith(true, "B101");
   });
 });
 
@@ -420,6 +431,7 @@ describe("Reservations checked-out bookings", () => {
     expect(screen.getByText(/Đã trả — Hoseo Kim/)).toBeTruthy();
     expect(screen.getByText("Trả phòng lúc")).toBeTruthy();
     expect(screen.queryByRole("button", { name: /^hủy$/i })).toBeNull();
+    expect(screen.queryByRole("button", { name: /chuyển phòng/i })).toBeNull();
   });
 
   it("reads the existing invoice instead of generating a new one", async () => {

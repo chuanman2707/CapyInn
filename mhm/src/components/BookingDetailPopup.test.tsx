@@ -69,6 +69,37 @@ describe("BookingDetailPopup", () => {
     expect(screen.queryByRole("button", { name: /xem hóa đơn/i })).toBeNull();
   });
 
+  it("opens the room change sheet for a booked reservation", async () => {
+    const user = userEvent.setup();
+    const onRoomChange = vi.fn();
+
+    render(
+      <BookingDetailPopup
+        booking={booking({ status: "booked", actual_checkout: null })}
+        mode="reservation"
+        onClose={vi.fn()}
+        onRoomChange={onRoomChange}
+      />,
+    );
+
+    await user.click(screen.getByRole("button", { name: /chuyển phòng/i }));
+    expect(onRoomChange).toHaveBeenCalledWith("B-1");
+  });
+
+  it("hides the room change action for a read-only (checked-out) booking", () => {
+    render(
+      <BookingDetailPopup
+        booking={booking({ status: "checked_out" })}
+        mode="readonly"
+        onClose={vi.fn()}
+        onViewInvoice={vi.fn()}
+        onRoomChange={vi.fn()}
+      />,
+    );
+
+    expect(screen.queryByRole("button", { name: /chuyển phòng/i })).toBeNull();
+  });
+
   it("shows a read-only view with the actual checkout time for closed bookings", async () => {
     const user = userEvent.setup();
     const onViewInvoice = vi.fn();

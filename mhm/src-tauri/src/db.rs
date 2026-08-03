@@ -145,7 +145,31 @@ async fn ensure_setting_default(
 /// Schema version a database reaches after `run_migrations` finishes on this
 /// build. Bump this together with every new migration block below; the
 /// `migrations_run_to_latest_schema_version` test fails otherwise.
-pub(crate) const LATEST_SCHEMA_VERSION: i32 = 22;
+///
+/// 23 and 24 are deliberately skipped, not free: 23 belongs to
+/// `design/kbtt-ux-simplify` (`migrate_v23_stay_snapshot`) and has already
+/// shipped to the hotel's machine, 24 belongs to
+/// `feat/room-drawer-stay-edits` (`migrate_v24_booking_rate_override`, see its
+/// commit 4c5c1c3, which renumbered away from this same collision). Reusing a
+/// number another branch already shipped is silent and fatal: the gate
+/// `current < N` is false on a database already at N, so the migration never
+/// runs and every query touching the new column dies at runtime. Before
+/// claiming the next number, survey every ref — `git for-each-ref` +
+/// `git show <ref>:mhm/src-tauri/src/db.rs | grep LATEST_SCHEMA_VERSION` — and
+/// read the live database, not the brief. Gaps are harmless; collisions are not.
+///
+/// **The same trap bites backwards, and that is the easier half to miss.** A
+/// branch written earlier and merged later is just as broken: once this build
+/// ships and the hotel's database reads 25, `feat/room-drawer-stay-edits` —
+/// still sitting at 24 — has a gate `current < 24` that can never fire again,
+/// so its `bookings.rate_overridden_at` would never be created. Picking a
+/// number higher than every *branch* is not enough; it must also be higher than
+/// whatever the live database has already reached by the time you merge. So the
+/// survey is not a one-off at the start of the work: re-run it immediately
+/// before merging, and if the shipped version has moved past yours, renumber
+/// above it. Nothing warns you — the app simply starts up and fails on the
+/// first query that touches the missing column.
+pub(crate) const LATEST_SCHEMA_VERSION: i32 = 25;
 
 async fn get_schema_version(pool: &Pool<Sqlite>) -> Result<i32, sqlx::Error> {
     sqlx::query(
@@ -320,6 +344,13 @@ pub(crate) async fn run_migrations(pool: &Pool<Sqlite>) -> Result<(), sqlx::Erro
     // -- V22: số khách trên booking, để tính phụ thu thêm người --
     if current < 22 {
         core_extensions::migrate_v22_booking_guest_count(pool).await?;
+    }
+
+    // -- V25: lời quyết toán in được cho khách, tách khỏi ghi chú nội bộ --
+    // (23 đã bị nhánh kbtt chiếm và đã chạy trên máy thật, 24 là của nhánh
+    //  room-drawer — xem chú thích ở LATEST_SCHEMA_VERSION)
+    if current < 25 {
+        core_extensions::migrate_v25_invoice_settlement_note(pool).await?;
     }
     Ok(())
 }
@@ -814,6 +845,14 @@ mod tests {
             .await
             .expect("creates legacy bookings table");
 
+        // Same reason, for v23's ALTER: a real database sitting at v10 or v11
+        // went through v8, so it already has `invoices`. This fixture jumps
+        // straight past v8, so it has to stand the table up itself.
+        sqlx::query("CREATE TABLE invoices (id TEXT PRIMARY KEY)")
+            .execute(pool)
+            .await
+            .expect("creates legacy invoices table");
+
         sqlx::query(
             "CREATE TABLE transactions (
                 id          TEXT PRIMARY KEY,
@@ -872,7 +911,7 @@ mod tests {
             .await
             .expect("reads final schema version");
 
-        assert_eq!(version, 22);
+        assert_eq!(version, 25);
 
         assert_table_group_exists(&pool, "PMS core", PMS_CORE_TABLES).await;
         assert_table_group_exists(&pool, "command safety", COMMAND_SAFETY_TABLES).await;
@@ -893,7 +932,7 @@ mod tests {
             .expect("reads version")
             .get("version");
 
-        assert_eq!(version, 22);
+        assert_eq!(version, 25);
         assert_money_columns_are_integer(&pool).await;
     }
 
@@ -1181,7 +1220,7 @@ mod tests {
             .expect("reads final schema version")
             .get("version");
 
-        assert_eq!(version, 22);
+        assert_eq!(version, 25);
     }
 
     #[tokio::test]
@@ -1248,7 +1287,7 @@ mod tests {
             .expect("reads final schema version")
             .get("version");
 
-        assert_eq!(version, 22);
+        assert_eq!(version, 25);
     }
 
     #[tokio::test]
@@ -1328,7 +1367,7 @@ mod tests {
         );
 
         let version = get_schema_version(&pool).await.expect("schema version");
-        assert_eq!(version, 22);
+        assert_eq!(version, 25);
     }
 
     #[tokio::test]
@@ -1368,7 +1407,7 @@ mod tests {
 
         assert_outbox_shape(&pool).await;
         let version = get_schema_version(&pool).await.expect("schema version");
-        assert_eq!(version, 22);
+        assert_eq!(version, 25);
     }
 
     #[tokio::test]
@@ -1386,7 +1425,7 @@ mod tests {
 
         assert_outbox_shape(&pool).await;
         let version = get_schema_version(&pool).await.expect("schema version");
-        assert_eq!(version, 22);
+        assert_eq!(version, 25);
     }
 
     #[tokio::test]
@@ -1416,7 +1455,7 @@ mod tests {
             1
         );
         let version = get_schema_version(&pool).await.expect("schema version");
-        assert_eq!(version, 22);
+        assert_eq!(version, 25);
     }
 
     #[tokio::test]
@@ -1429,7 +1468,7 @@ mod tests {
 
         assert_agent_safety_shape(&pool).await;
         let version = get_schema_version(&pool).await.expect("schema version");
-        assert_eq!(version, 22);
+        assert_eq!(version, 25);
     }
 
     #[tokio::test]
@@ -1438,6 +1477,107 @@ mod tests {
         run_migrations(&pool).await.expect("runs migrations");
 
         assert_agent_digest_runs_shape(&pool).await;
+    }
+
+    /// The decisive migration test, modelled on
+    /// `migration_v24_alter_actually_runs_on_a_genuinely_pre_v24_database`
+    /// (commit 4c5c1c3, which renumbered away from this same collision).
+    ///
+    /// Rewinding `schema_version` while the column is still present proves
+    /// nothing: the replayed ALTER lands in `execute_compat_alter`'s
+    /// duplicate-column swallow and the assertion passes on the column the
+    /// FIRST run created. It stays green even when the gate never fires —
+    /// exactly the production failure this branch shipped, where the hotel's
+    /// database was already at 23 (claimed by another branch), `current < 23`
+    /// was false, `settlement_note` was never created, and the first
+    /// `generate_invoice` died on `no such column`.
+    ///
+    /// So: DROP the column to build a database that has genuinely never seen
+    /// this migration, rewind to the true predecessor, and require the real
+    /// ALTER path to put it back.
+    #[tokio::test]
+    async fn migration_v25_alter_actually_runs_on_a_genuinely_pre_v25_database() {
+        let pool = SqlitePool::connect("sqlite::memory:")
+            .await
+            .expect("connects in-memory sqlite");
+        run_migrations(&pool)
+            .await
+            .expect("runs migrations to latest");
+
+        sqlx::query("ALTER TABLE invoices DROP COLUMN settlement_note")
+            .execute(&pool)
+            .await
+            .expect("drops settlement_note to simulate a pre-v25 database");
+        assert_eq!(
+            invoices_settlement_note_column_count(&pool).await,
+            0,
+            "tiền đề của test: DB phải thật sự chưa có cột settlement_note"
+        );
+
+        // 24 is the true predecessor — the highest number claimed by any other
+        // branch. A database sitting at 23 or 24 must still be upgraded.
+        sqlx::query("UPDATE schema_version SET version = 24")
+            .execute(&pool)
+            .await
+            .expect("rewinds schema version to a genuinely pre-v25 state");
+
+        run_migrations(&pool)
+            .await
+            .expect("v25 migration adds the column back via a real ALTER TABLE");
+
+        assert_eq!(
+            invoices_settlement_note_column_count(&pool).await,
+            1,
+            "ALTER TABLE thật phải chạy và tạo lại cột settlement_note"
+        );
+
+        // Replaying must be a no-op, not a half-applied upgrade that dies on
+        // the hotel's database: `execute_compat_alter` swallows the
+        // duplicate-column error the second ALTER would raise.
+        run_migrations(&pool)
+            .await
+            .expect("v25 migration is idempotent");
+        assert_eq!(invoices_settlement_note_column_count(&pool).await, 1);
+
+        let version = get_schema_version(&pool).await.expect("schema version");
+        assert_eq!(version, 25);
+    }
+
+    /// A database still sitting at kbtt's 23 — the version the hotel's machine
+    /// actually reports — must be carried all the way to 25, not stall because
+    /// some intermediate number was skipped.
+    #[tokio::test]
+    async fn migration_v25_upgrades_a_database_left_at_the_shipped_v23() {
+        let pool = SqlitePool::connect("sqlite::memory:")
+            .await
+            .expect("connects in-memory sqlite");
+        run_migrations(&pool)
+            .await
+            .expect("runs migrations to latest");
+
+        sqlx::query("ALTER TABLE invoices DROP COLUMN settlement_note")
+            .execute(&pool)
+            .await
+            .expect("drops settlement_note");
+        sqlx::query("UPDATE schema_version SET version = 23")
+            .execute(&pool)
+            .await
+            .expect("rewinds to the version the live database reports");
+
+        run_migrations(&pool).await.expect("v25 runs from v23");
+
+        assert_eq!(invoices_settlement_note_column_count(&pool).await, 1);
+        let version = get_schema_version(&pool).await.expect("schema version");
+        assert_eq!(version, 25);
+    }
+
+    async fn invoices_settlement_note_column_count(pool: &SqlitePool) -> i64 {
+        sqlx::query_scalar(
+            "SELECT COUNT(*) FROM pragma_table_info('invoices') WHERE name = 'settlement_note'",
+        )
+        .fetch_one(pool)
+        .await
+        .expect("reads invoices columns")
     }
 
     #[tokio::test]
@@ -1462,7 +1602,7 @@ mod tests {
 
         assert_agent_digest_runs_shape(&pool).await;
         let version = get_schema_version(&pool).await.expect("schema version");
-        assert_eq!(version, 22);
+        assert_eq!(version, 25);
     }
 
     #[tokio::test]
@@ -1486,7 +1626,7 @@ mod tests {
 
         assert_agent_safety_shape(&pool).await;
         let version = get_schema_version(&pool).await.expect("schema version");
-        assert_eq!(version, 22);
+        assert_eq!(version, 25);
     }
 
     #[tokio::test]

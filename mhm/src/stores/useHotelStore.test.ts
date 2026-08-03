@@ -484,3 +484,101 @@ describe("useHotelStore room type rates", () => {
     expect(useHotelStore.getState().roomTypeRates).toBeNull();
   });
 });
+
+describe("useHotelStore room change", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    createCorrelationId.mockReturnValue("COR-1A2B3C4D");
+    invokeWriteCommand.mockResolvedValue(undefined);
+    invoke.mockImplementation(async (command: string) => {
+      if (command === "get_rooms") return [];
+      if (command === "get_dashboard_stats") {
+        return { total_rooms: 10, occupied: 2, vacant: 8, cleaning: 0, revenue_today: 0 };
+      }
+      throw new Error(`Unhandled invoke ${command}`);
+    });
+    useHotelStore.setState({
+      rooms: [],
+      stats: null,
+      dashboardRefreshVersion: 0,
+      loading: false,
+      isRoomChangeOpen: false,
+      roomChangeBookingId: null,
+    });
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it("gửi change_room kèm đủ tham số rồi nạp lại phòng", async () => {
+    await useHotelStore.getState().changeRoom("B1", "2B", false, "máy lạnh hỏng");
+
+    expect(invokeWriteCommand).toHaveBeenCalledWith(
+      "change_room",
+      expect.objectContaining({
+        bookingId: "B1",
+        newRoomId: "2B",
+        keepPrice: false,
+        reason: "máy lạnh hỏng",
+      }),
+      expect.objectContaining({
+        correlationId: "COR-1A2B3C4D",
+      }),
+    );
+    expect(invoke).toHaveBeenCalledWith("get_rooms");
+  });
+
+  // Cùng lý do với check-in / check-out ở trên: Dashboard chỉ nạp lại khi
+  // `dashboardRefreshVersion` nhích lên, mà chuyển phòng vừa đổi công suất
+  // từng phòng vừa đổi `total_price` — hai thứ Dashboard đang hiển thị.
+  it("chuyển phòng cũng phải nhích dashboardRefreshVersion", async () => {
+    await useHotelStore.getState().changeRoom("B1", "2B", false, undefined);
+
+    expect(useHotelStore.getState().dashboardRefreshVersion).toBe(1);
+  });
+
+  it("setRoomChangeOpen mở sheet cho đúng booking", () => {
+    useHotelStore.getState().setRoomChangeOpen(true, "B1");
+    expect(useHotelStore.getState().isRoomChangeOpen).toBe(true);
+    expect(useHotelStore.getState().roomChangeBookingId).toBe("B1");
+
+    useHotelStore.getState().setRoomChangeOpen(false);
+    expect(useHotelStore.getState().isRoomChangeOpen).toBe(false);
+    expect(useHotelStore.getState().roomChangeBookingId).toBeNull();
+  });
+
+  it("fetchRoomChangeOptions đọc get_room_change_options và giữ nguyên priceDifference âm", async () => {
+    const options = {
+      bookingId: "B1",
+      currentRoomId: "1A",
+      currentRoomName: "Phòng 1A",
+      fromDate: "2026-08-02",
+      toDate: "2026-08-05",
+      nightsRemaining: 3,
+      nightsStayed: 0,
+      guestCount: 2,
+      rooms: [
+        {
+          roomId: "2B",
+          name: "Phòng 2B",
+          roomType: "Standard",
+          floor: 2,
+          maxGuests: 2,
+          priceDifference: -150000,
+        },
+      ],
+    };
+    invoke.mockImplementation(async (command: string) => {
+      if (command === "get_room_change_options") return options;
+      throw new Error(`Unhandled invoke ${command}`);
+    });
+
+    const result = await useHotelStore.getState().fetchRoomChangeOptions("B1");
+
+    expect(invoke).toHaveBeenCalledWith("get_room_change_options", { bookingId: "B1" });
+    expect(result).toEqual(options);
+    expect(result.rooms[0].priceDifference).toBe(-150000);
+  });
+});

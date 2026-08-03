@@ -28,8 +28,9 @@ use super::{
     pricing_service::calculate_stay_price_tx,
     support::{
         begin_tx, ensure_one_row_affected, insert_room_calendar_rows, invalid_state_transition,
-        lookup_booking_room_id, map_room_calendar_insert_error, parse_booking_datetime,
-        read_money_vnd_or_zero, validate_non_negative_booking_money,
+        lookup_booking_room_id, map_room_calendar_insert_error, merge_pricing_snapshot,
+        parse_booking_datetime, read_money_vnd_or_zero, room_calendar_stays_tx, room_stays_to_json,
+        validate_non_negative_booking_money, RoomStayRow,
     },
 };
 
@@ -515,6 +516,11 @@ struct CheckoutSettlementComputation {
     already_paid: MoneyVnd,
     explanation: String,
     reporting_checkout: String,
+    /// The booking's `pricing_snapshot` column as it stood before checkout —
+    /// carried through so `check_out_tx` can merge `checkout_settlement`
+    /// into it instead of overwriting keys a room change already wrote
+    /// (`room_stays`).
+    pricing_snapshot: Option<String>,
 }
 
 fn settlement_mode_label(mode: CheckoutSettlementMode) -> &'static str {
@@ -592,8 +598,14 @@ fn settlement_explanation(
     }
 }
 
+/// Builds the *inner* `checkout_settlement` object — the shape
+/// `revenue_queries.rs` reads via `json_extract(pricing_snapshot,
+/// '$.checkout_settlement.mode')` and `'...reporting_checkout')`. Callers
+/// merge this under the `checkout_settlement` key with `merge_pricing_snapshot`
+/// rather than writing it as the whole `pricing_snapshot` column, so a
+/// `room_stays` key written earlier by a room change survives checkout.
 #[allow(clippy::too_many_arguments)]
-fn checkout_settlement_snapshot(
+fn checkout_settlement_value(
     settlement_mode: CheckoutSettlementMode,
     original_nights: i32,
     actual_nights: i32,
@@ -602,21 +614,53 @@ fn checkout_settlement_snapshot(
     original_total: MoneyVnd,
     settled_total: MoneyVnd,
     manual_override: bool,
-) -> String {
+) -> serde_json::Value {
     serde_json::json!({
-        "checkout_settlement": {
-            "mode": settlement_mode,
-            "label": settlement_mode_label(settlement_mode),
-            "reporting_checkout": reporting_checkout,
-            "original_nights": original_nights,
-            "actual_nights": actual_nights,
-            "settled_nights": settled_nights,
-            "original_total": original_total,
-            "settled_total": settled_total,
-            "manual_override": manual_override,
-        }
+        "mode": settlement_mode,
+        "label": settlement_mode_label(settlement_mode),
+        "reporting_checkout": reporting_checkout,
+        "original_nights": original_nights,
+        "actual_nights": actual_nights,
+        "settled_nights": settled_nights,
+        "original_total": original_total,
+        "settled_total": settled_total,
+        "manual_override": manual_override,
     })
-    .to_string()
+}
+
+/// Caps the cumulative night count in `rows` to `settled_nights`, walking the
+/// segments in the date order `room_calendar_stays_tx` returns them: each
+/// segment keeps up to its own count, the next one gets whatever budget is
+/// left, and any segment past the point the budget hits zero is dropped
+/// entirely — the guest never reached it under the nights actually settled.
+///
+/// This is only correct because `rows` are *occupancy segments in date order*,
+/// not one row per room: a guest who moves A → B → A gets three segments, so
+/// the budget is spent on the nights actually slept first. Group by room
+/// instead and the earliest-dated A row swallows the whole budget while B
+/// silently disappears from the invoice.
+fn truncate_room_stays_to_settled_nights(
+    rows: &[RoomStayRow],
+    settled_nights: i32,
+) -> Vec<RoomStayRow> {
+    let mut remaining = i64::from(settled_nights.max(0));
+    let mut truncated = Vec::new();
+
+    for row in rows {
+        if remaining <= 0 {
+            break;
+        }
+        let nights_here = row.nights.min(remaining);
+        truncated.push(RoomStayRow {
+            room_id: row.room_id.clone(),
+            room_name: row.room_name.clone(),
+            nights: nights_here,
+            first_night: row.first_night.clone(),
+        });
+        remaining -= nights_here;
+    }
+
+    truncated
 }
 
 async fn preview_checkout_settlement_tx(
@@ -626,7 +670,8 @@ async fn preview_checkout_settlement_tx(
 ) -> BookingResult<CheckoutSettlementComputation> {
     let booking = sqlx::query(
         "SELECT room_id, check_in_at, nights, total_price, paid_amount,
-                COALESCE(pricing_type, 'nightly') AS pricing_type, guests, status
+                COALESCE(pricing_type, 'nightly') AS pricing_type, guests, status,
+                pricing_snapshot
          FROM bookings WHERE id = ?",
     )
     .bind(&req.booking_id)
@@ -654,6 +699,7 @@ async fn preview_checkout_settlement_tx(
     let original_total = read_money_vnd_or_zero(&booking, "total_price");
     let guests: Option<i32> = booking.get("guests");
     let already_paid = read_money_vnd_or_zero(&booking, "paid_amount");
+    let pricing_snapshot: Option<String> = booking.get("pricing_snapshot");
     let actual_nights = actual_nights_for_checkout(&check_in_at, now)?;
 
     let (settled_nights, recommended_total) = match req.settlement_mode {
@@ -690,6 +736,7 @@ async fn preview_checkout_settlement_tx(
         already_paid,
         explanation,
         reporting_checkout,
+        pricing_snapshot,
     })
 }
 
@@ -843,7 +890,7 @@ async fn check_out_tx(
     }
 
     let manual_override = final_total != settlement.recommended_total;
-    let pricing_snapshot = checkout_settlement_snapshot(
+    let settlement_value = checkout_settlement_value(
         req.settlement_mode,
         settlement.original_nights,
         settlement.actual_nights,
@@ -852,6 +899,31 @@ async fn check_out_tx(
         settlement.original_total,
         final_total,
         manual_override,
+    );
+    // Merge, don't overwrite: a room change earlier in the stay may have
+    // already written `room_stays` into this same column
+    // (room_change.rs::change_room_tx), and checkout must not erase it.
+    let pricing_snapshot = merge_pricing_snapshot(
+        settlement.pricing_snapshot.as_deref(),
+        "checkout_settlement",
+        settlement_value,
+    );
+
+    // Re-derive `room_stays` from `room_calendar` — the live truth — before
+    // the DELETE below wipes it. The snapshot `change_room_tx` wrote at move
+    // time assumed the guest would stay every remaining *booked* night;
+    // settlement may charge fewer than that (early checkout), so truncate
+    // the per-room split down to `settled_nights`, walking rooms in
+    // occupancy order and capping the running total. Reuses the same
+    // `merge_pricing_snapshot` helper as `checkout_settlement` above — no
+    // second snapshot writer.
+    let room_stays_from_calendar = room_calendar_stays_tx(tx, &req.booking_id).await?;
+    let truncated_room_stays =
+        truncate_room_stays_to_settled_nights(&room_stays_from_calendar, settlement.settled_nights);
+    let pricing_snapshot = merge_pricing_snapshot(
+        Some(&pricing_snapshot),
+        "room_stays",
+        room_stays_to_json(&truncated_room_stays),
     );
 
     let result = sqlx::query(

@@ -10,7 +10,7 @@ use crate::{
     queries::booking::{expense_queries, revenue_queries, room_queries, stay_info_queries},
     repositories::booking::expense_repository,
     services::{
-        booking::{backfill, stay_lifecycle},
+        booking::{backfill, room_change, stay_lifecycle},
         housekeeping::housekeeping_service,
     },
 };
@@ -73,6 +73,13 @@ fn extend_stay_failure_context(booking_id: &str) -> Value {
     json!({
         "booking_id": booking_id,
         "operation": "add_one_night",
+    })
+}
+
+fn change_room_failure_context(booking_id: &str, new_room_id: &str) -> Value {
+    json!({
+        "booking_id": booking_id,
+        "new_room_id": new_room_id,
     })
 }
 
@@ -352,6 +359,88 @@ pub async fn extend_stay(
 
     log::info!(
         "extend_stay success correlation_id={} source={:?} booking_id={} room_id={}",
+        effective_correlation_id.value,
+        effective_correlation_id.source,
+        booking.id,
+        booking.room_id
+    );
+
+    emit_db_update(&app, "rooms");
+
+    Ok(booking)
+}
+
+// ─── Change Room ───
+
+#[tauri::command]
+pub async fn get_room_change_options(
+    state: State<'_, AppState>,
+    booking_id: String,
+) -> Result<RoomChangeOptions, String> {
+    room_change::load_options(&state.db, &booking_id, chrono::Local::now().date_naive())
+        .await
+        .map_err(|error| error.to_string())
+}
+
+#[allow(clippy::too_many_arguments)]
+#[tauri::command]
+pub async fn change_room(
+    state: State<'_, AppState>,
+    booking_id: String,
+    new_room_id: String,
+    keep_price: bool,
+    reason: Option<String>,
+    app: tauri::AppHandle,
+    correlation_id: Option<String>,
+    idempotency_key: String,
+) -> CommandResult<Booking> {
+    let effective_correlation_id = normalize_correlation_id(correlation_id);
+    let error_context = change_room_failure_context(&booking_id, &new_room_id);
+    let actor_id = get_user_id(&state)
+        .ok_or_else(|| CommandError::user(codes::AUTH_NOT_AUTHENTICATED, "Chưa đăng nhập"))?;
+    let mut write_command_context = WriteCommandContext::for_scoped_command(
+        effective_correlation_id.value.clone(),
+        idempotency_key,
+        "change_room",
+    )?;
+    write_command_context.actor_id = Some(actor_id);
+    log::info!(
+        "change_room start correlation_id={} source={:?} booking_id={} new_room_id={}",
+        effective_correlation_id.value,
+        effective_correlation_id.source,
+        booking_id,
+        new_room_id
+    );
+
+    let result = room_change::change_room_idempotent(
+        &state.db,
+        &write_command_context,
+        &booking_id,
+        &new_room_id,
+        keep_price,
+        reason,
+    )
+    .await
+    .inspect_err(|command_error| {
+        record_command_failure_with_db_group(
+            "change_room",
+            command_error,
+            &effective_correlation_id.value,
+            None,
+            error_context.clone(),
+        );
+    })?;
+
+    let booking: Booking = serde_json::from_value(result.response).map_err(|error| {
+        CommandError::system(
+            codes::SYSTEM_INTERNAL_ERROR,
+            format!("Invalid change_room idempotent response: {error}"),
+        )
+        .with_request_id(write_command_context.request_id.clone())
+    })?;
+
+    log::info!(
+        "change_room success correlation_id={} source={:?} booking_id={} room_id={}",
         effective_correlation_id.value,
         effective_correlation_id.source,
         booking.id,

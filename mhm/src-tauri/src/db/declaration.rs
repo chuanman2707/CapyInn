@@ -429,7 +429,7 @@ mod tests {
             .fetch_one(&pool)
             .await
             .expect("reads schema version");
-        assert_eq!(version, 22);
+        assert_eq!(version, 25);
     }
 
     /// Khách tới trước khi có booking: phải khai báo được ngay, không phải chờ

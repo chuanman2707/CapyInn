@@ -1,6 +1,7 @@
 import { useState } from "react";
 import {
   ArrowLeft,
+  ArrowRightLeft,
   Building2,
   CalendarDays,
   CalendarPlus,
@@ -50,6 +51,7 @@ export default function RoomDetailPanel({
     getStayInfoText,
     setTab,
     setCheckinOpen,
+    setRoomChangeOpen,
     loading,
     roomTypeRates,
   } = useHotelStore();
@@ -208,6 +210,12 @@ export default function RoomDetailPanel({
                 variant="ghost"
               />
               <ActionBtn icon={CalendarPlus} label="Extend +1 đêm" onClick={handleExtend} variant="blue" />
+              <ActionBtn
+                icon={ArrowRightLeft}
+                label="Chuyển phòng"
+                onClick={() => booking && setRoomChangeOpen(true, booking.id)}
+                variant="ghost"
+              />
               <Button
                 variant="outline"
                 className="rounded-xl gap-2 text-sm font-semibold cursor-pointer"
@@ -217,9 +225,11 @@ export default function RoomDetailPanel({
                 <FileText className="w-4 h-4" />
                 {invoiceLoading ? "Đang tạo..." : "📄 Invoice"}
               </Button>
+              {/* 5 nút trong lưới 2 cột — nút cuối trải hết chiều ngang thay vì
+                  bị bỏ mồ côi một cột khi số nút lẻ. */}
               <button
                 onClick={() => setShowCheckout(true)}
-                className="flex items-center justify-center gap-2 py-3 bg-red-600 hover:bg-red-700 text-white rounded-xl font-semibold text-[13px] transition-colors cursor-pointer"
+                className="col-span-2 flex items-center justify-center gap-2 py-3 bg-red-600 hover:bg-red-700 text-white rounded-xl font-semibold text-[13px] transition-colors cursor-pointer"
               >
                 <LogOut size={15} /> Check-out
               </button>
