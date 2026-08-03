@@ -1500,7 +1500,9 @@ mod tests {
         let pool = SqlitePool::connect("sqlite::memory:")
             .await
             .expect("connects in-memory sqlite");
-        run_migrations(&pool).await.expect("runs migrations to latest");
+        run_migrations(&pool)
+            .await
+            .expect("runs migrations to latest");
 
         sqlx::query("ALTER TABLE invoices DROP COLUMN settlement_note")
             .execute(&pool)
@@ -1549,7 +1551,9 @@ mod tests {
         let pool = SqlitePool::connect("sqlite::memory:")
             .await
             .expect("connects in-memory sqlite");
-        run_migrations(&pool).await.expect("runs migrations to latest");
+        run_migrations(&pool)
+            .await
+            .expect("runs migrations to latest");
 
         sqlx::query("ALTER TABLE invoices DROP COLUMN settlement_note")
             .execute(&pool)

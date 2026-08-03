@@ -106,7 +106,10 @@ async fn load_options_excludes_current_room_and_lists_free_ones() {
     .unwrap();
 
     let ids: Vec<&str> = options.rooms.iter().map(|r| r.room_id.as_str()).collect();
-    assert!(!ids.contains(&"R-OLD"), "phòng hiện tại không được là phương án");
+    assert!(
+        !ids.contains(&"R-OLD"),
+        "phòng hiện tại không được là phương án"
+    );
     assert!(ids.contains(&"R-NEW"));
 }
 
@@ -157,7 +160,10 @@ async fn load_options_hides_a_dirty_room_when_the_guest_moves_in_tonight() {
     .unwrap();
 
     let ids: Vec<&str> = options.rooms.iter().map(|r| r.room_id.as_str()).collect();
-    assert!(!ids.contains(&"R-NEW"), "không đưa khách vào phòng chưa dọn");
+    assert!(
+        !ids.contains(&"R-NEW"),
+        "không đưa khách vào phòng chưa dọn"
+    );
 }
 
 /// `load_options` only applied the vacancy filter when `moving_in_today`. But
@@ -342,7 +348,10 @@ async fn change_room_with_keep_price_records_no_money_at_all() {
     .await
     .unwrap();
 
-    assert_eq!(booking.total_price, 750_000, "giữ giá cũ thì tổng không đổi");
+    assert_eq!(
+        booking.total_price, 750_000,
+        "giữ giá cũ thì tổng không đổi"
+    );
 
     let count: i32 = sqlx::query_scalar(
         "SELECT COUNT(*) FROM transactions WHERE booking_id = 'B-OPT' AND type = 'charge'",
@@ -744,8 +753,12 @@ async fn invoice_splits_lines_per_room_after_a_move() {
         .iter()
         .map(|line| line.label.clone())
         .collect();
-    assert!(labels.iter().any(|l| l.contains("R-OLD") && l.contains("1 đêm")));
-    assert!(labels.iter().any(|l| l.contains("R-NEW") && l.contains("2 đêm")));
+    assert!(labels
+        .iter()
+        .any(|l| l.contains("R-OLD") && l.contains("1 đêm")));
+    assert!(labels
+        .iter()
+        .any(|l| l.contains("R-NEW") && l.contains("2 đêm")));
 
     assert_breakdown_sums_to_subtotal(&invoice);
 }
@@ -939,11 +952,15 @@ async fn move_then_extend_reflects_the_real_split_not_the_stale_snapshot() {
         .map(|line| line.label.clone())
         .collect();
     assert!(
-        labels.iter().any(|l| l.contains("R-OLD") && l.contains("1 đêm")),
+        labels
+            .iter()
+            .any(|l| l.contains("R-OLD") && l.contains("1 đêm")),
         "labels: {labels:?}"
     );
     assert!(
-        labels.iter().any(|l| l.contains("R-NEW") && l.contains("4 đêm")),
+        labels
+            .iter()
+            .any(|l| l.contains("R-NEW") && l.contains("4 đêm")),
         "phòng hiện tại phải cộng dồn cả 2 đêm gia hạn (2 gốc + 2 gia hạn = 4), \
          không dừng lại ở snapshot 2 đêm chụp lúc chuyển phòng: {labels:?}"
     );
@@ -1022,16 +1039,22 @@ async fn move_then_early_checkout_truncates_room_stays_to_settled_nights() {
         .map(|line| line.label.clone())
         .collect();
     assert!(
-        labels.iter().any(|l| l.contains("R-OLD") && l.contains("1 đêm")),
+        labels
+            .iter()
+            .any(|l| l.contains("R-OLD") && l.contains("1 đêm")),
         "labels: {labels:?}"
     );
     assert!(
-        labels.iter().any(|l| l.contains("R-NEW") && l.contains("1 đêm")),
+        labels
+            .iter()
+            .any(|l| l.contains("R-NEW") && l.contains("1 đêm")),
         "R-NEW phải bị cắt xuống 1 đêm (ngân sách 2 đêm settled trừ 1 đêm R-OLD đã dùng), \
          không phải 2 đêm như snapshot lúc chuyển phòng còn nhớ: {labels:?}"
     );
     assert!(
-        !labels.iter().any(|l| l.contains("R-NEW") && l.contains("2 đêm")),
+        !labels
+            .iter()
+            .any(|l| l.contains("R-NEW") && l.contains("2 đêm")),
         "labels: {labels:?}"
     );
 
@@ -1361,15 +1384,21 @@ async fn move_out_and_back_bills_each_stay_separately_on_early_checkout() {
         .map(|line| line.label.clone())
         .collect();
     assert!(
-        labels.iter().any(|l| l.contains("R-OLD") && l.contains("1 đêm")),
+        labels
+            .iter()
+            .any(|l| l.contains("R-OLD") && l.contains("1 đêm")),
         "labels: {labels:?}"
     );
     assert!(
-        labels.iter().any(|l| l.contains("R-NEW") && l.contains("1 đêm")),
+        labels
+            .iter()
+            .any(|l| l.contains("R-NEW") && l.contains("1 đêm")),
         "R-NEW phải còn trên hoá đơn — khách ngủ ở đó đúng đêm 16/04: {labels:?}"
     );
     assert!(
-        !labels.iter().any(|l| l.contains("R-OLD") && l.contains("2 đêm")),
+        !labels
+            .iter()
+            .any(|l| l.contains("R-OLD") && l.contains("2 đêm")),
         "R-OLD không được nuốt cả ngân sách 2 đêm: {labels:?}"
     );
     assert_breakdown_sums_to_subtotal(&invoice);
@@ -1464,11 +1493,15 @@ async fn group_checkout_keeps_the_room_split_for_a_booking_that_moved() {
         .map(|line| line.label.clone())
         .collect();
     assert!(
-        labels.iter().any(|l| l.contains("G-A") && l.contains("1 đêm")),
+        labels
+            .iter()
+            .any(|l| l.contains("G-A") && l.contains("1 đêm")),
         "labels: {labels:?}"
     );
     assert!(
-        labels.iter().any(|l| l.contains("G-C") && l.contains("2 đêm")),
+        labels
+            .iter()
+            .any(|l| l.contains("G-C") && l.contains("2 đêm")),
         "G-C phải cộng cả đêm gia hạn — group checkout phải chốt lại room_stays \
          từ room_calendar trước khi xoá, đúng như check_out_tx: {labels:?}"
     );

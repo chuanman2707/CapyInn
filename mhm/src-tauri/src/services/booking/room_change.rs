@@ -78,13 +78,12 @@ async fn remaining_nights(
         ));
     }
 
-    let stayed: i32 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM room_calendar WHERE booking_id = ? AND date < ?",
-    )
-    .bind(booking_id)
-    .bind(&today_str)
-    .fetch_one(pool)
-    .await?;
+    let stayed: i32 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM room_calendar WHERE booking_id = ? AND date < ?")
+            .bind(booking_id)
+            .bind(&today_str)
+            .fetch_one(pool)
+            .await?;
 
     Ok(RemainingNights {
         from_date: row.get("from_date"),
@@ -95,11 +94,10 @@ async fn remaining_nights(
 }
 
 async fn guest_count(pool: &Pool<Sqlite>, booking_id: &str) -> BookingResult<i32> {
-    let count: i32 =
-        sqlx::query_scalar("SELECT COUNT(*) FROM booking_guests WHERE booking_id = ?")
-            .bind(booking_id)
-            .fetch_one(pool)
-            .await?;
+    let count: i32 = sqlx::query_scalar("SELECT COUNT(*) FROM booking_guests WHERE booking_id = ?")
+        .bind(booking_id)
+        .fetch_one(pool)
+        .await?;
     Ok(count.max(1))
 }
 
@@ -342,10 +340,11 @@ pub(super) async fn change_room_tx(
         )));
     }
 
-    let guests: i32 = sqlx::query_scalar("SELECT COUNT(*) FROM booking_guests WHERE booking_id = ?")
-        .bind(booking_id)
-        .fetch_one(&mut **tx)
-        .await?;
+    let guests: i32 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM booking_guests WHERE booking_id = ?")
+            .bind(booking_id)
+            .fetch_one(&mut **tx)
+            .await?;
     let max_guests: Option<i32> = sqlx::query_scalar("SELECT max_guests FROM rooms WHERE id = ?")
         .bind(new_room_id)
         .fetch_optional(&mut **tx)
@@ -412,8 +411,7 @@ pub(super) async fn change_room_tx(
                 format!("booking {booking_id} changed before room-change repricing"),
             )?;
 
-            let note =
-                format!("Chuyển phòng {old_room_id} → {new_room_id}: chênh {remaining} đêm");
+            let note = format!("Chuyển phòng {old_room_id} → {new_room_id}: chênh {remaining} đêm");
             let created_at = Local::now().to_rfc3339();
             match &origin_key {
                 Some(key) => {
@@ -495,10 +493,7 @@ pub(super) async fn change_room_tx(
             .bind(status::room::OCCUPIED)
             .execute(&mut **tx)
             .await?;
-        ensure_one_row_affected(
-            result,
-            format!("room {old_room_id} is no longer occupied"),
-        )?;
+        ensure_one_row_affected(result, format!("room {old_room_id} is no longer occupied"))?;
 
         let now = Local::now().to_rfc3339();
         sqlx::query(
@@ -519,10 +514,7 @@ pub(super) async fn change_room_tx(
             .bind(status::room::VACANT)
             .execute(&mut **tx)
             .await?;
-        ensure_one_row_affected(
-            result,
-            format!("room {new_room_id} is no longer vacant"),
-        )?;
+        ensure_one_row_affected(result, format!("room {new_room_id} is no longer vacant"))?;
     }
 
     Ok(())
@@ -624,10 +616,9 @@ pub async fn change_room_idempotent(
             ctx,
             request,
             move || async move {
-                let old_room_id =
-                    lookup_booking_room_id(&pool_for_lookup, &booking_id_for_lookup)
-                        .await
-                        .map_err(map_change_room_command_error)?;
+                let old_room_id = lookup_booking_room_id(&pool_for_lookup, &booking_id_for_lookup)
+                    .await
+                    .map_err(map_change_room_command_error)?;
                 let lock_keys = vec![
                     crate::aggregate_locks::booking_key(&booking_id_for_lookup)?,
                     crate::aggregate_locks::room_key(&old_room_id)?,

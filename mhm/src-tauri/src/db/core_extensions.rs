@@ -160,7 +160,11 @@ pub(super) async fn migrate_v25_invoice_settlement_note(
 ) -> Result<(), sqlx::Error> {
     let mut tx = pool.begin().await?;
 
-    execute_compat_alter(&mut tx, "ALTER TABLE invoices ADD COLUMN settlement_note TEXT").await?;
+    execute_compat_alter(
+        &mut tx,
+        "ALTER TABLE invoices ADD COLUMN settlement_note TEXT",
+    )
+    .await?;
 
     set_schema_version(&mut tx, 25).await?;
     tx.commit().await?;
