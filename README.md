@@ -234,7 +234,10 @@ npm run build
 cargo check --manifest-path src-tauri/Cargo.toml
 cargo test --manifest-path src-tauri/Cargo.toml
 cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings
+cargo fmt --manifest-path src-tauri/Cargo.toml -- --check
 ```
+
+Every command above is a hard CI gate, `cargo fmt` included — skipping the format check locally means a red build on a PR that otherwise passes.
 
 The repository also ships scripted verification gates. `verify:full` is the smoke gate the release checklist expects to pass before a tag is pushed; it runs the quick wave, the frontend suite, booking and backup scenario tests, and a native Tauri startup smoke against an isolated runtime root.
 
@@ -298,7 +301,7 @@ Short checklist:
 1. Fork the repository
 2. Create a branch from `main`
 3. Keep commit messages in Conventional Commits format
-4. Re-run `npm test`, `npm run build`, `cargo check`, `cargo test`, and `cargo clippy`
+4. Re-run `npm test`, `npm run build`, `cargo check`, `cargo test`, `cargo clippy`, and `cargo fmt -- --check`
 5. Open a pull request with scope and verification notes
 
 ## License
