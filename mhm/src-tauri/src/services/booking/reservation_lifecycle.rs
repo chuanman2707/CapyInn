@@ -27,7 +27,8 @@ use super::{
     pricing_service::calculate_stay_price_tx,
     support::{
         ensure_one_row_affected, insert_room_calendar_rows, invalid_state_transition,
-        read_money_vnd_or_zero, read_money_vnd_strict, validate_non_negative_booking_money,
+        lock_booking_and_read_room, read_money_vnd_or_zero, read_money_vnd_strict,
+        validate_non_negative_booking_money, FolioLock,
     },
 };
 
@@ -178,21 +179,18 @@ async fn resolve_reservation_lock(
     pool: Pool<Sqlite>,
     booking_id: String,
 ) -> CommandResult<ResolvedWriteCommandGuard<ReservationResolvedGuard>> {
-    let room_id = sqlx::query_scalar::<_, String>("SELECT room_id FROM bookings WHERE id = ?")
-        .bind(&booking_id)
-        .fetch_optional(&pool)
-        .await
-        .map_err(BookingError::from)
-        .map_err(map_reservation_command_error)?
-        .ok_or_else(|| {
-            CommandError::user(
-                codes::BOOKING_NOT_FOUND,
-                format!("Booking not found: {}", booking_id),
-            )
-        })?;
+    let (guard, room_id) = lock_booking_and_read_room(
+        &pool,
+        &booking_id,
+        FolioLock::Skip,
+        map_reservation_command_error,
+    )
+    .await?;
+    let guard = guard
+        .acquire_next(global_manager(), [room_key(&room_id)?])
+        .await?;
+    let lock_keys = guard.keys().to_vec();
 
-    let lock_keys = vec![booking_key(&booking_id)?, room_key(&room_id)?];
-    let guard = global_manager().acquire(lock_keys.clone()).await?;
     Ok(ResolvedWriteCommandGuard::new(
         ReservationResolvedGuard {
             room_id,

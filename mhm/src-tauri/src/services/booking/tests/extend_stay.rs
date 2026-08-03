@@ -280,3 +280,83 @@ async fn extend_stay_fails_when_second_pool_checked_out_booking_first() {
     pool_b.close().await;
     let _ = std::fs::remove_file(db_path);
 }
+
+#[tokio::test]
+async fn extend_stay_idempotent_reads_the_room_after_taking_the_booking_lock() {
+    let pool = test_pool().await;
+    let booking_id = uuid::Uuid::new_v4().to_string();
+    seed_room(&pool, "R901").await.unwrap();
+    seed_room(&pool, "R902").await.unwrap();
+    seed_active_booking(&pool, &booking_id, "R901")
+        .await
+        .unwrap();
+
+    // Giữ khoá booking để lệnh phải kẹt ở pha 1.
+    let blocker = crate::aggregate_locks::global_manager()
+        .acquire([crate::aggregate_locks::booking_key(&booking_id).unwrap()])
+        .await
+        .expect("blocker lock");
+
+    let ctx = cmd("extend_stay", &format!("idem-extend-race-{booking_id}"));
+    let pool_for_task = pool.clone();
+    let booking_for_task = booking_id.clone();
+    let command = tokio::spawn(async move {
+        stay_lifecycle::extend_stay_idempotent(&pool_for_task, &ctx, &booking_for_task).await
+    });
+
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    assert!(
+        !command.is_finished(),
+        "lệnh phải kẹt ở pha 1, chưa được phép đọc phòng"
+    );
+
+    // Dời booking sang phòng khác trong lúc lệnh đang kẹt.
+    sqlx::query("UPDATE room_calendar SET room_id = 'R902' WHERE booking_id = ?")
+        .bind(&booking_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE bookings SET room_id = 'R902' WHERE id = ?")
+        .bind(&booking_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE rooms SET status = 'occupied' WHERE id = 'R902'")
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE rooms SET status = 'vacant' WHERE id = 'R901'")
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    drop(blocker);
+
+    let result = command
+        .await
+        .expect("task joins")
+        .expect("extend stay phải thành công trên phòng mới");
+    assert!(!result.replayed);
+
+    // Đêm thêm phải nằm ở R902, không phải R901.
+    let extended_room: String = sqlx::query_scalar(
+        "SELECT room_id FROM room_calendar WHERE booking_id = ? AND date = '2026-04-16'",
+    )
+    .bind(&booking_id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(extended_room, "R902");
+
+    // Bộ khoá đã ghi lại phải là bộ đã gộp của hai pha.
+    let lock_keys_json: String = sqlx::query_scalar(
+        "SELECT lock_keys_json FROM command_idempotency WHERE command_name = 'extend_stay'",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert!(
+        lock_keys_json.contains("room:R902"),
+        "lock_keys_json phải chứa phòng mới, đang là {lock_keys_json}"
+    );
+}

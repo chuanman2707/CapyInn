@@ -670,6 +670,7 @@ fn group_checkout_initial_lock_keys_from_payload(
     Ok(vec![crate::aggregate_locks::group_key(group_id)?])
 }
 
+#[cfg(test)]
 struct GroupCheckoutLockState {
     selected_booking_room_map: std::collections::HashMap<String, String>,
     booking_ids_to_lock: Vec<String>,
@@ -682,12 +683,17 @@ struct GroupCheckoutResolvedGuard {
     locked_payment_candidate_booking_ids: Vec<String>,
 }
 
-async fn load_group_checkout_lock_state(
+/// Pha 1 (dưới khoá `group:G`): xác định danh sách booking phải khoá.
+///
+/// Chỉ đọc id, không đọc phòng — đọc phòng ở pha này vẫn có thể cũ ngay khi
+/// vừa đọc xong, vì `change_room` không cầm `group:`, chỉ cầm
+/// `booking:`/`folio:`/`room:`. Xem `load_group_checkout_room_lock_state`.
+async fn load_group_checkout_booking_ids_to_lock(
     pool: &Pool<Sqlite>,
     group_id: &str,
     selected_booking_ids: &[String],
     final_paid: Option<MoneyVnd>,
-) -> BookingResult<GroupCheckoutLockState> {
+) -> BookingResult<Vec<String>> {
     let group_exists: Option<String> =
         sqlx::query_scalar("SELECT id FROM booking_groups WHERE id = ? LIMIT 1")
             .bind(group_id)
@@ -701,7 +707,7 @@ async fn load_group_checkout_lock_state(
     }
 
     let mut selected_query: sqlx::QueryBuilder<Sqlite> =
-        sqlx::QueryBuilder::new("SELECT id, room_id FROM bookings WHERE group_id = ");
+        sqlx::QueryBuilder::new("SELECT id FROM bookings WHERE group_id = ");
     selected_query.push_bind(group_id);
     selected_query.push(" AND id IN (");
     let mut selected_sep = selected_query.separated(", ");
@@ -711,14 +717,13 @@ async fn load_group_checkout_lock_state(
     selected_sep.push_unseparated(")");
 
     let selected_rows = selected_query.build().fetch_all(pool).await?;
-    let mut selected_booking_room_map = std::collections::HashMap::new();
-    for row in selected_rows {
-        selected_booking_room_map
-            .insert(row.get::<String, _>("id"), row.get::<String, _>("room_id"));
-    }
+    let existing_selected_ids = selected_rows
+        .into_iter()
+        .map(|row| row.get::<String, _>("id"))
+        .collect::<std::collections::HashSet<_>>();
 
     for booking_id in selected_booking_ids {
-        if !selected_booking_room_map.contains_key(booking_id) {
+        if !existing_selected_ids.contains(booking_id) {
             return Err(BookingError::not_found(format!(
                 "Booking {} không tìm thấy hoặc đã checkout",
                 booking_id
@@ -726,29 +731,82 @@ async fn load_group_checkout_lock_state(
         }
     }
 
-    let mut booking_ids_to_lock = selected_booking_ids.to_vec();
-    let mut room_ids_to_lock = selected_booking_ids
-        .iter()
-        .filter_map(|booking_id| selected_booking_room_map.get(booking_id).cloned())
-        .collect::<Vec<_>>();
-
-    if final_paid.unwrap_or(0) > 0 {
-        let rows = sqlx::query("SELECT id, room_id FROM bookings WHERE group_id = ?")
+    let mut booking_ids_to_lock = if final_paid.unwrap_or(0) > 0 {
+        let rows = sqlx::query("SELECT id FROM bookings WHERE group_id = ?")
             .bind(group_id)
             .fetch_all(pool)
             .await?;
-        booking_ids_to_lock.clear();
-        room_ids_to_lock.clear();
-        for row in rows {
-            booking_ids_to_lock.push(row.get("id"));
-            room_ids_to_lock.push(row.get("room_id"));
-        }
-    }
+        rows.into_iter()
+            .map(|row| row.get::<String, _>("id"))
+            .collect::<Vec<_>>()
+    } else {
+        selected_booking_ids.to_vec()
+    };
 
     booking_ids_to_lock.sort();
     booking_ids_to_lock.dedup();
+
+    Ok(booking_ids_to_lock)
+}
+
+/// Pha 2 (dưới khoá `booking:`/`folio:` của mọi booking trong
+/// `booking_ids_to_lock`): đọc phòng của từng booking. Đây mới là chân lý —
+/// mọi lệnh dời phòng (`change_room`) buộc phải cầm khoá `booking:` trước khi
+/// đổi `bookings.room_id`, nên đọc dưới khoá này không thể cũ.
+async fn load_group_checkout_room_lock_state(
+    pool: &Pool<Sqlite>,
+    selected_booking_ids: &[String],
+    booking_ids_to_lock: &[String],
+) -> BookingResult<(std::collections::HashMap<String, String>, Vec<String>)> {
+    let mut room_query: sqlx::QueryBuilder<Sqlite> =
+        sqlx::QueryBuilder::new("SELECT id, room_id FROM bookings WHERE id IN (");
+    let mut room_sep = room_query.separated(", ");
+    for booking_id in booking_ids_to_lock {
+        room_sep.push_bind(booking_id);
+    }
+    room_sep.push_unseparated(")");
+
+    let rows = room_query.build().fetch_all(pool).await?;
+    let mut booking_room_map = std::collections::HashMap::new();
+    for row in rows {
+        booking_room_map.insert(row.get::<String, _>("id"), row.get::<String, _>("room_id"));
+    }
+
+    let selected_booking_room_map = selected_booking_ids
+        .iter()
+        .filter_map(|booking_id| {
+            booking_room_map
+                .get(booking_id)
+                .cloned()
+                .map(|room_id| (booking_id.clone(), room_id))
+        })
+        .collect::<std::collections::HashMap<_, _>>();
+
+    let mut room_ids_to_lock = booking_ids_to_lock
+        .iter()
+        .filter_map(|booking_id| booking_room_map.get(booking_id).cloned())
+        .collect::<Vec<_>>();
     room_ids_to_lock.sort();
     room_ids_to_lock.dedup();
+
+    Ok((selected_booking_room_map, room_ids_to_lock))
+}
+
+/// Wrapper mỏng cho helper test `group_checkout` (single-shot, không qua ba
+/// pha aggregate lock) — gọi lần lượt hai hàm trên.
+#[cfg(test)]
+async fn load_group_checkout_lock_state(
+    pool: &Pool<Sqlite>,
+    group_id: &str,
+    selected_booking_ids: &[String],
+    final_paid: Option<MoneyVnd>,
+) -> BookingResult<GroupCheckoutLockState> {
+    let booking_ids_to_lock =
+        load_group_checkout_booking_ids_to_lock(pool, group_id, selected_booking_ids, final_paid)
+            .await?;
+    let (selected_booking_room_map, room_ids_to_lock) =
+        load_group_checkout_room_lock_state(pool, selected_booking_ids, &booking_ids_to_lock)
+            .await?;
 
     Ok(GroupCheckoutLockState {
         selected_booking_room_map,
@@ -761,29 +819,55 @@ async fn resolve_group_checkout_locks(
     pool: Pool<Sqlite>,
     req: GroupCheckoutRequest,
 ) -> CommandResult<ResolvedWriteCommandGuard<GroupCheckoutResolvedGuard>> {
+    // Pha 1: khoá group trước. Danh sách booking phải khoá chỉ đứng yên khi
+    // đã cầm khoá này.
+    let guard = crate::aggregate_locks::global_manager()
+        .acquire([crate::aggregate_locks::group_key(&req.group_id)?])
+        .await?;
+
     let unique_booking_ids = normalized_booking_ids(&req.booking_ids);
-    let lock_state =
-        load_group_checkout_lock_state(&pool, &req.group_id, &unique_booking_ids, req.final_paid)
+    let booking_ids_to_lock = load_group_checkout_booking_ids_to_lock(
+        &pool,
+        &req.group_id,
+        &unique_booking_ids,
+        req.final_paid,
+    )
+    .await
+    .map_err(map_group_checkout_command_error)?;
+
+    // Pha 2: booking + folio cho mọi booking sẽ khoá, hạng cao hơn `group:`.
+    // `change_room` không cầm `group:`, nên phòng chỉ đứng yên từ đây trở đi.
+    let mut booking_phase_keys = Vec::new();
+    for booking_id in &booking_ids_to_lock {
+        booking_phase_keys.push(crate::aggregate_locks::booking_key(booking_id)?);
+        booking_phase_keys.push(crate::aggregate_locks::folio_key(booking_id)?);
+    }
+
+    let guard = guard
+        .acquire_next(crate::aggregate_locks::global_manager(), booking_phase_keys)
+        .await?;
+
+    let (selected_booking_room_map, room_ids_to_lock) =
+        load_group_checkout_room_lock_state(&pool, &unique_booking_ids, &booking_ids_to_lock)
             .await
             .map_err(map_group_checkout_command_error)?;
-    let mut lock_keys = vec![crate::aggregate_locks::group_key(&req.group_id)?];
 
-    for booking_id in &lock_state.booking_ids_to_lock {
-        lock_keys.push(crate::aggregate_locks::booking_key(booking_id)?);
-        lock_keys.push(crate::aggregate_locks::folio_key(booking_id)?);
-    }
-    for room_id in &lock_state.room_ids_to_lock {
-        lock_keys.push(crate::aggregate_locks::room_key(room_id)?);
+    // Pha 3: room, hạng cao hơn booking/folio.
+    let mut room_phase_keys = Vec::new();
+    for room_id in &room_ids_to_lock {
+        room_phase_keys.push(crate::aggregate_locks::room_key(room_id)?);
     }
 
-    let guard = crate::aggregate_locks::global_manager()
-        .acquire(lock_keys.clone())
+    let guard = guard
+        .acquire_next(crate::aggregate_locks::global_manager(), room_phase_keys)
         .await?;
+    let lock_keys = guard.keys().to_vec();
+
     Ok(ResolvedWriteCommandGuard::new(
         GroupCheckoutResolvedGuard {
             _guard: guard,
-            locked_booking_room_map: lock_state.selected_booking_room_map,
-            locked_payment_candidate_booking_ids: lock_state.booking_ids_to_lock,
+            locked_booking_room_map: selected_booking_room_map,
+            locked_payment_candidate_booking_ids: booking_ids_to_lock,
         },
         lock_keys,
     ))

@@ -645,3 +645,72 @@ async fn check_out_rejects_overpaid_booking_until_refund_flow_exists() {
 
     assert!(error.to_string().contains("refund"));
 }
+
+#[tokio::test]
+async fn check_out_idempotent_reads_the_room_after_taking_the_booking_lock() {
+    let pool = test_pool().await;
+    seed_room(&pool, "R911").await.unwrap();
+    seed_room(&pool, "R912").await.unwrap();
+    seed_pricing_rule(&pool, "standard", 500_000).await.unwrap();
+    seed_active_booking_with_terms(
+        &pool,
+        "B911",
+        "R911",
+        "2026-04-20T08:00:00+07:00",
+        "2026-04-25T12:00:00+07:00",
+        5,
+        2_500_000,
+        Some(0),
+    )
+    .await
+    .unwrap();
+
+    let blocker = crate::aggregate_locks::global_manager()
+        .acquire([crate::aggregate_locks::booking_key("B911").unwrap()])
+        .await
+        .expect("blocker lock");
+
+    let ctx = cmd("check_out", "idem-checkout-race");
+    let pool_for_task = pool.clone();
+    let command = tokio::spawn(async move {
+        stay_lifecycle::check_out_idempotent(
+            &pool_for_task,
+            &ctx,
+            checkout_req("B911", CheckoutSettlementMode::ActualNights, 2_500_000),
+        )
+        .await
+    });
+
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    assert!(
+        !command.is_finished(),
+        "lệnh phải kẹt ở pha 1, chưa được phép đọc phòng"
+    );
+
+    sqlx::query("UPDATE room_calendar SET room_id = 'R912' WHERE booking_id = 'B911'")
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE bookings SET room_id = 'R912' WHERE id = 'B911'")
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE rooms SET status = 'occupied' WHERE id = 'R912'")
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE rooms SET status = 'vacant' WHERE id = 'R911'")
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    drop(blocker);
+
+    let result = command
+        .await
+        .expect("task joins")
+        .expect("check out phải thành công trên phòng mới");
+
+    assert_eq!(result.response["room_id"], "R912");
+    assert_room_status(&pool, "R912", "cleaning").await;
+}
