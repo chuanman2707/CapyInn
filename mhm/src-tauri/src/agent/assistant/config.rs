@@ -294,6 +294,7 @@ mod tests {
 
         assert!(validate_assistant_base_url("").is_err());
         assert!(validate_assistant_base_url("khong-phai-url").is_err());
+        assert!(validate_assistant_base_url("ftp://example.com/x").is_err());
     }
 
     #[test]
@@ -326,6 +327,17 @@ mod tests {
         let status = evaluate_assistant_gate(&config, true, true);
 
         assert!(!status.ready);
+        assert!(status.missing.contains(&AssistantGateMissing::Model));
+    }
+
+    #[test]
+    fn gate_reports_a_blank_base_url_as_missing() {
+        let config = AssistantConfig::default_for(AssistantPreset::Custom);
+
+        let status = evaluate_assistant_gate(&config, true, true);
+
+        assert!(!status.ready);
+        assert!(status.missing.contains(&AssistantGateMissing::BaseUrl));
         assert!(status.missing.contains(&AssistantGateMissing::Model));
     }
 }

@@ -52,7 +52,7 @@ fn relative(path: &Path) -> String {
 }
 
 /// Layers that sit *inside* the command boundary and must never import from it.
-const INNER_LAYERS: [&str; 4] = ["domain", "queries", "repositories", "services"];
+const INNER_LAYERS: [&str; 5] = ["agent", "domain", "queries", "repositories", "services"];
 
 /// Test modules are exempt: driving a Tauri command is exactly how you
 /// integration-test the outer boundary, and `services/booking/tests/` does so
