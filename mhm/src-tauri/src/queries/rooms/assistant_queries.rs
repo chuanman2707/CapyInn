@@ -29,6 +29,15 @@ pub struct AssistantGuestStay {
     pub room_name: Option<String>,
 }
 
+#[derive(Debug, Clone, Serialize, sqlx::FromRow)]
+pub struct AssistantStayCharges {
+    pub booking_id: String,
+    pub guest_name: String,
+    pub room_name: String,
+    pub total_price_vnd: i64,
+    pub paid_amount_vnd: i64,
+}
+
 /// Trạng thái mọi phòng ngay lúc này, kèm khách đang ở nếu có.
 pub async fn load_room_status_now(
     pool: &Pool<Sqlite>,
@@ -103,5 +112,27 @@ pub async fn find_guest_stays(
     .bind(&pattern)
     .bind(&pattern)
     .fetch_all(pool)
+    .await
+}
+
+/// Tổng tiền và đã trả của một lượt ở. `None` nghĩa là không có booking nào
+/// mang mã đó — khác hẳn với "có booking nhưng chưa phát sinh khoản nào".
+pub async fn load_stay_charges(
+    pool: &Pool<Sqlite>,
+    booking_id: &str,
+) -> Result<Option<AssistantStayCharges>, sqlx::Error> {
+    sqlx::query_as::<_, AssistantStayCharges>(
+        "SELECT b.id                       AS booking_id,
+                g.full_name                AS guest_name,
+                r.name                     AS room_name,
+                b.total_price              AS total_price_vnd,
+                IFNULL(b.paid_amount, 0)   AS paid_amount_vnd
+           FROM bookings b
+           JOIN guests g ON g.id = b.primary_guest_id
+           JOIN rooms  r ON r.id = b.room_id
+          WHERE b.id = ?",
+    )
+    .bind(booking_id)
+    .fetch_optional(pool)
     .await
 }
