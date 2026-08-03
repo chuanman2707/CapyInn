@@ -216,7 +216,10 @@ fn build_shorten_stay_hash_payload(booking_id: &str) -> serde_json::Value {
     })
 }
 
-fn build_set_booking_rate_hash_payload(booking_id: &str, rate_per_night: MoneyVnd) -> serde_json::Value {
+fn build_set_booking_rate_hash_payload(
+    booking_id: &str,
+    rate_per_night: MoneyVnd,
+) -> serde_json::Value {
     json!({
         "schema": "stay.set_rate.v1",
         "booking_id": booking_id,
@@ -1544,24 +1547,23 @@ async fn shorten_stay_tx(
         "Booking vừa được cập nhật bởi thao tác khác — vui lòng tải lại trang và thử lại",
     )?;
 
-    let calendar_result = sqlx::query(
-        "DELETE FROM room_calendar WHERE room_id = ? AND date = ? AND booking_id = ?",
-    )
-    .bind(&room_id)
-    .bind(freed_date.format("%Y-%m-%d").to_string())
-    .bind(booking_id)
-    .execute(&mut **tx)
-    .await
-    .map_err(BookingError::from)
-    .map_err(mark_write_db_error)?;
+    let calendar_result =
+        sqlx::query("DELETE FROM room_calendar WHERE room_id = ? AND date = ? AND booking_id = ?")
+            .bind(&room_id)
+            .bind(freed_date.format("%Y-%m-%d").to_string())
+            .bind(booking_id)
+            .execute(&mut **tx)
+            .await
+            .map_err(BookingError::from)
+            .map_err(mark_write_db_error)?;
     ensure_one_row_affected(
         calendar_result,
         format!("lịch phòng của booking {booking_id} đã thay đổi trước khi rút đêm"),
     )?;
 
-    let credit = 0i64
-        .checked_sub(removed_total)
-        .ok_or_else(|| BookingError::validation("Số tiền hoàn vượt giới hạn tính toán".to_string()))?;
+    let credit = 0i64.checked_sub(removed_total).ok_or_else(|| {
+        BookingError::validation("Số tiền hoàn vượt giới hạn tính toán".to_string())
+    })?;
 
     if let Some(origin_key) = origin_key {
         let origin = OriginSideEffect::new(origin_key, 0)?;
@@ -1642,15 +1644,17 @@ async fn set_booking_rate_tx(
         ));
     }
 
-    let booking = sqlx::query(
-        "SELECT nights, total_price, paid_amount, status FROM bookings WHERE id = ?",
-    )
-    .bind(booking_id)
-    .fetch_optional(&mut **tx)
-    .await?
-    .ok_or_else(|| {
-        BookingError::not_found(format!("Không tìm thấy booking đang active {}", booking_id))
-    })?;
+    let booking =
+        sqlx::query("SELECT nights, total_price, paid_amount, status FROM bookings WHERE id = ?")
+            .bind(booking_id)
+            .fetch_optional(&mut **tx)
+            .await?
+            .ok_or_else(|| {
+                BookingError::not_found(format!(
+                    "Không tìm thấy booking đang active {}",
+                    booking_id
+                ))
+            })?;
 
     let booking_status: String = booking.get("status");
     if booking_status != status::booking::ACTIVE {
@@ -1875,7 +1879,9 @@ pub async fn update_booking_notes_idempotent(
     let request = WriteCommandRequest::new_sanitized(hash_payload, ledger_intent, summary)?
         .with_primary_aggregate_key(format!("booking:{booking_id}"))
         .with_lock_key_deriver(update_booking_notes_lock_keys_from_payload)
-        .with_success_summary(CommandLedgerResultSummary::success("Booking notes updated")?);
+        .with_success_summary(CommandLedgerResultSummary::success(
+            "Booking notes updated",
+        )?);
 
     let booking_id_for_service = booking_id.to_string();
 

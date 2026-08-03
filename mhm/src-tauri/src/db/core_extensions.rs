@@ -154,7 +154,7 @@ pub(super) async fn migrate_v22_booking_guest_count(
 /// này chưa từng được đổi giá thủ công (tính năng đổi giá chưa tồn tại), nên
 /// coi chúng là "chưa từng override" là đúng thực tế — không có default nào
 /// khác an toàn hơn NULL ở đây.
-pub(super) async fn migrate_v24_booking_rate_override(
+pub(super) async fn migrate_v26_booking_rate_override(
     pool: &Pool<Sqlite>,
 ) -> Result<(), sqlx::Error> {
     let mut tx = pool.begin().await?;
@@ -165,7 +165,7 @@ pub(super) async fn migrate_v24_booking_rate_override(
     )
     .await?;
 
-    set_schema_version(&mut tx, 24).await?;
+    set_schema_version(&mut tx, 26).await?;
     tx.commit().await?;
     Ok(())
 }

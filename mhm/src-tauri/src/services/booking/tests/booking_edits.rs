@@ -27,13 +27,12 @@ async fn set_booking_rate_recomputes_the_total_from_nights() {
         .await
         .unwrap();
 
-    let row = sqlx::query(
-        "SELECT nights, total_price, expected_checkout FROM bookings WHERE id = ?",
-    )
-    .bind("B801")
-    .fetch_one(&pool)
-    .await
-    .unwrap();
+    let row =
+        sqlx::query("SELECT nights, total_price, expected_checkout FROM bookings WHERE id = ?")
+            .bind("B801")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
     assert_eq!(row.get::<i64, _>("total_price"), 900_000);
     assert_eq!(row.get::<i32, _>("nights"), 2, "số đêm không được đổi");
     assert_eq!(
@@ -59,7 +58,10 @@ async fn set_booking_rate_records_the_difference_as_a_charge() {
     .fetch_one(&pool)
     .await
     .unwrap();
-    assert_eq!(amount, -100_000, "1.000.000 → 900.000 là chênh lệch -100.000");
+    assert_eq!(
+        amount, -100_000,
+        "1.000.000 → 900.000 là chênh lệch -100.000"
+    );
 }
 
 #[tokio::test]
@@ -414,17 +416,17 @@ async fn set_booking_rate_writes_nothing_when_the_booking_is_reserved_not_active
     // `set_booking_rate_tx` rejects a non-active booking via `invalid_state_transition`,
     // which always maps to `BookingError::Conflict`, not `Validation`/`NotFound` — see
     // `invalid_state_transition` in support.rs and the same correction in shorten_stay.rs.
-    assert!(matches!(
-        error,
-        BookingError::Conflict(_)
-    ));
+    assert!(matches!(error, BookingError::Conflict(_)));
 
     let total: i64 = sqlx::query_scalar("SELECT total_price FROM bookings WHERE id = ?")
         .bind("B809")
         .fetch_one(&pool)
         .await
         .unwrap();
-    assert_eq!(total, 1_000_000, "lệnh bị chặn thì tổng tiền không được đổi");
+    assert_eq!(
+        total, 1_000_000,
+        "lệnh bị chặn thì tổng tiền không được đổi"
+    );
 
     let charges: i64 = sqlx::query_scalar(
         "SELECT COUNT(*) FROM transactions WHERE booking_id = ? AND type = 'charge'",
@@ -490,10 +492,7 @@ async fn set_booking_rate_refuses_a_booking_that_is_not_active() {
         .unwrap_err();
     // Same as above: a checked-out booking is rejected via `invalid_state_transition`,
     // which is `BookingError::Conflict`.
-    assert!(matches!(
-        error,
-        BookingError::Conflict(_)
-    ));
+    assert!(matches!(error, BookingError::Conflict(_)));
 }
 
 #[tokio::test]
@@ -565,13 +564,9 @@ async fn update_booking_notes_trims_and_saves() {
     let pool = test_pool().await;
     seed_two_night_booking(&pool, "B901", "R901").await.unwrap();
 
-    stay_lifecycle::update_booking_notes(
-        &pool,
-        "B901",
-        Some("  Khách xin thêm gối  ".to_string()),
-    )
-    .await
-    .unwrap();
+    stay_lifecycle::update_booking_notes(&pool, "B901", Some("  Khách xin thêm gối  ".to_string()))
+        .await
+        .unwrap();
 
     let notes: Option<String> = sqlx::query_scalar("SELECT notes FROM bookings WHERE id = ?")
         .bind("B901")
@@ -652,9 +647,8 @@ async fn update_booking_notes_idempotent_records_the_actor_in_the_command_ledger
     let pool = test_pool().await;
     seed_two_night_booking(&pool, "B905", "R905").await.unwrap();
 
-    let mut ctx = crate::command_idempotency::WriteCommandContext::new_internal(
-        "update_booking_notes",
-    );
+    let mut ctx =
+        crate::command_idempotency::WriteCommandContext::new_internal("update_booking_notes");
     ctx.actor_id = Some("staff-905".to_string());
 
     stay_lifecycle::update_booking_notes_idempotent(
@@ -675,13 +669,14 @@ async fn update_booking_notes_idempotent_records_the_actor_in_the_command_ledger
     .fetch_one(&pool)
     .await
     .unwrap();
-    assert_eq!(row.get::<Option<String>, _>("actor_id").as_deref(), Some("staff-905"));
     assert_eq!(
-        row.get::<String, _>("command_name"),
-        "update_booking_notes"
+        row.get::<Option<String>, _>("actor_id").as_deref(),
+        Some("staff-905")
     );
+    assert_eq!(row.get::<String, _>("command_name"), "update_booking_notes");
     assert_eq!(
-        row.get::<Option<String>, _>("primary_aggregate_key").as_deref(),
+        row.get::<Option<String>, _>("primary_aggregate_key")
+            .as_deref(),
         Some("booking:B905")
     );
 
@@ -715,9 +710,7 @@ fn update_booking_notes_stays_out_of_the_write_manifest_and_recovery_high_risk_l
 /// truyền idempotency key, khác với `add_folio_line`/`set_booking_rate`.
 #[test]
 fn update_booking_notes_context_generates_its_own_idempotency_key_without_caller_input() {
-    let ctx = crate::command_idempotency::WriteCommandContext::new_internal(
-        "update_booking_notes",
-    );
+    let ctx = crate::command_idempotency::WriteCommandContext::new_internal("update_booking_notes");
 
     assert!(!ctx.idempotency_key.trim().is_empty());
     assert_eq!(ctx.command_name, "update_booking_notes");
@@ -735,8 +728,7 @@ fn update_booking_notes_context_generates_its_own_idempotency_key_without_caller
 /// mà lễ tân chưa từng thấy — không có lỗi nào nổi lên.
 #[tokio::test]
 async fn set_booking_rate_fails_when_second_pool_moves_the_total_while_the_lock_is_held() {
-    let (pool_a, pool_b, db_path) =
-        shared_file_test_pools("second-pool-rate-total-price").await;
+    let (pool_a, pool_b, db_path) = shared_file_test_pools("second-pool-rate-total-price").await;
     seed_two_night_booking(&pool_a, "B-2POOL-RATE", "R-2POOL-RATE")
         .await
         .unwrap();
@@ -832,7 +824,10 @@ async fn set_booking_rate_fails_when_second_pool_moves_the_total_while_the_lock_
     .fetch_one(&pool_a)
     .await
     .unwrap();
-    assert_eq!(charge_count, 0, "bị chặn thì không được để lại dòng đối ứng");
+    assert_eq!(
+        charge_count, 0,
+        "bị chặn thì không được để lại dòng đối ứng"
+    );
 
     pool_a.close().await;
     pool_b.close().await;
