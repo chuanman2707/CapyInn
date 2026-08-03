@@ -365,6 +365,46 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_draft_without_nights_reports_the_missing_field() {
+        let pool = test_pool().await;
+        let args = serde_json::json!({ "room_id": "R1", "guests": [{ "full_name": "Nam" }] });
+
+        let outcome = build_check_in_draft(&pool, &args, "2026-08-03")
+            .await
+            .expect("thiếu trường không phải lỗi hệ thống");
+
+        match outcome {
+            DraftOutcome::MissingFields(fields) => {
+                assert!(fields.contains(&"nights".to_string()))
+            }
+            other => panic!("mong đợi MissingFields, nhận {other:?}"),
+        }
+    }
+
+    /// `nights < 1` đi chung nhánh với vắng mặt — `unwrap_or(0)` biến "0" thành
+    /// cùng một con số 0 rồi cùng rớt vào điều kiện `nights < 1`.
+    #[tokio::test]
+    async fn a_draft_with_zero_nights_reports_the_missing_field() {
+        let pool = test_pool().await;
+        let args = serde_json::json!({
+            "room_id": "R1",
+            "nights": 0,
+            "guests": [{ "full_name": "Nam" }]
+        });
+
+        let outcome = build_check_in_draft(&pool, &args, "2026-08-03")
+            .await
+            .expect("thiếu trường không phải lỗi hệ thống");
+
+        match outcome {
+            DraftOutcome::MissingFields(fields) => {
+                assert!(fields.contains(&"nights".to_string()))
+            }
+            other => panic!("mong đợi MissingFields, nhận {other:?}"),
+        }
+    }
+
+    #[tokio::test]
     async fn a_draft_for_an_unknown_room_fails_instead_of_quoting_a_default() {
         let pool = test_pool().await;
         let args = serde_json::json!({
@@ -378,6 +418,154 @@ mod tests {
             .expect_err("không tra được giá thì không được dựng thẻ");
 
         assert_eq!(error.code, codes::AGENT_PREVIEW_UNAVAILABLE);
+    }
+
+    // ─── Happy-path coverage for `DraftOutcome::Ready` ───
+    //
+    // Every test above stops at `MissingFields` or the unknown-room `Err`, so
+    // `build_warnings` and the way `payload`/`preview`/`warnings` get assembled
+    // into a `ProposedAction` never actually ran. These seed a real room,
+    // following the same minimum recipe proven in `tools.rs`'s
+    // `quote_room_price_prices_a_seeded_room_over_two_weekday_nights`: just a
+    // `rooms` row, no `pricing_rules`/`room_types` row required for
+    // `calculate_room_price_preview` to succeed.
+
+    /// Chứng minh cả đường `Ready`: thẻ hiện đúng phòng/khách đã seed, tổng
+    /// tiền trên thẻ là tổng của preview thật (không phải 0, không phải mặc
+    /// định house 350k/400k), và `payload` mang đúng những gì đã truyền vào.
+    /// Phòng seed sạch và còn trống nên `warnings` phải rỗng — đối chứng cho
+    /// test cảnh báo ngay bên dưới, để test đó không thể đúng một cách vô
+    /// nghĩa (lúc nào cũng có cảnh báo bất kể trạng thái phòng).
+    #[tokio::test]
+    async fn a_draft_with_a_seeded_room_and_guest_is_ready_with_the_preview_total() {
+        let pool = test_pool().await;
+        seed_room(
+            &pool,
+            "room-ready",
+            "P701",
+            "Deluxe Balcony",
+            500_000,
+            "vacant",
+        )
+        .await;
+
+        // 2026-06-01 là thứ Hai, 2026-06-03 là thứ Tư (đã kiểm bằng `date`/
+        // `datetime`, không chỉ đọc comment) — kỳ ở này không dính đêm cuối
+        // tuần nào, nên mức uplift cuối tuần mặc định 20% mà một phòng không
+        // có `pricing_rules` sẽ rơi vào phải ra 0, và tổng phải đúng bằng 2
+        // đêm x base_price, không hơn không kém.
+        let args = serde_json::json!({
+            "room_id": "room-ready",
+            "nights": 2,
+            "guests": [
+                {
+                    "full_name": "Nguyễn Văn Nam",
+                    "doc_number": "079201001234",
+                    "phone": "0909000111"
+                }
+            ],
+            "source": "OTA",
+            "notes": "khách quen",
+            "paid_amount": 300_000,
+            "pricing_type": "nightly"
+        });
+
+        let outcome = build_check_in_draft(&pool, &args, "2026-06-01")
+            .await
+            .expect("dữ liệu hợp lệ với phòng có thật không được lỗi");
+
+        let action = match outcome {
+            DraftOutcome::Ready(action) => action,
+            other => panic!("mong đợi Ready, nhận {other:?}"),
+        };
+
+        assert_eq!(action.kind, CHECK_IN_ACTION_KIND);
+
+        // Thẻ hiện đúng phòng và khách đã seed.
+        assert_eq!(
+            action.display.get("room_id").map(String::as_str),
+            Some("room-ready")
+        );
+        assert_eq!(
+            action.display.get("guests").map(String::as_str),
+            Some("Nguyễn Văn Nam")
+        );
+
+        // Tổng trên thẻ phải là tổng của preview thật: 2 đêm x 500.000 base
+        // price, không cuối tuần, không phụ thu — không phải 0 và không phải
+        // một trong hai số mặc định house (350k hay daily_rate mặc định 400k
+        // của `PricingRule::default()`) mà một rule bị rớt về default sẽ lộ ra.
+        let preview_total = action
+            .preview
+            .get("total")
+            .and_then(Value::as_i64)
+            .expect("preview phải có total");
+        assert_eq!(preview_total, 1_000_000);
+        assert_eq!(
+            action.display.get("total").map(String::as_str),
+            Some("1.000.000 ₫")
+        );
+
+        // payload round-trip đúng những gì đã truyền vào.
+        assert_eq!(action.payload.room_id, "room-ready");
+        assert_eq!(action.payload.nights, 2);
+        assert_eq!(action.payload.guests.len(), 1);
+        assert_eq!(action.payload.guests[0].full_name, "Nguyễn Văn Nam");
+        assert_eq!(action.payload.guests[0].doc_number, "079201001234");
+        assert_eq!(
+            action.payload.guests[0].phone.as_deref(),
+            Some("0909000111")
+        );
+        assert_eq!(action.payload.source.as_deref(), Some("OTA"));
+        assert_eq!(action.payload.notes.as_deref(), Some("khách quen"));
+        assert_eq!(action.payload.paid_amount, Some(300_000));
+        assert_eq!(action.payload.pricing_type.as_deref(), Some("nightly"));
+
+        // Phòng sạch, không ai đang ở — không được có cảnh báo nào.
+        assert!(
+            action.warnings.is_empty(),
+            "phòng sạch và trống không được có cảnh báo: {:?}",
+            action.warnings
+        );
+    }
+
+    /// `build_warnings` đọc `rooms.status` thật từ PMS, không phải câu do model
+    /// tự viết ra — test này là bằng chứng tự động cho đúng luật đó, thay vì
+    /// chỉ dựa vào người đọc code. Không so sánh rỗng/không-rỗng chung chung:
+    /// so khớp đúng nội dung tiếng Việt và đúng số lượng, để một cảnh báo giả
+    /// hoặc một cảnh báo thứ hai lọt vào cũng bị bắt.
+    #[tokio::test]
+    async fn a_ready_draft_carries_a_pms_warning_when_the_room_is_dirty() {
+        let pool = test_pool().await;
+        seed_room(
+            &pool,
+            "room-dirty",
+            "P702",
+            "Standard Room",
+            300_000,
+            "dirty",
+        )
+        .await;
+
+        let args = serde_json::json!({
+            "room_id": "room-dirty",
+            "nights": 1,
+            "guests": [{ "full_name": "Trần Thị Hoa" }]
+        });
+
+        let outcome = build_check_in_draft(&pool, &args, "2026-06-01")
+            .await
+            .expect("phòng bẩn vẫn tra được giá — không phải lỗi hệ thống");
+
+        let action = match outcome {
+            DraftOutcome::Ready(action) => action,
+            other => panic!("mong đợi Ready, nhận {other:?}"),
+        };
+
+        assert_eq!(
+            action.warnings,
+            vec!["Phòng đang ở trạng thái bẩn, chưa dọn.".to_string()]
+        );
     }
 
     #[test]
@@ -410,5 +598,32 @@ mod tests {
             .await
             .expect("failed to run migrations");
         pool
+    }
+
+    /// Cùng công thức seed đã dùng ở `tools.rs`'s `seed_room`: chỉ một dòng
+    /// `rooms` là đủ cho `calculate_room_price_preview` chạy được, không cần
+    /// `room_types`/`pricing_rules`. `type` cố ý mang tên nhiều từ như thật
+    /// (`"Standard Room"`, `"Deluxe Balcony"`) — `rooms.type` là tên hiển thị
+    /// có khoảng trắng, một fixture một từ có thể che mất lỗi ghép chuỗi.
+    async fn seed_room(
+        pool: &Pool<Sqlite>,
+        id: &str,
+        name: &str,
+        room_type: &str,
+        base_price: i64,
+        status: &str,
+    ) {
+        sqlx::query(
+            "INSERT INTO rooms (id, name, type, floor, has_balcony, base_price, status)
+             VALUES (?, ?, ?, 1, 0, ?, ?)",
+        )
+        .bind(id)
+        .bind(name)
+        .bind(room_type)
+        .bind(base_price)
+        .bind(status)
+        .execute(pool)
+        .await
+        .expect("seed room");
     }
 }
