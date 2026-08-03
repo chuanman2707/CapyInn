@@ -178,7 +178,7 @@ pub struct HousekeepingTask {
 
 // --- Request/Response DTOs ---
 
-#[derive(Debug, Deserialize, Clone)]
+#[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct CreateGuestRequest {
     pub guest_type: Option<String>,
     pub full_name: String,
@@ -192,7 +192,7 @@ pub struct CreateGuestRequest {
     pub phone: Option<String>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct CheckInRequest {
     pub room_id: String,
     pub guests: Vec<CreateGuestRequest>,
