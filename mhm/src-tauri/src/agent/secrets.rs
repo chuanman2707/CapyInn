@@ -12,6 +12,7 @@ const KEYCHAIN_SERVICE: &str = "CapyInn CEO Agent";
 pub enum AgentSecretKind {
     TelegramBotToken,
     OpenAiApiKey,
+    AssistantApiKey,
 }
 
 impl AgentSecretKind {
@@ -19,6 +20,7 @@ impl AgentSecretKind {
         match self {
             Self::TelegramBotToken => "ceo_telegram_bot_token",
             Self::OpenAiApiKey => "ceo_openai_api_key",
+            Self::AssistantApiKey => "assistant_api_key",
         }
     }
 
@@ -26,6 +28,7 @@ impl AgentSecretKind {
         match self {
             Self::TelegramBotToken => "telegram",
             Self::OpenAiApiKey => "openai",
+            Self::AssistantApiKey => "assistant",
         }
     }
 }
@@ -220,5 +223,21 @@ mod tests {
         assert_ne!(token_fingerprint, key_fingerprint);
         assert_eq!(token_fingerprint.len(), 64);
         assert!(!token_fingerprint.contains("same-secret"));
+    }
+
+    #[test]
+    fn assistant_api_key_is_a_distinct_secret() {
+        assert_eq!(
+            AgentSecretKind::AssistantApiKey.label(),
+            "assistant_api_key"
+        );
+        assert_ne!(
+            AgentSecretKind::AssistantApiKey.label(),
+            AgentSecretKind::OpenAiApiKey.label()
+        );
+
+        let assistant = agent_secret_fingerprint(AgentSecretKind::AssistantApiKey, "same-secret");
+        let openai = agent_secret_fingerprint(AgentSecretKind::OpenAiApiKey, "same-secret");
+        assert_ne!(assistant, openai);
     }
 }
