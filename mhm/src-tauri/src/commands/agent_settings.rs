@@ -370,6 +370,15 @@ where
     let (telegram_present, openai_present) = match kind {
         AgentSecretKind::TelegramBotToken => (Some(present), None),
         AgentSecretKind::OpenAiApiKey => (None, Some(present)),
+        // Khoá của trợ lý quầy không đi qua cổng CEO Telegram. Hàm này ghi trạng
+        // thái vào bảng của CEO và phát audit gắn nhãn CeoSecretary, nên gọi nó
+        // với AssistantApiKey là lỗi lập trình — fail to, đừng ghi bừa.
+        AgentSecretKind::AssistantApiKey => {
+            return Err(CommandError::system(
+                codes::SYSTEM_INTERNAL_ERROR,
+                "persist_secret_presence_with_guard chỉ dùng cho secret của CEO Telegram",
+            ));
+        }
     };
 
     update_ceo_telegram_secret_presence_with_guard_idempotent(

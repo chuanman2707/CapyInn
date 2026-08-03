@@ -225,6 +225,16 @@
     "defaultMessage": "Trợ lý AI không có đủ dữ liệu PMS để trả lời câu hỏi này."
   },
   {
+    "code": "AGENT_MODEL_NO_TOOL_SUPPORT",
+    "kind": "user",
+    "defaultMessage": "Mô hình AI hiện tại không hỗ trợ gọi công cụ."
+  },
+  {
+    "code": "AGENT_PREVIEW_UNAVAILABLE",
+    "kind": "user",
+    "defaultMessage": "Không tra được giá phòng nên chưa dựng được thẻ xác nhận."
+  },
+  {
     "code": "SYSTEM_INTERNAL_ERROR",
     "kind": "system",
     "defaultMessage": "Có lỗi hệ thống, vui lòng thử lại"

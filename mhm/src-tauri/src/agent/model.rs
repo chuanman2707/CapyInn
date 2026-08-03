@@ -5,6 +5,7 @@ use serde::{Deserialize, Serialize};
 pub enum AgentRole {
     CeoSecretary,
     GuestReceptionist,
+    FrontDeskAssistant,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -106,5 +107,19 @@ mod tests {
         assert_eq!(meta.data_sensitivity, DataSensitivity::CeoSensitive);
         assert!(meta.allowed_for(AgentRole::CeoSecretary));
         assert!(!meta.allowed_for(AgentRole::GuestReceptionist));
+    }
+
+    #[test]
+    fn ceo_tools_are_not_visible_to_the_front_desk_assistant() {
+        let meta = AgentToolMeta {
+            name: "get_revenue_snapshot",
+            description: "Revenue snapshot",
+            mutation_risk: MutationRisk::ReadOnly,
+            data_sensitivity: DataSensitivity::CeoSensitive,
+            allowed_roles: &[AgentRole::CeoSecretary],
+            capability: AgentToolCapability::PmsRead,
+        };
+
+        assert!(!meta.allowed_for(AgentRole::FrontDeskAssistant));
     }
 }

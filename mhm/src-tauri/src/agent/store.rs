@@ -48,6 +48,7 @@ fn role_as_str(role: AgentRole) -> &'static str {
     match role {
         AgentRole::CeoSecretary => "ceo_secretary",
         AgentRole::GuestReceptionist => "guest_receptionist",
+        AgentRole::FrontDeskAssistant => "front_desk_assistant",
     }
 }
 

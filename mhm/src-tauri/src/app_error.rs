@@ -55,6 +55,8 @@ pub mod codes {
     pub const AGENT_PROVIDER_REQUEST_FAILED: &str = "AGENT_PROVIDER_REQUEST_FAILED";
     pub const AGENT_TOOL_LOOP_LIMIT: &str = "AGENT_TOOL_LOOP_LIMIT";
     pub const AGENT_UNSUPPORTED_PMS_QUESTION: &str = "AGENT_UNSUPPORTED_PMS_QUESTION";
+    pub const AGENT_MODEL_NO_TOOL_SUPPORT: &str = "AGENT_MODEL_NO_TOOL_SUPPORT";
+    pub const AGENT_PREVIEW_UNAVAILABLE: &str = "AGENT_PREVIEW_UNAVAILABLE";
     pub const SYSTEM_INTERNAL_ERROR: &str = "SYSTEM_INTERNAL_ERROR";
 
     pub const ALL: &[&str] = &[
@@ -103,6 +105,8 @@ pub mod codes {
         AGENT_PROVIDER_REQUEST_FAILED,
         AGENT_TOOL_LOOP_LIMIT,
         AGENT_UNSUPPORTED_PMS_QUESTION,
+        AGENT_MODEL_NO_TOOL_SUPPORT,
+        AGENT_PREVIEW_UNAVAILABLE,
         SYSTEM_INTERNAL_ERROR,
     ];
 }
@@ -433,6 +437,8 @@ mod tests {
             codes::AGENT_PROVIDER_REQUEST_FAILED,
             codes::AGENT_TOOL_LOOP_LIMIT,
             codes::AGENT_UNSUPPORTED_PMS_QUESTION,
+            codes::AGENT_MODEL_NO_TOOL_SUPPORT,
+            codes::AGENT_PREVIEW_UNAVAILABLE,
         ] {
             let error = CommandError::user(code, "agent policy denied");
             assert_eq!(error.code, code);
@@ -708,6 +714,16 @@ mod tests {
                 codes::AGENT_UNSUPPORTED_PMS_QUESTION,
                 AppErrorKind::User,
                 "Trợ lý AI không có đủ dữ liệu PMS để trả lời câu hỏi này.",
+            ),
+            (
+                codes::AGENT_MODEL_NO_TOOL_SUPPORT,
+                AppErrorKind::User,
+                "Mô hình AI hiện tại không hỗ trợ gọi công cụ.",
+            ),
+            (
+                codes::AGENT_PREVIEW_UNAVAILABLE,
+                AppErrorKind::User,
+                "Không tra được giá phòng nên chưa dựng được thẻ xác nhận.",
             ),
             (
                 codes::SYSTEM_INTERNAL_ERROR,
