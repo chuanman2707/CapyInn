@@ -121,13 +121,10 @@ pub fn build_assistant_provider_client() -> CommandResult<reqwest::Client> {
         .redirect(reqwest::redirect::Policy::none())
         .build()
         .map_err(|error| {
-            CommandError::system(
-                codes::AGENT_PROVIDER_REQUEST_FAILED,
-                format!(
-                    "Không dựng được kết nối tới máy chủ AI: {}",
-                    redact_agent_secret_markers(&error.to_string())
-                ),
-            )
+            provider_failure(format!(
+                "Không dựng được kết nối tới máy chủ AI: {}",
+                redact_agent_secret_markers(&error.to_string())
+            ))
         })
 }
 
@@ -182,6 +179,16 @@ impl AssistantProviderClient {
             })?;
 
         let status = response.status();
+
+        // Trần phải chặn TRƯỚC khi nạp, không phải sau. Content-Length không
+        // phải lúc nào cũng có (chunked encoding) và có thể khai gian, nên
+        // phép kiểm sau khi đọc bên dưới vẫn giữ lại làm lưới chắn thứ hai.
+        if let Some(declared) = response.content_length() {
+            if declared > MAX_PROVIDER_RESPONSE_BYTES as u64 {
+                return Err(provider_failure("Máy chủ AI trả về quá dài.".to_string()));
+            }
+        }
+
         let raw = response.text().await.map_err(|error| {
             provider_failure(format!(
                 "Không đọc được trả lời từ máy chủ AI: {}",
@@ -487,7 +494,12 @@ mod tests {
     async fn never_leaks_the_api_key_into_an_error_message() {
         let endpoint = spawn_provider(Router::new().route(
             "/v1/chat/completions",
-            post(|| async { (axum::http::StatusCode::INTERNAL_SERVER_ERROR, "boom") }),
+            post(|| async {
+                (
+                    axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                    "upstream rejected Bearer sk-super-secret",
+                )
+            }),
         ))
         .await;
 
@@ -528,6 +540,120 @@ mod tests {
             "/v1/chat/completions",
             post(|| async { Json(serde_json::json!({ "choices": [] })) }),
         ))
+        .await;
+
+        let error = client()
+            .call(
+                &endpoint,
+                "sk-test",
+                "deepseek-chat",
+                &[ChatMessage::user("chào")],
+                &sample_tools(),
+            )
+            .await
+            .expect_err("phải báo lỗi");
+
+        assert_eq!(error.code, codes::AGENT_PROVIDER_REQUEST_FAILED);
+    }
+
+    #[tokio::test]
+    async fn rejects_a_response_that_declares_a_size_over_the_ceiling() {
+        let endpoint = spawn_provider(Router::new().route(
+            "/v1/chat/completions",
+            post(|| async { "x".repeat(MAX_PROVIDER_RESPONSE_BYTES + 1) }),
+        ))
+        .await;
+
+        let error = client()
+            .call(
+                &endpoint,
+                "sk-test",
+                "deepseek-chat",
+                &[ChatMessage::user("chào")],
+                &sample_tools(),
+            )
+            .await
+            .expect_err("body quá trần phải bị từ chối");
+
+        assert_eq!(error.code, codes::AGENT_PROVIDER_REQUEST_FAILED);
+    }
+
+    #[tokio::test]
+    async fn treats_empty_tool_call_arguments_as_an_empty_object() {
+        let endpoint = spawn_provider(Router::new().route(
+            "/v1/chat/completions",
+            post(|| async {
+                Json(serde_json::json!({
+                    "choices": [{
+                        "message": {
+                            "role": "assistant",
+                            "content": null,
+                            "tool_calls": [{
+                                "id": "call_1",
+                                "type": "function",
+                                "function": {
+                                    "name": "list_rooms_now",
+                                    "arguments": ""
+                                }
+                            }]
+                        }
+                    }]
+                }))
+            }),
+        ))
+        .await;
+
+        let turn = client()
+            .call(
+                &endpoint,
+                "sk-test",
+                "deepseek-chat",
+                &[ChatMessage::user("phòng nào trống")],
+                &sample_tools(),
+            )
+            .await
+            .expect("đối số rỗng không phải là lỗi");
+
+        match turn {
+            AssistantProviderTurn::ToolCalls(calls) => {
+                assert_eq!(calls.len(), 1);
+                assert_eq!(calls[0].arguments, Value::Object(serde_json::Map::new()));
+            }
+            other => panic!("mong đợi tool call, nhận {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn maps_a_message_with_neither_content_nor_tool_calls_to_a_request_failure() {
+        let endpoint = spawn_provider(Router::new().route(
+            "/v1/chat/completions",
+            post(|| async {
+                Json(serde_json::json!({
+                    "choices": [{ "message": { "role": "assistant" } }]
+                }))
+            }),
+        ))
+        .await;
+
+        let error = client()
+            .call(
+                &endpoint,
+                "sk-test",
+                "deepseek-chat",
+                &[ChatMessage::user("chào")],
+                &sample_tools(),
+            )
+            .await
+            .expect_err("phải báo lỗi");
+
+        assert_eq!(error.code, codes::AGENT_PROVIDER_REQUEST_FAILED);
+    }
+
+    #[tokio::test]
+    async fn rejects_a_non_json_response_with_a_success_status() {
+        let endpoint = spawn_provider(
+            Router::new().route("/v1/chat/completions", post(|| async { "not json at all" })),
+        )
         .await;
 
         let error = client()
