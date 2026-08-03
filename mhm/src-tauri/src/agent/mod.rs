@@ -1,3 +1,4 @@
+pub mod assistant;
 pub mod channel;
 pub mod config;
 pub mod digest;
