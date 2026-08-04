@@ -46,7 +46,7 @@ pub const FRONT_DESK_READ_TOOLS: &[AgentToolMeta] = &[
     },
     AgentToolMeta {
         name: "quote_room_price",
-        description: "Báo giá một phòng cho khoảng ngày và số khách cụ thể.",
+        description: "Báo giá một phòng cho một khoảng ngày cụ thể, đúng số quầy thu.",
         mutation_risk: MutationRisk::ReadOnly,
         data_sensitivity: DataSensitivity::StaffOperational,
         allowed_roles: FRONT_DESK_ONLY,
@@ -135,13 +135,16 @@ fn read_tool_parameters(name: &str) -> Value {
             "properties": { "booking_id": { "type": "string" } },
             "required": ["booking_id"]
         }),
+        // Không có `guests`: giá quầy thu không phụ thuộc số khách (xem nhánh
+        // `quote_room_price` trong `execute_read_tool`). Một tham số nằm trong
+        // schema mà không đổi được kết quả là lời mời model tin rằng nó vừa
+        // hỏi giá cho đúng số khách đó, rồi diễn giải con số theo cách sai.
         "quote_room_price" => json!({
             "type": "object",
             "properties": {
                 "room_id": { "type": "string" },
                 "check_in": { "type": "string", "description": "YYYY-MM-DD" },
-                "check_out": { "type": "string", "description": "YYYY-MM-DD" },
-                "guests": { "type": "integer", "minimum": 1 }
+                "check_out": { "type": "string", "description": "YYYY-MM-DD" }
             },
             "required": ["room_id", "check_in", "check_out"]
         }),
@@ -205,10 +208,15 @@ pub async fn execute_read_tool(
             let room_id = required_str(args, "room_id")?;
             let check_in = required_str(args, "check_in")?;
             let check_out = required_str(args, "check_out")?;
-            let guests = args.get("guests").and_then(Value::as_i64).map(|n| n as i32);
 
+            // `None` cho số khách, cùng lý do với `draft::build_check_in_draft`:
+            // `stay_lifecycle::check_in` truyền `None`, nên phụ thu thêm người
+            // không nằm trong số quầy thu. Trợ lý đọc con số này thành lời
+            // trong khung chat, nên nó phải là số thu được, không phải số cao
+            // hơn. `guests` cũng đã bị gỡ khỏi schema — model không còn được
+            // mời gửi tham số này nữa; nếu có gửi thì cứ bỏ qua, đừng báo lỗi.
             let quote = crate::services::booking::pricing_service::calculate_room_price_preview(
-                pool, room_id, check_in, check_out, "nightly", guests,
+                pool, room_id, check_in, check_out, "nightly", None,
             )
             .await
             .map_err(|error| {
@@ -592,6 +600,47 @@ mod tests {
         assert_eq!(output["total"], json!(600_000));
     }
 
+    /// Trợ lý đọc số này ra thành câu nói trong khung chat. Nó phải là số quầy
+    /// thu, tức số `stay_lifecycle::check_in` tính — và lệnh đó truyền `None`
+    /// cho số khách, không bao giờ tính phụ thu thêm người. Phòng dưới đây có
+    /// phụ thu 150.000₫/khách/đêm nên một tham số `guests` lọt xuống engine sẽ
+    /// đội tổng lên 300.000₫.
+    #[tokio::test]
+    async fn quote_room_price_ignores_a_guest_count_the_desk_will_not_charge_for() {
+        let pool = test_pool().await;
+
+        seed_room_charging_extra_guests(&pool, "room-qp-extra", "P402", "Family Room", 300_000)
+            .await;
+
+        let output = execute_read_tool(
+            &pool,
+            "quote_room_price",
+            &serde_json::json!({
+                "room_id": "room-qp-extra",
+                "check_in": "2026-06-01",
+                "check_out": "2026-06-03",
+                "guests": 4
+            }),
+        )
+        .await
+        .expect("tool phải chạy được");
+
+        assert_eq!(output["total"], json!(600_000));
+    }
+
+    /// Tham số nào còn trong schema là lời mời model điền vào. `guests` không
+    /// còn ảnh hưởng tới kết quả nữa nên phải biến mất khỏi schema, không thì
+    /// model sẽ tưởng mình đang hỏi giá cho đúng số khách đó.
+    #[test]
+    fn the_quote_tool_no_longer_offers_the_model_a_guest_count() {
+        let schema = read_tool_parameters("quote_room_price");
+
+        assert!(
+            schema["properties"].get("guests").is_none(),
+            "schema vẫn mời model gửi `guests`: {schema}"
+        );
+    }
+
     #[tokio::test]
     async fn check_room_availability_excludes_a_booked_room_and_keeps_a_free_one() {
         let pool = test_pool().await;
@@ -763,6 +812,29 @@ mod tests {
         .execute(pool)
         .await
         .expect("seed room");
+    }
+
+    /// `seed_room` để schema điền `max_guests`/`extra_person_fee` mặc định
+    /// (2, 0), nên khoản phụ thu thêm người luôn bằng 0 và không fixture nào ở
+    /// trên phân biệt được "có gửi số khách" với "không gửi số khách".
+    async fn seed_room_charging_extra_guests(
+        pool: &Pool<Sqlite>,
+        id: &str,
+        name: &str,
+        room_type: &str,
+        base_price: i64,
+    ) {
+        sqlx::query(
+            "INSERT INTO rooms (id, name, type, floor, has_balcony, base_price, max_guests, extra_person_fee, status)
+             VALUES (?, ?, ?, 1, 0, ?, 2, 150000, 'vacant')",
+        )
+        .bind(id)
+        .bind(name)
+        .bind(room_type)
+        .bind(base_price)
+        .execute(pool)
+        .await
+        .expect("seed room có phụ thu thêm người");
     }
 
     async fn seed_guest(pool: &Pool<Sqlite>, id: &str, full_name: &str, phone: Option<&str>) {
