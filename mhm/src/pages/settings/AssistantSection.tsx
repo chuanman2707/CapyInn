@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 
 import { Button } from "@/components/ui/button";
 import { invokeCommand, invokeWriteCommand } from "@/lib/invokeCommand";
+import { useAssistantStore } from "@/stores/useAssistantStore";
 import type { AssistantSettings } from "@/types/assistant";
 
 // Base URL/model ở đây lặp lại đúng giá trị đã khai trong
@@ -60,6 +61,13 @@ export function AssistantSection() {
     setError(null);
     try {
       apply(await task());
+      // Panel trợ lý ở cột thứ ba của shell đọc cổng từ useAssistantStore, còn
+      // màn hình này giữ bản sao cục bộ riêng. Store chỉ được nạp đúng một lần
+      // lúc MainShell mount, nên không bơm lại ở đây thì chủ khách sạn lưu khoá
+      // xong vẫn thấy panel ẩn cho tới lần khởi động lại app — và ngược lại,
+      // gỡ cấu hình rồi mà panel vẫn còn. Cùng lối với useRoomConfig.ts:47.
+      // refreshSettings tự nuốt lỗi nên không che được lỗi ghi ở catch dưới.
+      await useAssistantStore.getState().refreshSettings();
     } catch (caught) {
       setError(describeError(caught));
     } finally {
