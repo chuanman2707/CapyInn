@@ -19,6 +19,7 @@ import { useExperimentalRuntimeStatus } from "@/lib/experimentalProfile";
 import { useAuthStore } from "@/stores/useAuthStore";
 
 import AppearanceSection from "./AppearanceSection";
+import { AssistantSection } from "./AssistantSection";
 import CheckinRulesSection from "./CheckinRulesSection";
 import CeoAgentSection from "./CeoAgentSection";
 import DataSection from "./DataSection";
@@ -42,6 +43,7 @@ type SettingsSectionKey =
   | "data"
   | "gateway"
   | "ceo-agent"
+  | "assistant"
   | "updates"
   | "pricing"
   | "peak-season"
@@ -66,7 +68,10 @@ export default function SettingsPage() {
       : []),
     { key: "updates" as const, label: "Software Update", icon: RefreshCcw },
     ...(isCurrentAdmin && experimentalRuntime.agentRuntimeEnabled
-      ? [{ key: "ceo-agent" as const, label: "CEO Agent", icon: Bot }]
+      ? [
+        { key: "ceo-agent" as const, label: "CEO Agent", icon: Bot },
+        { key: "assistant" as const, label: "Trợ lý quầy", icon: Bot },
+      ]
       : []),
     ...(isCurrentAdmin
       ? [
@@ -81,7 +86,7 @@ export default function SettingsPage() {
     if (
       (activeSection === "gateway" && !experimentalRuntime.gatewayRuntimeEnabled) ||
       (
-        activeSection === "ceo-agent" &&
+        (activeSection === "ceo-agent" || activeSection === "assistant") &&
         (!isCurrentAdmin || !experimentalRuntime.agentRuntimeEnabled)
       )
     ) {
@@ -132,6 +137,11 @@ export default function SettingsPage() {
           isCurrentAdmin &&
           experimentalRuntime.agentRuntimeEnabled && (
             <CeoAgentSection />
+          )}
+        {activeSection === "assistant" &&
+          isCurrentAdmin &&
+          experimentalRuntime.agentRuntimeEnabled && (
+            <AssistantSection />
           )}
         {activeSection === "pricing" && isCurrentAdmin && <PricingSection />}
         {activeSection === "peak-season" && isCurrentAdmin && <SpecialDatesSection />}
