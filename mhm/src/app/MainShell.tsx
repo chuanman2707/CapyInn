@@ -112,19 +112,21 @@ export function MainShell() {
     onExportCrashReport,
     gatewayRunning,
     gatewayRuntimeEnabled,
-    agentRuntimeEnabled,
     remoteCrashReportingEnabled,
   } = useRuntimeState();
 
-  // Cờ runtime là công tắc tắt của cả trợ lý, không phải chỉ của tab cài đặt.
-  // Cờ tắt thì không hỏi cài đặt (lệnh backend cũng từ chối), không hiện nút,
-  // không gắn panel — chủ nhà gỡ cờ là tính năng biến mất, đúng như tài liệu
-  // hứa. Xem `agent/assistant/config.rs::ensure_agent_runtime_enabled`.
+  // Trợ lý không còn đứng sau cờ `agentRuntimeEnabled`. Cờ đó chỉ bật được bằng
+  // biến môi trường lúc khởi động, mà lễ tân thì bấm icon để mở app — nên nó
+  // giấu tính năng khỏi đúng những người tính năng sinh ra để phục vụ. Cờ vẫn
+  // giữ cho CEO Telegram, thứ thật sự còn thí nghiệm.
+  //
+  // Công tắc tắt bây giờ là `gate.ready`: nằm trong database nên nhớ qua mọi
+  // lần khởi động, và admin tự tắt được trong Cài đặt → Trợ lý quầy. Tắt opt-in
+  // là panel biến mất và `assistant_turn` từ chối trước khi dựng prompt.
   useEffect(() => {
-    if (!agentRuntimeEnabled) return;
     void refreshAssistantSettings();
-  }, [agentRuntimeEnabled, refreshAssistantSettings]);
-  const assistantAvailable = agentRuntimeEnabled && Boolean(assistantSettings?.gate.ready);
+  }, [refreshAssistantSettings]);
+  const assistantAvailable = Boolean(assistantSettings?.gate.ready);
 
   const today = new Date().toLocaleDateString("vi-VN", {
     weekday: "long",

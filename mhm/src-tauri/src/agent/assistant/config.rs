@@ -73,6 +73,24 @@ pub struct AssistantGateStatus {
     pub missing: Vec<AssistantGateMissing>,
 }
 
+/// Cổng **duy nhất** của trợ lý quầy. Không còn cổng nào đứng trước nó.
+///
+/// Trước đây có thêm một cổng nữa, `ensure_agent_runtime_enabled`, đọc cờ môi
+/// trường `CAPYINN_EXPERIMENTAL_AGENT_RUNTIME`. Cờ đó đã bị gỡ khỏi trợ lý
+/// (vẫn còn cho CEO Telegram, xem `agent/supervisor.rs`) vì nó chỉ bật được
+/// bằng dòng lệnh lúc khởi động — thứ mà lễ tân bấm icon mở app không bao giờ
+/// có. Một tính năng dành cho lễ tân mà chỉ người biết gõ biến môi trường mới
+/// mở được thì coi như không tồn tại.
+///
+/// Gỡ được vì cổng này đã làm đúng việc mà cờ kia định làm, lại làm tốt hơn:
+/// nó nằm trong database nên nhớ qua mọi lần khởi động, và nó có giao diện nên
+/// admin tự tắt được. Không có `opt_in` thì `ready = false`, và
+/// `commands::assistant::assistant_turn` dừng **trước khi** dựng prompt — không
+/// byte dữ liệu khách nào rời máy. Đó vẫn là chỗ chủ nhà thu lại sự đồng ý.
+///
+/// Đừng thêm cổng cờ môi trường trở lại mà không đồng thời sửa
+/// `pages/settings/index.tsx`: cờ tắt mà tab cài đặt biến mất trong khi panel
+/// vẫn chạy là đúng cái lỗ hổng đã sửa ở 6d2c1d1 — mất luôn chỗ để tắt opt-in.
 pub fn evaluate_assistant_gate(
     config: &AssistantConfig,
     has_api_key: bool,
@@ -97,32 +115,6 @@ pub fn evaluate_assistant_gate(
         ready: missing.is_empty(),
         missing,
     }
-}
-
-/// Cổng thứ nhất, đứng trước `evaluate_assistant_gate`: cờ runtime thí nghiệm.
-///
-/// `evaluate_assistant_gate` chỉ hỏi "chủ nhà đã cấu hình xong chưa". Cái này
-/// hỏi "bản dựng này có được phép chạy trợ lý không" — và câu trả lời phải
-/// giống hệt câu mà màn hình cài đặt đã dùng để quyết định hiện hay ẩn tab
-/// (`pages/settings/index.tsx` đọc `agentRuntimeEnabled`, tức chính
-/// `effective_experimental_agent_runtime_enabled`). Hai bên lệch nhau nghĩa là
-/// gỡ cờ đi thì mất tab cài đặt trong khi panel vẫn gọi nhà cung cấp và vẫn
-/// đẩy dữ liệu khách lên cloud — mà không còn giao diện nào để tắt cái opt-in
-/// đang bật. Đó là ngược hẳn công dụng của cờ.
-///
-/// Lưu ý: `effective_…` cõng luôn override `CAPYINN_DISABLE_CEO_TELEGRAM`, một
-/// cái tên buộc tính năng này vào một tính năng không liên quan. Đã ghi nhận
-/// là nợ, cố ý **không** đi nối lại dây ở đây — việc cần làm là hai bên đọc
-/// cùng một cờ, không phải đổi cờ.
-pub fn ensure_agent_runtime_enabled() -> CommandResult<()> {
-    if crate::runtime_config::effective_experimental_agent_runtime_enabled() {
-        return Ok(());
-    }
-
-    Err(CommandError::user(
-        codes::AGENT_RUNTIME_DISABLED,
-        "Trợ lý quầy đang tắt trên bản dựng này.",
-    ))
 }
 
 pub fn validate_assistant_base_url(raw: &str) -> CommandResult<String> {
@@ -356,11 +348,16 @@ mod tests {
         assert!(status.missing.contains(&AssistantGateMissing::Model));
     }
 
-    /// Cờ `CAPYINN_EXPERIMENTAL_AGENT_RUNTIME` là công tắc tắt của cả tính
-    /// năng. Gỡ nó ra mà trợ lý vẫn gọi được nhà cung cấp thì công tắc chỉ giấu
-    /// đi màn hình cài đặt — tức lấy mất luôn chỗ để tắt cái opt-in đang bật.
+    /// Cổng thật của trợ lý là opt-in, không phải cờ môi trường — và nó **không**
+    /// nhìn vào môi trường chút nào.
+    ///
+    /// Test này thay hai test cũ đã bị xoá cùng `ensure_agent_runtime_enabled`.
+    /// Cũ: "gỡ cờ thì trợ lý phải từ chối". Mới: gỡ cờ chẳng đổi gì, vì cờ không
+    /// còn dính đến trợ lý; thứ duy nhất đóng cổng là chủ nhà tắt opt-in trong
+    /// Cài đặt. Đặt cả ba biến môi trường vào trạng thái "tắt sạch" rồi vẫn thấy
+    /// `ready = true` chính là cách chứng minh hai bên đã tách rời.
     #[test]
-    fn the_assistant_refuses_to_run_when_the_agent_runtime_flag_is_removed() {
+    fn the_gate_ignores_the_experimental_environment_flags_entirely() {
         let _guard = crate::runtime_config::env_lock().lock().unwrap();
 
         for name in [
@@ -371,36 +368,25 @@ mod tests {
             std::env::remove_var(name);
         }
 
-        let error = ensure_agent_runtime_enabled().expect_err("cờ tắt thì phải từ chối");
-        assert_eq!(error.code, codes::AGENT_RUNTIME_DISABLED);
+        let config = AssistantConfig::default();
 
-        std::env::set_var("CAPYINN_EXPERIMENTAL_AGENT_RUNTIME", "true");
-        assert!(ensure_agent_runtime_enabled().is_ok());
-        std::env::remove_var("CAPYINN_EXPERIMENTAL_AGENT_RUNTIME");
-    }
-
-    /// Trợ lý phải đọc **đúng cờ hiệu dụng** mà màn hình cài đặt đã đọc, kể cả
-    /// cái override đặt tên nhầm sang tính năng khác
-    /// (`CAPYINN_DISABLE_CEO_TELEGRAM`, xem `runtime_config.rs:37`). Không
-    /// phải để tán thành cách đặt tên đó — mà để hai bên không bao giờ bất
-    /// đồng: cửa sổ cài đặt biến mất trong khi panel vẫn gửi dữ liệu khách lên
-    /// cloud đúng là cái lỗ hổng này sinh ra.
-    #[test]
-    fn the_assistant_honours_the_same_disable_override_the_settings_screen_honours() {
-        let _guard = crate::runtime_config::env_lock().lock().unwrap();
-
-        std::env::set_var("CAPYINN_EXPERIMENTAL_AGENT_RUNTIME", "true");
-        std::env::set_var("CAPYINN_DISABLE_CEO_TELEGRAM", "true");
-
-        let error = ensure_agent_runtime_enabled().expect_err("override tắt thì phải từ chối");
-        assert_eq!(error.code, codes::AGENT_RUNTIME_DISABLED);
+        assert!(
+            evaluate_assistant_gate(&config, true, true).ready,
+            "không cờ nào bật mà trợ lý vẫn phải mở — lễ tân không gõ biến môi trường"
+        );
         assert!(
             !crate::runtime_config::effective_experimental_agent_runtime_enabled(),
-            "trợ lý và màn hình cài đặt phải cùng đọc một cờ hiệu dụng"
+            "phải đang ở đúng trạng thái không cờ thì khẳng định trên mới có nghĩa"
         );
 
-        std::env::remove_var("CAPYINN_EXPERIMENTAL_AGENT_RUNTIME");
-        std::env::remove_var("CAPYINN_DISABLE_CEO_TELEGRAM");
+        let closed = evaluate_assistant_gate(&config, true, false);
+        assert!(
+            !closed.ready,
+            "tắt opt-in là công tắc tắt duy nhất còn lại — nó phải đóng được"
+        );
+        assert!(closed
+            .missing
+            .contains(&AssistantGateMissing::CloudDataOptIn));
     }
 
     #[test]

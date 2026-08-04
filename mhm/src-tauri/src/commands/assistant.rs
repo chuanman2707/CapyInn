@@ -3,10 +3,10 @@ use crate::{
     agent::{
         assistant::{
             config::{
-                ensure_agent_runtime_enabled, evaluate_assistant_gate,
-                get_assistant_cloud_data_opt_in, get_assistant_config, save_assistant_config,
-                set_assistant_cloud_data_opt_in, validate_assistant_base_url,
-                validate_assistant_model, AssistantConfig, AssistantGateStatus, AssistantPreset,
+                evaluate_assistant_gate, get_assistant_cloud_data_opt_in, get_assistant_config,
+                save_assistant_config, set_assistant_cloud_data_opt_in,
+                validate_assistant_base_url, validate_assistant_model, AssistantConfig,
+                AssistantGateStatus, AssistantPreset,
             },
             provider::{build_assistant_provider_client, AssistantProviderClient},
             run_assistant_turn, AssistantTurnRequest, AssistantTurnResponse,
@@ -48,15 +48,14 @@ async fn load_settings(state: &State<'_, AppState>) -> CommandResult<AssistantSe
 
 /// Đọc được cho mọi người đăng nhập: frontend cần biết có nên hiện panel không.
 ///
-/// Cờ runtime chặn trước cả câu hỏi đăng nhập: bản dựng không bật trợ lý thì
-/// lệnh này lỗi, `useAssistantStore.refreshSettings` bắt lỗi và đặt
+/// Trả về `gate`, và `gate.ready` là thứ quyết định panel hiện hay không. Chưa
+/// đăng nhập thì lệnh lỗi, `useAssistantStore.refreshSettings` bắt lỗi và đặt
 /// `settings: null`, nên nút "Trợ lý" lẫn panel đều tự tắt — kể cả khi có ai
 /// đó gọi thẳng IPC mà không đi qua shell.
 #[tauri::command]
 pub async fn get_assistant_settings(
     state: State<'_, AppState>,
 ) -> CommandResult<AssistantSettings> {
-    ensure_agent_runtime_enabled()?;
     if get_user(&state).is_none() {
         return Err(CommandError::user(
             codes::AUTH_NOT_AUTHENTICATED,
@@ -73,7 +72,6 @@ pub async fn set_assistant_settings(
     base_url: String,
     model: String,
 ) -> CommandResult<AssistantSettings> {
-    ensure_agent_runtime_enabled()?;
     let _admin = require_admin_user(get_user(&state))?;
 
     let config = AssistantConfig {
@@ -91,7 +89,6 @@ pub async fn set_assistant_api_key(
     state: State<'_, AppState>,
     api_key: String,
 ) -> CommandResult<AssistantSettings> {
-    ensure_agent_runtime_enabled()?;
     let _admin = require_admin_user(get_user(&state))?;
 
     let trimmed = api_key.trim();
@@ -110,7 +107,6 @@ pub async fn set_assistant_api_key(
 pub async fn clear_assistant_api_key(
     state: State<'_, AppState>,
 ) -> CommandResult<AssistantSettings> {
-    ensure_agent_runtime_enabled()?;
     let _admin = require_admin_user(get_user(&state))?;
     secret_store().clear_secret(AgentSecretKind::AssistantApiKey)?;
     load_settings(&state).await
@@ -121,7 +117,6 @@ pub async fn set_assistant_cloud_opt_in(
     state: State<'_, AppState>,
     enabled: bool,
 ) -> CommandResult<AssistantSettings> {
-    ensure_agent_runtime_enabled()?;
     let _admin = require_admin_user(get_user(&state))?;
     set_assistant_cloud_data_opt_in(&state.db, enabled).await?;
     load_settings(&state).await
@@ -132,10 +127,6 @@ pub async fn assistant_turn(
     state: State<'_, AppState>,
     request: AssistantTurnRequest,
 ) -> CommandResult<AssistantTurnResponse> {
-    // Fail closed sớm nhất có thể: trước cả khi đọc cấu hình hay khoá API.
-    // Không có prompt nào được dựng, không byte dữ liệu khách nào rời máy khi
-    // chủ nhà đã gỡ cờ runtime.
-    ensure_agent_runtime_enabled()?;
     if get_user(&state).is_none() {
         return Err(CommandError::user(
             codes::AUTH_NOT_AUTHENTICATED,
