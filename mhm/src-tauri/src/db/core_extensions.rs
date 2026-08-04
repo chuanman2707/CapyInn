@@ -194,3 +194,68 @@ pub(super) async fn migrate_v26_booking_rate_override(
     tx.commit().await?;
     Ok(())
 }
+
+/// V27: sổ hội thoại của trợ lý quầy.
+///
+/// Bảng này **cố ý không có cột nào chứa `payload` hay `built_at_ms`** của
+/// `ProposedAction`. Thẻ nhận phòng chỉ được lưu thành một hàng
+/// `kind = 'action'` với `text` là bản tóm tắt người đọc được. Nhờ vậy không
+/// tồn tại đường nào duyệt lại một thẻ cũ từ lịch sử: `approve()` cần đúng
+/// `action.payload` để gọi `check_in`, mà database không giữ thứ đó. Đây là
+/// bảo đảm cấu trúc, cùng tinh thần với luật "tool ghi có schema nhưng không
+/// có executor". Đừng thêm cột JSON vào đây.
+///
+/// Nội dung lưu **nguyên văn, kể cả số CCCD**, và **không tự xoá** — lựa chọn
+/// của chủ nhà, đã cân nhắc đánh đổi. Lối ra là hai lệnh xoá tay của admin.
+///
+/// Bảng này nằm **ngoài** phạm vi `RAW_PROMPT_RETENTION` / `RAW_RESPONSE_RETENTION`
+/// trong `agent/retention.rs` — hai hằng số đó là cam kết của CEO Agent
+/// (`agent/settings.rs:80-89`), không phải của trợ lý quầy. Đừng sửa chúng.
+pub(super) async fn migrate_v27_assistant_conversations(
+    pool: &Pool<Sqlite>,
+) -> Result<(), sqlx::Error> {
+    let mut tx = pool.begin().await?;
+
+    sqlx::query(
+        "CREATE TABLE IF NOT EXISTS assistant_conversations (
+            id          TEXT PRIMARY KEY,
+            user_id     TEXT NOT NULL,
+            title       TEXT NOT NULL,
+            created_at  TEXT NOT NULL,
+            updated_at  TEXT NOT NULL
+        )",
+    )
+    .execute(&mut *tx)
+    .await?;
+
+    sqlx::query(
+        "CREATE TABLE IF NOT EXISTS assistant_messages (
+            id              TEXT PRIMARY KEY,
+            conversation_id TEXT NOT NULL
+                            REFERENCES assistant_conversations(id) ON DELETE CASCADE,
+            kind            TEXT NOT NULL,
+            text            TEXT NOT NULL,
+            created_at      TEXT NOT NULL
+        )",
+    )
+    .execute(&mut *tx)
+    .await?;
+
+    sqlx::query(
+        "CREATE INDEX IF NOT EXISTS idx_assistant_messages_conversation
+         ON assistant_messages(conversation_id, created_at)",
+    )
+    .execute(&mut *tx)
+    .await?;
+
+    sqlx::query(
+        "CREATE INDEX IF NOT EXISTS idx_assistant_conversations_user
+         ON assistant_conversations(user_id, updated_at DESC)",
+    )
+    .execute(&mut *tx)
+    .await?;
+
+    set_schema_version(&mut tx, 27).await?;
+    tx.commit().await?;
+    Ok(())
+}
