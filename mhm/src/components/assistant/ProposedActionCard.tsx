@@ -48,8 +48,11 @@ export function ProposedActionCard({
 
       {action.warnings.length > 0 && (
         <ul className="mt-3 space-y-1">
-          {action.warnings.map((warning) => (
-            <li key={warning} className="flex items-start gap-2 text-xs text-amber-700">
+          {action.warnings.map((warning, index) => (
+            <li
+              key={`${warning}-${index}`}
+              className="flex items-start gap-2 text-xs text-amber-700"
+            >
               <AlertTriangle size={14} className="mt-0.5 shrink-0" />
               {warning}
             </li>
@@ -63,14 +66,21 @@ export function ProposedActionCard({
             <p className="flex-1 text-xs text-brand-muted">
               Thẻ đã quá 5 phút, giá có thể đã đổi. Tính lại trước khi duyệt.
             </p>
-            <Button size="sm" onClick={onRebuild}>
+            <Button size="sm" disabled={busy} onClick={onRebuild}>
               Tính lại
             </Button>
           </>
         ) : (
-          <Button size="sm" disabled={busy} onClick={onApprove}>
-            Đồng ý
-          </Button>
+          <>
+            {busy && (
+              <p role="status" aria-live="polite" className="flex-1 text-xs text-brand-muted">
+                Đang gửi lệnh nhận phòng…
+              </p>
+            )}
+            <Button size="sm" disabled={busy} onClick={onApprove}>
+              Đồng ý
+            </Button>
+          </>
         )}
         <Button size="sm" variant="ghost" disabled={busy} onClick={onDismiss}>
           Huỷ
