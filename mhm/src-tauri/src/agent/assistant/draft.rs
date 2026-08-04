@@ -193,13 +193,21 @@ pub async fn build_check_in_draft(
 
     // Số tiền trên thẻ đến từ preview, không từ model. Preview hỏng thì không
     // có thẻ — không có số mặc định nào.
+    //
+    // `None` cho số khách, **không** phải `guests.len()`: nút "Đồng ý" gọi
+    // `check_in`, và `stay_lifecycle::check_in` truyền `None` xuống engine
+    // (`stay_lifecycle.rs`, chỗ gọi `calculate_stay_price_tx`), tức quầy không
+    // thu phụ thu thêm người. Gửi số khách ở đây thì thẻ báo cao hơn số thực
+    // thu — lễ tân đọc con số đó cho khách nghe. Cùng luật với form làm tay
+    // (`CheckinSheet.tsx` truyền `guests: null`) và với ghi chú ở
+    // `hooks/usePricePreview.ts`.
     let preview_result = pricing_service::calculate_room_price_preview(
         pool,
         &room_id,
         now_local_date,
         &check_out,
         &pricing_type,
-        Some(guests.len() as i32),
+        None,
     )
     .await
     .map_err(|error| {
@@ -529,6 +537,131 @@ mod tests {
         );
     }
 
+    // ─── Số trên thẻ phải bằng số lệnh nhận phòng thật sẽ ghi ───
+    //
+    // Mọi fixture `seed_room` ở trên bỏ trống `max_guests`/`extra_person_fee`,
+    // nên schema điền mặc định (2, 0) và khoản phụ thu thêm người **luôn bằng
+    // 0** — chênh lệch giữa hai cách gọi preview bị triệt tiêu về cấu trúc, dù
+    // có sai. Hai test dưới đây dựng đúng cái phòng làm khoản đó khác 0.
+
+    /// Preview của thẻ phải hỏi giá y như `stay_lifecycle::check_in` hỏi, tức
+    /// **không** kèm số khách. Phòng dưới đây chuẩn 2 khách, phụ thu 150.000₫
+    /// mỗi khách vượt mốc mỗi đêm; 3 khách × 2 đêm sẽ đội thêm 300.000₫ nếu
+    /// thẻ lỡ gửi số khách đi.
+    #[tokio::test]
+    async fn the_card_does_not_quote_an_extra_person_fee_the_check_in_will_not_charge() {
+        let pool = test_pool().await;
+        seed_room_charging_extra_guests(
+            &pool,
+            "room-extra",
+            "P703",
+            "Family Room",
+            500_000,
+            "vacant",
+        )
+        .await;
+
+        // 2026-06-01 thứ Hai → 2026-06-03 thứ Tư: không đêm cuối tuần nào, nên
+        // 1.000.000₫ là con số duy nhất đúng.
+        let args = serde_json::json!({
+            "room_id": "room-extra",
+            "nights": 2,
+            "guests": [
+                { "full_name": "Nguyễn Văn Nam" },
+                { "full_name": "Trần Thị Hoa" },
+                { "full_name": "Lê Văn Cường" }
+            ]
+        });
+
+        let outcome = build_check_in_draft(&pool, &args, "2026-06-01")
+            .await
+            .expect("dữ liệu hợp lệ không được lỗi");
+
+        let action = match outcome {
+            DraftOutcome::Ready(action) => action,
+            other => panic!("mong đợi Ready, nhận {other:?}"),
+        };
+
+        assert_eq!(
+            action.preview.get("total").and_then(Value::as_i64),
+            Some(1_000_000),
+            "preview của thẻ đang tính phụ thu thêm người mà quầy không thu"
+        );
+        assert_eq!(
+            action.display.get("total").map(String::as_str),
+            Some("1.000.000 ₫")
+        );
+    }
+
+    /// Đường nối thật: lấy đúng `payload` mà thẻ mang, chạy qua chính
+    /// `stay_lifecycle::check_in` — hàm mà nút "Đồng ý" gọi tới — rồi so tổng
+    /// trên thẻ với tổng ghi vào `bookings.total_price`.
+    ///
+    /// Đây là chỗ khách hàng nghe một con số và sổ sách ghi một con số khác,
+    /// nên nó phải có một test bám vào cả hai đầu, không phải hai test rời
+    /// nhau mỗi bên tự khẳng định mình đúng.
+    #[tokio::test]
+    async fn the_card_total_is_the_total_the_real_check_in_records() {
+        let pool = test_pool().await;
+        seed_room_charging_extra_guests(
+            &pool,
+            "room-seam",
+            "P704",
+            "Family Room",
+            500_000,
+            "vacant",
+        )
+        .await;
+
+        // `check_in_tx` chốt kỳ ở theo `Local::now()`, không nhận ngày truyền
+        // vào, nên thẻ phải được dựng cho đúng hôm nay thì hai bên mới báo giá
+        // cùng một khoảng ngày. Cả hai đi qua cùng phụ thu cuối tuần / ngày lễ
+        // nên khẳng định "bằng nhau" đúng bất kể hôm nay là thứ mấy.
+        let today = chrono::Local::now().format("%Y-%m-%d").to_string();
+        let args = serde_json::json!({
+            "room_id": "room-seam",
+            "nights": 2,
+            "guests": [
+                { "full_name": "Nguyễn Văn Nam", "doc_number": "079201001234" },
+                { "full_name": "Trần Thị Hoa", "doc_number": "079301005678" },
+                { "full_name": "Lê Văn Cường", "doc_number": "079201009999" }
+            ]
+        });
+
+        let outcome = build_check_in_draft(&pool, &args, &today)
+            .await
+            .expect("dữ liệu hợp lệ không được lỗi");
+
+        let action = match outcome {
+            DraftOutcome::Ready(action) => action,
+            other => panic!("mong đợi Ready, nhận {other:?}"),
+        };
+        let card_total = action
+            .preview
+            .get("total")
+            .and_then(Value::as_i64)
+            .expect("thẻ phải có tổng tiền");
+
+        let booking = crate::services::booking::stay_lifecycle::check_in(
+            &pool,
+            action.payload.clone(),
+            Some("user-test".to_string()),
+        )
+        .await
+        .expect("payload của thẻ phải nhận phòng được");
+
+        assert_eq!(
+            card_total, booking.total_price,
+            "thẻ báo {card_total} nhưng lượt ở ghi {}",
+            booking.total_price
+        );
+        assert_eq!(
+            action.display.get("total").map(String::as_str),
+            Some(format_vnd(booking.total_price).as_str()),
+            "dòng tổng tiền lễ tân đọc cho khách phải là số sổ sách ghi"
+        );
+    }
+
     /// `build_warnings` đọc `rooms.status` thật từ PMS, không phải câu do model
     /// tự viết ra — test này là bằng chứng tự động cho đúng luật đó, thay vì
     /// chỉ dựa vào người đọc code. Không so sánh rỗng/không-rỗng chung chung:
@@ -625,5 +758,31 @@ mod tests {
         .execute(pool)
         .await
         .expect("seed room");
+    }
+
+    /// Phòng có phụ thu thêm người khác 0 — thứ `seed_room` ở trên **không**
+    /// dựng được vì nó để schema điền `max_guests`/`extra_person_fee` mặc định
+    /// (2, 0). Với mặc định đó, gọi preview kèm số khách hay không kèm đều ra
+    /// cùng một số, nên không fixture nào ở trên nhìn thấy được sai lệch.
+    async fn seed_room_charging_extra_guests(
+        pool: &Pool<Sqlite>,
+        id: &str,
+        name: &str,
+        room_type: &str,
+        base_price: i64,
+        status: &str,
+    ) {
+        sqlx::query(
+            "INSERT INTO rooms (id, name, type, floor, has_balcony, base_price, max_guests, extra_person_fee, status)
+             VALUES (?, ?, ?, 1, 0, ?, 2, 150000, ?)",
+        )
+        .bind(id)
+        .bind(name)
+        .bind(room_type)
+        .bind(base_price)
+        .bind(status)
+        .execute(pool)
+        .await
+        .expect("seed room có phụ thu thêm người");
     }
 }
