@@ -150,10 +150,14 @@ describe("App experimental runtime gates", () => {
 
   // ─── Công tắc tắt của trợ lý quầy ───
   //
-  // Gỡ CAPYINN_EXPERIMENTAL_AGENT_RUNTIME phải tắt cả tính năng, không chỉ ẩn
-  // tab cài đặt. Ẩn mỗi tab là trường hợp tệ nhất: panel vẫn gọi nhà cung cấp,
-  // vẫn đẩy dữ liệu khách lên cloud, mà chủ nhà không còn chỗ nào để tắt cái
-  // opt-in đang bật.
+  // Trợ lý đã tách khỏi CAPYINN_EXPERIMENTAL_AGENT_RUNTIME. Cờ đó chỉ bật được
+  // bằng biến môi trường lúc khởi động, mà lễ tân thì bấm icon để mở app — nên
+  // nó giấu tính năng khỏi đúng những người tính năng sinh ra để phục vụ.
+  //
+  // Công tắc tắt bây giờ là `gate.ready` (API key + opt-in, lưu trong
+  // database). Hai test dưới đây khoá cả hai chiều: không cờ vẫn phải mở được,
+  // và tắt opt-in vẫn phải đóng được. Thiếu chiều thứ hai thì "gỡ cờ" biến
+  // thành "gỡ luôn cách tắt".
 
   const READY_ASSISTANT_SETTINGS = {
     config: { preset: "deep_seek", base_url: "https://api.deepseek.com/v1", model: "deepseek-chat" },
@@ -162,31 +166,8 @@ describe("App experimental runtime gates", () => {
     gate: { ready: true, missing: [] },
   };
 
-  it("cờ agent runtime tắt thì không có nút Trợ lý, dù cấu hình trợ lý đã đủ", async () => {
+  it("không cờ thí nghiệm nào bật, lễ tân vẫn thấy nút Trợ lý", async () => {
     setupAuthenticatedShell();
-    setMockResponses({ get_assistant_settings: () => READY_ASSISTANT_SETTINGS });
-
-    render(<App />);
-
-    await waitFor(() => {
-      expect(screen.getByText("Overview")).toBeInTheDocument();
-    });
-
-    expect(screen.queryByRole("button", { name: /trợ lý/i })).not.toBeInTheDocument();
-    // Và shell không thèm hỏi cài đặt trợ lý: cờ tắt thì không có gì để hỏi.
-    // Backend cũng từ chối lệnh này (ensure_agent_runtime_enabled), nên đây là
-    // lớp thứ hai chứ không phải lớp duy nhất.
-    expect(invoke.mock.calls.some(([command]) => command === "get_assistant_settings")).toBe(false);
-  });
-
-  it("cờ agent runtime bật thì nút Trợ lý hiện lại", async () => {
-    setupAuthenticatedShell({
-      experimental_runtime_enabled: false,
-      gateway_runtime_enabled: false,
-      agent_runtime_enabled: true,
-      gateway_disabled_by_override: false,
-      agent_disabled_by_override: false,
-    });
     setMockResponses({ get_assistant_settings: () => READY_ASSISTANT_SETTINGS });
 
     render(<App />);
@@ -195,6 +176,31 @@ describe("App experimental runtime gates", () => {
       expect(screen.getByRole("button", { name: /trợ lý/i })).toBeInTheDocument();
     });
     expect(invoke.mock.calls.some(([command]) => command === "get_assistant_settings")).toBe(true);
+  });
+
+  it("chưa bật opt-in thì không có nút Trợ lý, dù cờ agent runtime có bật", async () => {
+    setupAuthenticatedShell({
+      experimental_runtime_enabled: false,
+      gateway_runtime_enabled: false,
+      agent_runtime_enabled: true,
+      gateway_disabled_by_override: false,
+      agent_disabled_by_override: false,
+    });
+    setMockResponses({
+      get_assistant_settings: () => ({
+        ...READY_ASSISTANT_SETTINGS,
+        cloud_data_opt_in: false,
+        gate: { ready: false, missing: ["cloud_data_opt_in"] },
+      }),
+    });
+
+    render(<App />);
+
+    await waitFor(() => {
+      expect(screen.getByText("Overview")).toBeInTheDocument();
+    });
+
+    expect(screen.queryByRole("button", { name: /trợ lý/i })).not.toBeInTheDocument();
   });
 
   it("ignores gateway status responses from a disabled profile generation", async () => {

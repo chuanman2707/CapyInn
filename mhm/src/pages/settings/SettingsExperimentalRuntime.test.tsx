@@ -64,4 +64,35 @@ describe("SettingsPage experimental runtime gates", () => {
     expect(await screen.findByRole("button", { name: "CEO Agent" })).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "MCP Gateway" })).not.toBeInTheDocument();
   });
+
+  // Hai mục này từng dùng chung một cờ. Tách ra rồi thì phải có chỗ khoá lại,
+  // nếu không lần sau ai đó gỡ cờ cho "CEO Agent" mà không ai hay: bot Telegram
+  // bật lên trên máy khách sạn chỉ vì lễ tân cần khung chat.
+  it("cờ agent runtime tắt: vẫn có Trợ lý quầy nhưng không có CEO Agent", async () => {
+    setRuntimeStatus(false, false);
+
+    render(<SettingsPage />);
+
+    expect(await screen.findByRole("button", { name: "Trợ lý quầy" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "CEO Agent" })).not.toBeInTheDocument();
+  });
+
+  it("không phải admin thì không có Trợ lý quầy", async () => {
+    useAuthStore.setState({
+      user: { id: "u2", name: "Lễ tân", role: "receptionist", active: true, created_at: "" },
+      isAuthenticated: true,
+      loading: false,
+      error: null,
+    });
+    setRuntimeStatus(false, false);
+
+    render(<SettingsPage />);
+
+    await waitFor(() => {
+      expect(
+        invoke.mock.calls.some(([command]) => command === "get_experimental_runtime_status"),
+      ).toBe(true);
+    });
+    expect(screen.queryByRole("button", { name: "Trợ lý quầy" })).not.toBeInTheDocument();
+  });
 });

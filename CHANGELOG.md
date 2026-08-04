@@ -9,6 +9,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Front-desk AI assistant: a chat panel beside the PMS that reads the live data to
+  answer questions and drafts a check-in the receptionist confirms on a card, with
+  the confirmation running the ordinary `check_in` command. An admin configures the
+  provider in Settings; nothing reaches the provider until an API key is stored and
+  the cloud opt-in is switched on, and turning that opt-in off closes it again
 - Temporary residence declaration workspace (khai báo tạm trú): its own declaration
   module, extraction and validation, XLSX and XML writers generated from the official
   template, a declaration page with a sidebar badge and reconcile loop, and a
