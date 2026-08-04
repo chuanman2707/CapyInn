@@ -184,7 +184,11 @@ pub(super) async fn migrate_v26_booking_rate_override(
 ) -> Result<(), sqlx::Error> {
     let mut tx = pool.begin().await?;
 
-    execute_compat_alter(&mut tx, "ALTER TABLE bookings ADD COLUMN rate_overridden_at TEXT").await?;
+    execute_compat_alter(
+        &mut tx,
+        "ALTER TABLE bookings ADD COLUMN rate_overridden_at TEXT",
+    )
+    .await?;
 
     set_schema_version(&mut tx, 26).await?;
     tx.commit().await?;
