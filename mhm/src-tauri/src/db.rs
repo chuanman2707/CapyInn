@@ -176,7 +176,15 @@ async fn ensure_setting_default(
 /// commit 009bc07). 26 nằm trên mọi số đã phát hành, kể cả 25 mà máy thật đang
 /// đọc, nên cổng `current < 26` vẫn nổ đúng một lần trên DB của khách sạn.
 ///   sqlite3 "file:$HOME/CapyInn/capyinn.db?immutable=1" "SELECT MAX(version) FROM schema_version"
-pub(crate) const LATEST_SCHEMA_VERSION: i32 = 26;
+///
+/// 27 là `migrate_v27_assistant_conversations` (nhánh
+/// `feat/assistant-ui-airtable`). Khảo sát lúc chốt số ngày 2026-08-04: mọi ref
+/// đều ở 26 và DB thật của khách sạn cũng 26. Đó là ảnh chụp tại thời điểm đó,
+/// KHÔNG phải giấy thông hành — người merge nhánh này PHẢI chạy lại khảo sát
+/// ngay trước khi merge. Lúc chốt số vẫn còn nhánh anh em đang sống cũng ở 26,
+/// nên hoàn toàn có thể một nhánh khác chiếm mất 27 trước, và va chạm đó im
+/// lặng: canary chạy trên DB rỗng nên vẫn xanh, chỉ máy khách sạn mới chết.
+pub(crate) const LATEST_SCHEMA_VERSION: i32 = 27;
 
 async fn get_schema_version(pool: &Pool<Sqlite>) -> Result<i32, sqlx::Error> {
     sqlx::query(
@@ -365,6 +373,13 @@ pub(crate) async fn run_migrations(pool: &Pool<Sqlite>) -> Result<(), sqlx::Erro
     // mình, nên chạy 26 trước 25 sẽ kéo phiên bản tụt lại về 25.
     if current < 26 {
         core_extensions::migrate_v26_booking_rate_override(pool).await?;
+    }
+
+    // -- V27: sổ hội thoại của trợ lý quầy --
+    // Phải đứng SAU gate V26: mỗi migration tự `set_schema_version` số của
+    // mình, nên chạy 27 trước 26 sẽ kéo phiên bản tụt lại về 26.
+    if current < 27 {
+        core_extensions::migrate_v27_assistant_conversations(pool).await?;
     }
     Ok(())
 }
@@ -925,7 +940,7 @@ mod tests {
             .await
             .expect("reads final schema version");
 
-        assert_eq!(version, 26);
+        assert_eq!(version, 27);
 
         assert_table_group_exists(&pool, "PMS core", PMS_CORE_TABLES).await;
         assert_table_group_exists(&pool, "command safety", COMMAND_SAFETY_TABLES).await;
@@ -946,7 +961,7 @@ mod tests {
             .expect("reads version")
             .get("version");
 
-        assert_eq!(version, 26);
+        assert_eq!(version, 27);
         assert_money_columns_are_integer(&pool).await;
     }
 
@@ -1234,7 +1249,7 @@ mod tests {
             .expect("reads final schema version")
             .get("version");
 
-        assert_eq!(version, 26);
+        assert_eq!(version, 27);
     }
 
     #[tokio::test]
@@ -1301,7 +1316,7 @@ mod tests {
             .expect("reads final schema version")
             .get("version");
 
-        assert_eq!(version, 26);
+        assert_eq!(version, 27);
     }
 
     #[tokio::test]
@@ -1381,7 +1396,7 @@ mod tests {
         );
 
         let version = get_schema_version(&pool).await.expect("schema version");
-        assert_eq!(version, 26);
+        assert_eq!(version, 27);
     }
 
     #[tokio::test]
@@ -1421,7 +1436,7 @@ mod tests {
 
         assert_outbox_shape(&pool).await;
         let version = get_schema_version(&pool).await.expect("schema version");
-        assert_eq!(version, 26);
+        assert_eq!(version, 27);
     }
 
     #[tokio::test]
@@ -1439,7 +1454,7 @@ mod tests {
 
         assert_outbox_shape(&pool).await;
         let version = get_schema_version(&pool).await.expect("schema version");
-        assert_eq!(version, 26);
+        assert_eq!(version, 27);
     }
 
     #[tokio::test]
@@ -1469,7 +1484,7 @@ mod tests {
             1
         );
         let version = get_schema_version(&pool).await.expect("schema version");
-        assert_eq!(version, 26);
+        assert_eq!(version, 27);
     }
 
     #[tokio::test]
@@ -1482,7 +1497,7 @@ mod tests {
 
         assert_agent_safety_shape(&pool).await;
         let version = get_schema_version(&pool).await.expect("schema version");
-        assert_eq!(version, 26);
+        assert_eq!(version, 27);
     }
 
     #[tokio::test]
@@ -1554,7 +1569,7 @@ mod tests {
         assert_eq!(invoices_settlement_note_column_count(&pool).await, 1);
 
         let version = get_schema_version(&pool).await.expect("schema version");
-        assert_eq!(version, 26);
+        assert_eq!(version, 27);
     }
 
     /// A database still sitting at kbtt's 23 — the version the hotel's machine
@@ -1582,7 +1597,7 @@ mod tests {
 
         assert_eq!(invoices_settlement_note_column_count(&pool).await, 1);
         let version = get_schema_version(&pool).await.expect("schema version");
-        assert_eq!(version, 26);
+        assert_eq!(version, 27);
     }
 
     async fn invoices_settlement_note_column_count(pool: &SqlitePool) -> i64 {
@@ -1616,7 +1631,7 @@ mod tests {
 
         assert_agent_digest_runs_shape(&pool).await;
         let version = get_schema_version(&pool).await.expect("schema version");
-        assert_eq!(version, 26);
+        assert_eq!(version, 27);
     }
 
     #[tokio::test]
@@ -1640,7 +1655,7 @@ mod tests {
 
         assert_agent_safety_shape(&pool).await;
         let version = get_schema_version(&pool).await.expect("schema version");
-        assert_eq!(version, 26);
+        assert_eq!(version, 27);
     }
 
     #[tokio::test]
@@ -1701,7 +1716,7 @@ mod tests {
         );
 
         let version = get_schema_version(&pool).await.expect("schema version");
-        assert_eq!(version, 26);
+        assert_eq!(version, 27);
     }
 
     /// Migration test trên hoạt động bằng cách rewind `schema_version` SAU KHI
@@ -1792,7 +1807,7 @@ mod tests {
         );
 
         let version = get_schema_version(&pool).await.expect("schema version");
-        assert_eq!(version, 26);
+        assert_eq!(version, 27);
     }
 
     #[tokio::test]
@@ -1894,5 +1909,44 @@ mod tests {
             .await
             .expect("legacy folio line with NULL origin remains valid");
         }
+    }
+
+    /// Hai bảng hội thoại phải tồn tại sau migration, và xoá hội thoại phải
+    /// kéo tin nhắn con đi theo. Cascade là lối ra duy nhất cho dữ liệu định
+    /// danh khách trong sổ chat — chủ nhà đã chọn không tự xoá.
+    #[tokio::test]
+    async fn v27_creates_conversation_tables_with_working_cascade() {
+        let pool = test_pool().await;
+        run_migrations(&pool).await.expect("chạy migration");
+
+        sqlx::query(
+            "INSERT INTO assistant_conversations (id, user_id, title, created_at, updated_at)
+             VALUES ('c1', 'u1', 'Hỏi phòng trống', '2026-08-04T10:00:00+07:00', '2026-08-04T10:00:00+07:00')",
+        )
+        .execute(&pool)
+        .await
+        .expect("chèn hội thoại");
+
+        sqlx::query(
+            "INSERT INTO assistant_messages (id, conversation_id, kind, text, created_at)
+             VALUES ('m1', 'c1', 'user', 'Tối nay còn phòng nào trống?', '2026-08-04T10:00:00+07:00')",
+        )
+        .execute(&pool)
+        .await
+        .expect("chèn tin nhắn");
+
+        sqlx::query("DELETE FROM assistant_conversations WHERE id = 'c1'")
+            .execute(&pool)
+            .await
+            .expect("xoá hội thoại");
+
+        let remaining: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM assistant_messages WHERE conversation_id = 'c1'",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("đếm tin nhắn còn lại");
+
+        assert_eq!(remaining, 0, "xoá hội thoại phải kéo tin nhắn con đi theo");
     }
 }
