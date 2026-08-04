@@ -21,6 +21,7 @@ import { useSidebarCollapse } from "@/app/useSidebarCollapse";
 import AppUpdateBadge from "@/components/AppUpdateBadge";
 import AppUpdateRestartModal from "@/components/AppUpdateRestartModal";
 import AppLogo from "@/components/AppLogo";
+import { AssistantPanel } from "@/components/assistant/AssistantPanel";
 import { BackupFailureAlert } from "@/components/BackupFailureAlert";
 import { BackupStatusIndicator } from "@/components/BackupStatusIndicator";
 import CheckinSheet from "@/components/CheckinSheet";
@@ -42,6 +43,7 @@ import NightAudit from "@/pages/NightAudit";
 import Reservations from "@/pages/Reservations";
 import Rooms from "@/pages/Rooms";
 import Settings from "@/pages/settings";
+import { useAssistantStore } from "@/stores/useAssistantStore";
 import { useAuthStore } from "@/stores/useAuthStore";
 import { useHotelStore } from "@/stores/useHotelStore";
 
@@ -79,6 +81,13 @@ export function MainShell() {
   const { activeTab, setTab, setCheckinOpen, setGroupCheckinOpen, checkinRoomId, checkinNights } = useHotelStore();
   const { user, logout } = useAuthStore();
   const { collapsed, toggleCollapse } = useSidebarCollapse();
+
+  const assistantSettings = useAssistantStore((state) => state.settings);
+  const toggleAssistant = useAssistantStore((state) => state.togglePanel);
+  const refreshAssistantSettings = useAssistantStore((state) => state.refreshSettings);
+  useEffect(() => {
+    void refreshAssistantSettings();
+  }, [refreshAssistantSettings]);
 
   // Số khách đã đến trong 48h mà chưa nằm trong lô nào được đối chiếu khớp.
   // Con số này làm module hữu ích ngay từ trước khi ai bấm vào tab.
@@ -305,6 +314,16 @@ export function MainShell() {
                 {gatewayRunning ? "● MCP Gateway" : "○ Gateway Off"}
               </Badge>
             )}
+            {assistantSettings?.gate.ready && (
+              <Button
+                variant="ghost"
+                className="rounded-xl"
+                onClick={toggleAssistant}
+                title="Trợ lý quầy"
+              >
+                <Sparkles size={16} className="mr-1.5" /> Trợ lý
+              </Button>
+            )}
             <Badge className="bg-green-50 text-green-700 border-0 rounded-full py-1.5 px-3 uppercase tracking-wider text-[10px] font-bold">
               ● Scanner Ready
             </Badge>
@@ -348,6 +367,8 @@ export function MainShell() {
           </div>
         </div>
       </main>
+
+      <AssistantPanel />
 
       <CheckinSheet preSelectedRoomId={checkinRoomId ?? undefined} preSelectedNights={checkinNights ?? undefined} />
       <GroupCheckinSheet />
