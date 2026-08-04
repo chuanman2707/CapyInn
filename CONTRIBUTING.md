@@ -48,7 +48,11 @@ If you changed Rust code, also run:
 
 ```bash
 cargo clippy --all-targets -- -D warnings
+cargo fmt -- --check
 ```
+
+CI gates every command in this section, `cargo fmt` included. A branch that skips
+the format check locally fails the build even when every test passes.
 
 If you touched a core PMS lifecycle — reservations, stays, groups, or backup — run the smoke gate from `mhm/`:
 

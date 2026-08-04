@@ -9,13 +9,47 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Temporary residence declaration workspace (khai báo tạm trú): its own declaration
+  module, extraction and validation, XLSX and XML writers generated from the official
+  template, a declaration page with a sidebar badge and reconcile loop, and a
+  `--check-resources` mode on the probe CLI
+- Mid-stay room change for a guest already in house, with the valid target rooms
+  listed for the booking and an option to keep the original price or charge the
+  difference between the two rooms
+- Reservation calendar timeline: click or drag across empty cells to open a check-in
+  or a reservation with those dates already prefilled
+- Backfill sheet for recording a stay that already happened, with the matching
+  `backfill_stay` service and Tauri command behind it
+- Read-only booking detail popup for checked-out guests, and a read-first
+  `viewInvoice` that shows an already-issued invoice without creating a new one
+- Peak seasons: declare one as a date range in Settings, delete it, and have
+  contiguous declared days group back into a single season
+- Extra-guest pricing: a flat per-guest, per-night charge above the room's included
+  headcount, with reservations storing a guest count and being priced with it
+- Room-keyed price preview so the reservation sheet quotes what the engine will
+  actually charge, with the breakdown in Vietnamese
+- Restore drill now asserts backup freshness, schema version, and a row baseline
+- Frontend experimental runtime profile
 - open-source repository metadata and community files
 - CI workflow and GitHub issue / PR templates
 
 ### Changed
 
+- Room cards show the room type's configured rate instead of `rooms.base_price`,
+  which the pricing model does not honour as a price
+- The reservation sheet takes a checkout date from a calendar instead of a nights box
+- Night audit and the sheets close the day by the local day rather than a
+  UTC-derived one
 - public repository cleanup for internal agent files and docs layout
 - README restructuring for public contributors and onboarding-based setup
+
+### Fixed
+
+- Peak-season uplift is charged per night inside the season, not once per check-in day
+- Vietnamese room type names no longer lose their configured price: room types are
+  matched case-insensitively with the same folding on both sides of the comparison
+- The guest charge survives extend-stay, early checkout, modify, and check-in
+- Previews fail visibly instead of quoting a default the front desk will not honour
 
 ### Security
 

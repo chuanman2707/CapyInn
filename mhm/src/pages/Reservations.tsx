@@ -126,7 +126,7 @@ function describeLoadError(error: unknown): string {
 }
 
 export default function Reservations() {
-    const { rooms, fetchRooms, setCheckinOpen } = useHotelStore();
+    const { rooms, fetchRooms, setCheckinOpen, setRoomChangeOpen } = useHotelStore();
     const [bookings, setBookings] = useState<BookingWithGuest[]>([]);
     const [loadError, setLoadError] = useState<string | null>(null);
     const [searchQuery, setSearchQuery] = useState("");
@@ -560,6 +560,7 @@ export default function Reservations() {
                     onEdit={(booking) => { setEditBooking(booking); setSelectedBooking(null); }}
                     onCancel={handleCancelReservation}
                     onViewInvoice={viewInvoice}
+                    onRoomChange={(bookingId) => setRoomChangeOpen(true, bookingId)}
                     invoiceLoading={invoiceLoading}
                 />
             )}

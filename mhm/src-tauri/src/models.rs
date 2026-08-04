@@ -599,7 +599,14 @@ pub struct InvoiceData {
     pub total: MoneyVnd,
     pub balance_due: MoneyVnd,
     pub policy_text: Option<String>,
+    /// The booking's own notes, copied verbatim — front-desk shorthand, NOT
+    /// guest-facing. Neither invoice renderer prints this; see
+    /// `settlement_note` for the text that is meant to be read by the guest.
     pub notes: Option<String>,
+    /// Guest-facing explanation of how the total was reached, set only when
+    /// the breakdown splits per room (`invoice_generation.rs`). `None` on a
+    /// single-line invoice, where the breakdown line already says it.
+    pub settlement_note: Option<String>,
     pub status: String,
     pub created_at: String,
 }
@@ -734,6 +741,44 @@ pub struct GroupInvoiceRoomLine {
     pub price_per_night: MoneyVnd,
     pub total: MoneyVnd,
     pub guest_name: String,
+}
+
+// ── Room Change DTOs ──
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RoomChangeOption {
+    pub room_id: String,
+    pub name: String,
+    pub room_type: String,
+    pub floor: i32,
+    pub max_guests: i32,
+    /// Chênh lệch cho toàn bộ dải ngày còn lại: giá phòng này trừ giá phòng hiện tại.
+    /// Âm khi chuyển xuống hạng thấp hơn.
+    ///
+    /// Đây là số duy nhất DTO này trả về để hiển thị giá — không có
+    /// `base_price`. `rooms.base_price` không phải giá hệ thống tính tiền
+    /// (xem `pricing_queries.rs`): tiền tính theo `room_type` qua
+    /// `pricing_rules`, `base_price` chỉ là dự phòng khi loại phòng chưa có
+    /// luật giá. Đưa `base_price` ra giao diện dễ khiến lễ tân đọc một số mà
+    /// hệ thống tính tiền khách một số khác.
+    pub price_difference: MoneyVnd,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RoomChangeOptions {
+    pub booking_id: String,
+    pub current_room_id: String,
+    pub current_room_name: String,
+    /// Đêm đầu tiên được chuyển, dạng `YYYY-MM-DD`.
+    pub from_date: String,
+    /// Đêm cuối cùng được chuyển, dạng `YYYY-MM-DD`. Bao gồm chính nó.
+    pub to_date: String,
+    pub nights_remaining: i32,
+    pub nights_stayed: i32,
+    pub guest_count: i32,
+    pub rooms: Vec<RoomChangeOption>,
 }
 
 #[cfg(test)]

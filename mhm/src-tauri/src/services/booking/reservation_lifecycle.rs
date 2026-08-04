@@ -27,7 +27,8 @@ use super::{
     pricing_service::calculate_stay_price_tx,
     support::{
         ensure_one_row_affected, insert_room_calendar_rows, invalid_state_transition,
-        read_money_vnd_or_zero, read_money_vnd_strict, validate_non_negative_booking_money,
+        lock_booking_and_read_room, read_money_vnd_or_zero, read_money_vnd_strict,
+        validate_non_negative_booking_money, FolioLock,
     },
 };
 
@@ -178,21 +179,18 @@ async fn resolve_reservation_lock(
     pool: Pool<Sqlite>,
     booking_id: String,
 ) -> CommandResult<ResolvedWriteCommandGuard<ReservationResolvedGuard>> {
-    let room_id = sqlx::query_scalar::<_, String>("SELECT room_id FROM bookings WHERE id = ?")
-        .bind(&booking_id)
-        .fetch_optional(&pool)
-        .await
-        .map_err(BookingError::from)
-        .map_err(map_reservation_command_error)?
-        .ok_or_else(|| {
-            CommandError::user(
-                codes::BOOKING_NOT_FOUND,
-                format!("Booking not found: {}", booking_id),
-            )
-        })?;
+    let (guard, room_id) = lock_booking_and_read_room(
+        &pool,
+        &booking_id,
+        FolioLock::Skip,
+        map_reservation_command_error,
+    )
+    .await?;
+    let guard = guard
+        .acquire_next(global_manager(), [room_key(&room_id)?])
+        .await?;
+    let lock_keys = guard.keys().to_vec();
 
-    let lock_keys = vec![booking_key(&booking_id)?, room_key(&room_id)?];
-    let guard = global_manager().acquire(lock_keys.clone()).await?;
     Ok(ResolvedWriteCommandGuard::new(
         ReservationResolvedGuard {
             room_id,
@@ -621,6 +619,12 @@ pub async fn confirm_reservation_tx(
     let total_price = pricing.total;
     let actual_nights = (effective_checkout_date - today).num_days() as i32;
     let check_in_at = now.to_rfc3339();
+    // Cột `expected_checkout` của booking đang ở phải là RFC3339, giống hệt
+    // đường walk-in trong `stay_lifecycle::check_in_tx`: `extend_stay` đọc cột
+    // này bằng `DateTime::parse_from_rfc3339`, gặp chuỗi chỉ-có-ngày là chrono
+    // báo "premature end of input". `effective_checkout` dạng ngày vẫn giữ
+    // nguyên cho phần tính giá và ghi lịch phòng bên dưới.
+    let expected_checkout = (now + chrono::Duration::days(actual_nights as i64)).to_rfc3339();
 
     sqlx::query("DELETE FROM room_calendar WHERE booking_id = ?")
         .bind(booking_id)
@@ -644,7 +648,7 @@ pub async fn confirm_reservation_tx(
     )
     .bind(status::booking::ACTIVE)
     .bind(&check_in_at)
-    .bind(&effective_checkout)
+    .bind(&expected_checkout)
     .bind(actual_nights)
     .bind(total_price)
     .bind(reservation.paid_amount)

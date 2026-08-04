@@ -735,6 +735,10 @@ async fn set_booking_rate_fails_when_second_pool_moves_the_total_while_the_lock_
 
     let ctx = cmd("set_booking_rate", "idem-rate-2pool-total");
 
+    // `set_booking_rate` chỉ cần `booking:` + `folio:` (nó không đụng phòng —
+    // xem chú thích ở `set_booking_rate_idempotent`). Vẫn giữ luôn khoá phòng ở
+    // đây: một tập cha thì chặn không kém, và test không phải đổi lại nếu sau
+    // này lệnh có mở rộng phạm vi khoá.
     let held_lock = crate::aggregate_locks::global_manager()
         .acquire([
             crate::aggregate_locks::booking_key("B-2POOL-RATE").unwrap(),

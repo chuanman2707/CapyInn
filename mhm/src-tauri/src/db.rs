@@ -146,17 +146,35 @@ async fn ensure_setting_default(
 /// build. Bump this together with every new migration block below; the
 /// `migrations_run_to_latest_schema_version` test fails otherwise.
 ///
-/// 23 thuộc `design/kbtt-ux-simplify`, 25 thuộc `feat/room-change` — cả hai đã
-/// cài lên máy thật, nên DB của khách sạn đang đọc **25**. Nhánh này từng ở 24
-/// và như thế là chết: cổng là `if current < N`, `25 < 24` sai nên migration
-/// **im lặng không bao giờ chạy**, rồi mọi câu lệnh gọi `rate_overridden_at`
-/// hỏng lúc chạy — đúng lỗi commit 4c5c1c3 đã sửa một lần. Số phải nằm **trên**
-/// mọi số đã phát hành, không phải số kế tiếp trên nhánh của mình.
+/// 23 and 24 are deliberately skipped, not free: 23 belongs to
+/// `design/kbtt-ux-simplify` (`migrate_v23_stay_snapshot`) and has already
+/// shipped to the hotel's machine, 24 was claimed briefly by
+/// `feat/room-drawer-stay-edits` (`migrate_v24_booking_rate_override`, see its
+/// commit 4c5c1c3, which renumbered away from this same collision). Reusing a
+/// number another branch already shipped is silent and fatal: the gate
+/// `current < N` is false on a database already at N, so the migration never
+/// runs and every query touching the new column dies at runtime. Before
+/// claiming the next number, survey every ref — `git for-each-ref` +
+/// `git show <ref>:mhm/src-tauri/src/db.rs | grep LATEST_SCHEMA_VERSION` — and
+/// read the live database, not the brief. Gaps are harmless; collisions are not.
 ///
-/// Trước khi merge, rà lại lần nữa — số đã phát hành có thể đã đi tiếp:
-///   git for-each-ref --format='%(refname:short)' | while read r; do \
-///     printf '%s: ' "$r"; git show "$r:mhm/src-tauri/src/db.rs" 2>/dev/null \
-///     | grep -m1 LATEST_SCHEMA_VERSION; done
+/// **The same trap bites backwards, and that is the easier half to miss.** A
+/// branch written earlier and merged later is just as broken: once a build
+/// ships and the hotel's database reads 25, a branch still sitting at 24 has a
+/// gate `current < 24` that can never fire again, so its
+/// `bookings.rate_overridden_at` would never be created. Picking a number
+/// higher than every *branch* is not enough; it must also be higher than
+/// whatever the live database has already reached by the time you merge. So the
+/// survey is not a one-off at the start of the work: re-run it immediately
+/// before merging, and if the shipped version has moved past yours, renumber
+/// above it. Nothing warns you — the app simply starts up and fails on the
+/// first query that touches the missing column.
+///
+/// Trạng thái sau khi merge `feat/room-drawer-stay-edits` vào main: 25 là
+/// `migrate_v25_invoice_settlement_note` (đến từ main), 26 là
+/// `migrate_v26_booking_rate_override` (đến từ nhánh này, đã dời khỏi 24 ở
+/// commit 009bc07). 26 nằm trên mọi số đã phát hành, kể cả 25 mà máy thật đang
+/// đọc, nên cổng `current < 26` vẫn nổ đúng một lần trên DB của khách sạn.
 ///   sqlite3 "file:$HOME/CapyInn/capyinn.db?immutable=1" "SELECT MAX(version) FROM schema_version"
 pub(crate) const LATEST_SCHEMA_VERSION: i32 = 26;
 
@@ -335,8 +353,16 @@ pub(crate) async fn run_migrations(pool: &Pool<Sqlite>) -> Result<(), sqlx::Erro
         core_extensions::migrate_v22_booking_guest_count(pool).await?;
     }
 
+    // -- V25: lời quyết toán in được cho khách, tách khỏi ghi chú nội bộ --
+    // (23 đã bị nhánh kbtt chiếm và đã chạy trên máy thật, 24 là của nhánh
+    //  room-drawer — xem chú thích ở LATEST_SCHEMA_VERSION)
+    if current < 25 {
+        core_extensions::migrate_v25_invoice_settlement_note(pool).await?;
+    }
+
     // -- V26: dấu thời gian đổi giá thủ công trên booking --
-    // (23 của nhánh kbtt, 25 của feat/room-change — cả hai đã phát hành)
+    // Phải đứng SAU gate V25: mỗi migration tự `set_schema_version` số của
+    // mình, nên chạy 26 trước 25 sẽ kéo phiên bản tụt lại về 25.
     if current < 26 {
         core_extensions::migrate_v26_booking_rate_override(pool).await?;
     }
@@ -832,6 +858,14 @@ mod tests {
             .execute(pool)
             .await
             .expect("creates legacy bookings table");
+
+        // Same reason, for v23's ALTER: a real database sitting at v10 or v11
+        // went through v8, so it already has `invoices`. This fixture jumps
+        // straight past v8, so it has to stand the table up itself.
+        sqlx::query("CREATE TABLE invoices (id TEXT PRIMARY KEY)")
+            .execute(pool)
+            .await
+            .expect("creates legacy invoices table");
 
         sqlx::query(
             "CREATE TABLE transactions (
@@ -1457,6 +1491,107 @@ mod tests {
         run_migrations(&pool).await.expect("runs migrations");
 
         assert_agent_digest_runs_shape(&pool).await;
+    }
+
+    /// The decisive migration test, modelled on
+    /// `migration_v24_alter_actually_runs_on_a_genuinely_pre_v24_database`
+    /// (commit 4c5c1c3, which renumbered away from this same collision).
+    ///
+    /// Rewinding `schema_version` while the column is still present proves
+    /// nothing: the replayed ALTER lands in `execute_compat_alter`'s
+    /// duplicate-column swallow and the assertion passes on the column the
+    /// FIRST run created. It stays green even when the gate never fires —
+    /// exactly the production failure this branch shipped, where the hotel's
+    /// database was already at 23 (claimed by another branch), `current < 23`
+    /// was false, `settlement_note` was never created, and the first
+    /// `generate_invoice` died on `no such column`.
+    ///
+    /// So: DROP the column to build a database that has genuinely never seen
+    /// this migration, rewind to the true predecessor, and require the real
+    /// ALTER path to put it back.
+    #[tokio::test]
+    async fn migration_v25_alter_actually_runs_on_a_genuinely_pre_v25_database() {
+        let pool = SqlitePool::connect("sqlite::memory:")
+            .await
+            .expect("connects in-memory sqlite");
+        run_migrations(&pool)
+            .await
+            .expect("runs migrations to latest");
+
+        sqlx::query("ALTER TABLE invoices DROP COLUMN settlement_note")
+            .execute(&pool)
+            .await
+            .expect("drops settlement_note to simulate a pre-v25 database");
+        assert_eq!(
+            invoices_settlement_note_column_count(&pool).await,
+            0,
+            "tiền đề của test: DB phải thật sự chưa có cột settlement_note"
+        );
+
+        // 24 is the true predecessor — the highest number claimed by any other
+        // branch. A database sitting at 23 or 24 must still be upgraded.
+        sqlx::query("UPDATE schema_version SET version = 24")
+            .execute(&pool)
+            .await
+            .expect("rewinds schema version to a genuinely pre-v25 state");
+
+        run_migrations(&pool)
+            .await
+            .expect("v25 migration adds the column back via a real ALTER TABLE");
+
+        assert_eq!(
+            invoices_settlement_note_column_count(&pool).await,
+            1,
+            "ALTER TABLE thật phải chạy và tạo lại cột settlement_note"
+        );
+
+        // Replaying must be a no-op, not a half-applied upgrade that dies on
+        // the hotel's database: `execute_compat_alter` swallows the
+        // duplicate-column error the second ALTER would raise.
+        run_migrations(&pool)
+            .await
+            .expect("v25 migration is idempotent");
+        assert_eq!(invoices_settlement_note_column_count(&pool).await, 1);
+
+        let version = get_schema_version(&pool).await.expect("schema version");
+        assert_eq!(version, 26);
+    }
+
+    /// A database still sitting at kbtt's 23 — the version the hotel's machine
+    /// actually reports — must be carried all the way to the latest version,
+    /// not stall because some intermediate number was skipped.
+    #[tokio::test]
+    async fn migration_v25_upgrades_a_database_left_at_the_shipped_v23() {
+        let pool = SqlitePool::connect("sqlite::memory:")
+            .await
+            .expect("connects in-memory sqlite");
+        run_migrations(&pool)
+            .await
+            .expect("runs migrations to latest");
+
+        sqlx::query("ALTER TABLE invoices DROP COLUMN settlement_note")
+            .execute(&pool)
+            .await
+            .expect("drops settlement_note");
+        sqlx::query("UPDATE schema_version SET version = 23")
+            .execute(&pool)
+            .await
+            .expect("rewinds to the version the live database reports");
+
+        run_migrations(&pool).await.expect("v25 runs from v23");
+
+        assert_eq!(invoices_settlement_note_column_count(&pool).await, 1);
+        let version = get_schema_version(&pool).await.expect("schema version");
+        assert_eq!(version, 26);
+    }
+
+    async fn invoices_settlement_note_column_count(pool: &SqlitePool) -> i64 {
+        sqlx::query_scalar(
+            "SELECT COUNT(*) FROM pragma_table_info('invoices') WHERE name = 'settlement_note'",
+        )
+        .fetch_one(pool)
+        .await
+        .expect("reads invoices columns")
     }
 
     #[tokio::test]

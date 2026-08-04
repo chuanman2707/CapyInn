@@ -436,7 +436,13 @@ async fn confirm_reservation_reprices_and_marks_room_occupied() {
 
     assert_eq!(booking.status, "active");
     assert_eq!(booking.paid_amount, 50_000);
-    assert_eq!(booking.expected_checkout, scheduled_checkout_str);
+    // Booking đang ở giữ `expected_checkout` dạng RFC3339 để `extend_stay` đọc được.
+    assert_eq!(
+        chrono::DateTime::parse_from_rfc3339(&booking.expected_checkout)
+            .unwrap()
+            .date_naive(),
+        scheduled_checkout
+    );
     assert_eq!(booking.nights, 5);
     assert_eq!(booking.total_price, 3_000_000);
     assert!(booking.check_in_at.contains('T'));
@@ -569,7 +575,15 @@ async fn confirm_reservation_late_arrival_persists_effective_checkout() {
 
     assert_eq!(booking.status, "active");
     assert_eq!(booking.nights, 1);
-    assert_eq!(booking.expected_checkout, effective_checkout_str);
+    // Booking đang ở giữ `expected_checkout` dạng RFC3339 để `extend_stay` đọc được.
+    assert_eq!(
+        chrono::DateTime::parse_from_rfc3339(&booking.expected_checkout)
+            .unwrap()
+            .date_naive()
+            .format("%Y-%m-%d")
+            .to_string(),
+        effective_checkout_str
+    );
     assert_eq!(booking.total_price, 600_000);
 
     let calendar_rows = sqlx::query(

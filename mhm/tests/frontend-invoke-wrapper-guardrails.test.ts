@@ -44,6 +44,7 @@ const RAW_INVOKE_ALLOWED_COMMANDS: Record<string, string> = {
   get_pending_crash_report: "diagnostics recovery read",
   get_pricing_rules: "read-only pricing rules lookup",
   get_recent_activity: "read-only activity feed lookup",
+  get_room_change_options: "read-only room change move options lookup",
   get_room_detail: "read-only room detail lookup",
   get_room_types: "read-only room type lookup",
   get_room_type_rates: "read-only listed nightly rate per room type",

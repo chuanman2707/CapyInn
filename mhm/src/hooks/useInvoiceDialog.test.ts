@@ -49,6 +49,7 @@ describe("useInvoiceDialog", () => {
       balance_due: 0,
       policy_text: null,
       notes: null,
+      settlement_note: null,
       status: "issued",
       created_at: "2026-05-01T09:00:00+07:00",
     } satisfies InvoiceData;
@@ -104,6 +105,7 @@ describe("useInvoiceDialog", () => {
     balance_due: 0,
     policy_text: null,
     notes: null,
+    settlement_note: null,
     status: "issued",
     created_at: "2026-07-25T09:12:00+07:00",
   } satisfies InvoiceData;

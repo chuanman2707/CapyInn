@@ -804,3 +804,163 @@ async fn group_checkin_idempotent_same_key_changed_guest_name_conflicts() {
         crate::app_error::codes::CONFLICT_IDEMPOTENCY_HASH_MISMATCH
     );
 }
+
+#[tokio::test]
+async fn group_checkout_idempotent_reads_rooms_after_taking_the_group_lock() {
+    let pool = test_pool().await;
+    seed_room(&pool, "R931").await.unwrap();
+    seed_room(&pool, "R932").await.unwrap();
+    seed_pricing_rule(&pool, "standard", 500_000).await.unwrap();
+
+    let checkin_ctx = cmd("group_checkin", "idem-group-race-checkin");
+    let group = group_lifecycle::group_checkin_idempotent(
+        &pool,
+        None,
+        &checkin_ctx,
+        rich_group_checkin_request(&["R931"], "R931", None),
+    )
+    .await
+    .expect("group check-in succeeds");
+    let group_id = group.response["id"]
+        .as_str()
+        .expect("group id in response")
+        .to_string();
+
+    let booking_id: String =
+        sqlx::query_scalar("SELECT id FROM bookings WHERE group_id = ? LIMIT 1")
+            .bind(&group_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+
+    let blocker = crate::aggregate_locks::global_manager()
+        .acquire([crate::aggregate_locks::group_key(&group_id).unwrap()])
+        .await
+        .expect("blocker lock");
+
+    let ctx = cmd("group_checkout", "idem-group-race-checkout");
+    let pool_for_task = pool.clone();
+    let req = GroupCheckoutRequest {
+        group_id: group_id.clone(),
+        booking_ids: vec![booking_id.clone()],
+        final_paid: None,
+    };
+    let command = tokio::spawn(async move {
+        group_lifecycle::group_checkout_idempotent(&pool_for_task, &ctx, req).await
+    });
+
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    assert!(
+        !command.is_finished(),
+        "lệnh phải kẹt ở pha 1, chưa được phép đọc phòng của các booking"
+    );
+
+    sqlx::query("UPDATE room_calendar SET room_id = 'R932' WHERE booking_id = ?")
+        .bind(&booking_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE bookings SET room_id = 'R932' WHERE id = ?")
+        .bind(&booking_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE rooms SET status = 'occupied' WHERE id = 'R932'")
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE rooms SET status = 'vacant' WHERE id = 'R931'")
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    drop(blocker);
+
+    command
+        .await
+        .expect("task joins")
+        .expect("group checkout phải thành công trên phòng mới");
+
+    assert_room_status(&pool, "R932", "cleaning").await;
+}
+
+#[tokio::test]
+async fn group_checkout_idempotent_reads_rooms_after_taking_the_booking_locks() {
+    let pool = test_pool().await;
+    seed_room(&pool, "R941").await.unwrap();
+    seed_room(&pool, "R942").await.unwrap();
+    seed_pricing_rule(&pool, "standard", 500_000).await.unwrap();
+
+    let checkin_ctx = cmd("group_checkin", "idem-group-race2-checkin");
+    let group = group_lifecycle::group_checkin_idempotent(
+        &pool,
+        None,
+        &checkin_ctx,
+        rich_group_checkin_request(&["R941"], "R941", None),
+    )
+    .await
+    .expect("group check-in succeeds");
+    let group_id = group.response["id"]
+        .as_str()
+        .expect("group id in response")
+        .to_string();
+
+    let booking_id: String =
+        sqlx::query_scalar("SELECT id FROM bookings WHERE group_id = ? LIMIT 1")
+            .bind(&group_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+
+    // Chặn bằng khoá BOOKING, không phải khoá group — đúng bộ khoá mà
+    // change_room sẽ cầm. Lệnh phải qua được pha 1 rồi kẹt ở pha 2.
+    let blocker = crate::aggregate_locks::global_manager()
+        .acquire([crate::aggregate_locks::booking_key(&booking_id).unwrap()])
+        .await
+        .expect("blocker lock");
+
+    let ctx = cmd("group_checkout", "idem-group-race2-checkout");
+    let pool_for_task = pool.clone();
+    let req = GroupCheckoutRequest {
+        group_id: group_id.clone(),
+        booking_ids: vec![booking_id.clone()],
+        final_paid: None,
+    };
+    let command = tokio::spawn(async move {
+        group_lifecycle::group_checkout_idempotent(&pool_for_task, &ctx, req).await
+    });
+
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    assert!(
+        !command.is_finished(),
+        "lệnh phải kẹt ở pha 2, chưa được phép đọc phòng"
+    );
+
+    sqlx::query("UPDATE room_calendar SET room_id = 'R942' WHERE booking_id = ?")
+        .bind(&booking_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE bookings SET room_id = 'R942' WHERE id = ?")
+        .bind(&booking_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE rooms SET status = 'occupied' WHERE id = 'R942'")
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE rooms SET status = 'vacant' WHERE id = 'R941'")
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    drop(blocker);
+
+    command
+        .await
+        .expect("task joins")
+        .expect("group checkout phải thành công trên phòng mới");
+
+    assert_room_status(&pool, "R942", "cleaning").await;
+}

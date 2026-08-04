@@ -429,7 +429,7 @@ mod tests {
             .fetch_one(&pool)
             .await
             .expect("reads schema version");
-        assert_eq!(version, crate::db::LATEST_SCHEMA_VERSION);
+        assert_eq!(version, 26);
     }
 
     /// Khách tới trước khi có booking: phải khai báo được ngay, không phải chờ

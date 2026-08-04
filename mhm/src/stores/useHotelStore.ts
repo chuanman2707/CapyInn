@@ -20,6 +20,7 @@ import type {
   CheckoutSettlementMode,
   GroupInvoiceData,
   RoomTypeRate,
+  RoomChangeOptions,
 } from "@/types";
 
 interface HotelStore {
@@ -43,6 +44,8 @@ interface HotelStore {
   checkinNights: number | null;
   isGroupCheckinOpen: boolean;
   groups: BookingGroup[];
+  isRoomChangeOpen: boolean;
+  roomChangeBookingId: string | null;
 
   fetchRooms: () => Promise<void>;
   /** Không bao giờ throw: thất bại thì đặt `roomTypeRates` về `null`. */
@@ -61,6 +64,9 @@ interface HotelStore {
   shortenStay: (bookingId: string) => Promise<void>;
   setBookingRate: (bookingId: string, ratePerNight: number) => Promise<void>;
   updateBookingNotes: (bookingId: string, notes: string) => Promise<void>;
+  setRoomChangeOpen: (open: boolean, bookingId?: string | null) => void;
+  fetchRoomChangeOptions: (bookingId: string) => Promise<RoomChangeOptions>;
+  changeRoom: (bookingId: string, newRoomId: string, keepPrice: boolean, reason?: string) => Promise<void>;
   fetchHousekeeping: () => Promise<void>;
   updateHousekeeping: (taskId: string, status: string, note?: string) => Promise<void>;
   getStayInfoText: (bookingId: string) => Promise<string>;
@@ -102,6 +108,8 @@ export const useHotelStore = create<HotelStore>((set, get) => {
     checkinNights: null,
     isGroupCheckinOpen: false,
     groups: [],
+    isRoomChangeOpen: false,
+    roomChangeBookingId: null,
 
     fetchRooms: async () => {
       const rooms = await invoke<Room[]>("get_rooms");
@@ -294,6 +302,35 @@ export const useHotelStore = create<HotelStore>((set, get) => {
         await invokeCommand("update_booking_notes", { bookingId, notes: notes || null });
       } catch (err) {
         console.error("update_booking_notes error:", err);
+        throw err;
+      } finally {
+        endAction();
+      }
+    },
+
+    setRoomChangeOpen: (open, bookingId = null) =>
+      set({ isRoomChangeOpen: open, roomChangeBookingId: open ? bookingId : null }),
+
+    fetchRoomChangeOptions: async (bookingId) =>
+      invoke<RoomChangeOptions>("get_room_change_options", { bookingId }),
+
+    changeRoom: async (bookingId, newRoomId, keepPrice, reason) => {
+      beginAction();
+      try {
+        const correlationId = createCorrelationId();
+        await invokeWriteCommand(
+          "change_room",
+          { bookingId, newRoomId, keepPrice, reason: reason ?? null },
+          {
+            correlationId,
+            monitoringContext: { operation: "change_room" },
+          },
+        );
+        await get().fetchRooms();
+        await get().fetchStats();
+        get().markDashboardDataChanged();
+      } catch (err) {
+        console.error("change_room error:", err);
         throw err;
       } finally {
         endAction();

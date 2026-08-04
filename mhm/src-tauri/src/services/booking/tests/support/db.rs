@@ -373,6 +373,52 @@ pub async fn test_pool() -> Pool<Sqlite> {
     .await
     .expect("failed to create outbox origin command index");
 
+    sqlx::query(
+        "CREATE TABLE invoices (
+            id                TEXT PRIMARY KEY,
+            invoice_number    TEXT NOT NULL UNIQUE,
+            booking_id        TEXT NOT NULL REFERENCES bookings(id),
+            hotel_name        TEXT NOT NULL,
+            hotel_address     TEXT NOT NULL,
+            hotel_phone       TEXT NOT NULL,
+            guest_name        TEXT NOT NULL,
+            guest_phone       TEXT,
+            room_name         TEXT NOT NULL,
+            room_type         TEXT NOT NULL,
+            check_in          TEXT NOT NULL,
+            check_out         TEXT NOT NULL,
+            nights            INTEGER NOT NULL,
+            pricing_breakdown TEXT NOT NULL,
+            subtotal          INTEGER NOT NULL,
+            deposit_amount    INTEGER NOT NULL DEFAULT 0,
+            total             INTEGER NOT NULL,
+            balance_due       INTEGER NOT NULL,
+            policy_text       TEXT,
+            notes             TEXT,
+            settlement_note   TEXT,
+            status            TEXT NOT NULL DEFAULT 'issued',
+            created_at        TEXT NOT NULL
+        )",
+    )
+    .execute(&pool)
+    .await
+    .expect("failed to create invoices table");
+
+    sqlx::query("CREATE INDEX idx_invoices_booking ON invoices(booking_id)")
+        .execute(&pool)
+        .await
+        .expect("failed to create invoices booking index");
+
+    sqlx::query(
+        "CREATE TABLE settings (
+            key   TEXT PRIMARY KEY,
+            value TEXT NOT NULL
+        )",
+    )
+    .execute(&pool)
+    .await
+    .expect("failed to create settings table");
+
     pool
 }
 

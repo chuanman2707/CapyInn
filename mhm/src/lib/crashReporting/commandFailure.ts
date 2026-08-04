@@ -20,6 +20,9 @@ export type MonitoringContext =
       operation: "add_one_night" | "remove_one_night" | "set_booking_rate";
     }
   | {
+      operation: "change_room";
+    }
+  | {
       nights: number;
       deposit_present: boolean;
       source: string | null;
@@ -30,6 +33,7 @@ export type MonitoringContext =
     };
 
 const MONITORED_COMMANDS = new Set([
+  "change_room",
   "check_in",
   "check_out",
   "create_reservation",

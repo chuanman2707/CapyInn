@@ -718,9 +718,10 @@ async fn shorten_stay_fails_when_second_pool_moves_the_checkout_while_the_lock_i
 
     let ctx = cmd("shorten_stay", "idem-shorten-2pool-checkout");
 
-    // Giữ đúng bộ khoá mà `resolve_stay_lock` bên trong `shorten_stay_idempotent`
-    // cần để mở transaction — cho tới khi ta chủ động nhả, lệnh gọi bên dưới
-    // không thể vượt qua bước này.
+    // Giữ đúng bộ khoá mà `shorten_stay_idempotent` cần để mở transaction:
+    // `lock_booking_and_read_room` lấy `booking:` + `folio:` ở pha 1 rồi mới
+    // `acquire_next` khoá phòng ở pha 2. Cho tới khi ta chủ động nhả, lệnh gọi
+    // bên dưới không thể vượt qua bước này.
     let held_lock = crate::aggregate_locks::global_manager()
         .acquire([
             crate::aggregate_locks::booking_key("B-2POOL-SHORTEN").unwrap(),

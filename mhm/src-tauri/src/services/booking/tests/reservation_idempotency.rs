@@ -847,3 +847,53 @@ async fn reservation_command_idempotency_same_plain_key_across_commands_scopes_o
     assert!(origins.contains(&format!("{}:{}", create_ctx.command_name, plain_key)));
     assert!(origins.contains(&format!("{}:{}", cancel_ctx.command_name, plain_key)));
 }
+
+#[tokio::test]
+async fn cancel_reservation_idempotent_reads_the_room_after_taking_the_booking_lock() {
+    let pool = test_pool().await;
+    seed_room(&pool, "R921").await.unwrap();
+    seed_room(&pool, "R922").await.unwrap();
+    seed_booked_reservation(&pool, "B921", "R921")
+        .await
+        .unwrap();
+
+    let blocker = crate::aggregate_locks::global_manager()
+        .acquire([crate::aggregate_locks::booking_key("B921").unwrap()])
+        .await
+        .expect("blocker lock");
+
+    let ctx = cmd("cancel_reservation", "idem-cancel-race");
+    let pool_for_task = pool.clone();
+    let command = tokio::spawn(async move {
+        reservation_lifecycle::cancel_reservation_idempotent(&pool_for_task, &ctx, "B921").await
+    });
+
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    assert!(
+        !command.is_finished(),
+        "lệnh phải kẹt ở pha 1, chưa được phép đọc phòng"
+    );
+
+    sqlx::query("UPDATE room_calendar SET room_id = 'R922' WHERE booking_id = 'B921'")
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE bookings SET room_id = 'R922' WHERE id = 'B921'")
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    drop(blocker);
+
+    command
+        .await
+        .expect("task joins")
+        .expect("cancel reservation phải thành công trên phòng mới");
+
+    let remaining: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM room_calendar WHERE booking_id = 'B921'")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(remaining, 0, "lịch của phòng mới phải được dọn");
+}

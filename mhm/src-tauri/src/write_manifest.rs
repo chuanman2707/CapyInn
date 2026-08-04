@@ -54,7 +54,14 @@ pub const WRITE_COMMAND_MANIFEST: &[WriteCommandMeta] = &[
         enforced_in_foundation: true,
     },
     WriteCommandMeta {
+        // Đổi giá không đụng phòng: chỉ khoá `booking:` + `folio:`, không lấy
+        // khoá phòng. Xem `set_booking_rate_idempotent`.
         command_name: "set_booking_rate",
+        lock_deriver: LockDeriverId::FolioBooking,
+        enforced_in_foundation: true,
+    },
+    WriteCommandMeta {
+        command_name: "change_room",
         lock_deriver: LockDeriverId::BookingAndRoomFromBooking,
         enforced_in_foundation: true,
     },
@@ -126,6 +133,9 @@ mod tests {
             "check_in",
             "check_out",
             "extend_stay",
+            "shorten_stay",
+            "set_booking_rate",
+            "change_room",
             "group_checkin",
             "group_checkout",
             "confirm_reservation",

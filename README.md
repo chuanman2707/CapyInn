@@ -116,6 +116,10 @@ CapyInn is built for a narrow but practical use case: small hotels that need a s
 
 - Dashboard organized around the configured room layout
 - Check-in, check-out, extend-stay, and reservation flows in one desktop app
+- Mid-stay room change for an in-house guest, listing the valid target rooms for that booking and offering a choice between keeping the original price and charging the difference
+- Reservation calendar timeline: click or drag across empty cells to open a check-in or a reservation with those dates already filled in
+- Backfill sheet for recording a stay that already happened, opened from the same calendar
+- Read-only detail popup for a booking that has already checked out, including its issued invoice
 - Support for multiple guests on the same booking
 - Fast copy flow for guest registration details
 
@@ -125,9 +129,13 @@ CapyInn is built for a narrow but practical use case: small hotels that need a s
 - Watches `~/CapyInn/Scans/` for new scan files
 - Extracts guest name, national ID number, birth date, and address for check-in
 
-### Billing, payments, and reporting
+### Pricing, billing, and reporting
 
-- Night-based pricing by room type
+- Rates are a property of the room type, not of the individual room: hourly, overnight, and nightly/daily models, with an hourly total capped at the cheaper block
+- Weekend uplift, peak-season uplift, and early check-in / late check-out surcharges
+- Peak seasons are declared in Settings as date ranges; the uplift is charged only for the nights that fall inside one
+- Extra-person surcharge per guest per night above the room's included headcount — reservations carry a guest count and are quoted with it
+- Prices shown before a stay come from the backend preview that will charge it, never from arithmetic in the UI
 - Charge, payment, deposit, and balance tracking
 - Revenue analytics, expense tracking, and CSV export
 
@@ -226,7 +234,10 @@ npm run build
 cargo check --manifest-path src-tauri/Cargo.toml
 cargo test --manifest-path src-tauri/Cargo.toml
 cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings
+cargo fmt --manifest-path src-tauri/Cargo.toml -- --check
 ```
+
+Every command above is a hard CI gate, `cargo fmt` included — skipping the format check locally means a red build on a PR that otherwise passes.
 
 The repository also ships scripted verification gates. `verify:full` is the smoke gate the release checklist expects to pass before a tag is pushed; it runs the quick wave, the frontend suite, booking and backup scenario tests, and a native Tauri startup smoke against an isolated runtime root.
 
@@ -290,7 +301,7 @@ Short checklist:
 1. Fork the repository
 2. Create a branch from `main`
 3. Keep commit messages in Conventional Commits format
-4. Re-run `npm test`, `npm run build`, `cargo check`, `cargo test`, and `cargo clippy`
+4. Re-run `npm test`, `npm run build`, `cargo check`, `cargo test`, `cargo clippy`, and `cargo fmt -- --check`
 5. Open a pull request with scope and verification notes
 
 ## License

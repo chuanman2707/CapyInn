@@ -28,14 +28,15 @@ use super::{
     pricing_service::calculate_stay_price_tx,
     support::{
         begin_tx, ensure_one_row_affected, insert_room_calendar_rows, invalid_state_transition,
-        lookup_booking_expected_checkout, lookup_booking_room_id, lookup_booking_total_price,
-        map_room_calendar_insert_error, parse_booking_datetime, read_money_vnd_or_zero,
-        validate_non_negative_booking_money,
+        lock_booking_and_read_room, lookup_booking_expected_checkout, lookup_booking_total_price,
+        map_room_calendar_insert_error, merge_pricing_snapshot, parse_booking_datetime,
+        read_money_vnd_or_zero, room_calendar_stays_tx, room_stays_to_json,
+        validate_non_negative_booking_money, FolioLock, RoomStayRow,
     },
 };
 
 #[cfg(test)]
-use super::support::{begin_immediate_tx, fetch_booking};
+use super::support::{begin_immediate_tx, fetch_booking, lookup_booking_room_id};
 
 pub(super) fn mark_write_db_error(error: BookingError) -> BookingError {
     match error {
@@ -54,41 +55,6 @@ fn ensure_locked_room_matches_booking(
     } else {
         Err(invalid_state_transition(message))
     }
-}
-
-struct StayResolvedGuard {
-    room_id: String,
-    _guard: crate::aggregate_locks::AggregateLockGuard,
-}
-
-/// `check_out`, `extend_stay`, `shorten_stay` và `set_booking_rate` đều khoá
-/// cùng một bộ ba: booking, phòng của nó, và folio. Trước đây mỗi lệnh chép lại
-/// nguyên closure này. Khuôn theo `resolve_reservation_lock` ở
-/// `reservation_lifecycle.rs`, chỉ khác là bộ khoá ở đây có thêm folio.
-async fn resolve_stay_lock(
-    pool: Pool<Sqlite>,
-    booking_id: String,
-) -> CommandResult<ResolvedWriteCommandGuard<StayResolvedGuard>> {
-    let room_id = lookup_booking_room_id(&pool, &booking_id)
-        .await
-        .map_err(map_check_out_command_error)?;
-
-    let lock_keys = vec![
-        crate::aggregate_locks::booking_key(&booking_id)?,
-        crate::aggregate_locks::room_key(&room_id)?,
-        crate::aggregate_locks::folio_key(&booking_id)?,
-    ];
-    let guard = crate::aggregate_locks::global_manager()
-        .acquire(lock_keys.clone())
-        .await?;
-
-    Ok(ResolvedWriteCommandGuard::new(
-        StayResolvedGuard {
-            room_id,
-            _guard: guard,
-        },
-        lock_keys,
-    ))
 }
 
 fn stay_command_origin_key(ctx: &WriteCommandContext) -> String {
@@ -601,6 +567,11 @@ struct CheckoutSettlementComputation {
     already_paid: MoneyVnd,
     explanation: String,
     reporting_checkout: String,
+    /// The booking's `pricing_snapshot` column as it stood before checkout —
+    /// carried through so `check_out_tx` can merge `checkout_settlement`
+    /// into it instead of overwriting keys a room change already wrote
+    /// (`room_stays`).
+    pricing_snapshot: Option<String>,
 }
 
 fn settlement_mode_label(mode: CheckoutSettlementMode) -> &'static str {
@@ -678,8 +649,14 @@ fn settlement_explanation(
     }
 }
 
+/// Builds the *inner* `checkout_settlement` object — the shape
+/// `revenue_queries.rs` reads via `json_extract(pricing_snapshot,
+/// '$.checkout_settlement.mode')` and `'...reporting_checkout')`. Callers
+/// merge this under the `checkout_settlement` key with `merge_pricing_snapshot`
+/// rather than writing it as the whole `pricing_snapshot` column, so a
+/// `room_stays` key written earlier by a room change survives checkout.
 #[allow(clippy::too_many_arguments)]
-fn checkout_settlement_snapshot(
+fn checkout_settlement_value(
     settlement_mode: CheckoutSettlementMode,
     original_nights: i32,
     actual_nights: i32,
@@ -688,21 +665,53 @@ fn checkout_settlement_snapshot(
     original_total: MoneyVnd,
     settled_total: MoneyVnd,
     manual_override: bool,
-) -> String {
+) -> serde_json::Value {
     serde_json::json!({
-        "checkout_settlement": {
-            "mode": settlement_mode,
-            "label": settlement_mode_label(settlement_mode),
-            "reporting_checkout": reporting_checkout,
-            "original_nights": original_nights,
-            "actual_nights": actual_nights,
-            "settled_nights": settled_nights,
-            "original_total": original_total,
-            "settled_total": settled_total,
-            "manual_override": manual_override,
-        }
+        "mode": settlement_mode,
+        "label": settlement_mode_label(settlement_mode),
+        "reporting_checkout": reporting_checkout,
+        "original_nights": original_nights,
+        "actual_nights": actual_nights,
+        "settled_nights": settled_nights,
+        "original_total": original_total,
+        "settled_total": settled_total,
+        "manual_override": manual_override,
     })
-    .to_string()
+}
+
+/// Caps the cumulative night count in `rows` to `settled_nights`, walking the
+/// segments in the date order `room_calendar_stays_tx` returns them: each
+/// segment keeps up to its own count, the next one gets whatever budget is
+/// left, and any segment past the point the budget hits zero is dropped
+/// entirely — the guest never reached it under the nights actually settled.
+///
+/// This is only correct because `rows` are *occupancy segments in date order*,
+/// not one row per room: a guest who moves A → B → A gets three segments, so
+/// the budget is spent on the nights actually slept first. Group by room
+/// instead and the earliest-dated A row swallows the whole budget while B
+/// silently disappears from the invoice.
+fn truncate_room_stays_to_settled_nights(
+    rows: &[RoomStayRow],
+    settled_nights: i32,
+) -> Vec<RoomStayRow> {
+    let mut remaining = i64::from(settled_nights.max(0));
+    let mut truncated = Vec::new();
+
+    for row in rows {
+        if remaining <= 0 {
+            break;
+        }
+        let nights_here = row.nights.min(remaining);
+        truncated.push(RoomStayRow {
+            room_id: row.room_id.clone(),
+            room_name: row.room_name.clone(),
+            nights: nights_here,
+            first_night: row.first_night.clone(),
+        });
+        remaining -= nights_here;
+    }
+
+    truncated
 }
 
 async fn preview_checkout_settlement_tx(
@@ -712,7 +721,8 @@ async fn preview_checkout_settlement_tx(
 ) -> BookingResult<CheckoutSettlementComputation> {
     let booking = sqlx::query(
         "SELECT room_id, check_in_at, nights, total_price, paid_amount,
-                COALESCE(pricing_type, 'nightly') AS pricing_type, guests, status
+                COALESCE(pricing_type, 'nightly') AS pricing_type, guests, status,
+                pricing_snapshot
          FROM bookings WHERE id = ?",
     )
     .bind(&req.booking_id)
@@ -740,6 +750,7 @@ async fn preview_checkout_settlement_tx(
     let original_total = read_money_vnd_or_zero(&booking, "total_price");
     let guests: Option<i32> = booking.get("guests");
     let already_paid = read_money_vnd_or_zero(&booking, "paid_amount");
+    let pricing_snapshot: Option<String> = booking.get("pricing_snapshot");
     let actual_nights = actual_nights_for_checkout(&check_in_at, now)?;
 
     let (settled_nights, recommended_total) = match req.settlement_mode {
@@ -776,6 +787,7 @@ async fn preview_checkout_settlement_tx(
         already_paid,
         explanation,
         reporting_checkout,
+        pricing_snapshot,
     })
 }
 
@@ -929,7 +941,7 @@ async fn check_out_tx(
     }
 
     let manual_override = final_total != settlement.recommended_total;
-    let pricing_snapshot = checkout_settlement_snapshot(
+    let settlement_value = checkout_settlement_value(
         req.settlement_mode,
         settlement.original_nights,
         settlement.actual_nights,
@@ -938,6 +950,31 @@ async fn check_out_tx(
         settlement.original_total,
         final_total,
         manual_override,
+    );
+    // Merge, don't overwrite: a room change earlier in the stay may have
+    // already written `room_stays` into this same column
+    // (room_change.rs::change_room_tx), and checkout must not erase it.
+    let pricing_snapshot = merge_pricing_snapshot(
+        settlement.pricing_snapshot.as_deref(),
+        "checkout_settlement",
+        settlement_value,
+    );
+
+    // Re-derive `room_stays` from `room_calendar` — the live truth — before
+    // the DELETE below wipes it. The snapshot `change_room_tx` wrote at move
+    // time assumed the guest would stay every remaining *booked* night;
+    // settlement may charge fewer than that (early checkout), so truncate
+    // the per-room split down to `settled_nights`, walking rooms in
+    // occupancy order and capping the running total. Reuses the same
+    // `merge_pricing_snapshot` helper as `checkout_settlement` above — no
+    // second snapshot writer.
+    let room_stays_from_calendar = room_calendar_stays_tx(tx, &req.booking_id).await?;
+    let truncated_room_stays =
+        truncate_room_stays_to_settled_nights(&room_stays_from_calendar, settlement.settled_nights);
+    let pricing_snapshot = merge_pricing_snapshot(
+        Some(&pricing_snapshot),
+        "room_stays",
+        room_stays_to_json(&truncated_room_stays),
     );
 
     let result = sqlx::query(
@@ -1034,19 +1071,37 @@ pub async fn check_out_idempotent(
             &["bookings", "rooms", "folio"],
         )?);
 
-    let pool_for_guard = pool.clone();
-    let booking_id_for_guard = req.booking_id.clone();
+    let pool_for_lookup = pool.clone();
+    let booking_id_for_lookup = req.booking_id.clone();
     let origin_key = stay_command_origin_key(ctx);
 
     WriteCommandExecutor::new(pool.clone())
         .execute_with_resolved_guard(
             ctx,
             request,
-            move || resolve_stay_lock(pool_for_guard, booking_id_for_guard),
-            move |tx, guard| {
+            move || async move {
+                let (guard, room_id) = lock_booking_and_read_room(
+                    &pool_for_lookup,
+                    &booking_id_for_lookup,
+                    FolioLock::Include,
+                    map_check_out_command_error,
+                )
+                .await?;
+                let guard = guard
+                    .acquire_next(
+                        crate::aggregate_locks::global_manager(),
+                        [crate::aggregate_locks::room_key(&room_id)?],
+                    )
+                    .await?;
+                let lock_keys = guard.keys().to_vec();
+
+                Ok(ResolvedWriteCommandGuard::new((guard, room_id), lock_keys))
+            },
+            move |tx, resolved| {
                 Box::pin(async move {
+                    let (_guard, locked_room_id) = resolved;
                     let response =
-                        check_out_tx(tx, req, Local::now(), &guard.room_id, Some(origin_key))
+                        check_out_tx(tx, req, Local::now(), &locked_room_id, Some(origin_key))
                             .await
                             .map_err(map_check_out_command_error)?;
                     serde_json::to_value(&response).map_err(system_error)
@@ -1143,14 +1198,24 @@ async fn extend_stay_tx(
         .ok_or_else(|| BookingError::validation("total_price overflowed".to_string()))?;
     let new_checkout = new_expected.to_rfc3339();
 
+    // `scheduled_checkout` phải đi theo `expected_checkout`: timeline vẽ thanh
+    // booking bằng `scheduled_checkout || expected_checkout`, nên bỏ quên cột này
+    // là khách đặt trước gia hạn bao nhiêu lần thanh vẫn đứng ở ngày trả cũ.
+    // CASE giữ NULL cho khách walk-in — họ không có ngày đặt trước để dời.
+    let new_scheduled_checkout = new_expected.date_naive().format("%Y-%m-%d").to_string();
+
     let result = sqlx::query(
         "UPDATE bookings
-         SET nights = ?, total_price = ?, expected_checkout = ?
+         SET nights = ?, total_price = ?, expected_checkout = ?,
+             scheduled_checkout = CASE
+                 WHEN scheduled_checkout IS NULL THEN NULL ELSE ?
+             END
          WHERE id = ? AND status = ? AND expected_checkout = ?",
     )
     .bind(current_nights + 1)
     .bind(new_total)
     .bind(&new_checkout)
+    .bind(&new_scheduled_checkout)
     .bind(booking_id)
     .bind(status::booking::ACTIVE)
     .bind(&old_expected_checkout)
@@ -1229,8 +1294,8 @@ pub async fn extend_stay_idempotent(
             &["bookings", "rooms", "folio"],
         )?);
 
-    let pool_for_guard = pool.clone();
-    let booking_id_for_guard = booking_id.to_string();
+    let pool_for_lookup = pool.clone();
+    let booking_id_for_lookup = booking_id.to_string();
     let booking_id_for_service = booking_id.to_string();
     let origin_key = stay_command_origin_key(ctx);
 
@@ -1238,13 +1303,31 @@ pub async fn extend_stay_idempotent(
         .execute_with_resolved_guard(
             ctx,
             request,
-            move || resolve_stay_lock(pool_for_guard, booking_id_for_guard),
-            move |tx, guard| {
+            move || async move {
+                let (guard, room_id) = lock_booking_and_read_room(
+                    &pool_for_lookup,
+                    &booking_id_for_lookup,
+                    FolioLock::Include,
+                    map_extend_stay_command_error,
+                )
+                .await?;
+                let guard = guard
+                    .acquire_next(
+                        crate::aggregate_locks::global_manager(),
+                        [crate::aggregate_locks::room_key(&room_id)?],
+                    )
+                    .await?;
+                let lock_keys = guard.keys().to_vec();
+
+                Ok(ResolvedWriteCommandGuard::new((guard, room_id), lock_keys))
+            },
+            move |tx, resolved| {
                 Box::pin(async move {
+                    let (_guard, locked_room_id) = resolved;
                     let booking = extend_stay_tx(
                         tx,
                         &booking_id_for_service,
-                        &guard.room_id,
+                        &locked_room_id,
                         Some(origin_key),
                     )
                     .await
@@ -1265,6 +1348,14 @@ pub async fn shorten_stay_idempotent(
     // nào — đây là giá trị "trước khi khoá" mà `shorten_stay_tx` sẽ dùng để
     // chốt optimistic-concurrency guard ở UPDATE cuối cùng. Xem chú thích tại
     // `lookup_booking_expected_checkout` và bên trong `shorten_stay_tx`.
+    //
+    // Đây KHÔNG mâu thuẫn với #206 ("đọc phòng sau khi đã khoá booking"). #206
+    // cấm đọc `room_id` trước khoá vì kết quả cũ khiến ta khoá NHẦM phòng rồi
+    // đi tiếp — hỏng theo kiểu mở toang. Còn giá trị dưới đây cố ý được phép cũ:
+    // nó là ảnh chụp "thứ lễ tân đang nhìn thấy", và cũ thì `AND
+    // expected_checkout = ?` khớp 0 dòng nên lệnh dừng lại — hỏng theo kiểu đóng
+    // chặt. Dời nó xuống sau pha 1 (hoặc vào trong transaction) là giết đúng cái
+    // guard đó: khi ấy nó chỉ đọc lại chính giá trị mình vừa khoá.
     let locked_expected_checkout = lookup_booking_expected_checkout(pool, booking_id)
         .await
         .map_err(map_extend_stay_command_error)?;
@@ -1290,8 +1381,8 @@ pub async fn shorten_stay_idempotent(
             &["bookings", "rooms", "folio"],
         )?);
 
-    let pool_for_guard = pool.clone();
-    let booking_id_for_guard = booking_id.to_string();
+    let pool_for_lookup = pool.clone();
+    let booking_id_for_lookup = booking_id.to_string();
     let booking_id_for_service = booking_id.to_string();
     let origin_key = stay_command_origin_key(ctx);
 
@@ -1299,13 +1390,31 @@ pub async fn shorten_stay_idempotent(
         .execute_with_resolved_guard(
             ctx,
             request,
-            move || resolve_stay_lock(pool_for_guard, booking_id_for_guard),
-            move |tx, guard| {
+            move || async move {
+                let (guard, room_id) = lock_booking_and_read_room(
+                    &pool_for_lookup,
+                    &booking_id_for_lookup,
+                    FolioLock::Include,
+                    map_extend_stay_command_error,
+                )
+                .await?;
+                let guard = guard
+                    .acquire_next(
+                        crate::aggregate_locks::global_manager(),
+                        [crate::aggregate_locks::room_key(&room_id)?],
+                    )
+                    .await?;
+                let lock_keys = guard.keys().to_vec();
+
+                Ok(ResolvedWriteCommandGuard::new((guard, room_id), lock_keys))
+            },
+            move |tx, resolved| {
                 Box::pin(async move {
+                    let (_guard, locked_room_id) = resolved;
                     let booking = shorten_stay_tx(
                         tx,
                         &booking_id_for_service,
-                        &guard.room_id,
+                        &locked_room_id,
                         &locked_expected_checkout,
                         Some(origin_key),
                     )
@@ -1326,8 +1435,9 @@ pub async fn set_booking_rate_idempotent(
 ) -> CommandResult<IdempotentCommandResult<serde_json::Value>> {
     // Đọc `total_price` NGOÀI transaction, trước bất cứ bước khoá/claim nào —
     // giá trị "trước khi khoá" mà `set_booking_rate_tx` dùng để chốt
-    // optimistic-concurrency guard ở UPDATE cuối cùng. Cùng kỹ thuật với
-    // `shorten_stay_idempotent` phía trên.
+    // optimistic-concurrency guard ở UPDATE cuối cùng. Cùng kỹ thuật, và cùng
+    // lý do vì sao nó không phạm vào #206, với `shorten_stay_idempotent` phía
+    // trên.
     let locked_total_price = lookup_booking_total_price(pool, booking_id)
         .await
         .map_err(map_extend_stay_command_error)?;
@@ -1353,7 +1463,6 @@ pub async fn set_booking_rate_idempotent(
             &["bookings", "folio"],
         )?);
 
-    let pool_for_guard = pool.clone();
     let booking_id_for_guard = booking_id.to_string();
     let booking_id_for_service = booking_id.to_string();
     let origin_key = stay_command_origin_key(ctx);
@@ -1362,7 +1471,33 @@ pub async fn set_booking_rate_idempotent(
         .execute_with_resolved_guard(
             ctx,
             request,
-            move || resolve_stay_lock(pool_for_guard, booking_id_for_guard),
+            // KHÔNG lấy khoá phòng, khác hẳn ba lệnh stay còn lại.
+            //
+            // `set_booking_rate_tx` không đọc và không ghi một mẩu trạng thái
+            // phòng nào: nó sửa `bookings.total_price`/`rate_overridden_at` rồi
+            // ghi một dòng chênh lệch vào folio. Khoá `booking:` đã đủ để xếp
+            // hàng với check_out / extend_stay / shorten_stay / change_room —
+            // cả bốn đều lấy `booking:` ở pha 1 kể từ #206 — nên khoá phòng ở
+            // đây không bảo vệ thêm bất cứ bất biến nào, mà chỉ chặn oan những
+            // lệnh thật sự thuộc về phòng (ví dụ `update_housekeeping`) và bắt
+            // ta đọc thêm một vòng `room_id` không ai dùng.
+            //
+            // Bỏ bớt khoá không tạo nguy cơ kẹt: thứ tự toàn cục là theo HẠNG
+            // (group < booking < folio < room), và cầm một tập con của một thứ
+            // tự toàn phần thì luôn an toàn. Bộ khoá này cũng khớp đúng thứ mà
+            // `set_booking_rate_initial_lock_keys_from_payload` đã khai lúc
+            // claim, nên `lock_keys_json` không đổi giữa hai bước.
+            move || async move {
+                let guard = crate::aggregate_locks::global_manager()
+                    .acquire([
+                        crate::aggregate_locks::booking_key(&booking_id_for_guard)?,
+                        crate::aggregate_locks::folio_key(&booking_id_for_guard)?,
+                    ])
+                    .await?;
+                let lock_keys = guard.keys().to_vec();
+
+                Ok(ResolvedWriteCommandGuard::new(guard, lock_keys))
+            },
             move |tx, _guard| {
                 Box::pin(async move {
                     let booking = set_booking_rate_tx(

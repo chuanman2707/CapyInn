@@ -19,7 +19,10 @@ npm run build
 cargo check --manifest-path src-tauri/Cargo.toml
 cargo test --manifest-path src-tauri/Cargo.toml
 cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings
+cargo fmt --manifest-path src-tauri/Cargo.toml -- --check
 ```
+
+These are the same commands the CI `build-test` job runs, in the same order.
 
 Expected: every command passes without requiring Telegram, OpenAI, MCP, gateway, watcher, or agent configuration.
 
