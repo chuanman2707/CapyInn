@@ -85,9 +85,6 @@ export function MainShell() {
   const assistantSettings = useAssistantStore((state) => state.settings);
   const toggleAssistant = useAssistantStore((state) => state.togglePanel);
   const refreshAssistantSettings = useAssistantStore((state) => state.refreshSettings);
-  useEffect(() => {
-    void refreshAssistantSettings();
-  }, [refreshAssistantSettings]);
 
   // Số khách đã đến trong 48h mà chưa nằm trong lô nào được đối chiếu khớp.
   // Con số này làm module hữu ích ngay từ trước khi ai bấm vào tab.
@@ -115,8 +112,19 @@ export function MainShell() {
     onExportCrashReport,
     gatewayRunning,
     gatewayRuntimeEnabled,
+    agentRuntimeEnabled,
     remoteCrashReportingEnabled,
   } = useRuntimeState();
+
+  // Cờ runtime là công tắc tắt của cả trợ lý, không phải chỉ của tab cài đặt.
+  // Cờ tắt thì không hỏi cài đặt (lệnh backend cũng từ chối), không hiện nút,
+  // không gắn panel — chủ nhà gỡ cờ là tính năng biến mất, đúng như tài liệu
+  // hứa. Xem `agent/assistant/config.rs::ensure_agent_runtime_enabled`.
+  useEffect(() => {
+    if (!agentRuntimeEnabled) return;
+    void refreshAssistantSettings();
+  }, [agentRuntimeEnabled, refreshAssistantSettings]);
+  const assistantAvailable = agentRuntimeEnabled && Boolean(assistantSettings?.gate.ready);
 
   const today = new Date().toLocaleDateString("vi-VN", {
     weekday: "long",
@@ -314,7 +322,7 @@ export function MainShell() {
                 {gatewayRunning ? "● MCP Gateway" : "○ Gateway Off"}
               </Badge>
             )}
-            {assistantSettings?.gate.ready && (
+            {assistantAvailable && (
               <Button
                 variant="ghost"
                 className="rounded-xl"
@@ -368,7 +376,7 @@ export function MainShell() {
         </div>
       </main>
 
-      <AssistantPanel />
+      {assistantAvailable && <AssistantPanel />}
 
       <CheckinSheet preSelectedRoomId={checkinRoomId ?? undefined} preSelectedNights={checkinNights ?? undefined} />
       <GroupCheckinSheet />

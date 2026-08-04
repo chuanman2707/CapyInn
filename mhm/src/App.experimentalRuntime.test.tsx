@@ -148,6 +148,55 @@ describe("App experimental runtime gates", () => {
     expect(listen).toHaveBeenCalledWith("mcp_reservation_created", expect.any(Function));
   });
 
+  // ─── Công tắc tắt của trợ lý quầy ───
+  //
+  // Gỡ CAPYINN_EXPERIMENTAL_AGENT_RUNTIME phải tắt cả tính năng, không chỉ ẩn
+  // tab cài đặt. Ẩn mỗi tab là trường hợp tệ nhất: panel vẫn gọi nhà cung cấp,
+  // vẫn đẩy dữ liệu khách lên cloud, mà chủ nhà không còn chỗ nào để tắt cái
+  // opt-in đang bật.
+
+  const READY_ASSISTANT_SETTINGS = {
+    config: { preset: "deep_seek", base_url: "https://api.deepseek.com/v1", model: "deepseek-chat" },
+    has_api_key: true,
+    cloud_data_opt_in: true,
+    gate: { ready: true, missing: [] },
+  };
+
+  it("cờ agent runtime tắt thì không có nút Trợ lý, dù cấu hình trợ lý đã đủ", async () => {
+    setupAuthenticatedShell();
+    setMockResponses({ get_assistant_settings: () => READY_ASSISTANT_SETTINGS });
+
+    render(<App />);
+
+    await waitFor(() => {
+      expect(screen.getByText("Overview")).toBeInTheDocument();
+    });
+
+    expect(screen.queryByRole("button", { name: /trợ lý/i })).not.toBeInTheDocument();
+    // Và shell không thèm hỏi cài đặt trợ lý: cờ tắt thì không có gì để hỏi.
+    // Backend cũng từ chối lệnh này (ensure_agent_runtime_enabled), nên đây là
+    // lớp thứ hai chứ không phải lớp duy nhất.
+    expect(invoke.mock.calls.some(([command]) => command === "get_assistant_settings")).toBe(false);
+  });
+
+  it("cờ agent runtime bật thì nút Trợ lý hiện lại", async () => {
+    setupAuthenticatedShell({
+      experimental_runtime_enabled: false,
+      gateway_runtime_enabled: false,
+      agent_runtime_enabled: true,
+      gateway_disabled_by_override: false,
+      agent_disabled_by_override: false,
+    });
+    setMockResponses({ get_assistant_settings: () => READY_ASSISTANT_SETTINGS });
+
+    render(<App />);
+
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: /trợ lý/i })).toBeInTheDocument();
+    });
+    expect(invoke.mock.calls.some(([command]) => command === "get_assistant_settings")).toBe(true);
+  });
+
   it("ignores gateway status responses from a disabled profile generation", async () => {
     setupAuthenticatedShell();
 
