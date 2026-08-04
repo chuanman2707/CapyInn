@@ -1,4 +1,5 @@
 use crate::{
+    agent::secrets::{AgentSecretKind, AgentSecretStore},
     app_error::{codes, CommandError, CommandResult},
     services::settings_store,
 };
@@ -7,6 +8,19 @@ use sqlx::{Pool, Sqlite};
 
 pub const ASSISTANT_CONFIG_SETTING: &str = "assistant_config";
 pub const ASSISTANT_CLOUD_DATA_OPT_IN_SETTING: &str = "assistant_cloud_data_opt_in";
+
+/// Bản sao trong database của câu hỏi "đã có khoá API chưa".
+///
+/// Không phải cache cho nhanh — là để **không đụng keychain lúc khởi động**.
+/// macOS hỏi mật khẩu keychain mỗi lần một binary lạ đọc một mục có sẵn, và
+/// bản dựng CapyInn ký `adhoc` nên mỗi lần build lại là một binary lạ: bấm
+/// "Always Allow" chỉ yên tới lần cài kế tiếp. Trước đây `load_settings` đọc
+/// keychain chỉ để biết có khoá hay chưa, mà `MainShell` gọi nó ngay khi mở
+/// app — thành ra lễ tân gặp hộp hỏi mật khẩu mỗi sáng.
+///
+/// Giá trị này ghi đúng hai chỗ: lúc nhập khoá và lúc xoá khoá. Keychain chỉ
+/// còn bị đọc khi thật sự cần chính cái khoá đó để gọi nhà cung cấp.
+pub const ASSISTANT_API_KEY_PRESENT_SETTING: &str = "assistant_api_key_present";
 
 pub const DEEPSEEK_BASE_URL: &str = "https://api.deepseek.com/v1/chat/completions";
 pub const DEEPSEEK_MODEL: &str = "deepseek-chat";
@@ -214,6 +228,59 @@ pub async fn set_assistant_cloud_data_opt_in(
     .map_err(write_settings_error)
 }
 
+/// `None` nghĩa là chưa từng ghi — khác hẳn `Some(false)` là "đã biết, không có
+/// khoá". Phân biệt được hai thứ đó là điều kiện để nạp một lần rồi thôi.
+pub async fn get_assistant_api_key_present(pool: &Pool<Sqlite>) -> CommandResult<Option<bool>> {
+    let value = settings_store::get_setting(pool, ASSISTANT_API_KEY_PRESENT_SETTING)
+        .await
+        .map_err(read_settings_error)?;
+
+    Ok(value.as_deref().map(|value| {
+        let normalized = value.trim().to_ascii_lowercase();
+        normalized == "true" || normalized == "1"
+    }))
+}
+
+pub async fn set_assistant_api_key_present(
+    pool: &Pool<Sqlite>,
+    present: bool,
+) -> CommandResult<()> {
+    settings_store::save_setting(
+        pool,
+        ASSISTANT_API_KEY_PRESENT_SETTING,
+        if present { "true" } else { "false" },
+    )
+    .await
+    .map_err(write_settings_error)
+}
+
+/// Trả lời "đã có khoá API chưa", đụng keychain **nhiều nhất một lần trong đời
+/// máy đó** — và không lần nào nữa sau đó.
+///
+/// Nhánh nạp tồn tại vì những máy đã nhập khoá trước bản vá này: keychain có
+/// khoá, database chưa có cờ. Nếu cứ thế trả `false` thì trợ lý tự tắt và chủ
+/// nhà phải đi nhập lại khoá mà không hiểu tại sao. Nạp một lần rồi ghi cờ,
+/// nên hộp hỏi mật khẩu xuất hiện đúng một lần cuối cùng.
+///
+/// Cờ có thể lệch thật nếu ai đó xoá mục trong Keychain Access: cờ nói có,
+/// keychain nói không. Chấp nhận có chủ ý — `assistant_turn` đọc khoá thật
+/// trước khi gọi nhà cung cấp và trả `AGENT_SECRET_MISSING`, tức lệch thì
+/// hỏng ở chỗ nhìn thấy được, không hỏng âm thầm.
+pub async fn resolve_assistant_api_key_present(
+    pool: &Pool<Sqlite>,
+    store: &dyn AgentSecretStore,
+) -> CommandResult<bool> {
+    if let Some(known) = get_assistant_api_key_present(pool).await? {
+        return Ok(known);
+    }
+
+    let present = store
+        .get_secret(AgentSecretKind::AssistantApiKey)?
+        .is_some();
+    set_assistant_api_key_present(pool, present).await?;
+    Ok(present)
+}
+
 fn invalid_input(message: &str) -> CommandError {
     CommandError::user(codes::VALIDATION_INVALID_INPUT, message)
 }
@@ -279,6 +346,115 @@ mod tests {
         save_assistant_config(&pool, &config).await.expect("save");
 
         assert_eq!(get_assistant_config(&pool).await.expect("read"), config);
+    }
+
+    /// Đếm số lần keychain bị đọc. Con số đó mới là thứ hai test dưới đây
+    /// canh — không phải giá trị trả về, mà là **có đụng keychain hay không**.
+    struct CountingSecretStore {
+        stored: Option<String>,
+        reads: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    impl AgentSecretStore for CountingSecretStore {
+        fn get_secret(&self, _kind: AgentSecretKind) -> CommandResult<Option<String>> {
+            self.reads.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok(self.stored.clone())
+        }
+
+        fn set_secret(&self, _kind: AgentSecretKind, _value: &str) -> CommandResult<()> {
+            Ok(())
+        }
+
+        fn clear_secret(&self, _kind: AgentSecretKind) -> CommandResult<()> {
+            Ok(())
+        }
+    }
+
+    fn counting_store(
+        stored: Option<&str>,
+    ) -> (
+        CountingSecretStore,
+        std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    ) {
+        let reads = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        (
+            CountingSecretStore {
+                stored: stored.map(str::to_string),
+                reads: std::sync::Arc::clone(&reads),
+            },
+            reads,
+        )
+    }
+
+    /// Mở app không được đụng keychain. Đây là cả lý do tồn tại của cờ này:
+    /// mỗi lần đọc keychain là một lần macOS có thể hỏi mật khẩu, và bản dựng
+    /// ký `adhoc` nên "Always Allow" không sống qua lần cài kế tiếp.
+    #[tokio::test]
+    async fn presence_lookup_never_touches_the_keychain_once_the_flag_is_written() {
+        let pool = test_pool().await;
+        set_assistant_api_key_present(&pool, true)
+            .await
+            .expect("ghi cờ");
+        let (store, reads) = counting_store(Some("khoa-that"));
+
+        for _ in 0..3 {
+            assert!(resolve_assistant_api_key_present(&pool, &store)
+                .await
+                .expect("đọc cờ"));
+        }
+
+        assert_eq!(
+            reads.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "database đã biết câu trả lời thì không được hỏi keychain lần nào"
+        );
+    }
+
+    /// Máy đã nhập khoá trước bản vá: keychain có, database chưa có cờ. Phải
+    /// nạp đúng một lần rồi thôi — nếu nạp mỗi lần thì bản vá này vô nghĩa,
+    /// còn nếu không nạp thì chủ nhà mất khoá đang dùng.
+    #[tokio::test]
+    async fn presence_lookup_seeds_from_the_keychain_exactly_once() {
+        let pool = test_pool().await;
+        let (store, reads) = counting_store(Some("khoa-cu"));
+
+        for _ in 0..3 {
+            assert!(resolve_assistant_api_key_present(&pool, &store)
+                .await
+                .expect("nạp rồi đọc cờ"));
+        }
+
+        assert_eq!(
+            reads.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "máy có khoá từ trước chỉ được hỏi mật khẩu đúng một lần cuối cùng"
+        );
+        assert_eq!(
+            get_assistant_api_key_present(&pool).await.expect("đọc cờ"),
+            Some(true),
+            "nạp xong phải ghi cờ, không thì lần sau lại hỏi"
+        );
+    }
+
+    /// Chưa từng nhập khoá cũng phải ghi cờ, không thì mỗi lần mở app lại đi
+    /// hỏi keychain một câu mà câu trả lời luôn là "không có".
+    #[tokio::test]
+    async fn presence_lookup_records_a_missing_key_too() {
+        let pool = test_pool().await;
+        let (store, reads) = counting_store(None);
+
+        assert!(!resolve_assistant_api_key_present(&pool, &store)
+            .await
+            .expect("nạp"));
+        assert!(!resolve_assistant_api_key_present(&pool, &store)
+            .await
+            .expect("đọc cờ"));
+
+        assert_eq!(reads.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert_eq!(
+            get_assistant_api_key_present(&pool).await.expect("đọc cờ"),
+            Some(false)
+        );
     }
 
     #[tokio::test]

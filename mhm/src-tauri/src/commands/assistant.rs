@@ -4,7 +4,8 @@ use crate::{
         assistant::{
             config::{
                 evaluate_assistant_gate, get_assistant_cloud_data_opt_in, get_assistant_config,
-                save_assistant_config, set_assistant_cloud_data_opt_in,
+                resolve_assistant_api_key_present, save_assistant_config,
+                set_assistant_api_key_present, set_assistant_cloud_data_opt_in,
                 validate_assistant_base_url, validate_assistant_model, AssistantConfig,
                 AssistantGateStatus, AssistantPreset,
             },
@@ -30,12 +31,14 @@ fn secret_store() -> KeychainSecretStore {
     KeychainSecretStore
 }
 
+/// Chạy mỗi lần mở app (`MainShell` gọi `refreshAssistantSettings` khi mount),
+/// nên **không được đọc keychain**. Xem `resolve_assistant_api_key_present`:
+/// câu trả lời nằm trong database, keychain chỉ bị đụng đúng một lần trên máy
+/// đã nhập khoá từ trước bản vá này.
 async fn load_settings(state: &State<'_, AppState>) -> CommandResult<AssistantSettings> {
     let config = get_assistant_config(&state.db).await?;
     let cloud_data_opt_in = get_assistant_cloud_data_opt_in(&state.db).await?;
-    let has_api_key = secret_store()
-        .get_secret(AgentSecretKind::AssistantApiKey)?
-        .is_some();
+    let has_api_key = resolve_assistant_api_key_present(&state.db, &secret_store()).await?;
     let gate = evaluate_assistant_gate(&config, has_api_key, cloud_data_opt_in);
 
     Ok(AssistantSettings {
@@ -99,6 +102,10 @@ pub async fn set_assistant_api_key(
         ));
     }
     secret_store().set_secret(AgentSecretKind::AssistantApiKey, trimmed)?;
+    // Ghi cờ SAU khi keychain nhận khoá. Ngược lại là nói dối: cờ báo có khoá
+    // trong khi keychain từ chối lưu, và trợ lý sẽ hiện panel rồi chết ở lượt
+    // chat đầu tiên.
+    set_assistant_api_key_present(&state.db, true).await?;
 
     load_settings(&state).await
 }
@@ -109,6 +116,7 @@ pub async fn clear_assistant_api_key(
 ) -> CommandResult<AssistantSettings> {
     let _admin = require_admin_user(get_user(&state))?;
     secret_store().clear_secret(AgentSecretKind::AssistantApiKey)?;
+    set_assistant_api_key_present(&state.db, false).await?;
     load_settings(&state).await
 }
 
@@ -136,11 +144,11 @@ pub async fn assistant_turn(
 
     let config = get_assistant_config(&state.db).await?;
     let opt_in = get_assistant_cloud_data_opt_in(&state.db).await?;
-    let api_key = secret_store().get_secret(AgentSecretKind::AssistantApiKey)?;
+    let has_api_key = resolve_assistant_api_key_present(&state.db, &secret_store()).await?;
 
     // Fail closed TRƯỚC khi dựng prompt. Không có prompt nào được tạo, không có
     // request nào bay ra khi cổng chưa mở.
-    let gate = evaluate_assistant_gate(&config, api_key.is_some(), opt_in);
+    let gate = evaluate_assistant_gate(&config, has_api_key, opt_in);
     if !gate.ready {
         if !opt_in {
             return Err(CommandError::user(
@@ -154,7 +162,12 @@ pub async fn assistant_turn(
         ));
     }
 
-    let api_key = api_key
+    // Chỗ duy nhất còn đọc keychain trong luồng thường — và chỉ tới đây, khi
+    // đã chắc là sắp gọi nhà cung cấp thật. Nếu ai đó xoá mục trong Keychain
+    // Access thì cờ trong database lệch, và lệch sẽ lộ ra đúng ở đây thay vì
+    // hỏng âm thầm.
+    let api_key = secret_store()
+        .get_secret(AgentSecretKind::AssistantApiKey)?
         .ok_or_else(|| CommandError::user(codes::AGENT_SECRET_MISSING, "Chưa có khoá API."))?;
     let now_local_date = chrono::Local::now().format("%Y-%m-%d").to_string();
     let provider = AssistantProviderClient::new(build_assistant_provider_client()?);
