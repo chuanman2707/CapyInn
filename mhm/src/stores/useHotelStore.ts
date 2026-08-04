@@ -61,6 +61,9 @@ interface HotelStore {
     finalTotal: MoneyVnd,
   ) => Promise<void>;
   extendStay: (bookingId: string) => Promise<void>;
+  shortenStay: (bookingId: string) => Promise<void>;
+  setBookingRate: (bookingId: string, ratePerNight: number) => Promise<void>;
+  updateBookingNotes: (bookingId: string, notes: string) => Promise<void>;
   setRoomChangeOpen: (open: boolean, bookingId?: string | null) => void;
   fetchRoomChangeOptions: (bookingId: string) => Promise<RoomChangeOptions>;
   changeRoom: (bookingId: string, newRoomId: string, keepPrice: boolean, reason?: string) => Promise<void>;
@@ -237,6 +240,68 @@ export const useHotelStore = create<HotelStore>((set, get) => {
         get().markDashboardDataChanged();
       } catch (err) {
         console.error("extend_stay error:", err);
+        throw err;
+      } finally {
+        endAction();
+      }
+    },
+
+    shortenStay: async (bookingId) => {
+      beginAction();
+      try {
+        const correlationId = createCorrelationId();
+        await invokeWriteCommand(
+          "shorten_stay",
+          { bookingId },
+          {
+            correlationId,
+            monitoringContext: {
+              operation: "remove_one_night",
+            },
+          },
+        );
+        await get().fetchRooms();
+        await get().fetchStats();
+        get().markDashboardDataChanged();
+      } catch (err) {
+        console.error("shorten_stay error:", err);
+        throw err;
+      } finally {
+        endAction();
+      }
+    },
+
+    setBookingRate: async (bookingId, ratePerNight) => {
+      beginAction();
+      try {
+        const correlationId = createCorrelationId();
+        await invokeWriteCommand(
+          "set_booking_rate",
+          { bookingId, ratePerNight: assertNonNegativeMoneyVnd(ratePerNight, "ratePerNight") },
+          {
+            correlationId,
+            monitoringContext: {
+              operation: "set_booking_rate",
+            },
+          },
+        );
+        await get().fetchRooms();
+        await get().fetchStats();
+        get().markDashboardDataChanged();
+      } catch (err) {
+        console.error("set_booking_rate error:", err);
+        throw err;
+      } finally {
+        endAction();
+      }
+    },
+
+    updateBookingNotes: async (bookingId, notes) => {
+      beginAction();
+      try {
+        await invokeCommand("update_booking_notes", { bookingId, notes: notes || null });
+      } catch (err) {
+        console.error("update_booking_notes error:", err);
         throw err;
       } finally {
         endAction();

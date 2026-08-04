@@ -71,6 +71,8 @@ export interface Booking {
   source?: BookingSource | null;
   notes?: string;
   created_at: string;
+  /** Thời điểm gần nhất giá/đêm bị lễ tân đổi tay; null nếu chưa từng đổi. */
+  rate_overridden_at?: string | null;
 }
 
 export interface RoomChangeOption {

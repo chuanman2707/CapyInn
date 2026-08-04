@@ -80,6 +80,7 @@ pub async fn test_pool() -> Pool<Sqlite> {
             is_audited INTEGER NOT NULL DEFAULT 0,
             pricing_snapshot TEXT,
             guests INTEGER,
+            rate_overridden_at TEXT,
             created_at TEXT NOT NULL
         )",
     )

@@ -562,10 +562,11 @@ async fn the_migrated_special_dates_table_matches_what_the_code_assumes() {
 /// Dây bẫy số hiệu schema. Con số dưới đây cố ý viết cứng chứ không đọc
 /// `LATEST_SCHEMA_VERSION` — đọc hằng số thì test luôn xanh và chẳng canh gì cả.
 ///
-/// Hợp đồng nó canh: **số hiệu này đã được dời có chủ đích, hiện là 25.** Bản
+/// Hợp đồng nó canh: **số hiệu này đã được dời có chủ đích, hiện là 26.** Bản
 /// thân tính năng mùa cao điểm không cần migration riêng (nó chỉ ghi vào
 /// `special_dates`, có từ v3); con số ở đây phản ánh migration mới nhất của cả
-/// repo, hiện là `migrate_v25_invoice_settlement_note`.
+/// repo, hiện là `migrate_v26_booking_rate_override` (25 là
+/// `migrate_v25_invoice_settlement_note` đến từ main).
 ///
 /// Nếu test này đỏ, nghĩa là ai đó vừa thêm migration. **Đừng tăng số này lên
 /// một rồi đi tiếp.** Số hiệu bị trùng là lỗi im lặng và chết người: gate
@@ -592,7 +593,7 @@ async fn the_schema_version_is_the_one_this_branch_deliberately_claimed() {
         .expect("đọc schema_version");
 
     assert_eq!(
-        version, 25,
+        version, 26,
         "một migration mới vừa xuất hiện — quét mọi ref và đọc DB thật để chắc \
          số hiệu chưa bị nhánh nào chiếm, rồi mới nâng con số này"
     );

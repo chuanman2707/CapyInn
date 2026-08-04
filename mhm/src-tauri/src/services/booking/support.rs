@@ -60,6 +60,36 @@ pub async fn lookup_booking_room_id(
         .ok_or_else(|| BookingError::not_found(format!("Không tìm thấy booking {}", booking_id)))
 }
 
+/// Đọc `expected_checkout` NGOÀI transaction — dùng để chốt giá trị "trước khi
+/// khoá" cho optimistic-concurrency guard của `shorten_stay_tx`. Không có bước
+/// đọc riêng này, guard `AND expected_checkout = ?` ở cuối UPDATE sẽ so một giá
+/// trị với chính nó (đọc lại trong CÙNG transaction ngay trước khi ghi), nên
+/// không bao giờ có thể lệch — xem ghi chú trong `shorten_stay_tx`.
+pub async fn lookup_booking_expected_checkout(
+    pool: &Pool<Sqlite>,
+    booking_id: &str,
+) -> BookingResult<String> {
+    sqlx::query_scalar::<_, String>("SELECT expected_checkout FROM bookings WHERE id = ?")
+        .bind(booking_id)
+        .fetch_optional(pool)
+        .await?
+        .ok_or_else(|| BookingError::not_found(format!("Không tìm thấy booking {}", booking_id)))
+}
+
+/// Đọc `total_price` NGOÀI transaction — cùng lý do với
+/// `lookup_booking_expected_checkout`, áp dụng cho guard của `set_booking_rate_tx`.
+pub async fn lookup_booking_total_price(
+    pool: &Pool<Sqlite>,
+    booking_id: &str,
+) -> BookingResult<MoneyVnd> {
+    let row = sqlx::query("SELECT total_price FROM bookings WHERE id = ?")
+        .bind(booking_id)
+        .fetch_optional(pool)
+        .await?
+        .ok_or_else(|| BookingError::not_found(format!("Không tìm thấy booking {}", booking_id)))?;
+    Ok(read_money_vnd_or_zero(&row, "total_price"))
+}
+
 pub fn rfc3339_now() -> String {
     Local::now().to_rfc3339()
 }
@@ -196,7 +226,7 @@ where
     let row = sqlx::query(
         "SELECT id, room_id, primary_guest_id, check_in_at, expected_checkout,
                 actual_checkout, nights, total_price, paid_amount, status,
-                source, notes, created_at
+                source, notes, created_at, rate_overridden_at
          FROM bookings WHERE id = ?",
     )
     .bind(booking_id)
@@ -219,6 +249,7 @@ where
         source: row.get("source"),
         notes: row.get("notes"),
         created_at: row.get("created_at"),
+        rate_overridden_at: row.get("rate_overridden_at"),
     })
 }
 

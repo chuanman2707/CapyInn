@@ -17,7 +17,7 @@ export type MonitoringContext =
       settlement_mode: string;
     }
   | {
-      operation: "add_one_night";
+      operation: "add_one_night" | "remove_one_night" | "set_booking_rate";
     }
   | {
       operation: "change_room";
@@ -39,6 +39,8 @@ const MONITORED_COMMANDS = new Set([
   "create_reservation",
   "extend_stay",
   "run_night_audit",
+  "shorten_stay",
+  "set_booking_rate",
 ]);
 
 function isMonitoredCommand(command: string): boolean {

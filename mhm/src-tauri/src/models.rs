@@ -150,6 +150,9 @@ pub struct Booking {
     pub source: Option<String>,
     pub notes: Option<String>,
     pub created_at: String,
+    /// Thời điểm gần nhất giá/đêm bị đổi tay qua `set_booking_rate`. `None`
+    /// nghĩa là tổng tiền vẫn là giá tính bình thường từ pricing engine.
+    pub rate_overridden_at: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -801,6 +804,7 @@ mod tests {
             source: None,
             notes: None,
             created_at: "2026-04-30T14:00:00+07:00".to_string(),
+            rate_overridden_at: None,
         };
 
         assert_money_vnd(booking.total_price);

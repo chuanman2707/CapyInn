@@ -43,6 +43,7 @@ mod prelude {
 }
 
 mod backfill;
+mod booking_edits;
 mod checkout_settlement;
 mod extend_stay;
 mod folio;
@@ -58,5 +59,6 @@ mod reporting;
 mod reservation_idempotency;
 mod reservations;
 mod room_change;
+mod shorten_stay;
 mod stay_error_mapping;
 mod stays;

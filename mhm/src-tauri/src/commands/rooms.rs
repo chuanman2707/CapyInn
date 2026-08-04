@@ -76,6 +76,13 @@ fn extend_stay_failure_context(booking_id: &str) -> Value {
     })
 }
 
+fn shorten_stay_failure_context(booking_id: &str) -> Value {
+    json!({
+        "booking_id": booking_id,
+        "operation": "remove_one_night",
+    })
+}
+
 fn change_room_failure_context(booking_id: &str, new_room_id: &str) -> Value {
     json!({
         "booking_id": booking_id,
@@ -370,6 +377,65 @@ pub async fn extend_stay(
     Ok(booking)
 }
 
+// ─── Shorten Stay ───
+
+#[tauri::command]
+pub async fn shorten_stay(
+    state: State<'_, AppState>,
+    booking_id: String,
+    app: tauri::AppHandle,
+    correlation_id: Option<String>,
+    idempotency_key: String,
+) -> CommandResult<Booking> {
+    let effective_correlation_id = normalize_correlation_id(correlation_id);
+    let error_context = shorten_stay_failure_context(&booking_id);
+    let actor_id = get_user_id(&state)
+        .ok_or_else(|| CommandError::user(codes::AUTH_NOT_AUTHENTICATED, "Chưa đăng nhập"))?;
+    let mut write_command_context = WriteCommandContext::for_scoped_command(
+        effective_correlation_id.value.clone(),
+        idempotency_key,
+        "shorten_stay",
+    )?;
+    write_command_context.actor_id = Some(actor_id);
+    log::info!(
+        "shorten_stay start correlation_id={} source={:?} booking_id={}",
+        effective_correlation_id.value,
+        effective_correlation_id.source,
+        booking_id
+    );
+    let result =
+        stay_lifecycle::shorten_stay_idempotent(&state.db, &write_command_context, &booking_id)
+            .await
+            .inspect_err(|command_error| {
+                record_command_failure_with_db_group(
+                    "shorten_stay",
+                    command_error,
+                    &effective_correlation_id.value,
+                    None,
+                    error_context.clone(),
+                );
+            })?;
+    let booking: Booking = serde_json::from_value(result.response).map_err(|error| {
+        CommandError::system(
+            codes::SYSTEM_INTERNAL_ERROR,
+            format!("Invalid shorten_stay idempotent response: {error}"),
+        )
+        .with_request_id(write_command_context.request_id.clone())
+    })?;
+
+    log::info!(
+        "shorten_stay success correlation_id={} source={:?} booking_id={} room_id={}",
+        effective_correlation_id.value,
+        effective_correlation_id.source,
+        booking.id,
+        booking.room_id
+    );
+
+    emit_db_update(&app, "rooms");
+
+    Ok(booking)
+}
+
 // ─── Change Room ───
 
 #[tauri::command]
@@ -446,6 +512,111 @@ pub async fn change_room(
         booking.id,
         booking.room_id
     );
+
+    emit_db_update(&app, "rooms");
+
+    Ok(booking)
+}
+
+// ─── Set Booking Rate ───
+
+fn set_booking_rate_failure_context(booking_id: &str) -> Value {
+    json!({
+        "booking_id": booking_id,
+        "operation": "set_booking_rate",
+    })
+}
+
+#[tauri::command]
+pub async fn set_booking_rate(
+    state: State<'_, AppState>,
+    booking_id: String,
+    rate_per_night: i64,
+    app: tauri::AppHandle,
+    correlation_id: Option<String>,
+    idempotency_key: String,
+) -> CommandResult<Booking> {
+    let effective_correlation_id = normalize_correlation_id(correlation_id);
+    let error_context = set_booking_rate_failure_context(&booking_id);
+    let actor_id = get_user_id(&state)
+        .ok_or_else(|| CommandError::user(codes::AUTH_NOT_AUTHENTICATED, "Chưa đăng nhập"))?;
+    let mut write_command_context = WriteCommandContext::for_scoped_command(
+        effective_correlation_id.value.clone(),
+        idempotency_key,
+        "set_booking_rate",
+    )?;
+    write_command_context.actor_id = Some(actor_id);
+    log::info!(
+        "set_booking_rate start correlation_id={} booking_id={}",
+        effective_correlation_id.value,
+        booking_id
+    );
+    let result = stay_lifecycle::set_booking_rate_idempotent(
+        &state.db,
+        &write_command_context,
+        &booking_id,
+        rate_per_night,
+    )
+    .await
+    .inspect_err(|command_error| {
+        record_command_failure_with_db_group(
+            "set_booking_rate",
+            command_error,
+            &effective_correlation_id.value,
+            None,
+            error_context.clone(),
+        );
+    })?;
+    let booking: Booking = serde_json::from_value(result.response).map_err(|error| {
+        CommandError::system(
+            codes::SYSTEM_INTERNAL_ERROR,
+            format!("Invalid set_booking_rate idempotent response: {error}"),
+        )
+        .with_request_id(write_command_context.request_id.clone())
+    })?;
+
+    log::info!(
+        "set_booking_rate success correlation_id={} booking_id={}",
+        effective_correlation_id.value,
+        booking.id
+    );
+
+    emit_db_update(&app, "rooms");
+
+    Ok(booking)
+}
+
+// ─── Update Booking Notes ───
+
+fn require_update_booking_notes_actor_id(user_id: Option<String>) -> CommandResult<String> {
+    user_id.ok_or_else(|| CommandError::user(codes::AUTH_NOT_AUTHENTICATED, "Chưa đăng nhập"))
+}
+
+#[tauri::command]
+pub async fn update_booking_notes(
+    state: State<'_, AppState>,
+    booking_id: String,
+    notes: Option<String>,
+    app: tauri::AppHandle,
+) -> CommandResult<Booking> {
+    let actor_id = require_update_booking_notes_actor_id(get_user_id(&state))?;
+    let mut write_command_context = WriteCommandContext::new_internal("update_booking_notes");
+    write_command_context.actor_id = Some(actor_id);
+
+    let result = stay_lifecycle::update_booking_notes_idempotent(
+        &state.db,
+        &write_command_context,
+        &booking_id,
+        notes,
+    )
+    .await?;
+    let booking: Booking = serde_json::from_value(result.response).map_err(|error| {
+        CommandError::system(
+            codes::SYSTEM_INTERNAL_ERROR,
+            format!("Invalid update_booking_notes idempotent response: {error}"),
+        )
+        .with_request_id(write_command_context.request_id.clone())
+    })?;
 
     emit_db_update(&app, "rooms");
 
@@ -577,8 +748,8 @@ pub async fn scan_image(path: String) -> Result<crate::ocr::CccdInfo, String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        check_in_failure_context, check_out_failure_context, should_request_checkout_backup,
-        validate_create_expense_request,
+        check_in_failure_context, check_out_failure_context, require_update_booking_notes_actor_id,
+        should_request_checkout_backup, validate_create_expense_request,
     };
     use crate::app_error::{
         codes, correlation_context, log_system_error, record_command_failure_with_db_group,
@@ -607,6 +778,21 @@ mod tests {
             Some(value) => std::env::set_var("CAPYINN_RUNTIME_ROOT", value),
             None => std::env::remove_var("CAPYINN_RUNTIME_ROOT"),
         }
+    }
+
+    #[test]
+    fn update_booking_notes_requires_authenticated_actor() {
+        let error = require_update_booking_notes_actor_id(None).expect_err("missing user rejects");
+
+        assert_eq!(error.code, codes::AUTH_NOT_AUTHENTICATED);
+    }
+
+    #[test]
+    fn update_booking_notes_accepts_authenticated_actor() {
+        let actor_id = require_update_booking_notes_actor_id(Some("user-1".to_string()))
+            .expect("authenticated user is accepted");
+
+        assert_eq!(actor_id, "user-1");
     }
 
     #[test]

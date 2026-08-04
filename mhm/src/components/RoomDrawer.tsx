@@ -2,12 +2,9 @@ import { useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import {
     ArrowRightLeft,
-    CalendarDays,
-    CalendarPlus,
     Check,
     CheckCircle2,
     Clipboard,
-    FileText,
     LogOut,
     Play,
     Sparkles,
@@ -16,8 +13,10 @@ import { toast } from "sonner";
 
 import InvoiceDialog from "@/components/InvoiceDialog";
 import CheckoutSettlementModal from "@/components/CheckoutSettlementModal";
+import BookingSummary from "@/components/shared/BookingSummary";
 import InfoItem from "@/components/shared/InfoItem";
 import ActionBtn from "@/components/shared/ActionBtn";
+import NightsStepper from "@/components/shared/NightsStepper";
 import RoomGuestsSection from "@/components/shared/RoomGuestsSection";
 import Section from "@/components/shared/Section";
 import StatusBadge from "@/components/shared/StatusBadge";
@@ -25,9 +24,8 @@ import SlideDrawer from "@/components/shared/SlideDrawer";
 import { Button } from "@/components/ui/button";
 import { useInvoiceDialog } from "@/hooks/useInvoiceDialog";
 import { formatAppError } from "@/lib/appError";
-import { isFullySettled } from "@/lib/bookingBalance";
 import { getRoomTypeLabel } from "@/lib/constants";
-import { fmtDateShort, fmtMoney } from "@/lib/format";
+import { fmtMoney } from "@/lib/format";
 import { nightlyRateDisplay } from "@/lib/roomTypeRate";
 import { useHotelStore } from "@/stores/useHotelStore";
 import type { CheckoutSettlementPayload, RoomWithBooking, HousekeepingTask } from "@/types";
@@ -42,12 +40,15 @@ export default function RoomDrawer({ open, onClose, roomId }: RoomDrawerProps) {
     const {
         checkOut,
         extendStay,
+        shortenStay,
         getStayInfoText,
         setCheckinOpen,
         setRoomChangeOpen,
         fetchRooms,
         updateHousekeeping,
         roomTypeRates,
+        setBookingRate,
+        updateBookingNotes,
     } = useHotelStore();
 
     const [roomDetail, setRoomDetail] = useState<RoomWithBooking | null>(null);
@@ -55,6 +56,7 @@ export default function RoomDrawer({ open, onClose, roomId }: RoomDrawerProps) {
     const [showCheckout, setShowCheckout] = useState(false);
     const [copied, setCopied] = useState(false);
     const [fetching, setFetching] = useState(false);
+    const [nightsBusy, setNightsBusy] = useState(false);
     const { invoiceOpen, invoiceData, invoiceLoading, openInvoice, closeInvoice } = useInvoiceDialog();
 
     useEffect(() => {
@@ -101,6 +103,49 @@ export default function RoomDrawer({ open, onClose, roomId }: RoomDrawerProps) {
     // Giá loại phòng từ engine, không phải `room.base_price`.
     const nightlyRate = nightlyRateDisplay(roomTypeRates, room.type);
 
+    // So sánh phải cắt về đầu ngày ở cả hai vế. Backend chặn khi
+    // `checkout − 1 ngày < hôm nay`, tức tương đương `checkout ≤ hôm nay`;
+    // nên nút chỉ mở khi checkout thực sự sau hôm nay. So thẳng hai đối
+    // tượng Date chưa cắt giờ sẽ sai: checkout hôm nay lúc 12:00 vẫn lớn
+    // hơn 00:00 hôm nay, nút sẽ mở trong khi backend từ chối.
+    const checkoutDay = booking ? new Date(booking.expected_checkout) : null;
+    checkoutDay?.setHours(0, 0, 0, 0);
+    const todayStart = new Date();
+    todayStart.setHours(0, 0, 0, 0);
+
+    // Đảo ngược quyết định trước đó: rút đêm từng được phép đưa tổng tiền
+    // xuống dưới số khách đã trả. Backend (shorten_stay_tx) giờ từ chối thẳng
+    // ca đó — khoá luôn nút ở đây thay vì để người dùng bấm rồi nhận lỗi.
+    // Công thức tiền hoàn 1 đêm phải khớp CHÍNH XÁC công thức backend dùng
+    // (chia nguyên, làm tròn xuống): `current_total / current_nights`.
+    const nightCredit = booking ? Math.floor(booking.total_price / booking.nights) : 0;
+    const totalAfterShorten = booking ? booking.total_price - nightCredit : 0;
+    const wouldUnderpayAfterShorten = Boolean(
+        booking && totalAfterShorten < booking.paid_amount,
+    );
+
+    const canShorten = Boolean(
+        booking &&
+            booking.nights > 1 &&
+            checkoutDay !== null &&
+            checkoutDay.getTime() > todayStart.getTime() &&
+            !wouldUnderpayAfterShorten,
+    );
+    // Thứ tự ưu tiên khi nhiều điều kiện cùng chặn: cấu trúc (số đêm tối
+    // thiểu, đêm cuối đã tới) đi trước lý do tiền — hai cái đầu là bất khả
+    // thi tuyệt đối bất kể tiền nong, nên tooltip nên nói lý do "gốc" hơn.
+    const shortenDisabledReason =
+        booking && booking.nights <= 1
+            ? "Lưu trú tối thiểu 1 đêm"
+            : checkoutDay !== null && checkoutDay.getTime() <= todayStart.getTime()
+                ? "Đêm cuối là hôm nay — dùng Check-out"
+                : `Khách đã thanh toán ${fmtMoney(booking?.paid_amount ?? 0)}, cao hơn tổng tiền sau khi rút đêm (${fmtMoney(totalAfterShorten)}) — cần xử lý hoàn tiền trước`;
+
+    const refreshRoomDetail = async () => {
+        const detail = await invoke<RoomWithBooking>("get_room_detail", { roomId: room.id });
+        setRoomDetail(detail);
+    };
+
     const handleCopyStayInfo = async () => {
         if (!booking) return;
         const text = await getStayInfoText(booking.id);
@@ -125,20 +170,70 @@ export default function RoomDrawer({ open, onClose, roomId }: RoomDrawerProps) {
     };
 
     const handleExtend = async () => {
-        if (!booking) return;
+        if (!booking || nightsBusy) return;
+        setNightsBusy(true);
         try {
             await extendStay(booking.id);
-            const detail = await invoke<RoomWithBooking>("get_room_detail", { roomId: room.id });
-            setRoomDetail(detail);
+            await refreshRoomDetail();
             toast.success("Đã gia hạn thêm 1 đêm!");
         } catch (err) {
-            toast.error("Lỗi gia hạn: " + err);
+            toast.error("Lỗi gia hạn: " + formatAppError(err));
+        } finally {
+            setNightsBusy(false);
+        }
+    };
+
+    const handleShorten = async () => {
+        if (!booking || nightsBusy) return;
+        setNightsBusy(true);
+        try {
+            await shortenStay(booking.id);
+            // Gọi invoke trực tiếp thay vì dùng lại refreshRoomDetail(): hàm đó
+            // set state rồi trả về void, còn toast bên dưới cần chính con số
+            // vừa refetch (đêm còn lại, tổng tiền mới). State setter không đọc
+            // lại được trong cùng tick, nên nếu tái dùng refreshRoomDetail(),
+            // toast sẽ hiện số liệu cũ trước khi rút đêm — sai mà không lỗi rõ.
+            const detail = await invoke<RoomWithBooking>("get_room_detail", {
+                roomId: room.id,
+            });
+            setRoomDetail(detail);
+            const nights = detail.booking?.nights ?? 0;
+            const total = detail.booking?.total_price ?? 0;
+            toast.success(`Đã rút 1 đêm — còn ${nights} đêm, ${fmtMoney(total)}`);
+        } catch (err) {
+            toast.error("Lỗi rút đêm: " + formatAppError(err));
+        } finally {
+            setNightsBusy(false);
         }
     };
 
     const handleInvoice = async () => {
         if (!booking) return;
         await openInvoice(booking.id);
+    };
+
+    const handleSaveRate = async (ratePerNight: number) => {
+        if (!booking) return;
+        try {
+            await setBookingRate(booking.id, ratePerNight);
+            await refreshRoomDetail();
+            toast.success("Đã cập nhật giá phòng!");
+        } catch (err) {
+            toast.error("Lỗi sửa giá: " + formatAppError(err));
+            throw err;
+        }
+    };
+
+    const handleSaveNotes = async (notes: string) => {
+        if (!booking) return;
+        try {
+            await updateBookingNotes(booking.id, notes);
+            await refreshRoomDetail();
+            toast.success("Đã lưu ghi chú!");
+        } catch (err) {
+            toast.error("Lỗi lưu ghi chú: " + formatAppError(err));
+            throw err;
+        }
     };
 
     const handleHousekeepingUpdate = async (newStatus: string) => {
@@ -175,35 +270,14 @@ export default function RoomDrawer({ open, onClose, roomId }: RoomDrawerProps) {
 
     const guestSection = <RoomGuestsSection guests={guests} mode="sheet" />;
 
-    const paymentStatusClass =
-        booking && isFullySettled(booking.total_price, booking.paid_amount)
-            ? "text-emerald-600"
-            : "text-orange-600";
-
     const bookingSection = booking ? (
-        <Section icon={CalendarDays} title="Booking hiện tại" className="bg-slate-50 rounded-2xl p-5 space-y-3">
-            <div className="grid grid-cols-2 gap-3">
-                <InfoItem label="Check-in" value={fmtDateShort(booking.check_in_at)} />
-                <InfoItem label="Checkout" value={fmtDateShort(booking.expected_checkout)} />
-                <InfoItem label="Số đêm" value={booking.nights} />
-                <InfoItem label="Tổng tiền" value={fmtMoney(booking.total_price)} />
-            </div>
-            <div className="flex items-center justify-between pt-2 border-t border-slate-200">
-                <span className="text-sm font-medium text-brand-muted">Đã thanh toán</span>
-                <span className={"text-sm font-bold " + paymentStatusClass}>
-                    {fmtMoney(booking.paid_amount)} / {fmtMoney(booking.total_price)}
-                </span>
-            </div>
-            <Button
-                variant="outline"
-                className="w-full mt-3 gap-2 text-sm font-semibold cursor-pointer"
-                onClick={handleInvoice}
-                disabled={invoiceLoading}
-            >
-                <FileText className="w-4 h-4" />
-                {invoiceLoading ? "Đang tạo..." : "📄 Invoice"}
-            </Button>
-        </Section>
+        <BookingSummary
+            booking={booking}
+            onInvoice={handleInvoice}
+            invoiceLoading={invoiceLoading}
+            onSaveRate={handleSaveRate}
+            onSaveNotes={handleSaveNotes}
+        />
     ) : null;
 
     const getHkBadgeClass = () => {
@@ -269,7 +343,15 @@ export default function RoomDrawer({ open, onClose, roomId }: RoomDrawerProps) {
                     onClick={handleCopyStayInfo}
                     variant="ghost"
                 />
-                <ActionBtn icon={CalendarPlus} label="Extend +1 đêm" onClick={handleExtend} variant="blue" />
+                {/* Nút "Extend +1 đêm" cũ đã thành cặp −1/+1 trong
+                    NightsStepper; nó vẫn chiếm đúng một ô lưới như trước. */}
+                <NightsStepper
+                    canShorten={canShorten}
+                    shortenDisabledReason={shortenDisabledReason}
+                    busy={nightsBusy}
+                    onShorten={handleShorten}
+                    onExtend={handleExtend}
+                />
                 {/* 3 nút trong lưới 2 cột — nút cuối trải hết chiều ngang thay
                     vì bị bỏ mồ côi một cột khi số nút lẻ. */}
                 <ActionBtn

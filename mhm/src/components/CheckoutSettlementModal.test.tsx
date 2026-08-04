@@ -140,4 +140,71 @@ describe("CheckoutSettlementModal", () => {
         expect(screen.getByText(/refund/i)).toBeInTheDocument();
         expect(screen.getByRole("button", { name: "Xác nhận" })).toBeDisabled();
     });
+
+    it("defaults to the booked-nights mode for a booking with a manually-set rate, and explains why", async () => {
+        vi.mocked(invoke).mockResolvedValueOnce({
+            settlement_mode: "booked_nights",
+            settled_nights: 5,
+            recommended_total: 2500000,
+            explanation: "Thanh toán theo số đêm đã đặt: 5 đêm",
+        });
+
+        render(
+            <CheckoutSettlementModal
+                open
+                roomId="101"
+                booking={{ ...booking, rate_overridden_at: "2026-07-30T09:00:00+07:00" }}
+                onClose={vi.fn()}
+                onConfirm={vi.fn()}
+            />
+        );
+
+        // Cách tính được chọn ngay từ bản render đầu tiên — không cần đợi
+        // fetch — nên request đầu tiên tới backend đã mang settlement_mode
+        // đúng, không phải "actual_nights" rồi phải sửa lại sau.
+        expect(invoke).toHaveBeenCalledWith("preview_checkout_settlement", {
+            req: { booking_id: "B500", settlement_mode: "booked_nights" },
+        });
+        expect(screen.getByRole("button", { name: "Đã đặt" })).toHaveClass("border-blue-500");
+
+        await waitFor(() => {
+            expect(
+                screen.getByText("Thanh toán theo số đêm đã đặt: 5 đêm")
+            ).toBeInTheDocument();
+        });
+        expect(
+            screen.getByText(/đã được đổi giá thủ công/)
+        ).toBeInTheDocument();
+    });
+
+    it("defaults to the actual-nights mode and shows no override explanation for a normally-priced booking", async () => {
+        vi.mocked(invoke).mockResolvedValueOnce({
+            settlement_mode: "actual_nights",
+            settled_nights: 1,
+            recommended_total: 500000,
+            explanation: "Thanh toán theo số đêm thực tế: 1 đêm",
+        });
+
+        render(
+            <CheckoutSettlementModal
+                open
+                roomId="101"
+                booking={booking}
+                onClose={vi.fn()}
+                onConfirm={vi.fn()}
+            />
+        );
+
+        expect(invoke).toHaveBeenCalledWith("preview_checkout_settlement", {
+            req: { booking_id: "B500", settlement_mode: "actual_nights" },
+        });
+        expect(screen.getByRole("button", { name: "Thực tế" })).toHaveClass("border-blue-500");
+
+        await waitFor(() => {
+            expect(
+                screen.getByText("Thanh toán theo số đêm thực tế: 1 đêm")
+            ).toBeInTheDocument();
+        });
+        expect(screen.queryByText(/đã được đổi giá thủ công/)).not.toBeInTheDocument();
+    });
 });
