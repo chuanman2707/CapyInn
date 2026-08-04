@@ -40,6 +40,12 @@ export function AssistantSection() {
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
 
+  // apply() nạp cả bốn field — settings lẫn preset/baseUrl/model — từ phản hồi
+  // server. Chỉ hai chỗ được phép gọi nó: lần tải đầu tiên và khi "Lưu cấu
+  // hình" thành công. Các thao tác khác (lưu khoá, xoá khoá, bật/tắt công tắc
+  // cloud) chỉ đổi phần settings tương ứng của chúng ở backend — nếu cũng gọi
+  // apply() thì sẽ ghi đè baseUrl/model đang gõ dở bằng giá trị đã lưu trước
+  // đó, xoá mất sửa đổi chưa lưu của chủ khách sạn mà không hề cảnh báo.
   const apply = (next: AssistantSettings) => {
     setSettings(next);
     setPreset(next.config.preset);
@@ -56,11 +62,21 @@ export function AssistantSection() {
       .catch((caught) => setError(describeError(caught)));
   }, []);
 
-  const run = async (task: () => Promise<AssistantSettings>) => {
+  const run = async (
+    task: () => Promise<AssistantSettings>,
+    options: { syncFields?: boolean } = {},
+  ) => {
     setBusy(true);
     setError(null);
     try {
-      apply(await task());
+      const next = await task();
+      if (options.syncFields) {
+        apply(next);
+      } else {
+        // Chỉ cập nhật settings (has_api_key, cloud_data_opt_in, gate) — xem
+        // giải thích ở apply() phía trên.
+        setSettings(next);
+      }
       // Panel trợ lý ở cột thứ ba của shell đọc cổng từ useAssistantStore, còn
       // màn hình này giữ bản sao cục bộ riêng. Store chỉ được nạp đúng một lần
       // lúc MainShell mount, nên không bơm lại ở đây thì chủ khách sạn lưu khoá
@@ -131,12 +147,14 @@ export function AssistantSection() {
       <Button
         disabled={busy}
         onClick={() =>
-          run(() =>
-            invokeWriteCommand<AssistantSettings>("set_assistant_settings", {
-              preset,
-              baseUrl,
-              model,
-            }),
+          run(
+            () =>
+              invokeWriteCommand<AssistantSettings>("set_assistant_settings", {
+                preset,
+                baseUrl,
+                model,
+              }),
+            { syncFields: true },
           )
         }
       >
@@ -189,7 +207,6 @@ export function AssistantSection() {
           <input
             type="checkbox"
             className="mt-1"
-            aria-label="Đồng ý gửi dữ liệu khách lên máy chủ AI"
             checked={settings?.cloud_data_opt_in ?? false}
             disabled={busy}
             onChange={(event) =>

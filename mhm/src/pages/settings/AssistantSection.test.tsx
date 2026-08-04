@@ -149,4 +149,85 @@ describe("AssistantSection", () => {
     );
     expect(screen.getByLabelText(/model/i)).toHaveValue("");
   });
+
+  it("sửa địa chỉ máy chủ chưa lưu rồi bật công tắc cloud thì địa chỉ vừa sửa không bị mất", async () => {
+    invokeWriteCommand.mockResolvedValue({ ...settings, cloud_data_opt_in: true });
+
+    render(<AssistantSection />);
+    await waitFor(() => screen.getByLabelText(/khoá api/i));
+
+    // Gõ địa chỉ mới nhưng KHÔNG bấm "Lưu cấu hình" — mô phỏng đúng tình huống
+    // chủ khách sạn sửa dở rồi làm việc khác trên cùng màn hình.
+    const baseUrlInput = screen.getByLabelText(/địa chỉ máy chủ/i);
+    await userEvent.clear(baseUrlInput);
+    await userEvent.type(baseUrlInput, "https://gateway-noi-bo.example.com/v1");
+
+    const checkbox = screen.getByRole("checkbox", { name: /đồng ý gửi dữ liệu/i });
+    await userEvent.click(checkbox);
+
+    await waitFor(() =>
+      expect(invokeWriteCommand).toHaveBeenCalledWith("set_assistant_cloud_opt_in", {
+        enabled: true,
+      }),
+    );
+
+    // Bật công tắc cloud là một hành động không liên quan tới địa chỉ máy chủ —
+    // nó không được phép ghi đè ô đang gõ dở bằng base_url cũ mà server trả về
+    // kèm theo. Nếu không, chủ khách sạn sửa địa chỉ xong quên bấm "Lưu cấu
+    // hình" rồi bật công tắc cloud sẽ mất trắng phần vừa gõ mà không có cảnh
+    // báo nào.
+    expect(baseUrlInput).toHaveValue("https://gateway-noi-bo.example.com/v1");
+  });
+
+  it("lưu cấu hình thành công thì nạp lại địa chỉ máy chủ và model từ phản hồi server", async () => {
+    render(<AssistantSection />);
+    await waitFor(() => screen.getByLabelText(/khoá api/i));
+
+    const baseUrlInput = screen.getByLabelText(/địa chỉ máy chủ/i);
+    await userEvent.clear(baseUrlInput);
+    await userEvent.type(baseUrlInput, "https://gateway-noi-bo.example.com/v1  ");
+
+    // Server có thể chuẩn hoá giá trị trước khi lưu (ví dụ cắt khoảng trắng
+    // thừa) — trả về đúng cấu hình đã lưu, khác nguyên văn ô vừa gõ.
+    invokeWriteCommand.mockResolvedValue({
+      ...settings,
+      config: {
+        ...settings.config,
+        base_url: "https://gateway-noi-bo.example.com/v1",
+        model: "custom-model",
+      },
+    });
+
+    await userEvent.click(screen.getByRole("button", { name: /lưu cấu hình/i }));
+
+    // Đây là bài chặn "sửa quá tay": gom field-reset về đúng chỗ ở test trên
+    // không được biến thành không bao giờ đồng bộ nữa — nút "Lưu cấu hình" vẫn
+    // phải nạp lại đúng giá trị server trả về.
+    await waitFor(() =>
+      expect(baseUrlInput).toHaveValue("https://gateway-noi-bo.example.com/v1"),
+    );
+    expect(screen.getByLabelText(/model/i)).toHaveValue("custom-model");
+  });
+
+  it("lưu khoá xong thì chuỗi khoá vừa gõ không còn xuất hiện ở đâu trên màn hình", async () => {
+    render(<AssistantSection />);
+    await waitFor(() => screen.getByLabelText(/khoá api/i));
+
+    const secretKey = "sk-chi-em-biet-3f9d8c1a";
+    await userEvent.type(screen.getByLabelText(/khoá api/i), secretKey);
+    await userEvent.click(screen.getByRole("button", { name: /lưu khoá/i }));
+
+    await waitFor(() =>
+      expect(invokeWriteCommand).toHaveBeenCalledWith("set_assistant_api_key", {
+        apiKey: secretKey,
+      }),
+    );
+
+    // AssistantSettings chỉ mang has_api_key (boolean) — không trường nào chở
+    // khoá thật, nên thuộc tính "khoá không bao giờ hiện lại" giữ được là nhờ
+    // cấu trúc dữ liệu chứ không nhờ code UI cẩn thận. Chốt nó bằng cách quét
+    // toàn bộ DOM sau khi lưu, không riêng gì ô nhập khoá.
+    expect(screen.queryByText(secretKey)).not.toBeInTheDocument();
+    expect(screen.queryByDisplayValue(secretKey)).not.toBeInTheDocument();
+  });
 });
