@@ -60,15 +60,29 @@ pub fn build_check_in_display(
     let mut display = BTreeMap::new();
 
     display.insert("room_id".to_string(), payload.room_id.clone());
+
+    // Khách: một dòng đếm đầu người, rồi **mỗi khách một dòng riêng mang mọi
+    // trường đã điền** — không phải chỉ họ tên ghép bằng dấu phẩy.
+    //
+    // Số giấy tờ (CCCD) do model đọc ra là thứ `check_in` ghi thẳng vào
+    // `guests.doc_number` rồi đi vào khai báo tạm trú. Thẻ giấu nó đi nghĩa là
+    // con người bấm "Đồng ý" cho một con số họ chưa từng nhìn thấy — model gõ
+    // sai một chữ số, hay bịa ra cả dãy, cũng không ai chặn được.
     display.insert(
         "guests".to_string(),
-        payload
-            .guests
-            .iter()
-            .map(|guest| guest.full_name.clone())
-            .collect::<Vec<_>>()
-            .join(", "),
+        format!("{} người", payload.guests.len()),
     );
+
+    // `display` là `BTreeMap`, thẻ hiện theo thứ tự chuỗi của khoá: không đệm
+    // 0 thì "Khách 10" đứng trước "Khách 2".
+    let index_width = payload.guests.len().to_string().len();
+    for (index, guest) in payload.guests.iter().enumerate() {
+        display.insert(
+            format!("Khách {:0width$}", index + 1, width = index_width),
+            guest_display_line(guest),
+        );
+    }
+
     display.insert("nights".to_string(), format!("{} đêm", payload.nights));
     display.insert(
         "source".to_string(),
@@ -102,6 +116,39 @@ pub fn build_check_in_display(
     );
 
     display
+}
+
+/// Gói mọi trường **đã điền** của một khách thành một dòng đọc được.
+///
+/// Đây là điểm sửa duy nhất khi `CreateGuestRequest` mọc thêm trường: thêm
+/// trường mà quên thêm nhãn ở đây thì `the_card_shows_every_field_of_the_payload`
+/// đỏ. Trường rỗng hoặc `None` bị bỏ qua — không có gì để người duyệt nhìn, và
+/// một dòng đầy nhãn trống chỉ làm số giấy tờ khó thấy hơn. Riêng `doc_number`
+/// rỗng thì `build_warnings` nói hộ.
+///
+/// Nhãn bám theo form nhận phòng làm tay (`CheckinSheet.tsx`) để lễ tân đọc
+/// thẻ và đọc form thấy cùng một thứ tiếng.
+fn guest_display_line(guest: &CreateGuestRequest) -> String {
+    let mut parts = vec![guest.full_name.trim().to_string()];
+
+    let mut push = |label: &str, value: Option<&str>| {
+        if let Some(value) = value.map(str::trim).filter(|value| !value.is_empty()) {
+            parts.push(format!("{label}: {value}"));
+        }
+    };
+
+    // Thứ tự cố ý: hai thứ lễ tân đối chiếu với giấy tờ trên tay đứng trước.
+    push("CCCD", Some(guest.doc_number.as_str()));
+    push("SĐT", guest.phone.as_deref());
+    push("Loại khách", guest.guest_type.as_deref());
+    push("Ngày sinh", guest.dob.as_deref());
+    push("Giới tính", guest.gender.as_deref());
+    push("Quốc tịch", guest.nationality.as_deref());
+    push("Địa chỉ", guest.address.as_deref());
+    push("Visa hết hạn", guest.visa_expiry.as_deref());
+    push("Ảnh giấy tờ", guest.scan_path.as_deref());
+
+    parts.join(" · ")
 }
 
 fn format_vnd(amount: i64) -> String {
@@ -241,7 +288,7 @@ pub async fn build_check_in_draft(
         pricing_type: Some(pricing_type),
     };
 
-    let warnings = build_warnings(pool, &room_id).await?;
+    let warnings = build_warnings(pool, &room_id, &payload.guests).await?;
     let display = build_check_in_display(&payload, &preview);
 
     Ok(DraftOutcome::Ready(Box::new(ProposedAction {
@@ -255,7 +302,11 @@ pub async fn build_check_in_draft(
 }
 
 /// Cảnh báo tra từ PMS, không phải lời model viết ra.
-async fn build_warnings(pool: &Pool<Sqlite>, room_id: &str) -> CommandResult<Vec<String>> {
+async fn build_warnings(
+    pool: &Pool<Sqlite>,
+    room_id: &str,
+    guests: &[CreateGuestRequest],
+) -> CommandResult<Vec<String>> {
     let rooms = load_room_status_now(pool).await.map_err(|error| {
         CommandError::system(
             codes::SYSTEM_INTERNAL_ERROR,
@@ -273,6 +324,23 @@ async fn build_warnings(pool: &Pool<Sqlite>, room_id: &str) -> CommandResult<Vec
         }
     }
 
+    // Trợ lý dựng được một khách mà chính form của PMS sẽ từ chối: ở trên,
+    // `doc_number` vắng mặt được mặc định thành `""`, và
+    // `stay_lifecycle::validate_check_in_request` không kiểm trường đó — trong
+    // khi `CheckinSheet.tsx` khoá nút lưu khi thiếu. Cố ý **chỉ cảnh báo**,
+    // không từ chối: con người là bước duyệt theo đúng thiết kế, còn siết
+    // thành lỗi cứng là quyết định sản phẩm của chủ nhà, không phải của chỗ
+    // này.
+    for guest in guests {
+        if guest.doc_number.trim().is_empty() {
+            warnings.push(format!(
+                "Khách «{}» chưa có số giấy tờ. Form nhận phòng làm tay không cho lưu như vậy \
+                 (chế độ nhanh phải có số điện thoại thay thế), và hồ sơ khai báo tạm trú sẽ thiếu.",
+                guest.full_name.trim()
+            ));
+        }
+    }
+
     Ok(warnings)
 }
 
@@ -281,25 +349,51 @@ mod tests {
     use super::*;
     use crate::models::CreateGuestRequest;
 
+    /// Khách điền **đủ mười trường** của `CreateGuestRequest`, mỗi trường một
+    /// giá trị không trùng nhau và không là chuỗi con của nhau. Đây là điều
+    /// kiện để `the_card_shows_every_field_of_the_payload` có nghĩa: nó dò
+    /// từng giá trị lá trên thẻ, nên một trường bỏ trống trong fixture sẽ được
+    /// bỏ qua và che mất đúng cái lỗi cần bắt.
+    ///
+    /// Thêm trường mới vào `CreateGuestRequest` sẽ làm literal này **không
+    /// biên dịch được** — buộc người thêm phải cho nó một giá trị, rồi test
+    /// bên dưới bắt tiếp nếu thẻ không hiện nó ra.
     fn sample_guest(full_name: &str) -> CreateGuestRequest {
         CreateGuestRequest {
-            guest_type: None,
+            guest_type: Some("domestic".to_string()),
             full_name: full_name.to_string(),
-            doc_number: String::new(),
+            doc_number: "079201001234".to_string(),
+            dob: Some("1992-03-15".to_string()),
+            gender: Some("Nữ".to_string()),
+            nationality: Some("Việt Nam".to_string()),
+            address: Some("12 Lê Lợi, Đà Nẵng".to_string()),
+            visa_expiry: Some("2027-01-31".to_string()),
+            scan_path: Some("/anh/giay-to-1.jpg".to_string()),
+            phone: Some("0909000111".to_string()),
+        }
+    }
+
+    /// Khách thứ hai chỉ có ba trường như model thật vẫn gửi, và không trường
+    /// nào trùng khách thứ nhất — để một thẻ chỉ hiện khách đầu tiên bị bắt.
+    fn second_sample_guest() -> CreateGuestRequest {
+        CreateGuestRequest {
+            guest_type: None,
+            full_name: "Lê Văn Cường".to_string(),
+            doc_number: "079088007766".to_string(),
             dob: None,
             gender: None,
             nationality: None,
             address: None,
             visa_expiry: None,
             scan_path: None,
-            phone: None,
+            phone: Some("0912345678".to_string()),
         }
     }
 
     fn sample_payload() -> CheckInRequest {
         CheckInRequest {
             room_id: "R1".to_string(),
-            guests: vec![sample_guest("Nguyễn Văn Nam")],
+            guests: vec![sample_guest("Trần Thị Bích"), second_sample_guest()],
             nights: 2,
             source: Some("walk-in".to_string()),
             notes: Some("khách quen".to_string()),
@@ -308,8 +402,53 @@ mod tests {
         }
     }
 
+    /// Mọi giá trị lá nằm dưới một trường lồng của payload phải xuất hiện
+    /// nguyên văn ở đâu đó trên thẻ.
+    ///
+    /// `null` bị bỏ qua vì không mang thông tin nào để hiện. Chuỗi rỗng cũng
+    /// vậy — `doc_number` rỗng đã có cảnh báo riêng lo, xem
+    /// `build_warnings`.
+    fn assert_nested_leaves_are_on_the_card(path: &str, value: &Value, shown: &str) {
+        match value {
+            Value::Object(fields) => {
+                for (key, nested) in fields {
+                    assert_nested_leaves_are_on_the_card(&format!("{path}.{key}"), nested, shown);
+                }
+            }
+            Value::Array(entries) => {
+                for (index, nested) in entries.iter().enumerate() {
+                    assert_nested_leaves_are_on_the_card(
+                        &format!("{path}[{index}]"),
+                        nested,
+                        shown,
+                    );
+                }
+            }
+            Value::Null => {}
+            leaf => {
+                let text = leaf
+                    .as_str()
+                    .map(str::to_string)
+                    .unwrap_or_else(|| leaf.to_string());
+                if text.trim().is_empty() {
+                    return;
+                }
+                assert!(
+                    shown.contains(&text),
+                    "giá trị `{path}` = `{text}` của payload không hiện trên thẻ xác nhận.\nThẻ đang hiện:\n{shown}"
+                );
+            }
+        }
+    }
+
     /// Đây là luật số một của thiết kế: người dùng duyệt đúng cái sẽ được gửi.
-    /// Thêm trường vào CheckInRequest mà quên hiện lên thẻ là test này đỏ.
+    /// Thêm trường vào `CheckInRequest` **hoặc vào `CreateGuestRequest`** mà
+    /// quên hiện lên thẻ là test này đỏ.
+    ///
+    /// Bản cũ chỉ duyệt bảy khoá tầng ngoài của `CheckInRequest`. `guests` có
+    /// mặt trong `display` nên nó xanh, trong khi số giấy tờ và số điện thoại
+    /// của từng khách — thứ sẽ được ghi thẳng vào `guests.doc_number` rồi đi
+    /// vào khai báo tạm trú — không hề hiện ra. Giờ nó đệ quy xuống từng lá.
     #[test]
     fn the_card_shows_every_field_of_the_payload() {
         let payload = sample_payload();
@@ -319,12 +458,74 @@ mod tests {
 
         let encoded = serde_json::to_value(&payload).expect("payload phải serialize được");
         let fields = encoded.as_object().expect("payload là một object");
-        for key in fields.keys() {
+        let shown = display
+            .values()
+            .map(String::as_str)
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        for (key, value) in fields {
             assert!(
                 display.contains_key(key),
                 "trường `{key}` của payload không hiện trên thẻ xác nhận"
             );
+            if value.is_object() || value.is_array() {
+                assert_nested_leaves_are_on_the_card(key, value, &shown);
+            }
         }
+    }
+
+    /// Nói thẳng ra cái mà test đệ quy ở trên chỉ nói gián tiếp: con số CCCD
+    /// mà con người sắp cho phép ghi vào hồ sơ khai báo tạm trú phải nằm ngay
+    /// trên thẻ họ đang nhìn.
+    #[test]
+    fn the_card_shows_the_document_number_it_is_about_to_write() {
+        let payload = sample_payload();
+        let preview = serde_json::json!({ "total": 700_000 });
+
+        let display = build_check_in_display(&payload, &preview);
+
+        let first = display
+            .get("Khách 1")
+            .expect("phải có dòng riêng cho khách thứ nhất");
+        assert!(first.contains("Trần Thị Bích"), "{first}");
+        assert!(first.contains("079201001234"), "{first}");
+        assert!(first.contains("0909000111"), "{first}");
+
+        let second = display
+            .get("Khách 2")
+            .expect("phải có dòng riêng cho khách thứ hai");
+        assert!(second.contains("Lê Văn Cường"), "{second}");
+        assert!(second.contains("079088007766"), "{second}");
+    }
+
+    /// Khoá của `display` là `BTreeMap`, tức thẻ hiện theo thứ tự chuỗi. Không
+    /// đệm 0 thì "Khách 10" đứng trước "Khách 2" và danh sách khách đọc lộn
+    /// xộn đúng lúc đông người nhất.
+    #[test]
+    fn ten_guests_stay_in_order_on_the_card() {
+        let payload = CheckInRequest {
+            guests: (1..=10)
+                .map(|index| {
+                    let mut guest = second_sample_guest();
+                    guest.full_name = format!("Khách số {index}");
+                    guest.doc_number = format!("0790000000{index:02}");
+                    guest.phone = None;
+                    guest
+                })
+                .collect(),
+            ..sample_payload()
+        };
+
+        let display = build_check_in_display(&payload, &serde_json::json!({ "total": 0 }));
+
+        let order: Vec<&str> = display
+            .keys()
+            .filter(|key| key.starts_with("Khách "))
+            .map(String::as_str)
+            .collect();
+        assert_eq!(order.first(), Some(&"Khách 01"), "{order:?}");
+        assert_eq!(order.last(), Some(&"Khách 10"), "{order:?}");
     }
 
     #[test]
@@ -496,7 +697,11 @@ mod tests {
         );
         assert_eq!(
             action.display.get("guests").map(String::as_str),
-            Some("Nguyễn Văn Nam")
+            Some("1 người")
+        );
+        assert_eq!(
+            action.display.get("Khách 1").map(String::as_str),
+            Some("Nguyễn Văn Nam · CCCD: 079201001234 · SĐT: 0909000111")
         );
 
         // Tổng trên thẻ phải là tổng của preview thật: 2 đêm x 500.000 base
@@ -680,10 +885,12 @@ mod tests {
         )
         .await;
 
+        // Khách có số giấy tờ: test này canh đúng một cảnh báo trạng thái
+        // phòng, không được vô tình cõng thêm cảnh báo thiếu giấy tờ.
         let args = serde_json::json!({
             "room_id": "room-dirty",
             "nights": 1,
-            "guests": [{ "full_name": "Trần Thị Hoa" }]
+            "guests": [{ "full_name": "Trần Thị Hoa", "doc_number": "079301005678" }]
         });
 
         let outcome = build_check_in_draft(&pool, &args, "2026-06-01")
@@ -698,6 +905,55 @@ mod tests {
         assert_eq!(
             action.warnings,
             vec!["Phòng đang ở trạng thái bẩn, chưa dọn.".to_string()]
+        );
+    }
+
+    /// Trợ lý dựng được một khách mà chính form nhận phòng của PMS sẽ từ chối:
+    /// `draft.rs` mặc định `doc_number` thành `""` và
+    /// `validate_check_in_request` không kiểm trường đó. Đây **không** phải
+    /// chặn cứng — con người vẫn là bước duyệt theo đúng thiết kế — nhưng thẻ
+    /// phải nói ra sự chênh lệch đó thay vì để nó lặng lẽ trôi qua.
+    #[tokio::test]
+    async fn a_guest_without_a_document_number_gets_a_warning_naming_the_manual_form() {
+        let pool = test_pool().await;
+        seed_room(
+            &pool,
+            "room-nodoc",
+            "P705",
+            "Standard Room",
+            300_000,
+            "vacant",
+        )
+        .await;
+
+        let args = serde_json::json!({
+            "room_id": "room-nodoc",
+            "nights": 1,
+            "guests": [
+                { "full_name": "Nguyễn Văn Nam", "doc_number": "079201001234" },
+                { "full_name": "Phạm Thị Dung" }
+            ]
+        });
+
+        let outcome = build_check_in_draft(&pool, &args, "2026-06-01")
+            .await
+            .expect("thiếu giấy tờ không phải lỗi hệ thống");
+
+        let action = match outcome {
+            DraftOutcome::Ready(action) => action,
+            other => panic!("mong đợi Ready, nhận {other:?}"),
+        };
+
+        // Đúng một cảnh báo, và nó phải gọi tên đúng người thiếu giấy tờ —
+        // không phải người đã có.
+        assert_eq!(action.warnings.len(), 1, "{:?}", action.warnings);
+        let warning = &action.warnings[0];
+        assert!(warning.contains("Phạm Thị Dung"), "{warning}");
+        assert!(!warning.contains("Nguyễn Văn Nam"), "{warning}");
+        assert!(warning.contains("giấy tờ"), "{warning}");
+        assert!(
+            warning.contains("làm tay"),
+            "cảnh báo phải nói rõ form làm tay không nhận: {warning}"
         );
     }
 

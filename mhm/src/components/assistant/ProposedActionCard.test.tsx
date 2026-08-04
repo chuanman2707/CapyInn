@@ -9,16 +9,24 @@ const action: ProposedAction = {
   kind: "check_in",
   payload: {
     room_id: "R1",
-    guests: [{ full_name: "Nguyễn Văn Nam" }],
+    guests: [
+      { full_name: "Nguyễn Văn Nam", doc_number: "079201001234", phone: "0909000111" },
+      { full_name: "Trần Thị Bích", doc_number: "079301005678", phone: null },
+    ],
     nights: 2,
     source: "walk-in",
     notes: null,
     paid_amount: 500000,
     pricing_type: "nightly",
   },
+  // Đúng hình dạng `build_check_in_display` (Rust) sinh ra: một dòng đếm đầu
+  // người, rồi mỗi khách một dòng mang đủ trường đã điền. Khoá "Khách N" cố ý
+  // không có trong FIELD_LABELS — thẻ phải render generic theo display.
   display: {
     room_id: "Phòng 201",
-    guests: "Nguyễn Văn Nam",
+    guests: "2 người",
+    "Khách 1": "Nguyễn Văn Nam · CCCD: 079201001234 · SĐT: 0909000111",
+    "Khách 2": "Trần Thị Bích · CCCD: 079301005678",
     nights: "2 đêm",
     source: "walk-in",
     notes: "—",
@@ -49,6 +57,27 @@ describe("ProposedActionCard", () => {
 
     for (const value of Object.values(action.display)) {
       expect(screen.getByText(value)).toBeInTheDocument();
+    }
+  });
+
+  it("hiện số giấy tờ của từng khách, không chỉ tên", () => {
+    // Con số này sẽ được ghi vào guests.doc_number rồi đi vào khai báo tạm
+    // trú. Người bấm "Đồng ý" phải nhìn thấy nó trước khi bấm; thẻ là toàn bộ
+    // cơ chế cho phép, nên cái gì thẻ không hiện là cái được duyệt mù.
+    render(
+      <ProposedActionCard
+        action={action}
+        busy={false}
+        nowMs={action.built_at_ms}
+        onApprove={vi.fn()}
+        onRebuild={vi.fn()}
+        onDismiss={vi.fn()}
+      />,
+    );
+
+    for (const guest of action.payload.guests) {
+      expect(screen.getByText(new RegExp(guest.doc_number as string))).toBeInTheDocument();
+      expect(screen.getByText(new RegExp(guest.full_name))).toBeInTheDocument();
     }
   });
 
