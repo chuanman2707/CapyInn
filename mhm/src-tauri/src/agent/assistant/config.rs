@@ -99,6 +99,32 @@ pub fn evaluate_assistant_gate(
     }
 }
 
+/// Cổng thứ nhất, đứng trước `evaluate_assistant_gate`: cờ runtime thí nghiệm.
+///
+/// `evaluate_assistant_gate` chỉ hỏi "chủ nhà đã cấu hình xong chưa". Cái này
+/// hỏi "bản dựng này có được phép chạy trợ lý không" — và câu trả lời phải
+/// giống hệt câu mà màn hình cài đặt đã dùng để quyết định hiện hay ẩn tab
+/// (`pages/settings/index.tsx` đọc `agentRuntimeEnabled`, tức chính
+/// `effective_experimental_agent_runtime_enabled`). Hai bên lệch nhau nghĩa là
+/// gỡ cờ đi thì mất tab cài đặt trong khi panel vẫn gọi nhà cung cấp và vẫn
+/// đẩy dữ liệu khách lên cloud — mà không còn giao diện nào để tắt cái opt-in
+/// đang bật. Đó là ngược hẳn công dụng của cờ.
+///
+/// Lưu ý: `effective_…` cõng luôn override `CAPYINN_DISABLE_CEO_TELEGRAM`, một
+/// cái tên buộc tính năng này vào một tính năng không liên quan. Đã ghi nhận
+/// là nợ, cố ý **không** đi nối lại dây ở đây — việc cần làm là hai bên đọc
+/// cùng một cờ, không phải đổi cờ.
+pub fn ensure_agent_runtime_enabled() -> CommandResult<()> {
+    if crate::runtime_config::effective_experimental_agent_runtime_enabled() {
+        return Ok(());
+    }
+
+    Err(CommandError::user(
+        codes::AGENT_RUNTIME_DISABLED,
+        "Trợ lý quầy đang tắt trên bản dựng này.",
+    ))
+}
+
 pub fn validate_assistant_base_url(raw: &str) -> CommandResult<String> {
     let trimmed = raw.trim();
     if trimmed.is_empty() {
@@ -328,6 +354,53 @@ mod tests {
 
         assert!(!status.ready);
         assert!(status.missing.contains(&AssistantGateMissing::Model));
+    }
+
+    /// Cờ `CAPYINN_EXPERIMENTAL_AGENT_RUNTIME` là công tắc tắt của cả tính
+    /// năng. Gỡ nó ra mà trợ lý vẫn gọi được nhà cung cấp thì công tắc chỉ giấu
+    /// đi màn hình cài đặt — tức lấy mất luôn chỗ để tắt cái opt-in đang bật.
+    #[test]
+    fn the_assistant_refuses_to_run_when_the_agent_runtime_flag_is_removed() {
+        let _guard = crate::runtime_config::env_lock().lock().unwrap();
+
+        for name in [
+            "CAPYINN_EXPERIMENTAL_RUNTIME",
+            "CAPYINN_EXPERIMENTAL_AGENT_RUNTIME",
+            "CAPYINN_DISABLE_CEO_TELEGRAM",
+        ] {
+            std::env::remove_var(name);
+        }
+
+        let error = ensure_agent_runtime_enabled().expect_err("cờ tắt thì phải từ chối");
+        assert_eq!(error.code, codes::AGENT_RUNTIME_DISABLED);
+
+        std::env::set_var("CAPYINN_EXPERIMENTAL_AGENT_RUNTIME", "true");
+        assert!(ensure_agent_runtime_enabled().is_ok());
+        std::env::remove_var("CAPYINN_EXPERIMENTAL_AGENT_RUNTIME");
+    }
+
+    /// Trợ lý phải đọc **đúng cờ hiệu dụng** mà màn hình cài đặt đã đọc, kể cả
+    /// cái override đặt tên nhầm sang tính năng khác
+    /// (`CAPYINN_DISABLE_CEO_TELEGRAM`, xem `runtime_config.rs:37`). Không
+    /// phải để tán thành cách đặt tên đó — mà để hai bên không bao giờ bất
+    /// đồng: cửa sổ cài đặt biến mất trong khi panel vẫn gửi dữ liệu khách lên
+    /// cloud đúng là cái lỗ hổng này sinh ra.
+    #[test]
+    fn the_assistant_honours_the_same_disable_override_the_settings_screen_honours() {
+        let _guard = crate::runtime_config::env_lock().lock().unwrap();
+
+        std::env::set_var("CAPYINN_EXPERIMENTAL_AGENT_RUNTIME", "true");
+        std::env::set_var("CAPYINN_DISABLE_CEO_TELEGRAM", "true");
+
+        let error = ensure_agent_runtime_enabled().expect_err("override tắt thì phải từ chối");
+        assert_eq!(error.code, codes::AGENT_RUNTIME_DISABLED);
+        assert!(
+            !crate::runtime_config::effective_experimental_agent_runtime_enabled(),
+            "trợ lý và màn hình cài đặt phải cùng đọc một cờ hiệu dụng"
+        );
+
+        std::env::remove_var("CAPYINN_EXPERIMENTAL_AGENT_RUNTIME");
+        std::env::remove_var("CAPYINN_DISABLE_CEO_TELEGRAM");
     }
 
     #[test]
