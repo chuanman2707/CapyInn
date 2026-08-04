@@ -24,9 +24,27 @@ export function buildScreenContext(state: HotelSlice): ScreenContext {
 }
 
 export function AssistantPanel() {
-  const { open, messages, pendingAction, busy, settings, send, approve, dismissAction } =
-    useAssistantStore();
-  const hotel = useHotelStore();
+  // Field riêng, không destructure nguyên store: set() của Zustand thay cả
+  // reference top-level bất kể field nào đổi, nên destructure nguyên store
+  // khiến panel — mount suốt vòng đời app — re-render theo mọi set() ở bất
+  // kỳ đâu trong PMS, kể cả lúc đang ẩn. Chọn từng field thì chỉ re-render
+  // khi đúng field đó đổi. Cùng idiom với MainShell.tsx (dòng ~85-87).
+  const open = useAssistantStore((state) => state.open);
+  const messages = useAssistantStore((state) => state.messages);
+  const pendingAction = useAssistantStore((state) => state.pendingAction);
+  const busy = useAssistantStore((state) => state.busy);
+  const settings = useAssistantStore((state) => state.settings);
+  const send = useAssistantStore((state) => state.send);
+  const approve = useAssistantStore((state) => state.approve);
+  const dismissAction = useAssistantStore((state) => state.dismissAction);
+
+  // useHotelStore có ~14 field và loading bật/tắt ở gần như mọi lệnh ghi
+  // trong app (qua beginAction/endAction dùng chung); panel chỉ đọc 3 field
+  // dưới đây nên phải chọn riêng, không thì re-render theo cả 14.
+  const activeTab = useHotelStore((state) => state.activeTab);
+  const roomDetail = useHotelStore((state) => state.roomDetail);
+  const roomChangeBookingId = useHotelStore((state) => state.roomChangeBookingId);
+
   const [draft, setDraft] = useState("");
   const [nowMs, setNowMs] = useState(() => Date.now());
 
@@ -39,7 +57,7 @@ export function AssistantPanel() {
 
   if (!settings?.gate.ready || !open) return null;
 
-  const context = buildScreenContext(hotel as unknown as HotelSlice);
+  const context = buildScreenContext({ activeTab, roomDetail, roomChangeBookingId });
   const contextLabel = context.selectedRoomNumber
     ? `Đang xem: ${context.selectedRoomNumber}`
     : `Đang xem: ${context.route}`;
@@ -94,7 +112,7 @@ export function AssistantPanel() {
             placeholder="Hỏi hoặc ra việc…"
             className="flex-1 rounded-xl border border-slate-200 px-3 py-2 text-sm outline-none focus:border-brand-primary"
           />
-          <Button type="submit" size="sm" disabled={busy || !draft.trim()}>
+          <Button type="submit" size="sm" disabled={busy || !draft.trim()} aria-label="Gửi tin nhắn">
             <Send size={16} />
           </Button>
         </div>
