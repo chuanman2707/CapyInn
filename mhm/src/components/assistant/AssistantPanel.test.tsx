@@ -1,4 +1,4 @@
-import { render, screen } from "@testing-library/react";
+import { fireEvent, render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -168,6 +168,38 @@ describe("AssistantPanel", () => {
     });
   });
 
+  it("gửi bằng đường gõ-rồi-Enter thì dọn sạch ô nhập", async () => {
+    // Đường gợi ý (bấm chip ở màn hình trống) có canh chuyện dọn ô; đường
+    // gõ-rồi-gửi — đường lễ tân dùng 99% thời gian — thì không: bỏ hẳn
+    // `setDraft("")` khỏi `onSubmitDraft` mà cả 31 test cũ vẫn xanh.
+    //
+    // Chữ ở lại trong ô sau khi gửi thì cú Enter kế tiếp bắn lại y nguyên câu
+    // vừa gửi: một lượt `assistant_turn` thừa, và với câu dựng thẻ thì là một
+    // thẻ nhận phòng THỨ HAI.
+    const sendSpy = vi.spyOn(useAssistantStore.getState(), "send").mockResolvedValue(undefined);
+
+    render(<AssistantPanel />);
+    const box = screen.getByRole("textbox");
+
+    await userEvent.type(box, "Nhận phòng giúp tôi");
+    fireEvent.keyDown(box, { key: "Enter", isComposing: false });
+
+    // Gửi đúng câu đã gõ — chặn luôn bản "dọn ô trước rồi mới đọc `draft`",
+    // vốn cũng làm hai khẳng định dưới xanh nhưng gửi lên một chuỗi rỗng.
+    expect(sendSpy).toHaveBeenCalledWith("Nhận phòng giúp tôi", {
+      route: "rooms",
+      selectedRoomId: undefined,
+      selectedRoomNumber: undefined,
+      selectedBookingId: undefined,
+    });
+    expect(box).toHaveValue("");
+    expect(screen.getByRole("button", { name: "Gửi tin nhắn" })).toBeDisabled();
+
+    // Và cú Enter kế tiếp không được bắn lại câu vừa gửi.
+    fireEvent.keyDown(box, { key: "Enter", isComposing: false });
+    expect(sendSpy).toHaveBeenCalledTimes(1);
+  });
+
   it("bấm gợi ý ở màn hình trống thì GỬI luôn câu đó, không chỉ điền vào ô nhập", async () => {
     // Đây là điểm nối thật của màn hình trống: `AssistantEmptyState` chỉ biết
     // gọi `onPick`, còn việc cú bấm ấy có thành một lượt chat hay chỉ nhét chữ
@@ -225,12 +257,17 @@ describe("AssistantPanel", () => {
 
     render(<AssistantPanel />);
 
-    expect(screen.getByText(HISTORY_NOTICE)).toBeInTheDocument();
+    expect(screen.getByRole("status")).toHaveTextContent(HISTORY_NOTICE);
   });
 
   it("không nhắc gì khi historyNotice rỗng", () => {
     // Cặp với test trên: nhắc thường trực thì thành nhiễu, mà nhiễu thường
     // trực thì người ta thôi đọc. Một bản cài đặt in cứng câu nhắc sẽ đỏ ở đây.
+    //
+    // Khẳng định trên PHẦN TỬ chứ không trên chữ. Bản bọc-vô-điều-kiện —
+    // `<p className="…bg-amber-50 px-3 py-2">{historyNotice}</p>`, chỉ nội dung
+    // mới có điều kiện — vẽ ra một viên nền vàng RỖNG thường trực. jsdom không
+    // thấy nền nên `queryByText` vẫn xanh với nó; `queryByRole` thì đỏ.
     useAssistantStore.setState({
       messages: [{ id: "m1", kind: "user", text: "Phòng 201 còn trống không?" }],
       historyNotice: null,
@@ -238,6 +275,6 @@ describe("AssistantPanel", () => {
 
     render(<AssistantPanel />);
 
-    expect(screen.queryByText(HISTORY_NOTICE)).not.toBeInTheDocument();
+    expect(screen.queryByRole("status")).not.toBeInTheDocument();
   });
 });
