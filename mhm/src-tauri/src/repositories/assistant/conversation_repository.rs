@@ -4,12 +4,18 @@
 //! đều đã chốt ở `services::assistant::conversation_service` trước khi tới đây.
 //!
 //! `repositories` là module riêng của crate, nên tới khi service đó ra đời thì
-//! mọi thứ ở đây chỉ có test là caller — đó là lý do các `#[allow(dead_code)]`
-//! bên dưới. Bỏ chúng đi khi tầng service gọi vào.
+//! mọi thứ ở đây chỉ có test là caller. Các
+//! `#[cfg_attr(not(test), expect(dead_code))]` bên dưới nói đúng điều đó — và
+//! nói bằng `expect`, không phải `allow`: ngày tầng service gọi vào, chính
+//! compiler bắn `this lint expectation is unfulfilled` và CI đỏ, không ai phải
+//! nhớ dọn. `cfg_attr(not(test), …)` là bắt buộc chứ không phải trang trí: bản
+//! dựng test **đã có** caller sẵn (chính `mod tests` bên dưới), nên một
+//! `#[expect(dead_code)]` trần làm `cargo clippy --all-targets -- -D warnings`
+//! đỏ ngay hôm nay — đã đo, cả 10 chỗ.
 
 use sqlx::{Pool, Sqlite};
 
-#[allow(dead_code)]
+#[cfg_attr(not(test), expect(dead_code))]
 pub async fn insert_conversation(
     pool: &Pool<Sqlite>,
     id: &str,
@@ -31,7 +37,7 @@ pub async fn insert_conversation(
     Ok(())
 }
 
-#[allow(dead_code)]
+#[cfg_attr(not(test), expect(dead_code))]
 pub async fn insert_message(
     pool: &Pool<Sqlite>,
     id: &str,
@@ -54,7 +60,7 @@ pub async fn insert_message(
     Ok(())
 }
 
-#[allow(dead_code)]
+#[cfg_attr(not(test), expect(dead_code))]
 pub async fn touch_conversation(
     pool: &Pool<Sqlite>,
     id: &str,
@@ -69,7 +75,7 @@ pub async fn touch_conversation(
 }
 
 /// Trả số dòng bị xoá để caller phân biệt "đã xoá" với "không có hội thoại đó".
-#[allow(dead_code)]
+#[cfg_attr(not(test), expect(dead_code))]
 pub async fn delete_conversation(pool: &Pool<Sqlite>, id: &str) -> Result<u64, sqlx::Error> {
     let result = sqlx::query("DELETE FROM assistant_conversations WHERE id = ?")
         .bind(id)
@@ -78,7 +84,7 @@ pub async fn delete_conversation(pool: &Pool<Sqlite>, id: &str) -> Result<u64, s
     Ok(result.rows_affected())
 }
 
-#[allow(dead_code)]
+#[cfg_attr(not(test), expect(dead_code))]
 pub async fn delete_all_conversations(pool: &Pool<Sqlite>) -> Result<u64, sqlx::Error> {
     let result = sqlx::query("DELETE FROM assistant_conversations")
         .execute(pool)
