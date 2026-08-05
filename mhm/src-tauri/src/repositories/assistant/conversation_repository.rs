@@ -3,19 +3,20 @@
 //! Tầng này không quyết định chính sách: ai được ghi, tên hội thoại cắt ra sao
 //! đều đã chốt ở `services::assistant::conversation_service` trước khi tới đây.
 //!
-//! `repositories` là module riêng của crate, nên tới khi service đó ra đời thì
-//! mọi thứ ở đây chỉ có test là caller. Các
-//! `#[cfg_attr(not(test), expect(dead_code))]` bên dưới nói đúng điều đó — và
-//! nói bằng `expect`, không phải `allow`: ngày tầng service gọi vào, chính
-//! compiler bắn `this lint expectation is unfulfilled` và CI đỏ, không ai phải
-//! nhớ dọn. `cfg_attr(not(test), …)` là bắt buộc chứ không phải trang trí: bản
-//! dựng test **đã có** caller sẵn (chính `mod tests` bên dưới), nên một
-//! `#[expect(dead_code)]` trần làm `cargo clippy --all-targets -- -D warnings`
-//! đỏ ngay hôm nay — đã đo, cả 10 chỗ.
+//! `repositories` là module riêng của crate. `insert_conversation` nay đã có
+//! caller sản xuất — `conversation_service::ensure_conversation` — nên nó không
+//! còn mang `#[cfg_attr(not(test), expect(dead_code))]`. Những item còn giữ dấu
+//! ấy là những item vẫn chỉ có test là caller. `cfg_attr(not(test), …)` là bắt
+//! buộc chứ không phải trang trí: bản dựng test **đã có** caller sẵn (chính
+//! `mod tests` bên dưới), nên một `#[expect(dead_code)]` trần làm
+//! `cargo clippy --all-targets -- -D warnings` đỏ ngay hôm nay — đã đo, cả 10 chỗ.
+//!
+//! Đính chính đo được ở Task 3: `expect` **không** tự bắn `this lint expectation
+//! is unfulfilled` khi caller mới lại là một item đang mang `expect(dead_code)`
+//! — xem ghi chú dài hơn ở đầu `queries::assistant::conversation_queries`.
 
 use sqlx::{Pool, Sqlite};
 
-#[cfg_attr(not(test), expect(dead_code))]
 pub async fn insert_conversation(
     pool: &Pool<Sqlite>,
     id: &str,

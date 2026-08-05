@@ -15,15 +15,21 @@
 //! `LIMIT -5` trả về toàn bộ dòng), nên một số âm lọt xuống từ tầng trên là một
 //! cú dump sạch sổ hội thoại, im lặng, không lỗi, không dấu vết.
 //!
-//! `queries` là module riêng của crate, nên tới khi
-//! `services::assistant::conversation_service` gọi vào thì mọi thứ ở đây chỉ có
-//! test là caller. Các `#[cfg_attr(not(test), expect(dead_code))]` bên dưới nói
-//! đúng điều đó — và nói bằng `expect`, không phải `allow`: ngày Task 3 gọi vào,
-//! chính compiler bắn `this lint expectation is unfulfilled` và CI đỏ, không ai
-//! phải nhớ dọn. `cfg_attr(not(test), …)` là bắt buộc chứ không phải trang trí:
-//! bản dựng test **đã có** caller sẵn (chính `mod tests` bên dưới), nên một
+//! `queries` là module riêng của crate. `get_conversation_owner` nay đã có
+//! caller sản xuất — `services::assistant::conversation_service::assert_can_read`
+//! — nên nó không còn mang `#[cfg_attr(not(test), expect(dead_code))]`. Những
+//! item còn giữ dấu ấy là những item vẫn chỉ có test là caller.
+//! `cfg_attr(not(test), …)` là bắt buộc chứ không phải trang trí: bản dựng test
+//! **đã có** caller sẵn (chính `mod tests` bên dưới), nên một
 //! `#[expect(dead_code)]` trần làm `cargo clippy --all-targets -- -D warnings`
 //! đỏ ngay hôm nay — đã đo, cả 10 chỗ.
+//!
+//! Một đính chính đo được ở Task 3, ngược với ghi chú cũ ở đây: `expect` **không**
+//! tự bắn `this lint expectation is unfulfilled` khi caller mới lại là một item
+//! đang mang `expect(dead_code)`. rustc 1.97.1 vẫn đi vào thân của item
+//! allow/expect và đánh dấu callee là sống, nên một dấu thừa ở giữa chuỗi nằm im,
+//! không đỏ. Nó chỉ đỏ ở **đầu** chuỗi, nơi caller là code sản xuất thật — nên
+//! dọn dấu ở giữa vẫn là việc phải làm bằng mắt.
 
 use serde::Serialize;
 use sqlx::{FromRow, Pool, Sqlite};
@@ -119,7 +125,6 @@ pub async fn list_conversations(
     }
 }
 
-#[cfg_attr(not(test), expect(dead_code))]
 pub async fn get_conversation_owner(
     pool: &Pool<Sqlite>,
     id: &str,
