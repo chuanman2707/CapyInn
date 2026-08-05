@@ -22,14 +22,18 @@
 //! `cfg_attr(not(test), …)` là bắt buộc chứ không phải trang trí: bản dựng test
 //! **đã có** caller sẵn (chính `mod tests` bên dưới), nên một
 //! `#[expect(dead_code)]` trần làm `cargo clippy --all-targets -- -D warnings`
-//! đỏ ngay hôm nay — đã đo, cả 10 chỗ.
+//! đỏ ngay hôm nay — đã đo, cả 11 chỗ.
 //!
 //! Một đính chính đo được ở Task 3, ngược với ghi chú cũ ở đây: `expect` **không**
 //! tự bắn `this lint expectation is unfulfilled` khi caller mới lại là một item
 //! đang mang `expect(dead_code)`. rustc 1.97.1 vẫn đi vào thân của item
-//! allow/expect và đánh dấu callee là sống, nên một dấu thừa ở giữa chuỗi nằm im,
-//! không đỏ. Nó chỉ đỏ ở **đầu** chuỗi, nơi caller là code sản xuất thật — nên
-//! dọn dấu ở giữa vẫn là việc phải làm bằng mắt.
+//! allow/expect và đánh dấu callee là sống, nhưng độ sống đó không tính vào việc
+//! dựng cờ unfulfilled cho callee. Nói cho đúng: dấu chỉ đỏ khi chuỗi caller có
+//! **gốc là code sản xuất thật** — lúc đó nó đỏ ở *mọi* nấc trên chuỗi, không
+//! riêng nấc đầu. Còn nếu gốc chỉ sống nhờ chính một dấu allow/expect thì cả
+//! chuỗi nằm im. Nên trong giai đoạn quá độ giữa các task, dọn dấu vẫn là việc
+//! phải làm bằng mắt; ratchet chỉ tự siết lại từ ngày `generate_handler!` nối
+//! được chuỗi tới đây.
 
 use serde::Serialize;
 use sqlx::{FromRow, Pool, Sqlite};
