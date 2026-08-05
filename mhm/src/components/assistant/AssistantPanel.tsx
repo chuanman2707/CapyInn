@@ -71,7 +71,10 @@ export function AssistantPanel() {
 
   return (
     // Viền phải: panel là cột GIỮA, nên đường kẻ nằm ở mép giáp vùng nội dung.
-    <aside className="flex w-[380px] shrink-0 flex-col border-r border-slate-100 bg-white">
+    <aside
+      aria-label="Trợ lý quầy"
+      className="flex w-[380px] shrink-0 flex-col border-r border-slate-100 bg-white"
+    >
       <header className="flex h-[88px] items-center px-5 text-sm font-semibold">Trợ lý quầy</header>
 
       <div className="flex-1 space-y-3 overflow-y-auto px-5 pb-4">
