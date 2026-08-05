@@ -34,6 +34,7 @@ function props(
     conversations: [summary()],
     isAdmin: false,
     busy: false,
+    hasPendingAction: false,
     onOpen: vi.fn(),
     onDelete: vi.fn(),
     onDeleteAll: vi.fn(),
@@ -180,6 +181,129 @@ describe("AssistantHistoryList", () => {
     expect(confirmButton).toBeDisabled();
 
     expect(onDeleteAll).not.toHaveBeenCalled();
+  });
+
+  it("gõ đúng chữ nhưng dính khoảng trắng thì nút xoá sạch vẫn tắt", async () => {
+    // Vế thứ ba của cùng hàng rào, và là vế DUY NHẤT chưa được đo: đổi câu so
+    // sánh thành `phrase.trim() !== DELETE_ALL_PHRASE` thì cả bộ vẫn xanh (đo
+    // được), tức phần "không trim" của bản cài đặt đúng đang không có ai canh.
+    //
+    // Hàng rào này tồn tại để bắt người ta CỐ Ý — spec đòi gõ đúng chữ
+    // `XOÁ HẾT`. Một khoảng trắng dính vào là dấu hiệu của dán chuỗi từ chỗ
+    // khác, chứ không phải của một người vừa đọc xong câu cảnh báo và gõ tay.
+    const onDeleteAll = vi.fn();
+    render(<AssistantHistoryList {...props({ isAdmin: true, onDeleteAll })} />);
+
+    await userEvent.click(screen.getByRole("button", { name: "Xoá tất cả hội thoại" }));
+    const confirmButton = screen.getByRole("button", { name: "Xoá vĩnh viễn" });
+    const box = screen.getByRole("textbox", { name: "Gõ XOÁ HẾT để xác nhận" });
+
+    await userEvent.type(box, " XOÁ HẾT");
+    expect(confirmButton).toBeDisabled();
+
+    await userEvent.clear(box);
+    await userEvent.type(box, "XOÁ HẾT ");
+    expect(confirmButton).toBeDisabled();
+
+    expect(onDeleteAll).not.toHaveBeenCalled();
+  });
+
+  it("đóng hộp xoá sạch rồi mở lại thì phải gõ lại từ đầu", async () => {
+    // `closeDeleteAll()` dọn `phrase`, và cho tới giờ chỉ có COMMENT canh việc
+    // đó: chèn `return;` ngay trước `setPhrase("")` thì cả bộ vẫn xanh (đo
+    // được). Tức một nửa hàng rào duy nhất của lệnh xoá sạch không ai đo.
+    //
+    // Để nguyên chữ đã gõ thì lần mở sau hộp đã sẵn ở trạng thái BẬT NÚT, và cú
+    // bấm thứ hai — cú bấm nhầm, cú bấm của người tưởng mình đã huỷ — không còn
+    // phải đi qua hàng rào nào nữa.
+    const onDeleteAll = vi.fn();
+    render(<AssistantHistoryList {...props({ isAdmin: true, onDeleteAll })} />);
+
+    await userEvent.click(screen.getByRole("button", { name: "Xoá tất cả hội thoại" }));
+    await userEvent.type(
+      screen.getByRole("textbox", { name: "Gõ XOÁ HẾT để xác nhận" }),
+      "XOÁ HẾT",
+    );
+    // Đúng chữ rồi: nút bật. Không có câu này thì một bản không bao giờ bật nút
+    // cũng làm khẳng định cuối cùng bên dưới xanh.
+    expect(screen.getByRole("button", { name: "Xoá vĩnh viễn" })).toBeEnabled();
+
+    await userEvent.click(screen.getByRole("button", { name: "Huỷ" }));
+    await userEvent.click(screen.getByRole("button", { name: "Xoá tất cả hội thoại" }));
+
+    expect(screen.getByRole("textbox", { name: "Gõ XOÁ HẾT để xác nhận" })).toHaveValue("");
+    expect(screen.getByRole("button", { name: "Xoá vĩnh viễn" })).toBeDisabled();
+    expect(onDeleteAll).not.toHaveBeenCalled();
+  });
+
+  it("đang chờ trả lời thì không mở được hộp xoá sạch", () => {
+    // Cửa vào của lệnh xoá sạch. Hai nút bên trong hộp được đo ở test kế tiếp —
+    // tách ra vì mở hộp là THAY luôn nút này, nên một test không giữ được cả ba
+    // trên màn hình cùng lúc.
+    const { rerender } = render(<AssistantHistoryList {...props({ isAdmin: true })} />);
+
+    // Vế dương trước: một bản khoá cứng vĩnh viễn thì admin không xoá được gì
+    // nữa, mà xoá tay là lối ra DUY NHẤT của dữ liệu khách.
+    expect(screen.getByRole("button", { name: "Xoá tất cả hội thoại" })).toBeEnabled();
+
+    rerender(<AssistantHistoryList {...props({ isAdmin: true, busy: true })} />);
+
+    expect(screen.getByRole("button", { name: "Xoá tất cả hội thoại" })).toBeDisabled();
+  });
+
+  it("bận nổi lên giữa chừng thì hai nút xác nhận xoá khoá theo", async () => {
+    // Hai hộp xác nhận chỉ MỞ được khi đang rảnh (hai nút mở chúng đều khoá
+    // theo `busy`), nên ca thật là: mở hộp lúc rảnh, rồi `busy` bật lên giữa
+    // chừng — đúng hình dạng của "duyệt thẻ nhận phòng xong quay ra dọn lịch
+    // sử, `check_in` vẫn đang bay về". Vì thế phải dựng bằng `rerender`, không
+    // dựng bằng `busy: true` ngay từ đầu.
+    //
+    // Hậu quả nếu không khoá: cả hai lệnh xoá đều gọi `startNewChat()` → mint
+    // khoá phiên mới → kết quả `check_in` bị store bỏ (đúng thiết kế của lớp
+    // 4), nhưng phòng thì ĐÃ nhận thật. Lễ tân không thấy gì nên tưởng lệnh
+    // chưa chạy. Không mất tiền, mất tin.
+    const { rerender } = render(<AssistantHistoryList {...props({ isAdmin: true })} />);
+
+    await userEvent.click(
+      screen.getByRole("button", { name: "Xoá hội thoại Phòng 201 còn trống không?" }),
+    );
+    await userEvent.click(screen.getByRole("button", { name: "Xoá tất cả hội thoại" }));
+    await userEvent.type(
+      screen.getByRole("textbox", { name: "Gõ XOÁ HẾT để xác nhận" }),
+      "XOÁ HẾT",
+    );
+
+    // Lúc rảnh cả hai đều bấm được — vế dương, cùng lý do như test trên.
+    expect(screen.getByRole("button", { name: "Xoá hội thoại này" })).toBeEnabled();
+    expect(screen.getByRole("button", { name: "Xoá vĩnh viễn" })).toBeEnabled();
+
+    rerender(<AssistantHistoryList {...props({ isAdmin: true, busy: true })} />);
+
+    expect(screen.getByRole("button", { name: "Xoá hội thoại này" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Xoá vĩnh viễn" })).toBeDisabled();
+  });
+
+  it("đang treo thẻ thì hộp xoá sạch nói luôn là thẻ sẽ mất", async () => {
+    // `deleteAllConversations` gọi `startNewChat()` VÔ ĐIỀU KIỆN, nên thẻ nhận
+    // phòng đang chờ mất theo — kể cả khi `conversationId === null`, tức lệnh
+    // xoá không xoá nổi một dòng nào của chính hội thoại đang mở.
+    render(<AssistantHistoryList {...props({ isAdmin: true, hasPendingAction: true })} />);
+
+    await userEvent.click(screen.getByRole("button", { name: "Xoá tất cả hội thoại" }));
+
+    expect(screen.getByText("Thẻ nhận phòng đang chờ cũng sẽ mất.")).toBeInTheDocument();
+  });
+
+  it("không treo thẻ thì hộp xoá sạch không doạ chuyện không có", async () => {
+    // Vế âm, và là vế quan trọng hơn: một câu cảnh báo in cứng sẽ hiện cả những
+    // lúc chẳng có gì để mất, và cảnh báo thường trực là cảnh báo người ta thôi
+    // đọc — đúng lúc nó nói thật thì không ai còn nhìn.
+    render(<AssistantHistoryList {...props({ isAdmin: true, hasPendingAction: false })} />);
+
+    await userEvent.click(screen.getByRole("button", { name: "Xoá tất cả hội thoại" }));
+
+    expect(screen.getByText("Xoá sạch toàn bộ hội thoại?")).toBeInTheDocument();
+    expect(screen.queryByText("Thẻ nhận phòng đang chờ cũng sẽ mất.")).not.toBeInTheDocument();
   });
 
   it("đang chờ trả lời thì không mở được hội thoại nào", async () => {

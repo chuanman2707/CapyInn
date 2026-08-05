@@ -23,9 +23,19 @@ type AssistantHistoryListProps = {
   /// đều kiểm quyền phía Rust và trả `AUTH_FORBIDDEN` cho lễ tân. Giấu nút chỉ
   /// để lễ tân đừng bấm vào thứ chắc chắn bị từ chối.
   isAdmin: boolean;
-  /// Đang chờ trả lời → khoá mọi dòng. Chuyển hội thoại giữa lúc câu trả lời
-  /// đang bay về đẻ ra một mớ tình huống tranh chấp mà không đổi lại được gì.
+  /// Đang chờ trả lời → khoá mọi dòng **và cả ba nút xoá**. Chuyển hội thoại
+  /// giữa lúc câu trả lời đang bay về đẻ ra một mớ tình huống tranh chấp mà
+  /// không đổi lại được gì; xoá thì tệ hơn một bậc, vì cả hai lệnh xoá đều gọi
+  /// `startNewChat()` → mint khoá phiên mới → kết quả `check_in` đang bay về bị
+  /// store bỏ (đúng thiết kế, lớp 4), nhưng phòng thì ĐÃ nhận thật. Không mất
+  /// tiền, mất tin: lễ tân không thấy gì nên tưởng lệnh chưa chạy.
   busy: boolean;
+  /// Có thẻ nhận phòng đang chờ duyệt hay không. Chỉ dùng để CẢNH BÁO trong hộp
+  /// xoá sạch, **không** dựng thêm một cửa hỏi kiểu lớp 1: spec dòng 474-475
+  /// liệt kê đúng hai hành vi phải hỏi trước — bấm *hội thoại mới* và mở một hội
+  /// thoại từ lịch sử — còn xoá là hành động khác và đã có hàng rào riêng
+  /// (gõ đúng `XOÁ HẾT`).
+  hasPendingAction: boolean;
   onOpen: (conversationId: string) => void;
   onDelete: (conversationId: string) => void;
   onDeleteAll: () => void;
@@ -43,6 +53,7 @@ export function AssistantHistoryList({
   conversations,
   isAdmin,
   busy,
+  hasPendingAction,
   onOpen,
   onDelete,
   onDeleteAll,
@@ -70,6 +81,7 @@ export function AssistantHistoryList({
             <Button
               size="sm"
               className="bg-red-600 text-white"
+              disabled={busy}
               onClick={() => {
                 onDelete(deleting.id);
                 setDeleting(null);
@@ -135,6 +147,23 @@ export function AssistantHistoryList({
               <p className="text-xs text-red-700">
                 Không hoàn tác. Ngoài bản sao lưu ở Data &amp; Backup thì đây là bản duy nhất.
               </p>
+
+              {/* Xoá sạch gọi `startNewChat()` VÔ ĐIỀU KIỆN, nên thẻ nhận phòng
+                  đang chờ mất theo — kể cả ở ca `conversationId === null` (ghi sổ
+                  hỏng, hội thoại chưa hề vào sổ), tức mất thẻ vì một lệnh xoá
+                  không xoá nổi một dòng nào của chính hội thoại đó. Chỉ một câu,
+                  có điều kiện: câu cảnh báo thường trực là câu người ta thôi đọc.
+
+                  Cố ý KHÔNG đặt câu này trong hộp xoá từng dòng: ở đó
+                  `deleteConversation` chỉ dọn phiên khi xoá đúng hội thoại đang
+                  mở, nên muốn cảnh báo đúng thì phải biết thêm hội thoại nào đang
+                  mở — một prop nữa để đổi lấy một cảnh báo sai phần lớn thời
+                  gian. */}
+              {hasPendingAction && (
+                <p className="text-xs font-medium text-red-700">
+                  Thẻ nhận phòng đang chờ cũng sẽ mất.
+                </p>
+              )}
               <label htmlFor={PHRASE_INPUT_ID} className="block text-xs text-red-700">
                 Gõ {DELETE_ALL_PHRASE} để xác nhận
               </label>
@@ -149,7 +178,7 @@ export function AssistantHistoryList({
                 <Button
                   size="sm"
                   className="bg-red-600 text-white"
-                  disabled={phrase !== DELETE_ALL_PHRASE}
+                  disabled={busy || phrase !== DELETE_ALL_PHRASE}
                   onClick={() => {
                     onDeleteAll();
                     closeDeleteAll();
@@ -167,6 +196,7 @@ export function AssistantHistoryList({
               size="sm"
               variant="ghost"
               className="text-red-600"
+              disabled={busy}
               onClick={() => setConfirmingAll(true)}
             >
               Xoá tất cả hội thoại
