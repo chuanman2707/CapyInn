@@ -14,6 +14,10 @@
 //! Thứ tự trong một lượt là bắt buộc, không phải tuỳ ý: **kiểm rỗng và 2000 ký
 //! tự → kiểm quyền sở hữu → ghi câu hỏi → gọi nhà cung cấp → ghi câu trả lời →
 //! nhấc `updated_at`**. Xem `open_turn_record` và `close_turn_record`.
+//!
+//! Thứ tự ấy phải **nhìn thấy được trong dữ liệu**, không chỉ trong luồng chạy:
+//! câu hỏi và câu trả lời mang hai mốc `created_at` khác nhau, tính ở hai thời
+//! điểm khác nhau. Xem `close_turn_record`.
 
 use super::{get_user, require_admin_user, AppState};
 use crate::{
@@ -32,7 +36,7 @@ use crate::{
         },
         secrets::{AgentSecretKind, AgentSecretStore, KeychainSecretStore},
     },
-    app_error::{codes, CommandError, CommandResult},
+    app_error::{codes, AppErrorKind, CommandError, CommandResult, GENERIC_SYSTEM_ERROR_MESSAGE},
     commands::assistant_conversations::wrap_service_system_error,
     models::User,
     repositories::assistant::conversation_repository,
@@ -174,6 +178,36 @@ fn summarize_action(action: &ProposedAction) -> String {
     lines.join("\n")
 }
 
+/// Chữ của một lượt hỏng, ghi vào hàng `kind='error'`.
+///
+/// Lỗi **người dùng** ghi nguyên văn: "Trợ lý tra cứu quá nhiều vòng mà chưa ra
+/// kết quả" là câu viết cho lễ tân đọc, và mở sổ lại phải đọc được đúng câu ấy.
+///
+/// Lỗi **hệ thống** thì không, và đây là chỗ dễ tin nhầm nhất trong file:
+/// `CommandError::system` (`app_error.rs:170-181`) **giữ nguyên** `message` —
+/// chỉ `log_system_error` mới thay nó bằng câu chung. Nên `error.message` của
+/// một lỗi `System` tới đây vẫn là `format!("…: {error}")` với `error` là
+/// `sqlx::Error`. Đường sống có thật, không phải giả định: `draft.rs:311` dựng
+/// `CommandError::system(…, format!("Không đọc được trạng thái phòng: {error}"))`
+/// → `build_check_in_draft` → `run_assistant_turn` cho đi thẳng ra bằng `?`
+/// (`agent/assistant/mod.rs:150`) → `outcome`.
+///
+/// Ghi thẳng chuỗi ấy là **chôn vĩnh viễn** vào sổ đúng thứ mà Task 3 và Task 4
+/// tốn hai vòng duyệt để giữ khỏi màn hình quầy — và Task 6-10 sẽ render lại
+/// cái sổ đó. Câu chung kèm mã hỗ trợ viết y như `appError/format.ts:25-26`
+/// hiện trên màn hình, để dòng trong sổ khớp với thứ lễ tân đã nhìn thấy.
+fn error_text(error: &CommandError) -> String {
+    match error.kind {
+        AppErrorKind::User => error.message.clone(),
+        AppErrorKind::System => match error.support_id.as_deref() {
+            Some(support_id) => {
+                format!("{GENERIC_SYSTEM_ERROR_MESSAGE} (Mã hỗ trợ: {support_id})")
+            }
+            None => GENERIC_SYSTEM_ERROR_MESSAGE.to_string(),
+        },
+    }
+}
+
 /// Một lượt biến thành đúng một hàng trong sổ: `kind` và `text`. `None` khi
 /// lượt không sinh ra gì đáng ghi.
 ///
@@ -194,9 +228,42 @@ fn summarize_turn_for_log(
                 .map(|action| ("action", summarize_action(action)))
         }
         // Lượt hỏng vẫn để lại dấu: mở lại thấy "hôm ấy mình hỏi cái này, trợ lý
-        // báo lỗi". `message` của lỗi hệ thống đã là câu chung kèm `support_id`,
-        // không phải chuỗi sqlx thô.
-        Err(error) => Some(("error", error.message.clone())),
+        // báo lỗi". Nhưng KHÔNG phải bằng `error.message` — xem `error_text`:
+        // message của lỗi hệ thống là chuỗi sqlx thô, không phải câu chung.
+        Err(error) => Some(("error", error_text(error))),
+    }
+}
+
+/// Sổ hội thoại của **một lượt**: đang mở, hay đóng riêng cho lượt này.
+///
+/// Trạng thái thứ ba (`Off`) tồn tại vì `assert_can_read` có thể hỏng vì hai lý
+/// do khác hẳn nhau. Bị **từ chối quyền** là câu trả lời dứt khoát của hệ
+/// thống, phải nổ ra ngoài. **Không đọc nổi** chủ hội thoại (DB hỏng, thiếu
+/// bảng) thì không phải là từ chối gì cả — mà `assert_can_read` tồn tại để bảo
+/// vệ đường GHI, không phải để bảo vệ câu trả lời. Không xác minh được quyền
+/// thì **không ghi gì cả**, và không ghi thì không có rò chéo người dùng, nên
+/// lượt chat vẫn trả lời được an toàn.
+///
+/// `Off` mang theo id chứ **không** rơi về `None`: `None` là ca 3a, nghĩa là
+/// "chưa có hội thoại nào" và frontend sẽ mở hội thoại mới cho lượt sau. Rơi về
+/// đó thì mỗi lần bấm gửi trên một DB đang hỏng lại đẻ thêm một hội thoại rác.
+#[derive(Debug)]
+enum TurnLog {
+    /// Sổ đang mở. `TurnRecord` nói ghi được tới đâu.
+    On(TurnRecord),
+    /// **Lượt này không ghi sổ.** `close_turn_record` không ghi hàng nào và
+    /// không nhấc `updated_at`.
+    Off { conversation_id: String },
+}
+
+impl TurnLog {
+    /// Id trả về frontend. `Off` vẫn trả id cũ — hội thoại ấy có thật, chỉ lượt
+    /// này không vào được sổ.
+    fn conversation_id(&self) -> Option<String> {
+        match self {
+            TurnLog::On(record) => record.conversation_id.clone(),
+            TurnLog::Off { conversation_id } => Some(conversation_id.clone()),
+        }
     }
 }
 
@@ -210,7 +277,9 @@ fn summarize_turn_for_log(
 ///    nó. Trùng lặp có chủ ý — và dùng chung hằng số, không gõ lại con số.
 /// 2. Quyền sở hữu kiểm **ở đây**, không để `record_turn_question` nuốt thành
 ///    "ghi hỏng": nó vẫn trả về id cũ (ca 3b) khi bị chặn, nên lượt sẽ chạy tiếp
-///    và câu trả lời rơi vào sổ của người khác.
+///    và câu trả lời rơi vào sổ của người khác. Lỗi `User` (từ chối quyền) nổ ra
+///    ngoài bằng `Err`; lỗi `System` (không đọc nổi) chuyển sang `TurnLog::Off`
+///    — xem `TurnLog`.
 /// 3. Ghi hỏng thì **không** thành lỗi lượt (`lib.rs:136-143`) — nhưng nguyên
 ///    nhân gốc vẫn phải vào support log.
 async fn open_turn_record(
@@ -219,7 +288,7 @@ async fn open_turn_record(
     conversation_id: Option<&str>,
     question: &str,
     now: &str,
-) -> CommandResult<TurnRecord> {
+) -> CommandResult<TurnLog> {
     let question = question.trim();
     if question.is_empty() || question.chars().count() > MAX_MESSAGE_CHARS {
         return Err(CommandError::user(
@@ -233,15 +302,26 @@ async fn open_turn_record(
     let is_admin = user.role == "admin";
 
     if let Some(existing) = conversation_id {
-        assert_can_read(pool, existing, &user.id, is_admin)
-            .await
-            .map_err(|error| {
-                wrap_service_system_error(
-                    TURN_COMMAND,
-                    error,
-                    json!({ "conversation_id": existing }),
-                )
-            })?;
+        if let Err(error) = assert_can_read(pool, existing, &user.id, is_admin).await {
+            let error = wrap_service_system_error(
+                TURN_COMMAND,
+                error,
+                json!({ "conversation_id": existing }),
+            );
+
+            // Từ chối quyền là câu trả lời dứt khoát: nổ ra ngoài. Nuốt nó
+            // thành "ghi hỏng" rồi chạy tiếp là để câu trả lời rơi vào sổ của
+            // người khác.
+            if error.kind == AppErrorKind::User {
+                return Err(error);
+            }
+
+            // Không đọc nổi chủ hội thoại thì đóng sổ cho riêng lượt này, giữ
+            // nguyên id. Nguyên nhân gốc đã vào support log ở dòng trên.
+            return Ok(TurnLog::Off {
+                conversation_id: existing.to_string(),
+            });
+        }
     }
 
     let record =
@@ -260,11 +340,26 @@ async fn open_turn_record(
         );
     }
 
-    Ok(record)
+    Ok(TurnLog::On(record))
 }
 
 /// Ghi câu trả lời rồi nhấc `updated_at`. **Không trả lỗi**: sổ chat là tiện
 /// ích, trả lời được câu hỏi mới là việc chính.
+///
+/// **Mốc thời gian tính ở đây, không nhận từ caller — và đó là cả một sửa lỗi.**
+/// Bản cũ nhận `now: &str`, còn `assistant_turn` tính `now` đúng một lần rồi
+/// đưa cho cả câu hỏi lẫn câu trả lời. `conversation_queries::get_messages` sắp
+/// `ORDER BY created_at ASC, id ASC` mà `id` là UUIDv4 ngẫu nhiên, nên hoà
+/// `created_at` là để thứ tự cho bốc thăm: đo bằng `sqlite3` trên đúng câu SQL
+/// ấy, 2000 lượt, **993 lần (49,6%) câu trả lời hiện TRƯỚC câu hỏi**. Sổ hội
+/// thoại đọc lộn ngược một nửa số lượt, và không test nào bắt được vì fixture
+/// nào cũng chỉ ghi một message.
+///
+/// Bỏ hẳn tham số chứ không chỉ "nhớ truyền mốc thứ hai": còn tham số thì còn
+/// truyền lại được mốc của câu hỏi, và chế độ hỏng ấy im lặng 50% số lần. Ở đây
+/// mốc chỉ có thể là **sau** khi có `outcome` — tức sau khi trợ lý đã trả lời —
+/// nên nó cũng làm `updated_at` trung thực hơn: bản cũ nhấc `updated_at` lên
+/// mốc *trước* lúc trợ lý trả lời.
 ///
 /// `record.persisted || wrote_reply` không phải chi tiết vặt: `updated_at` chỉ
 /// được nhấc khi có ít nhất một message vào sổ (spec dòng 445). Danh sách lịch
@@ -272,15 +367,22 @@ async fn open_turn_record(
 /// rỗng lên đầu sổ.
 async fn close_turn_record(
     pool: &Pool<Sqlite>,
-    record: &TurnRecord,
+    log: &TurnLog,
     outcome: &CommandResult<AssistantTurnResponse>,
-    now: &str,
 ) {
+    // Sổ đóng cho riêng lượt này (không xác minh được quyền): không ghi hàng
+    // nào, không nhấc `updated_at`. Xem `TurnLog`.
+    let TurnLog::On(record) = log else {
+        return;
+    };
+
     // Ca 3a: không có hội thoại nào để ghi vào thì bỏ qua hoàn toàn, không cố
     // tạo lại giữa chừng.
     let Some(conversation_id) = record.conversation_id.as_deref() else {
         return;
     };
+
+    let answered_at = chrono::Local::now().to_rfc3339();
 
     let mut wrote_reply = false;
     if let Some((kind, text)) = summarize_turn_for_log(outcome) {
@@ -290,14 +392,15 @@ async fn close_turn_record(
             conversation_id,
             kind,
             &text,
-            now,
+            &answered_at,
         )
         .await
         .is_ok();
     }
 
     if record.persisted || wrote_reply {
-        let _ = conversation_repository::touch_conversation(pool, conversation_id, now).await;
+        let _ =
+            conversation_repository::touch_conversation(pool, conversation_id, &answered_at).await;
     }
 }
 
@@ -347,7 +450,7 @@ pub async fn assistant_turn(
     let now = chrono::Local::now().to_rfc3339();
     let provider = AssistantProviderClient::new(build_assistant_provider_client()?);
 
-    let record = open_turn_record(
+    let log = open_turn_record(
         &state.db,
         user,
         request.conversation_id.as_deref(),
@@ -366,25 +469,45 @@ pub async fn assistant_turn(
     )
     .await;
 
-    close_turn_record(&state.db, &record, &outcome, &now).await;
+    close_turn_record(&state.db, &log, &outcome).await;
 
+    // ĐƯỜNG LÁCH CÒN ĐỂ NGỎ, ghi lại vì hậu quả là thứ lễ tân nhìn thấy.
+    //
+    // `?` ở đây vứt mất `conversation_id` của một lượt hỏng. Với lượt thứ hai
+    // trở đi thì vô hại — frontend đã cầm id từ lượt trước. Nhưng với lượt
+    // **đầu tiên** của một hội thoại, id vừa tạo ra chỉ tồn tại ở đây, và vứt
+    // nó đi nghĩa là frontend không có gì để gửi lên cho lần sau.
+    //
+    // Hậu quả cụ thể khi nhà cung cấp chết: mỗi lần lễ tân bấm gửi lại là một
+    // hội thoại rác mới (câu hỏi + hàng `error`), và vì `updated_at` đã bump
+    // nên nó nằm **trên đầu** danh sách lịch sử. Thử 5 lần là 5 hội thoại rác
+    // đè lên lịch sử thật — mà lễ tân **không xoá được**, spec chỉ cho admin
+    // xoá.
+    //
+    // Cố ý KHÔNG sửa ở đây: mang `conversation_id` ra cùng `Err` là đổi hợp
+    // đồng lỗi của lệnh, kéo theo `CommandError` và cả đường lỗi phía frontend
+    // — việc của một thay đổi riêng, không phải của bản vá này.
     let mut response = outcome?;
-    response.conversation_id = record.conversation_id;
+    response.conversation_id = log.conversation_id();
     Ok(response)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::agent::assistant::draft::{ProposedAction, CHECK_IN_ACTION_KIND};
-    use crate::app_error::GENERIC_SYSTEM_ERROR_MESSAGE;
+    use crate::agent::assistant::draft::{
+        build_check_in_display, ProposedAction, CHECK_IN_ACTION_KIND,
+    };
     use crate::commands::assistant_conversations::tests::{commands_in, CommandShell};
-    use crate::models::{CheckInRequest, User};
+    use crate::models::{CheckInRequest, CreateGuestRequest, User};
+    use crate::queries::assistant::conversation_queries;
     use sqlx::sqlite::SqlitePoolOptions;
-    use std::collections::BTreeMap;
 
+    /// Mốc của câu hỏi. Cố ý nằm trong **quá khứ** so với đồng hồ máy: câu trả
+    /// lời lấy mốc thật bằng `chrono::Local::now()` bên trong
+    /// `close_turn_record`, nên "sau câu hỏi" là một khẳng định đo được chứ
+    /// không phải một hằng số thứ hai do test tự đặt.
     const NOW: &str = "2026-08-04T10:00:00+07:00";
-    const LATER: &str = "2026-08-04T18:30:00+07:00";
 
     fn receptionist(id: &str) -> Option<User> {
         Some(User {
@@ -466,12 +589,12 @@ mod tests {
             .expect("đọc updated_at")
     }
 
-    fn existing_record(conversation_id: &str, persisted: bool) -> TurnRecord {
-        TurnRecord {
+    fn existing_record(conversation_id: &str, persisted: bool) -> TurnLog {
+        TurnLog::On(TurnRecord {
             conversation_id: Some(conversation_id.to_string()),
             persisted,
             failure: None,
-        }
+        })
     }
 
     fn reply_only(text: &str) -> CommandResult<AssistantTurnResponse> {
@@ -483,27 +606,46 @@ mod tests {
         })
     }
 
+    /// Thẻ xác nhận dựng bằng **đúng hàm sản xuất** `build_check_in_display`.
+    ///
+    /// Bản cũ dựng `display` bằng tay với hai dòng vô hại (`Khách`, `Phòng`),
+    /// nên khẳng định "`payload.room_id` không lọt vào text" xanh — mà xanh vì
+    /// fixture, không vì code. Ngoài đời `build_check_in_display`
+    /// (`draft.rs:62`) **luôn** nhét `display["room_id"]`, và mỗi khách một
+    /// dòng gồm họ tên · CCCD · SĐT · ngày sinh · địa chỉ · đường dẫn ảnh giấy
+    /// tờ. Fixture nào không có những thứ ấy thì đo một cái sổ không tồn tại.
     fn action_card() -> CommandResult<AssistantTurnResponse> {
-        let mut display = BTreeMap::new();
-        display.insert("Khách".to_string(), "Nguyễn Văn A".to_string());
-        display.insert("Phòng".to_string(), "201".to_string());
+        let payload = CheckInRequest {
+            room_id: "R201".to_string(),
+            guests: vec![CreateGuestRequest {
+                guest_type: None,
+                full_name: "Nguyễn Văn A".to_string(),
+                doc_number: "012345678901".to_string(),
+                dob: Some("1990-01-02".to_string()),
+                gender: None,
+                nationality: None,
+                address: Some("12 Lê Lợi, Huế".to_string()),
+                visa_expiry: None,
+                scan_path: Some("/anh-giay-to/cccd-a.jpg".to_string()),
+                phone: Some("0905000111".to_string()),
+            }],
+            nights: 2,
+            source: None,
+            notes: None,
+            paid_amount: None,
+            pricing_type: None,
+        };
+        let preview = serde_json::json!({ "total": 500000 });
+        let display = build_check_in_display(&payload, &preview);
 
         Ok(AssistantTurnResponse {
             reply: None,
             proposed_action: Some(ProposedAction {
                 kind: CHECK_IN_ACTION_KIND.to_string(),
-                payload: CheckInRequest {
-                    room_id: "R201".to_string(),
-                    guests: Vec::new(),
-                    nights: 2,
-                    source: None,
-                    notes: None,
-                    paid_amount: None,
-                    pricing_type: None,
-                },
+                payload,
                 display,
-                preview: serde_json::json!({ "total": 500000 }),
-                warnings: vec!["Phòng đang bẩn".to_string()],
+                preview,
+                warnings: vec!["Phòng đang ở trạng thái bẩn, chưa dọn.".to_string()],
                 built_at_ms: 1_754_300_000_000,
             }),
             history: Vec::new(),
@@ -517,7 +659,7 @@ mod tests {
     async fn the_first_question_opens_names_and_records_a_conversation() {
         let pool = seeded_pool().await;
 
-        let record = open_turn_record(
+        let log = open_turn_record(
             &pool,
             receptionist("u1"),
             None,
@@ -527,8 +669,11 @@ mod tests {
         .await
         .expect("lượt hợp lệ");
 
+        let TurnLog::On(record) = &log else {
+            panic!("đường thường phải mở được sổ");
+        };
         assert!(record.persisted);
-        let id = record.conversation_id.expect("phải có id trả về frontend");
+        let id = log.conversation_id().expect("phải có id trả về frontend");
 
         let title: String =
             sqlx::query_scalar("SELECT title FROM assistant_conversations WHERE id = ?")
@@ -639,7 +784,6 @@ mod tests {
             &pool,
             &existing_record("c1", false),
             &reply_only("Còn phòng 101."),
-            LATER,
         )
         .await;
 
@@ -658,11 +802,19 @@ mod tests {
             &pool,
             &existing_record("c1", true),
             &reply_only("Còn phòng 101."),
-            LATER,
         )
         .await;
 
-        assert_eq!(updated_at(&pool, "c1").await, LATER);
+        // So bằng mốc đã phân tích, không bằng chuỗi: `close_turn_record` tự
+        // tính mốc của mình (xem doc-comment ở đó), nên test không được biết
+        // trước chuỗi ấy — chỉ được biết nó phải nằm **sau** câu hỏi.
+        let bumped = chrono::DateTime::parse_from_rfc3339(&updated_at(&pool, "c1").await)
+            .expect("updated_at phải là rfc3339");
+        let asked = chrono::DateTime::parse_from_rfc3339(NOW).expect("mốc câu hỏi");
+        assert!(
+            bumped > asked,
+            "updated_at phải nhích lên sau khi trợ lý trả lời, đo được: {bumped}"
+        );
         assert_eq!(
             logged_message(&pool, "c1").await,
             ("assistant".to_string(), "Còn phòng 101.".to_string())
@@ -674,16 +826,47 @@ mod tests {
     #[tokio::test]
     async fn a_turn_without_a_conversation_logs_nothing() {
         let pool = seeded_pool().await;
-        let record = TurnRecord {
+        let log = TurnLog::On(TurnRecord {
             conversation_id: None,
             persisted: false,
             failure: None,
-        };
+        });
 
-        close_turn_record(&pool, &record, &reply_only("Còn phòng 101."), LATER).await;
+        close_turn_record(&pool, &log, &reply_only("Còn phòng 101.")).await;
 
         assert_eq!(count(&pool, "assistant_messages").await, 0);
         assert_eq!(count(&pool, "assistant_conversations").await, 2);
+    }
+
+    /// Trạng thái thứ ba: sổ đóng cho riêng lượt này. Không ghi hàng nào,
+    /// **không** nhấc `updated_at` — trên một DB hoàn toàn lành lặn, nên đây là
+    /// khẳng định về ý định của code chứ không phải về việc lệnh ghi hỏng.
+    #[tokio::test]
+    async fn a_closed_log_writes_nothing_and_leaves_updated_at_alone() {
+        let pool = seeded_pool().await;
+        let log = TurnLog::Off {
+            conversation_id: "c1".to_string(),
+        };
+
+        close_turn_record(&pool, &log, &reply_only("Còn phòng 101.")).await;
+
+        assert_eq!(
+            count(&pool, "assistant_messages").await,
+            0,
+            "sổ đóng thì không một dòng nào được ghi"
+        );
+        assert_eq!(
+            updated_at(&pool, "c1").await,
+            NOW,
+            "sổ đóng thì updated_at đứng yên — không thì một hội thoại không ghi \
+             được gì vẫn nhảy lên đầu danh sách lịch sử"
+        );
+        assert_eq!(
+            log.conversation_id().as_deref(),
+            Some("c1"),
+            "id phải đi tiếp về frontend: rơi về None là bảo nó mở hội thoại mới, \
+             và mỗi lần bấm gửi lại đẻ thêm một hội thoại rác"
+        );
     }
 
     /// Hàng `kind='action'` là CHỮ, không phải dữ liệu dựng lại được. Bảng cố ý
@@ -694,21 +877,123 @@ mod tests {
     async fn an_action_card_is_logged_as_readable_text_only() {
         let pool = seeded_pool().await;
 
-        close_turn_record(&pool, &existing_record("c1", true), &action_card(), LATER).await;
+        close_turn_record(&pool, &existing_record("c1", true), &action_card()).await;
+
+        // Đối chứng cho chính fixture: bản cũ dựng `display` bằng tay nên
+        // khẳng định "`payload.room_id` không lọt vào text" xanh — xanh vì
+        // fixture chứ không vì code. Fixture giờ dựng bằng hàm sản xuất, và
+        // dòng dưới ghim đúng cái sự thật mà khẳng định kia đã nói dối.
+        let display = match &action_card().expect("thẻ").proposed_action {
+            Some(action) => action.display.clone(),
+            None => panic!("fixture phải là thẻ xác nhận"),
+        };
+        assert_eq!(
+            display.get("room_id").map(String::as_str),
+            Some("R201"),
+            "`build_check_in_display` LUÔN nhét `room_id` vào thẻ (draft.rs:62)"
+        );
 
         let (kind, text) = logged_message(&pool, "c1").await;
         assert_eq!(kind, "action");
+        // Chuỗi kỳ vọng cố ý viết ra đủ: nó là câu trả lời cho "sổ chat chứa
+        // những gì?". Có `room_id`, có số CCCD, có địa chỉ, có đường dẫn ảnh
+        // giấy tờ — **đúng lựa chọn của chủ nhà**, spec dòng 343-346 chốt "Giữ
+        // nguyên văn, kể cả số CCCD. Không tự xoá", đã nêu rõ đánh đổi trước
+        // khi chốt. Đây KHÔNG phải lỗ rò cần bịt; bịt nó là sửa spec, không
+        // phải sửa code. Điều cấm là thứ khác, ba khẳng định bên dưới mới là
+        // nó.
         assert_eq!(
             text,
-            "Đề xuất nhận phòng:\n- Khách: Nguyễn Văn A\n- Phòng: 201\n- (cảnh báo) Phòng đang bẩn"
+            "Đề xuất nhận phòng:\n\
+             - Khách 1: Nguyễn Văn A · CCCD: 012345678901 · SĐT: 0905000111 · \
+             Ngày sinh: 1990-01-02 · Địa chỉ: 12 Lê Lợi, Huế · \
+             Ảnh giấy tờ: /anh-giay-to/cccd-a.jpg\n\
+             - guests: 1 người\n\
+             - nights: 2 đêm\n\
+             - notes: —\n\
+             - paid_amount: 0 ₫\n\
+             - pricing_type: nightly\n\
+             - room_id: R201\n\
+             - source: —\n\
+             - total: 500.000 ₫\n\
+             - (cảnh báo) Phòng đang ở trạng thái bẩn, chưa dọn."
         );
+        // Cấm: thứ **dựng lại được**. `approve()` cần `action.payload` để bắn
+        // `check_in` — tiền thật — nên sổ không được chứa nguyên liệu dựng lại
+        // nó, dù là JSON thô hay mốc `built_at_ms` để so trùng.
         assert!(
             !text.contains("built_at_ms"),
-            "không được lưu thứ dựng lại được: {text}"
+            "mốc dựng thẻ lọt vào sổ: {text}"
         );
         assert!(
-            !text.contains("R201"),
-            "`payload.room_id` không được lọt vào text dưới bất kỳ dạng nào: {text}"
+            !text.contains("preview"),
+            "bảng giá tạm tính lọt vào sổ nguyên khối: {text}"
+        );
+        assert!(
+            !text.contains('{') && !text.contains('}'),
+            "JSON thô của payload lọt vào text: {text}"
+        );
+    }
+
+    /// Câu hỏi phải nằm TRƯỚC câu trả lời khi sổ được đọc lại.
+    ///
+    /// `get_messages` sắp `ORDER BY created_at ASC, id ASC`, mà `id` là UUIDv4
+    /// ngẫu nhiên: hoà `created_at` thì thứ tự do bốc thăm, và đo được là
+    /// **49,6% số lượt** hiện câu trả lời trước câu hỏi.
+    ///
+    /// Test này ép cái bốc thăm ấy thành tất định. Sau khi ghi xong, `id` của
+    /// câu trả lời bị đặt thành `"a…"` còn của câu hỏi thành `"z…"`; nếu hai
+    /// mốc `created_at` bằng nhau thì `id ASC` **chắc chắn** đẩy câu trả lời
+    /// lên đầu và test đỏ — không phải may rủi.
+    #[tokio::test]
+    async fn the_answer_never_sorts_before_the_question() {
+        let pool = seeded_pool().await;
+
+        let log = open_turn_record(
+            &pool,
+            receptionist("u1"),
+            None,
+            "Tối nay còn phòng nào trống?",
+            NOW,
+        )
+        .await
+        .expect("mở lượt");
+        let id = log.conversation_id().expect("phải có hội thoại");
+
+        close_turn_record(&pool, &log, &reply_only("Còn phòng 101.")).await;
+
+        for (kind, forced_id) in [("user", "zzzz"), ("assistant", "aaaa")] {
+            let changed = sqlx::query(
+                "UPDATE assistant_messages SET id = ? WHERE conversation_id = ? AND kind = ?",
+            )
+            .bind(forced_id)
+            .bind(&id)
+            .bind(kind)
+            .execute(&pool)
+            .await
+            .expect("ép id");
+            assert_eq!(
+                changed.rows_affected(),
+                1,
+                "phải có đúng một hàng `{kind}` để ép id — không thì phép ép \
+                 thành vô nghĩa và test xanh giả"
+            );
+        }
+
+        let messages = conversation_queries::get_messages(&pool, &id)
+            .await
+            .expect("đọc lại sổ");
+
+        assert_eq!(messages.len(), 2, "một lượt là hai hàng: hỏi và trả lời");
+        assert_eq!(
+            (messages[0].kind.as_str(), messages[0].text.as_str()),
+            ("user", "Tối nay còn phòng nào trống?"),
+            "câu trả lời chen lên trước câu hỏi — sổ hội thoại đọc lộn ngược: \
+             {messages:?}"
+        );
+        assert_eq!(
+            (messages[1].kind.as_str(), messages[1].text.as_str()),
+            ("assistant", "Còn phòng 101.")
         );
     }
 
@@ -722,24 +1007,152 @@ mod tests {
             "Trợ lý tra cứu quá nhiều vòng mà chưa ra kết quả.",
         ));
 
-        close_turn_record(&pool, &existing_record("c1", true), &outcome, LATER).await;
+        close_turn_record(&pool, &existing_record("c1", true), &outcome).await;
 
         assert_eq!(
             logged_message(&pool, "c1").await,
             (
                 "error".to_string(),
                 "Trợ lý tra cứu quá nhiều vòng mà chưa ra kết quả.".to_string()
-            )
+            ),
+            "lỗi NGƯỜI DÙNG ghi nguyên văn — câu này viết cho lễ tân đọc"
         );
+    }
+
+    /// Hàng `kind='error'` của một sự cố **hệ thống** không được mang chuỗi
+    /// sqlx thô.
+    ///
+    /// `CommandError::system` **giữ nguyên** `message` — chỉ `log_system_error`
+    /// mới thay nó bằng câu chung. Đường sống có thật: `draft.rs:311` dựng
+    /// `CommandError::system(…, format!("Không đọc được trạng thái phòng:
+    /// {error}"))` với `error` là `sqlx::Error`, `run_assistant_turn` cho nó
+    /// đi thẳng ra bằng `?`, và nó rơi vào `outcome`. Ghi thẳng `error.message`
+    /// là **chôn vĩnh viễn** vào sổ đúng cái chuỗi mà Task 3 và Task 4 tốn hai
+    /// vòng duyệt để giữ khỏi màn hình quầy — sổ này Task 6-10 sẽ render.
+    #[tokio::test]
+    async fn a_system_failure_is_logged_as_the_generic_sentence_not_the_sqlx_string() {
+        let pool = seeded_pool().await;
+        let outcome: CommandResult<AssistantTurnResponse> = Err(CommandError::system(
+            codes::SYSTEM_INTERNAL_ERROR,
+            "Không đọc được trạng thái phòng: no such table: rooms",
+        ));
+        let support_id = outcome
+            .as_ref()
+            .expect_err("lỗi hệ thống")
+            .support_id
+            .clone()
+            .expect("lỗi hệ thống luôn có mã hỗ trợ");
+
+        close_turn_record(&pool, &existing_record("c1", true), &outcome).await;
+
+        let (kind, text) = logged_message(&pool, "c1").await;
+        assert_eq!(kind, "error");
+        assert!(
+            !text.contains("no such table"),
+            "chuỗi sqlx thô nằm vĩnh viễn trong sổ hội thoại: {text}"
+        );
+        assert!(
+            text.starts_with(GENERIC_SYSTEM_ERROR_MESSAGE),
+            "sổ phải ghi đúng câu chung mà lễ tân đã thấy trên màn hình: {text}"
+        );
+        assert!(
+            text.contains(&support_id),
+            "mất mã hỗ trợ thì lễ tân mở sổ đọc lên, support vẫn không tra được \
+             lượt nào đã hỏng: {text}"
+        );
+    }
+
+    /// Sự cố **hệ thống** ở `assert_can_read` không được giết cả lượt chat.
+    ///
+    /// Bất đối xứng mà bản cũ để lại: lượt **đầu tiên** sống sót qua DB hỏng
+    /// (ca 3a — `record_turn_question` nuốt lỗi, lượt chạy tiếp), lượt **tiếp
+    /// theo** thì không, vì `assert_can_read` lỗi `System` đi thẳng ra bằng
+    /// `?`. `assert_can_read` tồn tại để bảo vệ đường GHI, không phải để bảo
+    /// vệ câu trả lời: không xác minh được quyền thì **không ghi gì cả**, mà
+    /// không ghi thì không có rò chéo người dùng nào để mà chặn.
+    ///
+    /// Đổi tên bảng chứ không `DROP`: đường đọc chủ hội thoại gãy đúng như DB
+    /// hỏng thật, nhưng các hàng cũ vẫn đếm được — nếu không đếm được thì vế
+    /// "không đẻ hội thoại rác" không khẳng định được.
+    // `env_lock` là `std::sync::Mutex` và phải giữ suốt cả test, xem
+    // `agent/supervisor.rs`. Sự cố hệ thống ở đây có ghi support log, nên phải
+    // chuyển hướng runtime root đi chỗ khác.
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn a_system_failure_on_the_owner_check_never_kills_the_turn() {
+        let _guard = crate::runtime_config::env_lock().lock().unwrap();
+        let runtime_root =
+            std::env::temp_dir().join(format!("capyinn-assistant-owner-{}", uuid::Uuid::new_v4()));
+        std::env::set_var("CAPYINN_RUNTIME_ROOT", &runtime_root);
+
+        let pool = seeded_pool().await;
+        sqlx::query("ALTER TABLE assistant_conversations RENAME TO conversations_moved_away")
+            .execute(&pool)
+            .await
+            .expect("giấu bảng hội thoại đi để ép sự cố hệ thống ở cửa quyền");
+
+        let opened = open_turn_record(&pool, receptionist("u1"), Some("c1"), "câu hỏi", NOW).await;
+
+        std::env::remove_var("CAPYINN_RUNTIME_ROOT");
+
+        let opened = opened.expect(
+            "sự cố hệ thống ở cửa quyền không được giết lượt chat — lễ tân vẫn \
+             phải nhận được câu trả lời",
+        );
+        match &opened {
+            TurnLog::Off { conversation_id } => assert_eq!(
+                conversation_id, "c1",
+                "sổ đóng vẫn phải mang id cũ đi tiếp, không rơi về None"
+            ),
+            TurnLog::On(_) => {
+                panic!("không xác minh được quyền thì tuyệt đối không được mở sổ")
+            }
+        }
+
+        close_turn_record(&pool, &opened, &reply_only("Còn phòng 101.")).await;
+
+        assert_eq!(
+            count(&pool, "assistant_messages").await,
+            0,
+            "không xác minh được quyền thì tuyệt đối không ghi hàng nào"
+        );
+        assert_eq!(
+            count(&pool, "conversations_moved_away").await,
+            2,
+            "không được đẻ hội thoại rác"
+        );
+
+        let _ = std::fs::remove_dir_all(&runtime_root);
+    }
+
+    /// Vế còn lại của cùng một cửa: lỗi **`User`** (từ chối quyền) vẫn phải nổ
+    /// ra ngoài bằng `Err`, KHÔNG được nuốt thành "lượt này không ghi sổ".
+    /// Nuốt nó là để một lượt chen ngang chạy tiếp như thường.
+    #[tokio::test]
+    async fn a_refused_owner_check_is_never_downgraded_to_a_closed_log() {
+        let pool = seeded_pool().await;
+
+        let error = open_turn_record(&pool, receptionist("u2"), Some("c1"), "chen ngang", NOW)
+            .await
+            .expect_err("từ chối quyền phải là lỗi lượt, không phải sổ đóng");
+
+        assert_eq!(error.code, codes::AUTH_FORBIDDEN);
+        assert_eq!(error.kind, AppErrorKind::User);
     }
 
     // ─── Lỗi hệ thống: chuỗi sqlx không được ra tới frontend ───
 
     /// `conversation_service` dựng `CommandError::system(format!("…: {error}"))`
-    /// ở **hai** chỗ, và Task 5 chạm cả hai: `assert_can_read` (lỗi đi thẳng ra
-    /// frontend qua `?`) và `insert_conversation` bên trong `ensure_conversation`
-    /// (lỗi không ra ngoài, nhưng phải vào support log chứ không bốc hơi).
-    /// `mhm/src/lib/appError/format.ts` nối thẳng `message` ra UI.
+    /// ở **hai** chỗ, và Task 5 chạm cả hai: `assert_can_read` và
+    /// `insert_conversation` bên trong `ensure_conversation`. Chuỗi sqlx thô
+    /// phải vào support log và **chỉ** vào đó — `mhm/src/lib/appError/format.ts`
+    /// nối thẳng `message` ra UI.
+    ///
+    /// Cả hai đường nay đều **không** trả `Err`: đường kiểm quyền đóng sổ cho
+    /// riêng lượt này (`TurnLog::Off`), đường tạo hội thoại nuốt lỗi thành ca
+    /// 3a. Nên vế "không đẩy chuỗi lạ ra frontend" mạnh hơn trước — chẳng có lỗi
+    /// nào ra tới frontend cả — nhưng vế "nguyên nhân gốc không được bốc hơi"
+    /// thì vẫn phải tự đứng, và nó là hai dòng trong support log.
     // `env_lock` là `std::sync::Mutex` và phải giữ suốt cả test — khuôn có sẵn
     // trong repo, xem `agent/supervisor.rs`.
     #[tokio::test]
@@ -751,25 +1164,23 @@ mod tests {
         std::env::set_var("CAPYINN_RUNTIME_ROOT", &runtime_root);
 
         let pool = unmigrated_pool().await;
-        let refused = open_turn_record(&pool, receptionist("u1"), Some("c1"), "câu hỏi", NOW)
-            .await
-            .err();
+        let closed = open_turn_record(&pool, receptionist("u1"), Some("c1"), "câu hỏi", NOW).await;
         let opened = open_turn_record(&pool, receptionist("u1"), None, "câu hỏi", NOW).await;
 
         std::env::remove_var("CAPYINN_RUNTIME_ROOT");
 
-        let refused = refused.expect("bảng không tồn tại thì đường kiểm quyền phải lỗi");
-        assert_eq!(
-            refused.message, GENERIC_SYSTEM_ERROR_MESSAGE,
-            "đẩy chuỗi lạ ra frontend: {}",
-            refused.message
+        let closed = closed.expect("DB hỏng ở cửa quyền không được giết lượt chat");
+        assert!(
+            matches!(closed, TurnLog::Off { .. }),
+            "không đọc nổi chủ hội thoại thì phải đóng sổ, không được ghi tiếp"
         );
-        assert!(!refused.message.contains("no such table"));
-        let support_id = refused.support_id.as_deref().expect("thiếu mã hỗ trợ");
 
         let opened = opened.expect("ghi hỏng không được biến thành lỗi lượt");
-        assert_eq!(opened.conversation_id, None, "ca 3a");
-        assert!(!opened.persisted);
+        let TurnLog::On(record) = &opened else {
+            panic!("đường tạo mới không đi qua cửa quyền, phải là sổ mở");
+        };
+        assert_eq!(record.conversation_id, None, "ca 3a");
+        assert!(!record.persisted);
 
         let log = std::fs::read_to_string(
             runtime_root
@@ -778,12 +1189,12 @@ mod tests {
         )
         .expect("support log phải được ghi");
         assert!(
-            log.contains(support_id),
-            "mã {support_id} không tra được trong support log"
-        );
-        assert!(
             log.contains("assistant_turn"),
             "lệnh phải tự khai tên mình, không dùng chung một chuỗi"
+        );
+        assert!(
+            log.contains("SUP-"),
+            "thiếu mã hỗ trợ thì dòng log không tra ngược được"
         );
         assert_eq!(
             log.lines()
