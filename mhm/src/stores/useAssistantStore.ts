@@ -328,7 +328,18 @@ export const useAssistantStore = create<AssistantState>((set, get) => ({
       const conversations = await invokeCommand<AssistantConversationSummary[]>(
         "list_assistant_conversations",
       );
-      set({ conversations });
+      // Dọn viên lỗi cũ, không chỉ nạp danh sách. Không có `error: null` thì
+      // đường đo được là: tải hỏng → viên đỏ "Không đọc được sổ hội thoại" →
+      // bấm thử lại → danh sách hiện ra ĐẦY ĐỦ, mà viên đỏ cũ vẫn nằm nguyên
+      // trên đầu chính cái danh sách nó vừa tố là đọc không được. Không phải
+      // "viên đỏ nằm lì vài phút" mà là mâu thuẫn trực tiếp với thứ ngay bên
+      // dưới nó.
+      //
+      // Đây cũng là chỗ dọn cho hai đường xoá: cả hai kết thúc bằng
+      // `loadConversations()`, kể cả ca xoá một hội thoại KHÁC hội thoại đang
+      // mở — ca duy nhất không đi qua `startNewChat()` (và `error: null` của
+      // `emptySession()`).
+      set({ conversations, error: null });
     } catch (error) {
       set({ error: readErrorMessage(error) });
     }

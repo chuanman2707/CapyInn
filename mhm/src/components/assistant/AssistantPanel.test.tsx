@@ -494,6 +494,47 @@ describe("AssistantPanel", () => {
     expect(screen.getByText("Xác nhận nhận phòng")).toBeInTheDocument();
   });
 
+  it("đang chờ check_in thì nút Bỏ thẻ và đi tiếp khoá lại, nút Ở lại vẫn mở", async () => {
+    // CỬA THỨ TƯ mint khoá phiên, và là cửa duy nhất mở được SAU khi `busy` bật:
+    // hộp hỏi mở từ lúc còn rảnh nên `disabled={busy}` ở nút *Hội thoại mới*
+    // không với tới nó. Đường đo được ngoài đời: bấm *Hội thoại mới* (rảnh) →
+    // hộp hiện → bấm *Đồng ý* trên thẻ → `check_in` bay đi, `busy=true`, hộp
+    // VẪN mở → bấm *Bỏ thẻ và đi tiếp* → khoá phiên đổi → lớp 4 vứt kết quả,
+    // nhưng phòng ĐÃ nhận thật và màn hình không còn một chữ nào.
+    const newChatSpy = vi
+      .spyOn(useAssistantStore.getState(), "startNewChat")
+      .mockImplementation(() => {});
+    useAssistantStore.setState({
+      pendingAction: makeAction(),
+      pendingActionKey: "phien-dang-mo",
+      conversationKey: "phien-dang-mo",
+    });
+
+    render(<AssistantPanel />);
+    await userEvent.click(screen.getByRole("button", { name: "Hội thoại mới" }));
+
+    // Vế âm, cùng một test: lúc còn rảnh nút phải MỞ. Thiếu câu này thì một bản
+    // `disabled` in cứng `true` — hộp hỏi không đường đi tiếp — vẫn xanh.
+    expect(screen.getByRole("button", { name: "Bỏ thẻ và đi tiếp" })).not.toBeDisabled();
+
+    act(() => {
+      useAssistantStore.setState({ busy: true });
+    });
+
+    expect(screen.getByRole("button", { name: "Bỏ thẻ và đi tiếp" })).toBeDisabled();
+    // Và cú bấm không lọt qua: đo hành vi chứ không chỉ đo thuộc tính.
+    // `fireEvent` chứ không `userEvent` — `disabled:pointer-events-none` của
+    // Button làm userEvent ném lỗi thay vì đo được điều đang cần đo.
+    fireEvent.click(screen.getByRole("button", { name: "Bỏ thẻ và đi tiếp" }));
+    expect(newChatSpy).not.toHaveBeenCalled();
+
+    // Rút lui phải LUÔN mở, kể cả lúc bận: khoá cả hai nút là treo một hộp hỏi
+    // không lối thoát cho tới khi `check_in` về đích.
+    expect(screen.getByRole("button", { name: "Ở lại" })).not.toBeDisabled();
+    await userEvent.click(screen.getByRole("button", { name: "Ở lại" }));
+    expect(screen.queryByRole("alertdialog")).not.toBeInTheDocument();
+  });
+
   it("không treo thẻ thì mở hội thoại từ lịch sử đi thẳng", async () => {
     vi.spyOn(useAssistantStore.getState(), "loadConversations").mockResolvedValue(undefined);
     const openSpy = vi
@@ -590,6 +631,81 @@ describe("AssistantPanel", () => {
     await userEvent.click(screen.getByRole("button", { name: "Xoá hội thoại này" }));
 
     expect(deleteSpy).toHaveBeenCalledWith("c1");
+  });
+
+  // ── Hai sợi dây panel → danh sách, đo Ở TẦNG NỐI ────────────────────────
+  //
+  // `AssistantHistoryList` có test riêng cho cả `hasPendingAction` lẫn `busy`,
+  // nhưng test ở đó truyền prop tay nên KHÔNG đo được sợi dây. Đo được: đổi
+  // `hasPendingAction={pendingAction !== null}` thành `{false}` (câu cảnh báo
+  // không bao giờ hiện) hay `{true}` (hiện thường trực) đều để lại cả bộ xanh,
+  // và `busy={false}` cũng vậy. Cặp test dưới đây theo đúng khuôn của cặp
+  // `isAdmin` ngay trên: mỗi sợi dây một vế dương và một vế âm.
+
+  it("đang treo thẻ thì hộp xoá sạch cảnh báo thẻ sẽ mất", async () => {
+    signIn("admin");
+    vi.spyOn(useAssistantStore.getState(), "loadConversations").mockResolvedValue(undefined);
+    useAssistantStore.setState({
+      conversations: [makeSummary()],
+      pendingAction: makeAction(),
+      pendingActionKey: "phien-dang-mo",
+      conversationKey: "phien-dang-mo",
+    });
+
+    render(<AssistantPanel />);
+    await userEvent.click(screen.getByRole("button", { name: "Lịch sử" }));
+    await userEvent.click(screen.getByRole("button", { name: "Xoá tất cả hội thoại" }));
+
+    expect(screen.getByText("Thẻ nhận phòng đang chờ cũng sẽ mất.")).toBeInTheDocument();
+  });
+
+  it("không treo thẻ thì hộp xoá sạch KHÔNG cảnh báo suông", async () => {
+    // Vế âm. Câu cảnh báo thường trực là câu người ta thôi đọc — và khi nó thật
+    // sự đúng thì cũng không ai còn nhìn.
+    signIn("admin");
+    vi.spyOn(useAssistantStore.getState(), "loadConversations").mockResolvedValue(undefined);
+    useAssistantStore.setState({ conversations: [makeSummary()], pendingAction: null });
+
+    render(<AssistantPanel />);
+    await userEvent.click(screen.getByRole("button", { name: "Lịch sử" }));
+    await userEvent.click(screen.getByRole("button", { name: "Xoá tất cả hội thoại" }));
+
+    // Hộp thật sự đã mở — thiếu câu này thì "không thấy cảnh báo" chỉ là hệ quả
+    // của việc chẳng thấy hộp nào.
+    expect(screen.getByRole("button", { name: "Xoá vĩnh viễn" })).toBeInTheDocument();
+    expect(screen.queryByText("Thẻ nhận phòng đang chờ cũng sẽ mất.")).not.toBeInTheDocument();
+  });
+
+  it("đang chờ trả lời thì cả dòng lịch sử lẫn hai nút xoá khoá theo", async () => {
+    // Sợi dây `busy` xuống danh sách, đo cả HAI chiều trong một test: cả hai
+    // lệnh xoá gọi `startNewChat()` → mint khoá phiên mới → kết quả `check_in`
+    // đang bay về bị store bỏ, nhưng phòng thì ĐÃ nhận thật.
+    signIn("admin");
+    vi.spyOn(useAssistantStore.getState(), "loadConversations").mockResolvedValue(undefined);
+    useAssistantStore.setState({ conversations: [makeSummary()] });
+
+    render(<AssistantPanel />);
+    // Phải vào lịch sử lúc còn RẢNH: nút *Lịch sử* trên header cũng khoá theo
+    // `busy`, nên đặt `busy` trước thì không vào được tới danh sách để mà đo.
+    await userEvent.click(screen.getByRole("button", { name: "Lịch sử" }));
+
+    const row = screen.getByRole("button", { name: /^Phòng 201 còn trống không/ });
+    const deleteOne = screen.getByRole("button", {
+      name: "Xoá hội thoại Phòng 201 còn trống không?",
+    });
+    const deleteAll = screen.getByRole("button", { name: "Xoá tất cả hội thoại" });
+
+    expect(row).not.toBeDisabled();
+    expect(deleteOne).not.toBeDisabled();
+    expect(deleteAll).not.toBeDisabled();
+
+    act(() => {
+      useAssistantStore.setState({ busy: true });
+    });
+
+    expect(row).toBeDisabled();
+    expect(deleteOne).toBeDisabled();
+    expect(deleteAll).toBeDisabled();
   });
 
   // ── `error` của store phải được VẼ RA ──────────────────────────────────

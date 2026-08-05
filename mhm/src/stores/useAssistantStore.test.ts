@@ -506,6 +506,35 @@ describe("useAssistantStore", () => {
       expect(state.error).toBeNull();
       expect(state.busy).toBe(false);
     });
+
+    /// VẾ DƯƠNG của đường lỗi `send()` — đường hỏng phổ biến nhất của cả tính
+    /// năng (nhà cung cấp AI hết hạn mức, mất mạng, khoá API sai), và trước test
+    /// này không ai canh. Đo được: bỏ `error: text` khỏi khối `catch` mà giữ
+    /// bong bóng thì cả bộ vẫn xanh, và bỏ bong bóng mà giữ `error` cũng vậy.
+    /// Lý do là test duy nhất chạm khối `catch` — vế ÂM ngay bên trên — chỉ
+    /// khẳng định "KHÔNG có gì rơi vào phiên mới", nên một bản chẳng đặt gì cả
+    /// cũng qua được nó.
+    ///
+    /// Phải có CẢ HAI, và đây là quyết định thiết kế chứ không phải trùng lặp
+    /// thừa: bong bóng `kind: "error"` là bản ghi ở lại trong dòng hội thoại
+    /// (cuộn lên vẫn thấy lượt nào hỏng), còn `error` là viên `role="alert"`
+    /// ghim tại chỗ và được trình đọc màn hình xướng lên. Hai vai trò khác nhau.
+    it("send() hỏng trong CÙNG phiên thì đặt cả bong bóng lỗi lẫn viên cảnh báo", async () => {
+      invokeCommand.mockRejectedValue(new Error("Nhà cung cấp AI không phản hồi"));
+
+      await useAssistantStore.getState().send("phòng nào trống", { route: "rooms" });
+
+      const state = useAssistantStore.getState();
+      expect(state.error).toBe("Nhà cung cấp AI không phản hồi");
+      expect(state.messages).toEqual([
+        expect.objectContaining({ kind: "user", text: "phòng nào trống" }),
+        expect.objectContaining({ kind: "error", text: "Nhà cung cấp AI không phản hồi" }),
+      ]);
+      expect(state.busy).toBe(false);
+      // Không đổi phiên thì cũng không mint khoá mới: lượt hỏng vẫn thuộc về
+      // hội thoại đang mở, hỏi lại được ngay.
+      expect(state.conversationKey).toBe(SESSION_KEY);
+    });
   });
 
   // ─── history khi đổi hội thoại — đường rò CCCD xuyên hội thoại ───
@@ -686,6 +715,61 @@ describe("useAssistantStore", () => {
 
       expect(invokeCommand).toHaveBeenCalledWith("list_assistant_conversations");
       expect(useAssistantStore.getState().conversations).toEqual([summary("c1", "Hỏi phòng")]);
+    });
+
+    /// Viên lỗi phải chết khi thao tác MỚI thành công, không thì nó NÓI DỐI.
+    ///
+    /// Đường đo được: tải lịch sử hỏng → viên đỏ "Không đọc được sổ hội thoại"
+    /// → bấm thử lại → danh sách hiện ra đầy đủ, mà viên đỏ cũ vẫn nằm nguyên
+    /// trên đầu chính cái danh sách nó vừa tố là đọc không được. Không phải
+    /// "viên đỏ nằm lì vài phút" mà là mâu thuẫn trực tiếp với thứ ngay bên dưới.
+    it("tải lại được danh sách thì viên lỗi của lần hỏng trước tắt theo", async () => {
+      invokeCommand.mockRejectedValueOnce(new Error("Không đọc được sổ hội thoại"));
+      await useAssistantStore.getState().loadConversations();
+
+      // Vế dương: lần hỏng CÓ đặt viên lỗi. Thiếu câu này thì một bản không bao
+      // giờ đặt `error` cũng làm khẳng định bên dưới xanh.
+      expect(useAssistantStore.getState().error).toContain("Không đọc được sổ hội thoại");
+
+      invokeCommand.mockResolvedValueOnce([summary("c1", "Hỏi phòng")]);
+      await useAssistantStore.getState().loadConversations();
+
+      const state = useAssistantStore.getState();
+      expect(state.conversations).toEqual([summary("c1", "Hỏi phòng")]);
+      expect(state.error).toBeNull();
+    });
+
+    /// Ca duy nhất trong ba đường xoá/tải KHÔNG đi qua `startNewChat()` — tức
+    /// không đi qua `error: null` của `emptySession()`. Nó dọn được viên lỗi cũ
+    /// là nhờ `loadConversations()` chạy ở cuối, nên test này canh đúng sợi dây
+    /// đó chứ không canh lại thứ `emptySession()` đã canh.
+    it("xoá một hội thoại khác thành công cũng dọn viên lỗi cũ", async () => {
+      useAssistantStore.setState({ conversationId: "c1", error: "Chỉ admin mới được thực hiện" });
+      invokeWriteCommand.mockResolvedValue(1);
+      invokeCommand.mockResolvedValue([summary("c1", "Hỏi phòng")]);
+
+      await useAssistantStore.getState().deleteConversation("c2");
+
+      const state = useAssistantStore.getState();
+      // Phiên đang mở không bị đụng — đây đúng là ca không qua `startNewChat()`.
+      expect(state.conversationId).toBe("c1");
+      expect(state.conversationKey).toBe(SESSION_KEY);
+      expect(state.error).toBeNull();
+    });
+
+    /// `openConversation` thành công dọn `error` qua `emptySession()`. Trước
+    /// test này sợi dây đó chỉ được canh GIÁN TIẾP bởi test của `startNewChat()`
+    /// — cùng dùng `emptySession()` — nên một bản đổi `openConversation` sang
+    /// dựng state bằng tay sẽ để lại viên lỗi cũ mà cả bộ vẫn xanh.
+    it("mở được hội thoại cũ thì viên lỗi của lần mở hỏng trước tắt theo", async () => {
+      useAssistantStore.setState({ error: "Không đọc được hội thoại" });
+      invokeCommand.mockResolvedValue([storedMessage("m1", "user", "Phòng 201 trống không?")]);
+
+      await useAssistantStore.getState().openConversation("c1");
+
+      const state = useAssistantStore.getState();
+      expect(state.conversationId).toBe("c1");
+      expect(state.error).toBeNull();
     });
 
     it("xoá đúng hội thoại đang mở thì về hội thoại mới và nạp lại danh sách", async () => {
