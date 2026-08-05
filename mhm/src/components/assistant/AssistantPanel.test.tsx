@@ -1,6 +1,8 @@
-import { fireEvent, render, screen } from "@testing-library/react";
+import { act, fireEvent, render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+
+import { clearMockResponses, setMockResponse } from "@test-mocks/tauri-core";
 
 // useHotelStore thật sẽ nạp dữ liệu qua Tauri lúc render. Panel chỉ cần ba
 // trường, nên mock nguyên store cho test đứng độc lập. hotelState khai qua
@@ -74,6 +76,11 @@ describe("AssistantPanel", () => {
     // Mặc định là lễ tân: quyền admin phải được từng test bật lên rõ ràng.
     useAuthStore.setState({ user: null, isAuthenticated: false });
 
+    // Bảng trả lời của lớp Tauri giả nằm trên `globalThis`, không theo test —
+    // test nào tự dựng một lệnh hỏng thì phải dọn, kẻo lệnh đó hỏng luôn ở test
+    // sau.
+    clearMockResponses();
+
     // Trả store về đúng bản gốc TRƯỚC khi đặt trạng thái của test.
     //
     // `vi.spyOn` trên state zustand rò sang test kế tiếp: `setState` sao chép
@@ -109,8 +116,24 @@ describe("AssistantPanel", () => {
   });
 
   afterEach(() => {
-    // Test "bấm gửi..." spy trên chính store thật (xem dưới); trả action gốc
-    // lại để không rò rỉ sang test hoặc file khác.
+    // ĐỌC KỸ TRƯỚC KHI DỌN DẸP: dòng này **không** phải thứ đang cô lập các spy
+    // của file. Thứ đang cô lập là `setState(getInitialState(), true)` ở
+    // `beforeEach` bên trên — gỡ dòng đó ra thì các test lớp 1 đỏ ngay; gỡ hẳn
+    // `vi.restoreAllMocks()` thì cả file vẫn xanh (đã đo).
+    //
+    // Lý do: mọi `vi.spyOn` ở đây đều đặt lên `useAssistantStore.getState()`,
+    // mà `getState()` lúc ấy trả về một object do `setState({...})` của
+    // `beforeEach` vừa `Object.assign` ra — một BẢN SAO dùng một lần. Spy nằm
+    // trên bản sao đó, và `restoreAllMocks` cũng chỉ khôi phục trên đúng bản sao
+    // đó: một object đã bị vứt trước khi test sau chạy. Cái cứu test sau là
+    // nguồn của bản sao KẾ TIẾP sạch — tức state được ép về `getInitialState()`
+    // trước, chứ không phải state đã dính spy của test trước.
+    //
+    // Giữ dòng này lại không phải vì thói quen: nó là lưới cho loại spy mà file
+    // này chưa có nhưng rất dễ có — spy lên một object BỀN của module
+    // (`useAssistantStore` chứ không phải `getState()`, `console`, `crypto`).
+    // Loại đó `setState` không đụng tới được, và không có `restoreAllMocks` thì
+    // nó rò sang mọi test còn lại.
     vi.restoreAllMocks();
   });
 
@@ -567,6 +590,192 @@ describe("AssistantPanel", () => {
     await userEvent.click(screen.getByRole("button", { name: "Xoá hội thoại này" }));
 
     expect(deleteSpy).toHaveBeenCalledWith("c1");
+  });
+
+  // ── `error` của store phải được VẼ RA ──────────────────────────────────
+  //
+  // Store đặt `error` ở sáu chỗ, và trước vòng này chỉ đúng một chỗ (`send()`)
+  // nói được ra thành lời, nhờ bong bóng `kind: "error"` đi kèm. Năm chỗ còn
+  // lại câm tuyệt đối: `grep` cả `src/` không có ai đọc `state.error`.
+  //
+  // Đo bằng `queryByRole("alert")` chứ KHÔNG bằng `queryByText`: một bản vẽ
+  // đúng chữ nhưng đặt trong nhánh `view === "chat"` vẫn làm `queryByText` xanh
+  // ở test đầu, trong khi ba trong năm đường câm (`loadConversations`, hai lệnh
+  // xoá) đều nổ lúc lễ tân đang đứng ở màn hình lịch sử. Hộp lớp 1 dùng
+  // `role="alertdialog"`, một role KHÁC — đã đo: `getByRole("alert")` không
+  // khớp nó — nên hai thứ này không giẫm lên nhau.
+
+  it("nhận phòng hỏng thì panel nói ra lý do, không để thẻ đứng im (đường approve)", async () => {
+    // Chế độ hỏng thật: `check_in` ném "Phòng đã có khách" → spinner tắt, thẻ
+    // còn đó, không một chữ giải thích. Lễ tân bấm lại. Đây là đường tiền.
+    //
+    // Đi qua `approve()` thật và qua cả lớp bọc `invokeCommand` thật, chỉ chặn
+    // ở đúng biên Tauri: bản "đặt thẳng `error` vào store rồi render" không đo
+    // được rằng đường này CÓ đặt `error`.
+    // Ném đúng hình dạng lỗi Rust trả về (`code`/`message`/`kind`) chứ không
+    // ném `new Error("…")` trần: `normalizeAppError` vứt mọi thứ không khớp sổ
+    // mã lỗi thành câu chung "Có lỗi hệ thống, vui lòng thử lại", và một test
+    // ném lỗi trần sẽ đo nhầm — nó khẳng định panel vẽ được câu chung, chứ
+    // không khẳng định panel vẽ được LÝ DO thật.
+    setMockResponse("check_in", () => {
+      throw {
+        code: "CONFLICT_ROOM_UNAVAILABLE",
+        message: "Phòng đã có khách",
+        kind: "user",
+        support_id: null,
+      };
+    });
+    useAssistantStore.setState({
+      pendingAction: makeAction(),
+      pendingActionKey: "phien-dang-mo",
+      conversationKey: "phien-dang-mo",
+    });
+
+    render(<AssistantPanel />);
+
+    // Chưa bấm thì chưa có gì hỏng: một viên cảnh báo thường trực cũng làm
+    // khẳng định bên dưới xanh.
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+
+    await userEvent.click(screen.getByRole("button", { name: "Đồng ý" }));
+
+    expect(await screen.findByRole("alert")).toHaveTextContent(/Phòng đã có khách/);
+    // Và thẻ vẫn còn để sửa hoặc bấm lại — lỗi được NÓI RA, không phải thẻ bị vứt.
+    expect(screen.getByText("Xác nhận nhận phòng")).toBeInTheDocument();
+  });
+
+  it("tải lịch sử hỏng thì panel nói ra lý do ngay ở màn hình lịch sử", async () => {
+    // Chế độ hỏng thật, và là chế độ tệ nhất trong năm: `loadConversations`
+    // ném → `conversations` rỗng → danh sách nói "Chưa có hội thoại nào.", một
+    // câu SAI SỰ THẬT về dữ liệu khách. Admin đọc câu đó xong kết luận sổ trống.
+    //
+    // Test này là chỗ duy nhất bắt được viên cảnh báo bị đặt nhầm vào trong
+    // nhánh `view === "chat"`: ở đây panel đang ở màn hình lịch sử.
+    setMockResponse("list_assistant_conversations", () => {
+      throw {
+        code: "DB_LOCKED_RETRYABLE",
+        message: "Không đọc được sổ hội thoại",
+        kind: "system",
+        support_id: null,
+      };
+    });
+
+    render(<AssistantPanel />);
+    await userEvent.click(screen.getByRole("button", { name: "Lịch sử" }));
+
+    expect(await screen.findByRole("alert")).toHaveTextContent(/Không đọc được sổ hội thoại/);
+  });
+
+  it("không có lỗi thì không có viên cảnh báo nào, ở cả khung chat lẫn lịch sử", async () => {
+    // Vế âm cho cả HAI màn hình. Thiếu vế lịch sử thì một viên in cứng nằm sẵn
+    // trong nhánh lịch sử vẫn xanh ở mọi test còn lại của file.
+    vi.spyOn(useAssistantStore.getState(), "loadConversations").mockResolvedValue(undefined);
+    useAssistantStore.setState({ conversations: [makeSummary()] });
+
+    render(<AssistantPanel />);
+
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+
+    await userEvent.click(screen.getByRole("button", { name: "Lịch sử" }));
+
+    expect(screen.getByRole("listitem")).toBeInTheDocument();
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+  });
+
+  // ── Hộp hỏi của lớp 1 phải chết theo mọi đường RÚT LUI ───────────────────
+  //
+  // `switchIntent` sống trong state của component, và component này không bao
+  // giờ unmount trong đời một phiên đăng nhập. Mỗi đường rút lui không dọn nó
+  // là một đường để một câu hỏi cũ vứt thẻ nhận phòng ở một lúc người dùng
+  // không còn hiểu vì sao mình bị hỏi.
+
+  it("bấm quay lại thì hộp hỏi tắt theo, không đi kèm sang khung chat", async () => {
+    // Đường đo được: ở lịch sử, bấm một dòng → hộp hỏi hiện → bấm *Quay lại hội
+    // thoại* → hộp hỏi THEO sang khung chat, vẫn nguyên → bấm *Bỏ thẻ và đi
+    // tiếp* → người dùng đã rút lui mà vẫn mất thẻ VÀ bị mở đúng cái hội thoại
+    // mình vừa bỏ.
+    vi.spyOn(useAssistantStore.getState(), "loadConversations").mockResolvedValue(undefined);
+    const openSpy = vi
+      .spyOn(useAssistantStore.getState(), "openConversation")
+      .mockResolvedValue(undefined);
+    useAssistantStore.setState({
+      conversations: [makeSummary({ id: "c1" })],
+      pendingAction: makeAction(),
+      pendingActionKey: "phien-dang-mo",
+      conversationKey: "phien-dang-mo",
+    });
+
+    render(<AssistantPanel />);
+    await userEvent.click(screen.getByRole("button", { name: "Lịch sử" }));
+    await userEvent.click(screen.getByRole("button", { name: /^Phòng 201 còn trống không/ }));
+
+    // Vế dương: hộp hỏi CÓ hiện. Thiếu câu này thì một bản không bao giờ hỏi —
+    // tức lớp 1 bị gỡ hẳn — cũng làm khẳng định bên dưới xanh.
+    expect(screen.getByRole("alertdialog")).toBeInTheDocument();
+
+    await userEvent.click(screen.getByRole("button", { name: "Quay lại hội thoại" }));
+
+    expect(screen.queryByRole("alertdialog")).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Bỏ thẻ và đi tiếp" })).not.toBeInTheDocument();
+    expect(openSpy).not.toHaveBeenCalled();
+    // Rút lui thì không mất gì: thẻ còn nguyên, và panel về đúng khung chat.
+    expect(screen.getByText("Xác nhận nhận phòng")).toBeInTheDocument();
+    expect(screen.getByPlaceholderText("Hỏi hoặc ra việc…")).toBeInTheDocument();
+  });
+
+  it("thu trợ lý rồi mở lại thì hộp hỏi cũ không treo lại", async () => {
+    // Panel KHÔNG unmount khi thu: `if (!settings?.gate.ready || !open) return null`
+    // giữ nguyên toàn bộ hook, nên `switchIntent` sống sót nếu không dọn tay.
+    // Mở lại panel thấy một câu hỏi mình không nhớ đã gây ra, và cú bấm sai ở
+    // đó vẫn vứt thẻ thật.
+    const newChatSpy = vi
+      .spyOn(useAssistantStore.getState(), "startNewChat")
+      .mockImplementation(() => {});
+    useAssistantStore.setState({
+      pendingAction: makeAction(),
+      pendingActionKey: "phien-dang-mo",
+      conversationKey: "phien-dang-mo",
+    });
+
+    render(<AssistantPanel />);
+    await userEvent.click(screen.getByRole("button", { name: "Hội thoại mới" }));
+    expect(screen.getByRole("alertdialog")).toBeInTheDocument();
+
+    await userEvent.click(screen.getByRole("button", { name: "Thu trợ lý" }));
+    act(() => {
+      useAssistantStore.setState({ open: true });
+    });
+
+    // Panel thật sự đã mở lại — thiếu câu này thì "không thấy hộp hỏi" chỉ là
+    // hệ quả của việc chẳng thấy gì cả.
+    expect(screen.getByRole("button", { name: "Thu trợ lý" })).toBeInTheDocument();
+    expect(screen.queryByRole("alertdialog")).not.toBeInTheDocument();
+    expect(newChatSpy).not.toHaveBeenCalled();
+  });
+
+  it("bỏ thẻ ngay trên thẻ thì hộp hỏi tắt theo, không hỏi về cái đã không còn", async () => {
+    // Đường rút lui thứ ba, không nằm trong bản mô tả nhưng cùng một hình dạng:
+    // hộp hỏi vẫn bấm được trong lúc thẻ còn trên màn hình, nên bấm *Huỷ* trên
+    // chính thẻ làm hộp hỏi trở thành câu hỏi về một cái thẻ đã không còn — mà
+    // trả lời "Bỏ thẻ và đi tiếp" cho nó thì vẫn đổi hội thoại thật.
+    const newChatSpy = vi
+      .spyOn(useAssistantStore.getState(), "startNewChat")
+      .mockImplementation(() => {});
+    useAssistantStore.setState({
+      pendingAction: makeAction(),
+      pendingActionKey: "phien-dang-mo",
+      conversationKey: "phien-dang-mo",
+    });
+
+    render(<AssistantPanel />);
+    await userEvent.click(screen.getByRole("button", { name: "Hội thoại mới" }));
+    expect(screen.getByRole("alertdialog")).toBeInTheDocument();
+
+    await userEvent.click(screen.getByRole("button", { name: "Huỷ" }));
+
+    expect(screen.queryByText("Xác nhận nhận phòng")).not.toBeInTheDocument();
+    expect(screen.queryByRole("alertdialog")).not.toBeInTheDocument();
+    expect(newChatSpy).not.toHaveBeenCalled();
   });
 
   it("admin gõ XOÁ HẾT rồi mới gọi được lệnh xoá sạch", async () => {

@@ -44,6 +44,7 @@ export function AssistantPanel() {
   const pendingActionKey = useAssistantStore((state) => state.pendingActionKey);
   const conversationKey = useAssistantStore((state) => state.conversationKey);
   const historyNotice = useAssistantStore((state) => state.historyNotice);
+  const error = useAssistantStore((state) => state.error);
   const conversations = useAssistantStore((state) => state.conversations);
   const conversationId = useAssistantStore((state) => state.conversationId);
   const busy = useAssistantStore((state) => state.busy);
@@ -93,6 +94,26 @@ export function AssistantPanel() {
     const timer = setInterval(() => setNowMs(Date.now()), 10_000);
     return () => clearInterval(timer);
   }, [showAction]);
+
+  // Hộp hỏi của lớp 1 phải chết theo mọi đường RÚT LUI, không chỉ theo hai nút
+  // bên trong nó. `switchIntent` sống trong state của component, và component
+  // này KHÔNG unmount khi thu panel — câu `return null` ngay dưới giữ nguyên
+  // toàn bộ hook — nên không dọn tay thì hộp treo lại: mở panel lần sau, câu
+  // hỏi cũ còn nguyên, và cú bấm *Bỏ thẻ và đi tiếp* vứt thẻ theo một ý định
+  // người dùng đã bỏ dở từ lúc nào không rõ.
+  //
+  // Vế `!pendingAction` là đường thứ ba: bấm *Bỏ thẻ* ngay trên chính thẻ (nút
+  // của `ProposedActionCard`, vẫn bấm được trong lúc hộp hỏi đang mở) làm thẻ
+  // biến mất, và một hộp hỏi "Bỏ thẻ nhận phòng đang chờ?" về cái thẻ không còn
+  // tồn tại là câu hỏi suông — nhưng trả lời "Bỏ thẻ và đi tiếp" cho nó thì vẫn
+  // đổi hội thoại thật.
+  //
+  // Đây KHÔNG phải nới lỏng lớp 1: nó chỉ gỡ hộp hỏi ở đúng những lúc không còn
+  // gì để mất hoặc người dùng đã rời đi. Đường mở hộp (`requestSwitch`) không
+  // đổi, và `runSwitch` vẫn chỉ chạy từ nút đồng ý.
+  useEffect(() => {
+    if (!open || !pendingAction) setSwitchIntent(null);
+  }, [open, pendingAction]);
 
   if (!settings?.gate.ready || !open) return null;
 
@@ -176,7 +197,14 @@ export function AssistantPanel() {
           <button
             type="button"
             aria-label="Quay lại hội thoại"
-            onClick={() => setView("chat")}
+            onClick={() => {
+              // Quay lại là RÚT LUI, không phải đồng ý. Không dọn `switchIntent`
+              // ở đây thì hộp hỏi — vốn nằm ngoài máy chuyển view — đi THEO sang
+              // khung chat, và cú bấm *Bỏ thẻ và đi tiếp* ở bên đó vứt thẻ **và**
+              // mở đúng cái hội thoại người dùng vừa từ chối mở.
+              setSwitchIntent(null);
+              setView("chat");
+            }}
             className="flex h-8 w-8 shrink-0 items-center justify-center rounded-xl text-brand-muted hover:bg-slate-50"
           >
             <ArrowLeft size={16} />
@@ -255,12 +283,38 @@ export function AssistantPanel() {
         </div>
       )}
 
+      {/* Lỗi của store. Nằm NGOÀI máy chuyển view vì năm trong sáu chỗ đặt
+          `error` không đi qua khung chat: `loadConversations`, `openConversation`
+          và hai lệnh xoá đều nổ trong lúc lễ tân đang đứng ở màn hình lịch sử.
+          Vẽ nó trong khung chat thôi là để y nguyên cái câm mà nó sinh ra để
+          chữa — nặng nhất là `loadConversations` hỏng: danh sách rỗng, và panel
+          nói "Chưa có hội thoại nào.", một câu SAI SỰ THẬT về dữ liệu khách.
+
+          `role="alert"` chứ không phải `role="status"` như `historyNotice`: đây
+          là hỏng việc, không phải tin phụ trợ. Nó cũng khác `role="alertdialog"`
+          của hộp lớp 1 (đo được: `getByRole("alert")` không khớp alertdialog),
+          nên test hai thứ này không giẫm lên nhau.
+
+          Đường `send()` hỏng vẽ hai lần — một bong bóng đỏ trong dòng hội thoại
+          và một viên này — và đó là đánh đổi có chủ ý: bong bóng nằm trong vùng
+          cuộn nên cuộn qua là mất, còn viên này ghim tại chỗ và được trình đọc
+          màn hình xướng lên. */}
+      {error && (
+        <p
+          role="alert"
+          className="mx-5 mb-3 shrink-0 rounded-xl bg-red-50 px-3 py-2 text-xs text-red-700"
+        >
+          {error}
+        </p>
+      )}
+
       {view === "history" ? (
         <div className="flex-1 overflow-y-auto px-5 pb-4">
           <AssistantHistoryList
             conversations={conversations}
             isAdmin={isAdmin}
             busy={busy}
+            hasPendingAction={pendingAction !== null}
             onOpen={(id) => requestSwitch({ kind: "open", conversationId: id })}
             onDelete={(id) => void deleteConversation(id)}
             onDeleteAll={() => void deleteAllConversations()}
