@@ -80,18 +80,9 @@ pub async fn assert_can_read(
 /// Trả về id hội thoại để ghi tiếp. `None` nghĩa là tạo mới; `Some` phải qua
 /// cửa quyền sở hữu trước.
 ///
-/// Đây là cửa duy nhất của module chưa có caller sản xuất — `commands::assistant`
-/// gọi vào ở **Task 5** (Task 4 chỉ nối `assert_can_read`). Mọi thứ còn lại trong
-/// file đều nằm dưới nó nên không cần đánh dấu riêng: rustc coi một item mang
-/// `expect(dead_code)` là gốc và vẫn đi tiếp vào thân, nên `derive_title`,
-/// `assert_can_read` và hai hàm query/repository nó gọi tới đã sống.
-///
-/// Dùng `expect` chứ không `allow` — nhưng đừng trông cậy quá vào nó: đã đo được
-/// rằng `expect` chỉ bắn `this lint expectation is unfulfilled` khi chuỗi caller
-/// có gốc là code sản xuất thật. Chừng nào `generate_handler!` chưa nối tới đây,
-/// dấu này nằm im kể cả khi đã thừa. Xem đính chính đầy đủ ở đầu
-/// `queries/assistant/conversation_queries.rs`.
-#[cfg_attr(not(test), expect(dead_code))]
+/// **Cố ý không tự `touch_conversation`.** `updated_at` chỉ được nhấc khi có ít
+/// nhất một message vào sổ (spec dòng 445); tạo được hội thoại mà chèn message
+/// hỏng thì hội thoại rỗng ấy không có quyền nhảy lên đầu danh sách lịch sử.
 pub async fn ensure_conversation(
     pool: &Pool<Sqlite>,
     conversation_id: Option<&str>,
@@ -122,6 +113,76 @@ pub async fn ensure_conversation(
     })?;
 
     Ok(id)
+}
+
+/// Kết quả của việc ghi câu hỏi: id để dùng tiếp, và có ghi được hay không.
+///
+/// Hai thứ này **độc lập**. Ca 3b — hội thoại đã có, chèn message hỏng — vẫn
+/// trả id cũ kèm `persisted = false`. Gộp chúng lại thành một `Option` là cách
+/// làm cuộc trò chuyện bị chẻ làm hai bản ghi rời trong sổ.
+#[derive(Debug)]
+pub struct TurnRecord {
+    pub conversation_id: Option<String>,
+    pub persisted: bool,
+    /// Lỗi từ `ensure_conversation`, giữ lại **nguyên vẹn** cho caller ghi
+    /// support log.
+    ///
+    /// Không có trường này thì lỗi bị nuốt trắng: lượt chat vẫn chạy tiếp (đúng
+    /// ý đồ — sổ chat là tiện ích), nhưng `"no such table: assistant_conversations"`
+    /// không tới được support log và "sao hội thoại không lưu" thành câu hỏi
+    /// không ai trả lời được. Nó mang chuỗi sqlx thô, nên caller **phải** cho nó
+    /// đi qua `wrap_service_system_error` trước khi có bất cứ khả năng nào chạm
+    /// tới frontend.
+    pub failure: Option<CommandError>,
+}
+
+/// Ghi câu hỏi của một lượt chat, tạo hội thoại nếu chưa có.
+///
+/// **Không kiểm quyền thay cho caller.** `ensure_conversation` bên trong có
+/// kiểm, nhưng lỗi của nó rơi vào `failure` — tức trông y hệt "ghi hỏng". Tầng
+/// command phải gọi `assert_can_read` TRƯỚC và trả lỗi ra ngoài, không thì một
+/// lượt chen vào hội thoại người khác sẽ chạy tiếp như thường và câu trả lời
+/// rơi vào sổ của người ta.
+pub async fn record_turn_question(
+    pool: &Pool<Sqlite>,
+    conversation_id: Option<&str>,
+    user_id: &str,
+    is_admin: bool,
+    question: &str,
+    now: &str,
+) -> TurnRecord {
+    let existing = conversation_id.map(str::to_string);
+
+    let id =
+        match ensure_conversation(pool, conversation_id, user_id, is_admin, question, now).await {
+            Ok(id) => id,
+            // Tạo hỏng (3a) → không có id. Nhưng nếu id đã có sẵn từ đầu (3b) thì
+            // giữ lại, vì hội thoại vẫn tồn tại và vẫn là chỗ đúng để ghi tiếp.
+            Err(error) => {
+                return TurnRecord {
+                    conversation_id: existing,
+                    persisted: false,
+                    failure: Some(error),
+                }
+            }
+        };
+
+    let persisted = conversation_repository::insert_message(
+        pool,
+        &uuid::Uuid::new_v4().to_string(),
+        &id,
+        "user",
+        question,
+        now,
+    )
+    .await
+    .is_ok();
+
+    TurnRecord {
+        conversation_id: Some(id),
+        persisted,
+        failure: None,
+    }
 }
 
 #[cfg(test)]
@@ -348,5 +409,123 @@ mod tests {
             .expect_err("không được ghi vào hội thoại người khác");
 
         assert_eq!(error.code, codes::AUTH_FORBIDDEN);
+    }
+
+    // ─── Ghi câu hỏi của một lượt chat ───
+
+    #[tokio::test]
+    async fn the_first_question_is_written_as_a_user_message() {
+        let pool = seeded_pool().await;
+
+        let outcome = record_turn_question(
+            &pool,
+            None,
+            "u1",
+            false,
+            "Tối nay còn phòng nào trống?",
+            NOW,
+        )
+        .await;
+
+        assert!(outcome.persisted, "đường thường phải ghi được");
+        assert!(outcome.failure.is_none());
+        let id = outcome.conversation_id.expect("phải tạo được hội thoại");
+
+        let (kind, text): (String, String) =
+            sqlx::query_as("SELECT kind, text FROM assistant_messages WHERE conversation_id = ?")
+                .bind(&id)
+                .fetch_one(&pool)
+                .await
+                .expect("đọc lại câu hỏi vừa ghi");
+        assert_eq!(kind, "user");
+        assert_eq!(text, "Tối nay còn phòng nào trống?");
+
+        // Vòng khứ hồi chủ sở hữu, cùng lý do với
+        // `ensure_conversation_creates_and_names_on_the_first_message`.
+        assert!(assert_can_read(&pool, &id, "u1", false).await.is_ok());
+        assert!(assert_can_read(&pool, &id, "u2", false).await.is_err());
+    }
+
+    /// Ca 3b: hội thoại đã có, chỉ lệnh chèn message hỏng. Phải trả id CŨ.
+    /// Trả `None` thì lượt sau tạo hội thoại mới và cuộc trò chuyện bị chẻ làm
+    /// hai bản ghi rời trong sổ.
+    ///
+    /// Bỏ hẳn bảng tin nhắn là cách ép đúng ca này: hội thoại vẫn còn và vẫn
+    /// kiểm quyền được, chỉ đường ghi message gãy. Không bỏ bảng thì
+    /// `insert_message` chạy trót lọt và test xanh mà chưa từng chạm nhánh hỏng.
+    #[tokio::test]
+    async fn a_failed_insert_on_an_existing_conversation_keeps_the_id() {
+        let pool = seeded_pool().await;
+        sqlx::query("DROP TABLE assistant_messages")
+            .execute(&pool)
+            .await
+            .expect("bỏ bảng tin nhắn để ép lỗi chèn");
+
+        let outcome = record_turn_question(&pool, Some("c1"), "u1", false, "câu hỏi", NOW).await;
+
+        assert_eq!(outcome.conversation_id.as_deref(), Some("c1"));
+        assert!(
+            !outcome.persisted,
+            "chèn hỏng thì phải báo là chưa ghi được"
+        );
+    }
+
+    /// Ca 3a: chưa có hội thoại và tạo hỏng → `None`.
+    #[tokio::test]
+    async fn a_failed_create_yields_no_conversation_id() {
+        let pool = test_pool().await;
+        sqlx::query("DROP TABLE assistant_conversations")
+            .execute(&pool)
+            .await
+            .expect("bỏ bảng để ép lỗi ghi");
+
+        let outcome = record_turn_question(&pool, None, "u1", false, "câu hỏi", NOW).await;
+
+        assert_eq!(outcome.conversation_id, None);
+        assert!(
+            !outcome.persisted,
+            "không ghi được thì phải báo là không ghi được"
+        );
+
+        // Lỗi gốc phải đi ra được, chứ không bị nuốt trắng: tầng command cần nó
+        // để ghi support log. Chuỗi sqlx thô nằm ở đây là **đúng chỗ** — chỗ sai
+        // là frontend, và `commands::assistant` bọc nó lại trước khi ra tới đó.
+        let failure = outcome
+            .failure
+            .as_ref()
+            .expect("lỗi tạo hội thoại phải giữ lại được");
+        assert_eq!(failure.kind, crate::app_error::AppErrorKind::System);
+        assert!(
+            failure.message.contains("no such table"),
+            "nguyên nhân gốc phải còn nguyên cho support log: {}",
+            failure.message
+        );
+    }
+
+    /// `record_turn_question` **nuốt** lỗi quyền thành "ghi hỏng" — đó chính là
+    /// lý do tầng command phải gọi `assert_can_read` TRƯỚC nó. Ghim cả hai vế:
+    /// nuốt thật, và không một dòng nào rơi vào hội thoại người khác.
+    #[tokio::test]
+    async fn a_refused_owner_check_writes_nothing_and_looks_like_a_write_failure() {
+        let pool = seeded_pool().await;
+
+        let outcome = record_turn_question(&pool, Some("c1"), "u2", false, "chen ngang", NOW).await;
+
+        assert!(!outcome.persisted);
+        assert_eq!(
+            outcome.failure.as_ref().map(|error| error.code.as_str()),
+            Some(codes::AUTH_FORBIDDEN),
+            "lỗi quyền không được biến mất — nhưng nó ra bằng đường `failure`, \
+             không phải đường `Err`, nên tầng command không thấy được nếu chỉ \
+             trông vào `?`"
+        );
+
+        let written: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM assistant_messages WHERE conversation_id = ?")
+                .bind("c1")
+                .fetch_one(&pool)
+                .await
+                .expect("đếm tin nhắn");
+        assert_eq!(written, 0, "bị chặn quyền thì không được ghi gì");
     }
 }

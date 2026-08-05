@@ -199,8 +199,11 @@ pub async fn delete_all_assistant_conversations(state: State<'_, AppState>) -> C
     delete_every(&state.db, get_user(&state)).await
 }
 
+/// `pub(crate)` vì bộ đọc vỏ lệnh bên dưới (`commands_in`) là hàng rào dùng
+/// chung: `commands::assistant` đọc lại nó thay vì chép bản thứ hai — hai bản
+/// sao là hai chỗ để trôi lệch, và một bộ đọc què làm guard xanh trơn.
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::app_error::GENERIC_SYSTEM_ERROR_MESSAGE;
     use sqlx::sqlite::SqlitePoolOptions;
@@ -515,10 +518,10 @@ mod tests {
     /// Một vỏ `#[tauri::command]` đọc ra từ mã nguồn: tên, tên các tham số, và
     /// các dòng thân hàm (đã `trim`, bỏ dòng trống).
     #[derive(Debug)]
-    struct CommandShell {
-        name: String,
-        parameters: Vec<String>,
-        body: Vec<String>,
+    pub(crate) struct CommandShell {
+        pub(crate) name: String,
+        pub(crate) parameters: Vec<String>,
+        pub(crate) body: Vec<String>,
     }
 
     /// Đọc mọi `#[tauri::command]` trong một file.
@@ -532,7 +535,7 @@ mod tests {
     /// thêm một lệnh thứ năm khai biến thể đó, mang cả `user_id: String` lẫn
     /// `is_admin: bool`, thì nó lọt hẳn khỏi bộ đọc — số vỏ đọc được vẫn là 4
     /// nên guard vẫn xanh.
-    fn commands_in(source: &str) -> Vec<CommandShell> {
+    pub(crate) fn commands_in(source: &str) -> Vec<CommandShell> {
         let mut shells = Vec::new();
         let mut lines = source.lines();
 
