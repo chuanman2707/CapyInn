@@ -71,9 +71,18 @@ const READY_SETTINGS: AssistantSettings = {
 
 /// Ba mốc của bố cục, tìm bằng ruột chứ không bằng thứ tự — dùng thứ tự để tìm
 /// rồi kiểm thứ tự thì test luôn xanh.
+///
+/// Panel tìm bằng `aria-label`, KHÔNG bằng `querySelector("form")`. Bám vào
+/// `<form>` là bám vào ruột mà Task 8 được giao viết lại: khung soạn thôi là
+/// `<form>` thì `panel` thành null, ba test bố cục đỏ **vì lý do sai**, và tệ
+/// hơn — test cổng `gate.ready` bên dưới khẳng định `panel === null` nên nó
+/// **xanh vĩnh viễn** rồi thôi canh gì cả. Một `<form>` lạ xuất hiện trước
+/// panel (ô tìm kiếm trong nav) cũng làm nó trỏ nhầm sang `<aside>` nav.
+/// `aria-label` vừa bền vừa thật: nó đặt tên cho landmark, không phải móc chỉ
+/// để test bám vào.
 function landmarks(container: HTMLElement) {
   const nav = container.querySelector("nav")?.closest("aside");
-  const panel = container.querySelector("form")?.closest("aside") ?? null;
+  const panel = container.querySelector('aside[aria-label="Trợ lý quầy"]');
   const content = container.querySelector("main");
   const inDocumentOrder = Array.from(container.querySelectorAll("aside, main"));
   return { nav, panel, content, inDocumentOrder };
@@ -159,6 +168,8 @@ describe("MainShell — bố cục ba cột", () => {
 
     await waitFor(() => expect(screen.getByText("Dashboard page")).toBeInTheDocument());
     expect(landmarks(container).panel).toBeNull();
-    expect(within(container.querySelector("main")!).queryByPlaceholderText("Hỏi hoặc ra việc…")).toBeNull();
+    // Quét cả cây, không quét trong `<main>`: panel là anh em của `<main>` chứ
+    // không phải con, nên tìm trong `<main>` là một khẳng định luôn đúng.
+    expect(within(container).queryByPlaceholderText("Hỏi hoặc ra việc…")).toBeNull();
   });
 });
