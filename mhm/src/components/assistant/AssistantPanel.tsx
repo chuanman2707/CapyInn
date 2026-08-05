@@ -115,6 +115,29 @@ export function AssistantPanel() {
     if (!open || !pendingAction) setSwitchIntent(null);
   }, [open, pendingAction]);
 
+  // Đổi người dùng phải dọn cả state của COMPONENT, không chỉ state của store.
+  //
+  // `resetForLogout()` với tới store, nhưng `draft` — câu đang gõ dở, mang tên
+  // khách và số CCCD — và `view` sống trong component này. Và component này
+  // **không unmount khi đăng xuất** ở cấu hình `app_lock_enabled = false`:
+  // `AuthGate.tsx:26` chỉ thay MainShell bằng LoginScreen khi app lock BẬT; app
+  // lock tắt thì AuthGate luôn render children. Cùng trục với lỗ hổng vòng
+  // duyệt Task 6 đã bắt (lễ tân B duyệt được thẻ của lễ tân A) — chỉ khác là ở
+  // tầng component chứ không phải tầng store, nên `resetForLogout()` không với
+  // tới bằng bất kỳ cách nào.
+  //
+  // Bám vào ID người dùng chứ không vào `isAuthenticated`: với app lock tắt,
+  // `isAuthenticated` có thể đứng yên ở `false` suốt vòng đời app, còn `user`
+  // thì `logout()` LUÔN đặt về `null` ở cả hai cấu hình.
+  //
+  // `switchIntent` cố ý không dọn ở đây: effect ngay trên đã dọn nó, vì
+  // `resetForLogout()` đặt `open: false`. Dọn lần hai là viết một no-op.
+  const userId = useAuthStore((state) => state.user?.id ?? null);
+  useEffect(() => {
+    setDraft("");
+    setView("chat");
+  }, [userId]);
+
   if (!settings?.gate.ready || !open) return null;
 
   const context = buildScreenContext({ activeTab, roomDetail, roomChangeBookingId });

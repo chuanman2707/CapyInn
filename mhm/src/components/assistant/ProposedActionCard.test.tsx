@@ -112,6 +112,50 @@ describe("ProposedActionCard", () => {
     expect(screen.getByText("Phòng đang ở trạng thái bẩn, chưa dọn.")).toBeInTheDocument();
   });
 
+  it("cảnh báo nằm TRONG viên cảnh báo, không trôi ra ngoài", () => {
+    // Test "hiện cảnh báo lấy từ PMS" phía trên chỉ hỏi chữ có mặt ở đâu đó
+    // trên thẻ hay không, nên nó xanh với cả bản để cảnh báo trôi lạc giữa bảng
+    // giá trị. Từ khi cảnh báo được gom vào một viên riêng thì "nằm ở đâu" mới
+    // là thứ phải đo — người bấm *Đồng ý* quét thẻ theo khối, không đọc từng
+    // dòng.
+    render(
+      <ProposedActionCard
+        action={action}
+        busy={false}
+        nowMs={action.built_at_ms}
+        onApprove={vi.fn()}
+        onRebuild={vi.fn()}
+        onDismiss={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByRole("list", { name: "Cảnh báo từ PMS" })).toHaveTextContent(
+      "Phòng đang ở trạng thái bẩn, chưa dọn.",
+    );
+  });
+
+  it("không có cảnh báo nào thì KHÔNG vẽ viên cảnh báo rỗng", () => {
+    // Vế âm, và là vế duy nhất bắt được bản "bọc luôn vẽ, chỉ nội dung có điều
+    // kiện": một viên nền vàng RỖNG thường trực làm mọi test dò chữ xanh, vì
+    // jsdom không nhìn thấy nền. Đây đúng là loại test rỗng thứ năm mà nhánh
+    // này đã dính ở `historyNotice`.
+    render(
+      <ProposedActionCard
+        action={{ ...action, warnings: [] }}
+        busy={false}
+        nowMs={action.built_at_ms}
+        onApprove={vi.fn()}
+        onRebuild={vi.fn()}
+        onDismiss={vi.fn()}
+      />,
+    );
+
+    // Vế dương kèm theo: thẻ VẪN được vẽ, chỉ là không có viên cảnh báo. Thiếu
+    // câu này thì một component trả `null` cũng làm khẳng định trên xanh.
+    expect(screen.getByText("Xác nhận nhận phòng")).toBeInTheDocument();
+    expect(screen.queryByRole("list", { name: "Cảnh báo từ PMS" })).not.toBeInTheDocument();
+  });
+
   it("hai cảnh báo trùng nội dung vẫn hiện đủ hai dòng, không phát cảnh báo key trùng", () => {
     const errorSpy = vi.spyOn(console, "error");
     const duplicateWarningAction: ProposedAction = {

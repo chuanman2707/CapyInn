@@ -910,5 +910,50 @@ describe("useAssistantStore", () => {
 
       expect(invokeWriteCommand).not.toHaveBeenCalled();
     });
+
+    /// Ca lệnh KHÔNG BAO GIỜ bay về: mạng treo, nhà cung cấp AI câm.
+    ///
+    /// Bình thường `busy` tự lành mà không cần ai dọn — cả hai nhánh race guard
+    /// trong `send()` đều `set({ busy: false })` trước khi `return`. Nhưng cả
+    /// hai nhánh ấy chỉ chạy khi promise **giải quyết**. Không có `busy: false`
+    /// trong `resetForLogout()` thì `busy` kẹt `true` sang phiên của người kế
+    /// tiếp, và khung soạn của họ tắt cho tới khi khởi động lại app: `send()`
+    /// tự chặn ở `if (!trimmed || get().busy) return;`, nên đây là hàng rào ở
+    /// tầng store chứ không chỉ là một nút xám.
+    ///
+    /// Đăng xuất là đúng thời điểm dọn cứng: nó không được phụ thuộc vào một
+    /// promise đang bay mà không ai biết bao giờ về.
+    it("đăng xuất giữa lúc lệnh treo thì người kế tiếp vẫn gửi được tin", async () => {
+      // Không `mockResolvedValue`, không `mockRejectedValue`: promise này
+      // không bao giờ đổi trạng thái, đúng hình dạng của mạng treo.
+      invokeCommand.mockReturnValue(new Promise(() => {}));
+
+      void useAssistantStore.getState().send("phòng nào trống", { route: "rooms" });
+      // Vế dương trước: thiếu câu này thì một bản `send()` không bao giờ bật
+      // `busy` cũng làm khẳng định cuối cùng xanh, mà nó chẳng đo được gì.
+      expect(useAssistantStore.getState().busy).toBe(true);
+
+      await useAuthStore.getState().logout();
+
+      expect(useAssistantStore.getState().busy).toBe(false);
+
+      // Và đo tới tận hậu quả: người kế tiếp gõ được thật, không chỉ là một cờ
+      // boolean đúng. `send()` chặn ngay ở đầu khi `busy`, nên nếu cờ còn kẹt
+      // thì lệnh thứ hai này không bao giờ được bắn đi.
+      invokeCommand.mockResolvedValue({
+        reply: "ok",
+        proposed_action: null,
+        history: [],
+        conversation_id: null,
+      });
+      await useAssistantStore.getState().send("của người mới", { route: "rooms" });
+
+      expect(invokeCommand).toHaveBeenLastCalledWith(
+        "assistant_turn",
+        expect.objectContaining({
+          request: expect.objectContaining({ message: "của người mới" }),
+        }),
+      );
+    });
   });
 });

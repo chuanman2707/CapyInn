@@ -98,3 +98,26 @@ export const CARD_TTL_MS = 5 * 60 * 1000;
 export function isActionExpired(action: ProposedAction, nowMs: number): boolean {
   return nowMs - action.built_at_ms > CARD_TTL_MS;
 }
+
+/// Chuỗi phải gõ đúng thì nút xoá sạch mới bật.
+///
+/// Ở đây chứ không ở trong một component nào, vì spec dòng 359 đòi nút *Xoá tất
+/// cả* ở **HAI** chỗ — cuối danh sách lịch sử và Cài đặt → Trợ lý quầy. Hai bản
+/// chép tay là hai chỗ trôi độc lập, và cái trôi được thì đúng là hàng rào.
+export const DELETE_ALL_PHRASE = "XOÁ HẾT";
+
+/// So bằng `===` trên chuỗi **thô**: không `trim()`, không `toUpperCase()`,
+/// không bỏ dấu.
+///
+/// Hàng rào này tồn tại để gây khó — lệnh xoá sạch xoá bản duy nhất, không hoàn
+/// tác, và chủ nhà đã chọn hệ thống không tự xoá nên đây là lối ra duy nhất của
+/// dữ liệu khách. Mỗi cách nới lỏng biến nó thành một ô nhập trang trí: chuẩn
+/// hoá bỏ dấu cho "xoa het" đi lọt, mà "xoa het" là thứ gõ nhầm ra được; còn
+/// `trim()` cho một chuỗi dán từ chỗ khác đi lọt, mà dán chuỗi không phải hành
+/// vi của người vừa đọc xong câu cảnh báo.
+///
+/// Là một hàm dùng chung chứ không phải hai câu so sánh chép tay: nới lỏng ở
+/// đây làm đỏ test của **cả hai** cửa cùng lúc.
+export function isDeleteAllPhrase(typed: string): boolean {
+  return typed === DELETE_ALL_PHRASE;
+}
