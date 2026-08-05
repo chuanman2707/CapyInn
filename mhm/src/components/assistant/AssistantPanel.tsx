@@ -1,8 +1,8 @@
-import { useEffect, useState, type FormEvent } from "react";
-import { Send } from "lucide-react";
+import { useEffect, useState } from "react";
 
+import { AssistantComposer } from "@/components/assistant/AssistantComposer";
+import { AssistantEmptyState } from "@/components/assistant/AssistantEmptyState";
 import { ProposedActionCard } from "@/components/assistant/ProposedActionCard";
-import { Button } from "@/components/ui/button";
 import { useAssistantStore } from "@/stores/useAssistantStore";
 import { useHotelStore } from "@/stores/useHotelStore";
 import type { ScreenContext } from "@/types/assistant";
@@ -32,6 +32,9 @@ export function AssistantPanel() {
   const open = useAssistantStore((state) => state.open);
   const messages = useAssistantStore((state) => state.messages);
   const pendingAction = useAssistantStore((state) => state.pendingAction);
+  const pendingActionKey = useAssistantStore((state) => state.pendingActionKey);
+  const conversationKey = useAssistantStore((state) => state.conversationKey);
+  const historyNotice = useAssistantStore((state) => state.historyNotice);
   const busy = useAssistantStore((state) => state.busy);
   const settings = useAssistantStore((state) => state.settings);
   const send = useAssistantStore((state) => state.send);
@@ -48,12 +51,24 @@ export function AssistantPanel() {
   const [draft, setDraft] = useState("");
   const [nowMs, setNowMs] = useState(() => Date.now());
 
+  // Lớp 3 của bốn lớp bảo vệ: chỉ vẽ thẻ khi nó được dựng ở CHÍNH hội thoại
+  // đang mở. Lớp 4 (`approve()`) canh việc GHI và là lớp duy nhất nằm trên
+  // đường tiền; lớp này canh việc VẼ. Không có nó thì lễ tân đang đọc hội thoại
+  // B vẫn thấy thẻ nhận phòng của hội thoại A, bấm *Đồng ý*, và tất cả những gì
+  // xảy ra là thẻ biến mất — không một lời giải thích, vì lớp 4 trả về im lặng.
+  //
+  // So bằng `conversationKey` chứ KHÔNG bằng `conversationId`: id database là
+  // `null` khi ghi hỏng, và `null === null` sẽ khớp — đúng cái phải chặn.
+  const showAction = pendingAction !== null && pendingActionKey === conversationKey;
+
   // Đồng hồ để thẻ tự chuyển sang trạng thái hết hạn mà không cần thao tác.
+  // Bám vào thẻ ĐANG VẼ, không phải `pendingAction` trần: thẻ của hội thoại
+  // khác không hiện thì cũng không có gì để đếm giờ.
   useEffect(() => {
-    if (!pendingAction) return;
+    if (!showAction) return;
     const timer = setInterval(() => setNowMs(Date.now()), 10_000);
     return () => clearInterval(timer);
-  }, [pendingAction]);
+  }, [showAction]);
 
   if (!settings?.gate.ready || !open) return null;
 
@@ -62,11 +77,17 @@ export function AssistantPanel() {
     ? `Đang xem: ${context.selectedRoomNumber}`
     : `Đang xem: ${context.route}`;
 
-  const onSubmit = async (event: FormEvent) => {
-    event.preventDefault();
+  // Gợi ý ở màn hình trống phải GỬI thẳng câu đó, không đi vòng qua `draft`:
+  // điền hộ vào ô nhập rồi bắt bấm gửi lần nữa là biến một cú bấm thành hai mà
+  // chẳng thêm thông tin gì.
+  const sendMessage = (message: string) => {
+    void send(message, context);
+  };
+
+  const onSubmitDraft = () => {
     const message = draft;
     setDraft("");
-    await send(message, context);
+    sendMessage(message);
   };
 
   return (
@@ -77,7 +98,17 @@ export function AssistantPanel() {
     >
       <header className="flex h-[88px] items-center px-5 text-sm font-semibold">Trợ lý quầy</header>
 
-      <div className="flex-1 space-y-3 overflow-y-auto px-5 pb-4">
+      <div className="flex flex-1 flex-col gap-3 overflow-y-auto px-5 pb-4">
+        {/* Dòng nhắc khi mở lại hội thoại cũ. Có điều kiện — nhắc thường trực
+            thì thành nhiễu, và nhiễu thường trực thì người ta thôi đọc. */}
+        {historyNotice && (
+          <p className="rounded-xl bg-amber-50 px-3 py-2 text-[11px] text-amber-800">
+            {historyNotice}
+          </p>
+        )}
+
+        {messages.length === 0 && <AssistantEmptyState onPick={sendMessage} />}
+
         {messages.map((message) => (
           <p
             key={message.id}
@@ -95,32 +126,27 @@ export function AssistantPanel() {
 
         {busy && <p className="text-xs text-brand-muted">Đang tra dữ liệu…</p>}
 
-        {pendingAction && (
+        {showAction && pendingAction && (
           <ProposedActionCard
             action={pendingAction}
             busy={busy}
             nowMs={nowMs}
             onApprove={approve}
-            onRebuild={() => void send("Tính lại thẻ nhận phòng vừa rồi.", context)}
+            onRebuild={() => sendMessage("Tính lại thẻ nhận phòng vừa rồi.")}
             onDismiss={dismissAction}
           />
         )}
       </div>
 
-      <form onSubmit={onSubmit} className="border-t border-slate-100 p-4">
-        <p className="mb-2 text-[11px] text-brand-muted">{contextLabel}</p>
-        <div className="flex gap-2">
-          <input
-            value={draft}
-            onChange={(event) => setDraft(event.target.value)}
-            placeholder="Hỏi hoặc ra việc…"
-            className="flex-1 rounded-xl border border-slate-200 px-3 py-2 text-sm outline-none focus:border-brand-primary"
-          />
-          <Button type="submit" size="sm" disabled={busy || !draft.trim()} aria-label="Gửi tin nhắn">
-            <Send size={16} />
-          </Button>
-        </div>
-      </form>
+      <div className="border-t border-slate-100">
+        <AssistantComposer
+          value={draft}
+          contextLabel={contextLabel}
+          busy={busy}
+          onChange={setDraft}
+          onSubmit={onSubmitDraft}
+        />
+      </div>
     </aside>
   );
 }
