@@ -48,6 +48,7 @@ pub(crate) fn emit_db_update(app: &tauri::AppHandle, entity: &str) {
 pub mod agent_settings;
 pub mod analytics;
 pub mod assistant;
+pub mod assistant_conversations;
 pub mod audit;
 pub mod auth;
 pub mod billing;

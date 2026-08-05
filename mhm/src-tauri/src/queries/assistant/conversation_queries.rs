@@ -15,25 +15,27 @@
 //! `LIMIT -5` trả về toàn bộ dòng), nên một số âm lọt xuống từ tầng trên là một
 //! cú dump sạch sổ hội thoại, im lặng, không lỗi, không dấu vết.
 //!
-//! `queries` là module riêng của crate. `get_conversation_owner` nay đã có
-//! caller sản xuất — `services::assistant::conversation_service::assert_can_read`
-//! — nên nó không còn mang `#[cfg_attr(not(test), expect(dead_code))]`. Những
-//! item còn giữ dấu ấy là những item vẫn chỉ có test là caller.
-//! `cfg_attr(not(test), …)` là bắt buộc chứ không phải trang trí: bản dựng test
-//! **đã có** caller sẵn (chính `mod tests` bên dưới), nên một
-//! `#[expect(dead_code)]` trần làm `cargo clippy --all-targets -- -D warnings`
-//! đỏ ngay hôm nay — đã đo, cả 11 chỗ.
+//! `queries` là module riêng của crate, nên tới hết Task 3 gần như mọi item ở
+//! đây còn mang `#[cfg_attr(not(test), expect(dead_code))]`. **Task 4 đã gỡ hết
+//! dấu trong file này**: đăng ký bốn lệnh vào `generate_handler!` nối chuỗi
+//! caller từ code sản xuất thật xuống tận đây, và rustc bắn
+//! `this lint expectation is unfulfilled` cho đúng năm dấu còn lại — ngày mà
+//! ghi chú cũ ở đây dự báo. File này giờ không còn dấu nào.
 //!
-//! Một đính chính đo được ở Task 3, ngược với ghi chú cũ ở đây: `expect` **không**
-//! tự bắn `this lint expectation is unfulfilled` khi caller mới lại là một item
-//! đang mang `expect(dead_code)`. rustc 1.97.1 vẫn đi vào thân của item
+//! Phần đính chính đo được ở Task 3 vẫn giữ, vì `repositories` và `services` còn
+//! dấu tới Task 5: `expect` **không** tự bắn `unfulfilled` khi caller mới lại là
+//! một item đang mang `expect(dead_code)`. rustc 1.97.1 vẫn đi vào thân của item
 //! allow/expect và đánh dấu callee là sống, nhưng độ sống đó không tính vào việc
 //! dựng cờ unfulfilled cho callee. Nói cho đúng: dấu chỉ đỏ khi chuỗi caller có
 //! **gốc là code sản xuất thật** — lúc đó nó đỏ ở *mọi* nấc trên chuỗi, không
 //! riêng nấc đầu. Còn nếu gốc chỉ sống nhờ chính một dấu allow/expect thì cả
-//! chuỗi nằm im. Nên trong giai đoạn quá độ giữa các task, dọn dấu vẫn là việc
-//! phải làm bằng mắt; ratchet chỉ tự siết lại từ ngày `generate_handler!` nối
-//! được chuỗi tới đây.
+//! chuỗi nằm im, nên trong giai đoạn quá độ giữa các task, dọn dấu vẫn là việc
+//! phải làm bằng mắt.
+//!
+//! `cfg_attr(not(test), …)` là bắt buộc chứ không phải trang trí: bản dựng test
+//! **đã có** caller sẵn (chính `mod tests` bên dưới), nên một
+//! `#[expect(dead_code)]` trần làm `cargo clippy --all-targets -- -D warnings`
+//! đỏ ngay hôm nay — đã đo, cả 11 chỗ.
 
 use serde::Serialize;
 use sqlx::{FromRow, Pool, Sqlite};
@@ -49,14 +51,12 @@ pub const MESSAGE_WINDOW: i64 = 100;
 ///
 /// `EveryUser` là đường của admin. Nó là một biến thể phải gõ ra, không phải
 /// một `None` rơi vào do sơ suất — đó là toàn bộ lý do kiểu này tồn tại.
-#[cfg_attr(not(test), expect(dead_code))]
 #[derive(Debug, Clone, Copy)]
 pub enum ConversationScope<'a> {
     OwnedBy(&'a str),
     EveryUser,
 }
 
-#[cfg_attr(not(test), expect(dead_code))]
 #[derive(Debug, Clone, Serialize, FromRow)]
 pub struct ConversationSummary {
     pub id: String,
@@ -66,7 +66,6 @@ pub struct ConversationSummary {
     pub updated_at: String,
 }
 
-#[cfg_attr(not(test), expect(dead_code))]
 #[derive(Debug, Clone, Serialize, FromRow)]
 pub struct StoredMessage {
     pub id: String,
@@ -86,7 +85,6 @@ pub struct StoredMessage {
 /// - tách, đường `OwnedBy`: `SEARCH c USING INDEX … (user_id=?)`, hết sort
 ///
 /// Chính sách lưu trữ là "không tự xoá", nên bảng chỉ lớn lên.
-#[cfg_attr(not(test), expect(dead_code))]
 pub async fn list_conversations(
     pool: &Pool<Sqlite>,
     scope: ConversationScope<'_>,
@@ -142,7 +140,6 @@ pub async fn get_conversation_owner(
 /// Lấy `MESSAGE_WINDOW` tin **mới nhất** rồi trả về theo thứ tự **cũ trước**.
 /// Hai chiều khác nhau nên phải bọc: `ORDER BY … DESC LIMIT` để chọn đúng phần
 /// đuôi, rồi đảo lại để đọc xuôi.
-#[cfg_attr(not(test), expect(dead_code))]
 pub async fn get_messages(
     pool: &Pool<Sqlite>,
     conversation_id: &str,
