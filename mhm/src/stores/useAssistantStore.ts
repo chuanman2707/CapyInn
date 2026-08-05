@@ -294,7 +294,15 @@ export const useAssistantStore = create<AssistantState>((set, get) => ({
   ///   khách. Nó không nằm trong `emptySession()` vì *hội thoại mới* cố ý giữ
   ///   lại danh sách — cùng một người, cùng quyền đọc.
   /// - `open`: panel không được mở sẵn trên tay người kế tiếp.
-  resetForLogout: () => set({ ...emptySession(), conversations: [], open: false }),
+  /// - `busy`: cờ "đang chờ trả lời". Bình thường nó tự lành — cả hai nhánh
+  ///   race guard trong `send()` đều `set({ busy: false })` trước khi `return`
+  ///   — nhưng cả hai chỉ chạy khi promise GIẢI QUYẾT. Lệnh không bao giờ bay
+  ///   về (mạng treo, nhà cung cấp AI câm) thì cờ kẹt `true` sang phiên của
+  ///   người kế tiếp, và `send()` tự chặn ở câu đầu tiên: khung soạn của họ
+  ///   chết tới khi khởi động lại app. Đăng xuất là đúng lúc dọn cứng, không
+  ///   phụ thuộc vào một promise đang bay.
+  resetForLogout: () =>
+    set({ ...emptySession(), conversations: [], open: false, busy: false }),
 
   openConversation: async (conversationId) => {
     let stored: StoredMessage[];

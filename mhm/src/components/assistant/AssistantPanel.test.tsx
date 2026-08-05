@@ -913,4 +913,74 @@ describe("AssistantPanel", () => {
 
     expect(deleteAllSpy).toHaveBeenCalledTimes(1);
   });
+
+  // ─── Đổi người dùng: những gì `resetForLogout()` KHÔNG với tới ───────────
+  //
+  // `resetForLogout()` dọn store. `draft` và `view` không nằm trong store, chúng
+  // là state của chính component này — và component này **không unmount khi đăng
+  // xuất** ở cấu hình `app_lock_enabled = false`: `AuthGate.tsx:26` chỉ thay
+  // MainShell bằng LoginScreen khi app lock BẬT. Với app lock tắt, AuthGate luôn
+  // render children, nên panel sống nguyên qua cú đăng xuất y như store từng
+  // sống trước Task 6.
+  //
+  // Chính vì thế bộ test này đo ở tầng panel mà KHÔNG dựng AuthGate: panel không
+  // unmount là đúng hình dạng của cấu hình app-lock-tắt, còn cấu hình app-lock-
+  // bật thì MainShell unmount và mọi state chết theo — không có gì để canh.
+  //
+  // `switchIntent` cố ý không có test riêng ở đây: nó đã được dọn bởi
+  // `useEffect([open, pendingAction])` sẵn có, vì `resetForLogout()` đặt
+  // `open: false`. Thêm một đường dọn thứ hai cho nó là viết một no-op.
+
+  describe("đăng xuất dọn state của panel", () => {
+    it("câu đang gõ dở của người trước không nằm lại trên khung soạn", async () => {
+      // Câu gõ dở là dữ liệu khách chưa gửi đi đâu cả: tên và số CCCD nằm ngay
+      // trên màn hình, không đi qua bất kỳ luật lọc `user_id` nào phía Rust —
+      // cùng trục với lỗ hổng vòng duyệt Task 6 đã bắt, chỉ khác tầng.
+      signIn("receptionist");
+      render(<AssistantPanel />);
+
+      const box = screen.getByRole("textbox");
+      await userEvent.type(box, "Nhận phòng Nguyễn Văn Nam, CCCD 079201001234");
+      // Vế dương: thiếu câu này thì một ô nhập không bao giờ nhận chữ cũng làm
+      // khẳng định cuối cùng xanh.
+      expect(box).toHaveValue("Nhận phòng Nguyễn Văn Nam, CCCD 079201001234");
+
+      await act(async () => {
+        await useAuthStore.getState().logout();
+      });
+
+      // `resetForLogout()` đặt `open: false` nên panel `return null` — nhưng
+      // KHÔNG unmount. Người kế tiếp mở lại panel là thấy đúng cái DOM cũ.
+      act(() => {
+        useAssistantStore.setState({ open: true });
+      });
+
+      expect(screen.getByRole("textbox")).toHaveValue("");
+    });
+
+    it("người kế tiếp mở panel là vào khung chat, không đứng ở màn hình lịch sử", async () => {
+      // `view` cũng là state của component. Người trước đang xem lịch sử rồi
+      // đăng xuất thì người kế tiếp mở panel ra là rơi thẳng vào danh sách —
+      // mà `conversations` đã bị dọn, nên màn hình nói "Chưa có hội thoại
+      // nào.", một câu SAI SỰ THẬT về dữ liệu của chính người mới.
+      signIn("receptionist");
+      vi.spyOn(useAssistantStore.getState(), "loadConversations").mockResolvedValue(undefined);
+      useAssistantStore.setState({ conversations: [makeSummary()] });
+
+      render(<AssistantPanel />);
+      await userEvent.click(screen.getByRole("button", { name: "Lịch sử" }));
+      // Vế dương: đang ở màn hình lịch sử thật.
+      expect(screen.getByRole("heading", { name: "Lịch sử" })).toBeInTheDocument();
+
+      await act(async () => {
+        await useAuthStore.getState().logout();
+      });
+      act(() => {
+        useAssistantStore.setState({ open: true });
+      });
+
+      expect(screen.queryByRole("heading", { name: "Lịch sử" })).not.toBeInTheDocument();
+      expect(screen.getByRole("textbox")).toBeInTheDocument();
+    });
+  });
 });

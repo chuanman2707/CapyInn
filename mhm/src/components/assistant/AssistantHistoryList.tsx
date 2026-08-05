@@ -3,17 +3,13 @@ import { useState } from "react";
 
 import { Button } from "@/components/ui/button";
 import { fmtDate } from "@/lib/format";
+import { DELETE_ALL_PHRASE, isDeleteAllPhrase } from "@/types/assistant";
 import type { AssistantConversationSummary } from "@/types/assistant";
 
-/// Chuỗi phải gõ đúng thì nút xoá sạch mới bật.
-///
-/// So bằng `===` trên chuỗi thô: **không** `trim()`, **không** `toUpperCase()`,
-/// **không** bỏ dấu. Hàng rào này tồn tại để gây khó — nó xoá bản duy nhất,
-/// không hoàn tác, và chủ nhà đã chọn hệ thống không tự xoá nên đây là lối ra
-/// duy nhất. Mỗi cách nới lỏng biến nó thành một ô nhập trang trí: chuẩn hoá bỏ
-/// dấu cho "xoa het" đi lọt, mà "xoa het" là thứ gõ nhầm ra được.
-const DELETE_ALL_PHRASE = "XOÁ HẾT";
-
+/// Cửa xoá sạch thứ hai (Cài đặt → Trợ lý quầy) dùng chung chuỗi và chung luật
+/// so sánh — xem `isDeleteAllPhrase` trong `types/assistant.ts`. Id của ô nhập
+/// thì KHÔNG dùng chung: hai ô cùng id trên một trang là một id trùng, và
+/// `getByLabelText` sẽ trỏ nhầm.
 const PHRASE_INPUT_ID = "assistant-delete-all-phrase";
 
 type AssistantHistoryListProps = {
@@ -178,7 +174,7 @@ export function AssistantHistoryList({
                 <Button
                   size="sm"
                   className="bg-red-600 text-white"
-                  disabled={busy || phrase !== DELETE_ALL_PHRASE}
+                  disabled={busy || !isDeleteAllPhrase(phrase)}
                   onClick={() => {
                     onDeleteAll();
                     closeDeleteAll();

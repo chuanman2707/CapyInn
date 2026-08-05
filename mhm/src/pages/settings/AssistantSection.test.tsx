@@ -58,6 +58,23 @@ describe("AssistantSection", () => {
     );
   });
 
+  it("câu đồng ý nói cả vế thứ hai: dữ liệu còn Ở LẠI máy này cho tới khi admin xoá tay", async () => {
+    // Vế đi đã có test riêng phía trên. Vế ở lại là vế mới, và là vế chủ nhà
+    // chưa từng được kể: chủ nhà đã chọn "giữ nguyên văn, không tự xoá", nên
+    // mỗi lượt chat để lại một bản sao tên khách + số CCCD nằm vĩnh viễn trên
+    // máy quầy. Đồng ý mà chỉ nghe vế đi là đồng ý cho một thứ khác.
+    render(<AssistantSection />);
+
+    const consent = await screen.findByRole("checkbox", { name: /đồng ý gửi dữ liệu/i });
+
+    // Khẳng định trên TÊN TRUY CẬP của chính ô tick, không phải trên "có chữ đó
+    // ở đâu đó trên màn hình": một đoạn chú thích rời nằm cuối section cũng làm
+    // `getByText` xanh, mà thứ chủ nhà đang tick là cái nhãn này.
+    expect(consent).toHaveAccessibleName(/rời khỏi máy này/i);
+    expect(consent).toHaveAccessibleName(/ở lại máy này/i);
+    expect(consent).toHaveAccessibleName(/không tự xoá/i);
+  });
+
   it("lưu khoá thì gọi set_assistant_api_key qua invokeWriteCommand và không giữ lại trong ô nhập", async () => {
     render(<AssistantSection />);
     await waitFor(() => screen.getByLabelText(/khoá api/i));
