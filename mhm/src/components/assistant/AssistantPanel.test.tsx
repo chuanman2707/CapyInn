@@ -25,7 +25,22 @@ vi.mock("@/stores/useHotelStore", () => ({
 }));
 
 import { useAssistantStore } from "@/stores/useAssistantStore";
+import type { ProposedAction } from "@/types/assistant";
+import { SUGGESTIONS } from "./AssistantEmptyState";
 import { AssistantPanel, buildScreenContext } from "./AssistantPanel";
+
+const HISTORY_NOTICE = "Đây là bản ghi. Hỏi tiếp thì trợ lý không nhớ thẻ đã đề xuất trước đó.";
+
+function makeAction(): ProposedAction {
+  return {
+    kind: "check_in",
+    payload: { room_id: "R1", guests: [{ full_name: "Nguyễn Văn Nam" }], nights: 1 },
+    display: { room_id: "Phòng 201" },
+    preview: {},
+    warnings: [],
+    built_at_ms: Date.now(),
+  };
+}
 
 describe("AssistantPanel", () => {
   beforeEach(() => {
@@ -40,6 +55,9 @@ describe("AssistantPanel", () => {
       messages: [],
       history: [],
       pendingAction: null,
+      pendingActionKey: null,
+      conversationKey: "phien-dang-mo",
+      historyNotice: null,
       busy: false,
       error: null,
       settings: {
@@ -148,5 +166,78 @@ describe("AssistantPanel", () => {
       selectedRoomNumber: "Phòng 201",
       selectedBookingId: undefined,
     });
+  });
+
+  it("bấm gợi ý ở màn hình trống thì GỬI luôn câu đó, không chỉ điền vào ô nhập", async () => {
+    // Đây là điểm nối thật của màn hình trống: `AssistantEmptyState` chỉ biết
+    // gọi `onPick`, còn việc cú bấm ấy có thành một lượt chat hay chỉ nhét chữ
+    // vào ô nhập rồi đứng im thì chỉ đo được ở đây. Khẳng định thứ hai (ô nhập
+    // vẫn rỗng) chặn đúng bản cài đặt "điền hộ rồi bắt bấm gửi lần nữa".
+    const sendSpy = vi.spyOn(useAssistantStore.getState(), "send").mockResolvedValue(undefined);
+
+    render(<AssistantPanel />);
+
+    await userEvent.click(screen.getByRole("button", { name: SUGGESTIONS[0] }));
+
+    expect(sendSpy).toHaveBeenCalledWith(SUGGESTIONS[0], {
+      route: "rooms",
+      selectedRoomId: undefined,
+      selectedRoomNumber: undefined,
+      selectedBookingId: undefined,
+    });
+    expect(screen.getByRole("textbox")).toHaveValue("");
+  });
+
+  it("vẽ thẻ khi thẻ được dựng ở chính hội thoại đang mở", () => {
+    // Vế dương của lớp 3. Thiếu nó thì một bản cài đặt không vẽ thẻ bao giờ
+    // cũng làm test âm bên dưới xanh.
+    useAssistantStore.setState({
+      pendingAction: makeAction(),
+      pendingActionKey: "phien-dang-mo",
+      conversationKey: "phien-dang-mo",
+    });
+
+    render(<AssistantPanel />);
+
+    expect(screen.getByText("Xác nhận nhận phòng")).toBeInTheDocument();
+  });
+
+  it("KHÔNG vẽ thẻ dựng ở hội thoại khác (lớp 3)", () => {
+    // Lớp 4 trong `approve()` đã chặn được TIỀN, nhưng nó chỉ chạy sau khi lễ
+    // tân bấm *Đồng ý* trên một cái thẻ đáng lẽ không có ở đó — thẻ biến mất,
+    // không một lời giải thích. Lớp 3 tồn tại để nó đừng xuất hiện từ đầu.
+    useAssistantStore.setState({
+      pendingAction: makeAction(),
+      pendingActionKey: "phien-khac",
+      conversationKey: "phien-dang-mo",
+    });
+
+    render(<AssistantPanel />);
+
+    expect(screen.queryByText("Xác nhận nhận phòng")).not.toBeInTheDocument();
+  });
+
+  it("hiện dòng nhắc khi mở lại một hội thoại cũ", () => {
+    useAssistantStore.setState({
+      messages: [{ id: "m1", kind: "user", text: "Phòng 201 còn trống không?" }],
+      historyNotice: HISTORY_NOTICE,
+    });
+
+    render(<AssistantPanel />);
+
+    expect(screen.getByText(HISTORY_NOTICE)).toBeInTheDocument();
+  });
+
+  it("không nhắc gì khi historyNotice rỗng", () => {
+    // Cặp với test trên: nhắc thường trực thì thành nhiễu, mà nhiễu thường
+    // trực thì người ta thôi đọc. Một bản cài đặt in cứng câu nhắc sẽ đỏ ở đây.
+    useAssistantStore.setState({
+      messages: [{ id: "m1", kind: "user", text: "Phòng 201 còn trống không?" }],
+      historyNotice: null,
+    });
+
+    render(<AssistantPanel />);
+
+    expect(screen.queryByText(HISTORY_NOTICE)).not.toBeInTheDocument();
   });
 });
