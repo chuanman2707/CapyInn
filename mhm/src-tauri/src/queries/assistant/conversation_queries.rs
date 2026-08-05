@@ -317,6 +317,16 @@ mod tests {
         assert_eq!(messages[99].text, "tin 119", "giữ tới tin mới nhất");
     }
 
+    /// Ba test trần bên trên đo *tương đối* với hằng số — chúng canh "SQL có tôn
+    /// trọng hằng số không", chứ không canh "hằng số có đúng con số spec chốt
+    /// không". Hạ `CONVERSATION_PAGE` xuống 20 thì cả ba vẫn xanh. Test này là
+    /// nửa còn lại: ghim hai con số vào đúng thứ spec dòng 337-338 chốt.
+    #[test]
+    fn the_ceilings_are_the_numbers_the_spec_pinned() {
+        assert_eq!(CONVERSATION_PAGE, 50, "spec: 50 hội thoại mới nhất");
+        assert_eq!(MESSAGE_WINDOW, 100, "spec: 100 tin nhắn mới nhất");
+    }
+
     /// Lễ tân chỉ được thấy hội thoại của mình. Hội thoại chứa tên khách và
     /// CCCD, nên đây là luật chống rò chứ không phải luật tiện dụng.
     #[tokio::test]
