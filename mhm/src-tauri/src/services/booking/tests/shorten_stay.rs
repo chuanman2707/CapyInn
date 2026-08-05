@@ -825,3 +825,77 @@ async fn shorten_stay_fails_when_second_pool_moves_the_checkout_while_the_lock_i
     pool_b.close().await;
     let _ = std::fs::remove_file(db_path);
 }
+
+/// Timeline vẽ thanh booking bằng `scheduled_checkout || expected_checkout`
+/// (`Reservations.tsx`), nên rút đêm mà quên dời `scheduled_checkout` thì thanh
+/// của khách đặt trước vẫn nằm dài tới ngày trả cũ: lễ tân bấm "−1 đêm", drawer
+/// hiện ngày mới, còn lịch phòng phía sau đứng im — nhìn như phần mềm không
+/// nhận lệnh, và tệ hơn là chủ khách sạn tưởng phòng còn bận thêm một đêm nên
+/// không bán. `extend_stay` đã sửa đúng lỗi này ở #204; `shorten_stay` ra đời ở
+/// #208 và không thừa hưởng.
+#[tokio::test]
+async fn shorten_stay_moves_scheduled_checkout_for_a_reservation_booking() {
+    let pool = test_pool().await;
+    seed_room(&pool, "R-SCHED-SHORTEN").await.unwrap();
+    let (check_in, _checkout) = seed_future_booking(&pool, "B-SCHED-SHORTEN", "R-SCHED-SHORTEN", 3)
+        .await
+        .unwrap();
+
+    // Booking gốc từ đặt trước: đã check-in (status active) nhưng vẫn giữ hai
+    // cột `scheduled_*` — đúng hình dạng của booking gặp lỗi trên máy khách sạn.
+    let check_in_date = date_from_rfc3339(&check_in);
+    sqlx::query("UPDATE bookings SET scheduled_checkin = ?, scheduled_checkout = ? WHERE id = ?")
+        .bind(check_in_date.format("%Y-%m-%d").to_string())
+        .bind(
+            (check_in_date + Duration::days(3))
+                .format("%Y-%m-%d")
+                .to_string(),
+        )
+        .bind("B-SCHED-SHORTEN")
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    stay_lifecycle::shorten_stay(&pool, "B-SCHED-SHORTEN")
+        .await
+        .unwrap();
+
+    let after: Option<String> =
+        sqlx::query_scalar("SELECT scheduled_checkout FROM bookings WHERE id = ?")
+            .bind("B-SCHED-SHORTEN")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(
+        after,
+        Some(
+            (check_in_date + Duration::days(2))
+                .format("%Y-%m-%d")
+                .to_string()
+        ),
+        "scheduled_checkout phải lùi theo expected_checkout khi rút đêm"
+    );
+}
+
+/// Khách vãng lai không có `scheduled_checkout`; rút đêm không được tự đẻ ra
+/// giá trị cho cột đó, nếu không booking walk-in sẽ bị nhầm thành đặt trước.
+#[tokio::test]
+async fn shorten_stay_leaves_scheduled_checkout_null_for_a_walk_in() {
+    let pool = test_pool().await;
+    seed_room(&pool, "R-WALKIN-SHORTEN").await.unwrap();
+    seed_future_booking(&pool, "B-WALKIN-SHORTEN", "R-WALKIN-SHORTEN", 3)
+        .await
+        .unwrap();
+
+    stay_lifecycle::shorten_stay(&pool, "B-WALKIN-SHORTEN")
+        .await
+        .unwrap();
+
+    let after: Option<String> =
+        sqlx::query_scalar("SELECT scheduled_checkout FROM bookings WHERE id = ?")
+            .bind("B-WALKIN-SHORTEN")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(after, None, "rút đêm không được đẻ ra scheduled_checkout");
+}

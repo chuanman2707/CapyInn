@@ -1662,14 +1662,26 @@ async fn shorten_stay_tx(
 
     let new_checkout = new_expected.to_rfc3339();
 
+    // Đối xứng với `extend_stay` ở trên: `scheduled_checkout` phải đi theo
+    // `expected_checkout`, vì timeline vẽ thanh booking bằng
+    // `scheduled_checkout || expected_checkout`. Bỏ quên cột này là lễ tân bấm
+    // "−1 đêm", drawer đổi ngày, còn thanh trên lịch phòng đứng nguyên ở ngày
+    // trả cũ — chủ khách sạn tưởng phòng còn bận thêm một đêm nên không bán.
+    // CASE giữ NULL cho khách vãng lai — họ không có ngày đặt trước để dời.
+    let new_scheduled_checkout = new_expected.date_naive().format("%Y-%m-%d").to_string();
+
     let result = sqlx::query(
         "UPDATE bookings
-         SET nights = ?, total_price = ?, expected_checkout = ?
+         SET nights = ?, total_price = ?, expected_checkout = ?,
+             scheduled_checkout = CASE
+                 WHEN scheduled_checkout IS NULL THEN NULL ELSE ?
+             END
          WHERE id = ? AND status = ? AND expected_checkout = ?",
     )
     .bind(current_nights - 1)
     .bind(new_total)
     .bind(&new_checkout)
+    .bind(&new_scheduled_checkout)
     .bind(booking_id)
     .bind(status::booking::ACTIVE)
     .bind(locked_expected_checkout)
