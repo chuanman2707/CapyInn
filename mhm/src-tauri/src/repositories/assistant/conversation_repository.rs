@@ -9,7 +9,7 @@
 //! ấy là những item vẫn chỉ có test là caller. `cfg_attr(not(test), …)` là bắt
 //! buộc chứ không phải trang trí: bản dựng test **đã có** caller sẵn (chính
 //! `mod tests` bên dưới), nên một `#[expect(dead_code)]` trần làm
-//! `cargo clippy --all-targets -- -D warnings` đỏ ngay hôm nay — đã đo, cả 10 chỗ.
+//! `cargo clippy --all-targets -- -D warnings` đỏ ngay hôm nay — đã đo, cả 11 chỗ.
 //!
 //! Đính chính đo được ở Task 3: `expect` **không** tự bắn `this lint expectation
 //! is unfulfilled` khi caller mới lại là một item đang mang `expect(dead_code)`

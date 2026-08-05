@@ -81,12 +81,16 @@ pub async fn assert_can_read(
 /// cửa quyền sở hữu trước.
 ///
 /// Đây là cửa duy nhất của module chưa có caller sản xuất — `commands::assistant`
-/// sẽ gọi vào ở Task 4. Mọi thứ còn lại trong file đều nằm dưới nó nên không cần
-/// đánh dấu riêng: rustc coi một item mang `expect(dead_code)` là gốc và vẫn đi
-/// tiếp vào thân, nên `derive_title`, `assert_can_read` và hai hàm query/
-/// repository nó gọi tới đã sống. Dùng `expect` chứ không `allow`: ngày Task 4
-/// nối dây, chính compiler bắn `this lint expectation is unfulfilled` và CI đỏ,
-/// không ai phải nhớ dọn.
+/// gọi vào ở **Task 5** (Task 4 chỉ nối `assert_can_read`). Mọi thứ còn lại trong
+/// file đều nằm dưới nó nên không cần đánh dấu riêng: rustc coi một item mang
+/// `expect(dead_code)` là gốc và vẫn đi tiếp vào thân, nên `derive_title`,
+/// `assert_can_read` và hai hàm query/repository nó gọi tới đã sống.
+///
+/// Dùng `expect` chứ không `allow` — nhưng đừng trông cậy quá vào nó: đã đo được
+/// rằng `expect` chỉ bắn `this lint expectation is unfulfilled` khi chuỗi caller
+/// có gốc là code sản xuất thật. Chừng nào `generate_handler!` chưa nối tới đây,
+/// dấu này nằm im kể cả khi đã thừa. Xem đính chính đầy đủ ở đầu
+/// `queries/assistant/conversation_queries.rs`.
 #[cfg_attr(not(test), expect(dead_code))]
 pub async fn ensure_conversation(
     pool: &Pool<Sqlite>,
@@ -178,6 +182,22 @@ mod tests {
         let long = "à".repeat(200);
 
         let title = derive_title(&long);
+
+        assert_eq!(title.chars().count(), 61, "60 ký tự + dấu …");
+        assert!(title.ends_with('…'));
+    }
+
+    /// Test trên **không** ép ra được cái panic mà comment của `derive_title`
+    /// cảnh báo: `"à"` toàn chuỗi thì byte thứ 60 rơi trúng biên ký tự, nên
+    /// `&s[..60]` chỉ trả tên cụt chứ không nổ. Trộn một ký tự ASCII vào đầu là
+    /// đẩy mọi biên lệch pha đi một byte — giờ byte 60 nằm giữa một `à`, đúng
+    /// hình dạng đầu vào làm sập app ngoài đời (câu hỏi lẫn tiếng Anh, số phòng,
+    /// tên khách viết không dấu).
+    #[test]
+    fn title_survives_a_cut_point_that_lands_mid_character() {
+        let mixed = format!("a{}", "à".repeat(100));
+
+        let title = derive_title(&mixed);
 
         assert_eq!(title.chars().count(), 61, "60 ký tự + dấu …");
         assert!(title.ends_with('…'));
@@ -286,6 +306,20 @@ mod tests {
                 .await
                 .expect("đọc tên");
         assert_eq!(title, "Tối nay còn phòng nào trống?");
+
+        // Vòng khứ hồi: hàng vừa ghi phải thuộc về ĐÚNG người gọi. Không có hai
+        // dòng này thì `insert_conversation(pool, &id, "nguoi-la", …)` vẫn xanh
+        // cả bộ — đường ghi duy nhất của task, mà không gì canh chủ sở hữu.
+        // Ghi sai chủ thì chính người tạo mất quyền đọc, còn người kia thấy hội
+        // thoại đó trong lịch sử, kèm tên khách và số CCCD bên trong.
+        assert!(
+            assert_can_read(&pool, &id, "u1", false).await.is_ok(),
+            "người tạo phải đọc được hội thoại của chính mình"
+        );
+        assert!(
+            assert_can_read(&pool, &id, "u2", false).await.is_err(),
+            "người khác không được đọc"
+        );
     }
 
     #[tokio::test]
