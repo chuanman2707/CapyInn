@@ -3,6 +3,10 @@ import { invoke } from "@tauri-apps/api/core";
 
 import { normalizeAppError, type AppError } from "@/lib/appError";
 import { invokeCommand } from "@/lib/invokeCommand";
+// Một chiều: store trợ lý không biết gì về store xác thực, nên import này không
+// tạo phụ thuộc vòng. Đường ngược lại (trợ lý tự đăng ký nghe store xác thực)
+// mới là đường đẻ ra vòng, và cũng khó đọc hơn khi đi tìm "ai dọn cái gì".
+import { useAssistantStore } from "@/stores/useAssistantStore";
 
 export interface User {
     id: string;
@@ -45,6 +49,13 @@ export const useAuthStore = create<AuthStore>((set, get) => ({
     },
 
     logout: async () => {
+        // Dọn trợ lý TRƯỚC khi gọi backend, đồng bộ: không có `await` nào giữa
+        // "người dùng bấm đăng xuất" và "dữ liệu của người ấy biến khỏi bộ
+        // nhớ". Đặt sau `await` thì một lệnh `logout` treo hoặc một lần sửa
+        // sau này cho `logout` thoát sớm là để nguyên hội thoại, `history`
+        // (transcript có tên khách và CCCD) và cả một thẻ nhận phòng còn duyệt
+        // được — store zustand là singleton của module và app không reload.
+        useAssistantStore.getState().resetForLogout();
         try {
             await invoke("logout");
         } catch { /* ignore */ }

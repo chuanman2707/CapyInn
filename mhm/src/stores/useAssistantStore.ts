@@ -42,6 +42,7 @@ type AssistantState = {
   approve: () => Promise<void>;
   dismissAction: () => void;
   startNewChat: () => void;
+  resetForLogout: () => void;
   openConversation: (conversationId: string) => Promise<void>;
   loadConversations: () => Promise<void>;
   deleteConversation: (conversationId: string) => Promise<void>;
@@ -102,8 +103,8 @@ function buildHistoryNotice(stored: StoredMessage[]): string | null {
 }
 
 /// Trạng thái của một phiên chat trống. Dùng chung cho *hội thoại mới*, cho
-/// đường xoá, và (Task 10) cho đăng xuất — ba chỗ phải dọn **đúng cùng một
-/// tập**, không thì chỗ nào quên một field là chỗ đó rò sang người kế tiếp.
+/// đường xoá, và cho đăng xuất — ba chỗ phải dọn **đúng cùng một tập**, không
+/// thì chỗ nào quên một field là chỗ đó rò sang người kế tiếp.
 function emptySession() {
   return {
     // Mint khoá mới: mọi thẻ đang treo lập tức mất quyền duyệt qua lớp 4.
@@ -236,9 +237,23 @@ export const useAssistantStore = create<AssistantState>((set, get) => ({
       return;
     }
 
+    // Phiên mà lượt duyệt này thuộc về, chốt TRƯỚC khi bắn lệnh ghi đi — cùng
+    // một chốt `send()` đang có. Đây là câu đọc đồng bộ, KHÔNG phải `await`,
+    // nên nó không mở khe nào giữa lớp 4 ở trên và `invokeWriteCommand` dưới.
+    const approveKey = get().conversationKey;
+
     set({ busy: true, error: null });
     try {
       await invokeWriteCommand("check_in", { req: pendingAction.payload });
+      // Đổi hội thoại giữa lúc `check_in` đang bay về. Lệnh đã đi rồi và vẫn
+      // phải chạy — huỷ một lượt nhận phòng đã bắn là chuyện khác — nhưng KẾT
+      // QUẢ thì không được đổ vào phiên đang mở: lễ tân mở chat mới để phục vụ
+      // khách kế tiếp mà thấy "Đã nhận phòng xong." ngay trên màn hình của
+      // khách đó là đúng kiểu nhầm lẫn trên đường tiền mà lớp 4 sinh ra để chặn.
+      if (get().conversationKey !== approveKey) {
+        set({ busy: false });
+        return;
+      }
       set((state) => ({
         busy: false,
         pendingAction: null,
@@ -249,6 +264,13 @@ export const useAssistantStore = create<AssistantState>((set, get) => ({
         ],
       }));
     } catch (error) {
+      // Cùng lý do như đường thành công, nặng hơn một bậc: chuỗi lỗi của PMS
+      // ("Phòng đã có khách") hiện trong một hội thoại không liên quan, còn cái
+      // thẻ để sửa thì đã mất theo phiên cũ nên chẳng ai làm gì được với nó.
+      if (get().conversationKey !== approveKey) {
+        set({ busy: false });
+        return;
+      }
       // Giữ nguyên thẻ: người dùng còn sửa hoặc mở form làm tay được.
       set({ busy: false, error: readErrorMessage(error) });
     }
@@ -257,6 +279,22 @@ export const useAssistantStore = create<AssistantState>((set, get) => ({
   dismissAction: () => set({ pendingAction: null, pendingActionKey: null }),
 
   startNewChat: () => set(emptySession()),
+
+  /// Đổi người dùng. Gọi từ `useAuthStore.logout()`, không phải từ panel.
+  ///
+  /// Store zustand là singleton của module và trong `src/` không có chỗ nào
+  /// `location.reload`, nên mọi thứ ở đây sống nguyên vẹn qua màn hình PIN nếu
+  /// không dọn tay: lễ tân B đăng nhập là đọc được hội thoại của lễ tân A, và —
+  /// nặng hơn — bấm duyệt được luôn thẻ nhận phòng còn treo của A, vì
+  /// `pendingActionKey === conversationKey` vẫn khớp. `emptySession()` mint
+  /// khoá phiên mới, và chính cú mint đó làm lớp 4 vứt thẻ của người trước.
+  ///
+  /// Dọn thêm hai thứ ngoài `emptySession()`:
+  /// - `conversations`: danh sách lịch sử của người vừa ra, tiêu đề mang tên
+  ///   khách. Nó không nằm trong `emptySession()` vì *hội thoại mới* cố ý giữ
+  ///   lại danh sách — cùng một người, cùng quyền đọc.
+  /// - `open`: panel không được mở sẵn trên tay người kế tiếp.
+  resetForLogout: () => set({ ...emptySession(), conversations: [], open: false }),
 
   openConversation: async (conversationId) => {
     let stored: StoredMessage[];

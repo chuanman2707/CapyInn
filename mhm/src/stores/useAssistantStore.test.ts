@@ -10,6 +10,7 @@ vi.mock("@/lib/invokeCommand", () => ({
 }));
 
 import { useAssistantStore } from "./useAssistantStore";
+import { useAuthStore } from "./useAuthStore";
 import type {
   AssistantConversationSummary,
   ChatMessage,
@@ -317,6 +318,52 @@ describe("useAssistantStore", () => {
       expect(invokeWriteCommand).not.toHaveBeenCalled();
     });
 
+    /// Chốt tranh chấp của `approve()`, đường THÀNH CÔNG.
+    ///
+    /// Kịch bản đo được: thẻ đang duyệt, `check_in` đang bay, lễ tân bấm *hội
+    /// thoại mới* để phục vụ khách kế tiếp. Lệnh nhận phòng **vẫn phải chạy** —
+    /// nó đã đi rồi — nhưng câu "Đã nhận phòng xong." mà rơi vào phiên mới là
+    /// nó hiện ngay trên màn hình của một người khách khác.
+    it("đổi hội thoại giữa lúc check_in đang bay về thì lời báo xong không rơi vào phiên mới", async () => {
+      let releaseCheckIn: (value: unknown) => void = () => {};
+      invokeWriteCommand.mockImplementation(
+        () =>
+          new Promise((resolve) => {
+            releaseCheckIn = resolve;
+          }),
+      );
+      useAssistantStore.setState({ pendingAction: sampleAction, pendingActionKey: SESSION_KEY });
+
+      const approval = useAssistantStore.getState().approve();
+      useAssistantStore.getState().startNewChat();
+      releaseCheckIn({ id: "B1" });
+      await approval;
+
+      // Lệnh đã bắn thì vẫn chạy: chốt này quyết định KẾT QUẢ đổ đi đâu, không
+      // phải huỷ một lượt nhận phòng đang dở.
+      expect(invokeWriteCommand).toHaveBeenCalledWith("check_in", { req: sampleAction.payload });
+      const state = useAssistantStore.getState();
+      expect(state.messages).toEqual([]);
+      expect(state.busy).toBe(false);
+    });
+
+    /// Vế đối xứng, đường LỖI của `approve()` — đường tệ hơn: chuỗi lỗi của PMS
+    /// hiện trong một hội thoại không liên quan, còn cái thẻ để sửa thì đã mất
+    /// theo phiên cũ nên lễ tân chẳng làm gì được với nó.
+    it("đổi hội thoại giữa lúc check_in đang lỗi thì chuỗi lỗi không rơi vào phiên mới", async () => {
+      invokeWriteCommand.mockRejectedValue(new Error("Phòng đã có khách"));
+      useAssistantStore.setState({ pendingAction: sampleAction, pendingActionKey: SESSION_KEY });
+
+      const approval = useAssistantStore.getState().approve();
+      useAssistantStore.getState().startNewChat();
+      await approval;
+
+      expect(invokeWriteCommand).toHaveBeenCalledWith("check_in", { req: sampleAction.payload });
+      const state = useAssistantStore.getState();
+      expect(state.error).toBeNull();
+      expect(state.busy).toBe(false);
+    });
+
     it("dismissAction() gỡ cả khoá của thẻ, không để lại khoá mồ côi", () => {
       useAssistantStore.setState({ pendingAction: sampleAction, pendingActionKey: SESSION_KEY });
 
@@ -436,6 +483,27 @@ describe("useAssistantStore", () => {
       expect(state.messages).toEqual([]);
       expect(state.conversationId).toBeNull();
       expect(state.pendingAction).toBeNull();
+      expect(state.busy).toBe(false);
+    });
+
+    /// Vế đối xứng của test ngay trên, cho đường LỖI của `send()`. Không có nó
+    /// thì bốn dòng chốt trong khối `catch` xoá đi vẫn xanh cả bộ (đo được), và
+    /// một đợt dọn dẹp sau này sẽ dọn mất chúng: bong bóng lỗi + `error` của
+    /// hội thoại cũ đổ vào phiên mới, ngay dưới mắt khách kế tiếp.
+    ///
+    /// `mockRejectedValue` là đủ để dựng ca này: `send()` chạy đồng bộ tới chỗ
+    /// `await`, test bấm *hội thoại mới* ngay sau đó, khối `catch` chỉ chạy ở
+    /// microtask sau — đúng thứ tự cần đo.
+    it("đổi hội thoại giữa lúc lượt cũ đang lỗi thì bong bóng lỗi không rơi vào phiên mới", async () => {
+      invokeCommand.mockRejectedValue(new Error("Nhà cung cấp AI không phản hồi"));
+
+      const turn = useAssistantStore.getState().send("phòng nào trống", { route: "rooms" });
+      useAssistantStore.getState().startNewChat();
+      await turn;
+
+      const state = useAssistantStore.getState();
+      expect(state.messages).toEqual([]);
+      expect(state.error).toBeNull();
       expect(state.busy).toBe(false);
     });
   });
@@ -700,6 +768,63 @@ describe("useAssistantStore", () => {
       expect(state.messages).toEqual([{ id: "m1", kind: "user", text: "đang dở" }]);
       expect(state.conversations).toEqual([summary("c1", "Hỏi phòng")]);
       expect(state.error).toContain("Chỉ admin mới được thực hiện");
+    });
+  });
+
+  // ─── Đổi người dùng — lớp 4 phải sống sót qua màn hình PIN ───
+  //
+  // Store zustand là singleton của module và trong `src/` không có chỗ nào
+  // `location.reload`, nên không dọn tay thì mọi thứ ở đây sống nguyên qua
+  // `logout()`. Test đi qua `useAuthStore.getState().logout()` chứ không gọi
+  // thẳng `resetForLogout()`: cái phải đo là SỢI DÂY đã nối, không phải cái
+  // hàm dọn tồn tại.
+
+  describe("đăng xuất", () => {
+    it("đăng xuất xoá sạch phiên của người trước và mint khoá mới", async () => {
+      useAssistantStore.setState({
+        open: true,
+        conversationId: "c1",
+        messages: [{ id: "m1", kind: "user", text: "Khách Nguyễn Văn A, CCCD 001" }],
+        history: [{ role: "user", content: "Khách Nguyễn Văn A, CCCD 001" }],
+        conversations: [summary("c1", "Hỏi phòng")],
+        pendingAction: sampleAction,
+        pendingActionKey: SESSION_KEY,
+        historyNotice: "nhắc cũ",
+        error: "lỗi cũ",
+      });
+
+      await useAuthStore.getState().logout();
+
+      const state = useAssistantStore.getState();
+      expect(state.pendingAction).toBeNull();
+      expect(state.pendingActionKey).toBeNull();
+      expect(state.history).toEqual([]);
+      expect(state.messages).toEqual([]);
+      expect(state.conversations).toEqual([]);
+      expect(state.conversationId).toBeNull();
+      expect(state.historyNotice).toBeNull();
+      expect(state.error).toBeNull();
+      expect(state.open).toBe(false);
+      // Chính cú mint này là thứ làm lớp 4 vứt thẻ của người trước.
+      expect(state.conversationKey).not.toBe(SESSION_KEY);
+    });
+
+    /// Ca tiền: lễ tân A để lại một thẻ nhận phòng đang treo, A đăng xuất, B
+    /// đăng nhập và bấm duyệt. Không dọn store thì `pendingActionKey ===
+    /// conversationKey` vẫn khớp và `check_in` chạy thật — nhận phòng thật,
+    /// tiền thật, dưới danh nghĩa người khác.
+    it("thẻ còn treo của người trước không duyệt được sau khi đăng xuất", async () => {
+      invokeWriteCommand.mockResolvedValue({ id: "B1" });
+      useAssistantStore.setState({
+        pendingAction: sampleAction,
+        pendingActionKey: SESSION_KEY,
+        conversationKey: SESSION_KEY,
+      });
+
+      await useAuthStore.getState().logout();
+      await useAssistantStore.getState().approve();
+
+      expect(invokeWriteCommand).not.toHaveBeenCalled();
     });
   });
 });
