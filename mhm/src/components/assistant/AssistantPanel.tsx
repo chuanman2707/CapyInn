@@ -100,9 +100,17 @@ export function AssistantPanel() {
 
       <div className="flex flex-1 flex-col gap-3 overflow-y-auto px-5 pb-4">
         {/* Dòng nhắc khi mở lại hội thoại cũ. Có điều kiện — nhắc thường trực
-            thì thành nhiễu, và nhiễu thường trực thì người ta thôi đọc. */}
+            thì thành nhiễu, và nhiễu thường trực thì người ta thôi đọc.
+            `role="status"` vừa đúng nghĩa (tin phụ trợ, không tới mức cảnh báo)
+            vừa cho test khẳng định được "KHÔNG có viên nhắc nào": chỉ dò chữ
+            thì một bản bọc-luôn-vẽ — viên nền vàng rỗng thường trực — vẫn lọt,
+            vì jsdom không thấy nền. Cùng idiom với ProposedActionCard.tsx:76. */}
         {historyNotice && (
-          <p className="rounded-xl bg-amber-50 px-3 py-2 text-[11px] text-amber-800">
+          <p
+            role="status"
+            aria-live="polite"
+            className="rounded-xl bg-amber-50 px-3 py-2 text-[11px] text-amber-800"
+          >
             {historyNotice}
           </p>
         )}
