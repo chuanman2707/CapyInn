@@ -3,10 +3,13 @@
 //! Tầng này không quyết định chính sách: ai được ghi, tên hội thoại cắt ra sao
 //! đều đã chốt ở `services::assistant::conversation_service` trước khi tới đây.
 //!
-//! `repositories` là module riêng của crate. `insert_conversation` nay đã có
-//! caller sản xuất — `conversation_service::ensure_conversation` — nên nó không
-//! còn mang `#[cfg_attr(not(test), expect(dead_code))]`. Những item còn giữ dấu
-//! ấy là những item vẫn chỉ có test là caller. `cfg_attr(not(test), …)` là bắt
+//! `repositories` là module riêng của crate. Hai hàm xoá đã bỏ
+//! `#[cfg_attr(not(test), expect(dead_code))]` ở Task 4, khi
+//! `commands::assistant_conversations` vào `generate_handler!` và rustc bắn
+//! `this lint expectation is unfulfilled` cho cả hai. Hai item còn giữ dấu là
+//! `insert_message` và `touch_conversation`: caller sản xuất của chúng —
+//! `commands::assistant` ghi lượt hỏi đáp — mới có ở **Task 5**, và chừng nào
+//! chưa có thì dấu vẫn nằm im chứ không tự nhắc. `cfg_attr(not(test), …)` là bắt
 //! buộc chứ không phải trang trí: bản dựng test **đã có** caller sẵn (chính
 //! `mod tests` bên dưới), nên một `#[expect(dead_code)]` trần làm
 //! `cargo clippy --all-targets -- -D warnings` đỏ ngay hôm nay — đã đo, cả 11 chỗ.
@@ -76,7 +79,6 @@ pub async fn touch_conversation(
 }
 
 /// Trả số dòng bị xoá để caller phân biệt "đã xoá" với "không có hội thoại đó".
-#[cfg_attr(not(test), expect(dead_code))]
 pub async fn delete_conversation(pool: &Pool<Sqlite>, id: &str) -> Result<u64, sqlx::Error> {
     let result = sqlx::query("DELETE FROM assistant_conversations WHERE id = ?")
         .bind(id)
@@ -85,7 +87,6 @@ pub async fn delete_conversation(pool: &Pool<Sqlite>, id: &str) -> Result<u64, s
     Ok(result.rows_affected())
 }
 
-#[cfg_attr(not(test), expect(dead_code))]
 pub async fn delete_all_conversations(pool: &Pool<Sqlite>) -> Result<u64, sqlx::Error> {
     let result = sqlx::query("DELETE FROM assistant_conversations")
         .execute(pool)
