@@ -61,6 +61,35 @@ function readErrorMessage(error: unknown): string {
   return "Trợ lý gặp lỗi không xác định.";
 }
 
+/// Mã lỗi backend trả khi `conversation_id` gửi kèm lượt chat không mở được.
+///
+/// Viết thẳng chuỗi thay vì tra `APP_ERROR_CODES`: bảng mã là
+/// `Record<string, string>` dựng lúc chạy từ `shared/error-codes.json`, nên mã
+/// bị đổi tên thì `APP_ERROR_CODES.AUTH_FORBIDDEN` thành `undefined`, và câu so
+/// sánh dưới đây sẽ khớp **mọi** lỗi không mang `code` — nhận nhầm im lặng còn
+/// tệ hơn bỏ sót im lặng.
+const CONVERSATION_FORBIDDEN_CODE = "AUTH_FORBIDDEN";
+
+/// Lượt chat vừa hỏng vì chính cái `conversation_id` frontend gửi lên.
+///
+/// Đường Rust, đọc chứ không đoán: `commands/assistant.rs::open_turn_record` →
+/// `services/assistant/conversation_service.rs::assert_can_read` → chủ hội
+/// thoại là `None` (hàng đã bị xoá) hoặc là người khác → `forbidden()` =
+/// `CommandError::user(AUTH_FORBIDDEN, "Không mở được hội thoại này.")` → `kind
+/// == User` nên nổ ra ngoài bằng `Err`, hỏng cả lượt. Đây là chỗ **duy nhất**
+/// `assistant_turn` sinh ra mã này; hai ca xác thực còn lại mang mã khác
+/// (`AUTH_NOT_AUTHENTICATED`).
+///
+/// Cả hai nguyên nhân đều dẫn tới cùng một kết luận ở frontend: id đang giữ
+/// KHÔNG dùng được nữa, và giữ nó lại là bảo đảm mọi lượt sau hỏng y hệt.
+function isConversationForbidden(error: unknown): boolean {
+  return (
+    typeof error === "object" &&
+    error !== null &&
+    (error as { code?: unknown }).code === CONVERSATION_FORBIDDEN_CODE
+  );
+}
+
 /// Một hàng trong sổ thành một dòng trên panel.
 ///
 /// `action` hiện như lời trợ lý: hàng ấy là **CHỮ** tóm tắt thẻ, không phải dữ
@@ -198,6 +227,18 @@ export const useAssistantStore = create<AssistantState>((set, get) => ({
 
       set((state) => ({
         busy: false,
+        // Lượt này XONG rồi thì viên đỏ nói "chưa xong" là nói dối.
+        //
+        // `send()` đã đặt `error: null` ở đầu, nên dòng này chỉ ăn thua với
+        // viên đặt **giữa lúc lệnh đang bay** — và đúng một loại viên rơi vào
+        // khe đó: `BUSY_REFUSAL`, từ cú `openConversation()` kiểm lại sau
+        // `await` (đường duy nhất từ panel còn tới được câu từ chối; mọi nút
+        // khác đều `disabled={busy}`). Đo được trên DOM: màn hình hiện câu trả
+        // lời VÀ viên đỏ "Trợ lý đang bận… Xong rồi hãy thử lại." cùng lúc.
+        //
+        // Cùng lớp lỗi `loadConversations()` đã bịt bằng `error: null`; câu từ
+        // chối vì bận mở lại lớp ấy ở đây và ở `approve()`.
+        error: null,
         history: response.history,
         pendingAction: response.proposed_action,
         // Gắn thẻ vào đúng phiên nó được dựng ra, ngay tại thời điểm gán.
@@ -219,6 +260,19 @@ export const useAssistantStore = create<AssistantState>((set, get) => ({
       set((state) => ({
         busy: false,
         error: text,
+        // TỰ LÀNH — đường (b) của I4. Backend vừa từ chối chính cái
+        // `conversation_id` này, nên giữ nó lại là bảo đảm **mọi lượt sau hỏng
+        // y hệt, mãi mãi**, tới khi lễ tân tự đoán ra là phải bấm *Hội thoại
+        // mới*: trợ lý chết cứng ở quầy.
+        //
+        // Bỏ id đi là lượt kế tiếp mở sổ mới và chạy bình thường. KHÔNG mint
+        // khoá phiên ở đây: khoá đổi thì lớp 3 và lớp 4 vứt mất thẻ nhận phòng
+        // đang treo, mà thẻ ấy chẳng liên quan gì tới việc ghi sổ chat hỏng.
+        //
+        // Có điều kiện chứ không dọn mọi lỗi: mạng chập hay nhà cung cấp AI câm
+        // thì hội thoại vẫn còn nguyên trên đĩa, và hỏi lại phải là hỏi tiếp
+        // đúng sổ đó chứ không phải chẻ ra một sổ mới mỗi lần lỗi.
+        conversationId: isConversationForbidden(error) ? null : state.conversationId,
         messages: [...state.messages, { id: nextId(), kind: "error", text }],
       }));
     }
@@ -281,6 +335,10 @@ export const useAssistantStore = create<AssistantState>((set, get) => ({
       }
       set((state) => ({
         busy: false,
+        // Cùng lý do như nhánh thành công của `send()`, và đây là chỗ đọc kỳ
+        // quặc nhất trong hai chỗ: viên đỏ "Trợ lý đang bận: … chưa xong."
+        // nằm ngay cạnh dòng "Đã nhận phòng xong." vừa in ra. Đo được trên DOM.
+        error: null,
         pendingAction: null,
         pendingActionKey: null,
         messages: [
@@ -475,11 +533,32 @@ export const useAssistantStore = create<AssistantState>((set, get) => ({
     // `loadConversations()` được phép dọn (và có test canh đúng việc đó).
     const refused = mustReset && get().conversationKey === keyBeforeReset;
 
+    // ── I4(a): đừng để lại trạng thái nửa vời ────────────────────────────────
+    //
+    // Lệnh xoá ĐÃ chạy (đĩa rỗng) nhưng cú dọn phiên bị từ chối, nên
+    // `conversationId` còn trỏ vào một hàng không còn tồn tại. Đo được: lượt kế
+    // tiếp gửi `assistant_turn { conversation_id: "c1" }` → phía Rust
+    // `assert_can_read` thấy chủ hội thoại là `None` → `AUTH_FORBIDDEN`, `kind
+    // == User` nên nổ ra ngoài bằng `Err` → cả lượt hỏng → `send()` rơi vào
+    // `catch` mà **không** dọn id ⇒ mọi câu hỏi sau hỏng y hệt, mãi mãi.
+    //
+    // Bỏ id đi mà **KHÔNG mint khoá phiên mới** — đó là toàn bộ điểm của cách
+    // này. Khoá không đổi ⇒ lớp 3 vẫn vẽ thẻ, lớp 4 vẫn duyệt được nó, kết quả
+    // `check_in` đang bay vẫn tới được màn hình. Không lượt nào hỏng cả, thay vì
+    // để lượt sau hỏng rồi mới tự lành.
+    if (refused) set({ conversationId: null });
+
     await get().loadConversations();
     // Đặt LẠI sau `loadConversations()`: nạp được danh sách thì nó dọn `error`,
     // và câu từ chối vừa rồi sẽ chết theo — admin bấm xoá, sổ vẫn còn nguyên
     // trên màn hình, không một chữ giải thích.
-    if (refused) set({ error: BUSY_REFUSAL });
+    //
+    // Nhưng chỉ đặt khi `loadConversations()` KHÔNG để lại lỗi nào. Nạp lại
+    // hỏng thì `error` đang mang câu "không đọc được sổ hội thoại", và đè lên nó
+    // là lấy mất của admin tin quan trọng hơn: **danh sách đang hiện có thể đã
+    // cũ**. Câu từ chối thì còn đo được ở chỗ khác (phiên trên panel vẫn nguyên
+    // vẹn); danh sách sai thì không có dấu hiệu nào cả.
+    if (refused && get().error === null) set({ error: BUSY_REFUSAL });
   },
 
   deleteAllConversations: async () => {
@@ -501,7 +580,12 @@ export const useAssistantStore = create<AssistantState>((set, get) => ({
     get().startNewChat();
     const refused = get().conversationKey === keyBeforeReset;
 
+    // Vế song sinh của `deleteConversation` ngay trên — cùng hai lý do, cùng hai
+    // dòng. Ở đây sổ rỗng SẠCH, nên `conversationId` còn sót lại chắc chắn trỏ
+    // vào một hàng đã chết.
+    if (refused) set({ conversationId: null });
+
     await get().loadConversations();
-    if (refused) set({ error: BUSY_REFUSAL });
+    if (refused && get().error === null) set({ error: BUSY_REFUSAL });
   },
 }));

@@ -11,6 +11,7 @@ vi.mock("@/lib/invokeCommand", () => ({
 
 import { BUSY_REFUSAL, useAssistantStore } from "./useAssistantStore";
 import { useAuthStore } from "./useAuthStore";
+import { createAppErrorException } from "@/lib/appError";
 import type {
   AssistantConversationSummary,
   ChatMessage,
@@ -756,6 +757,142 @@ describe("useAssistantStore", () => {
       expect(afterCheckIn.pendingAction).toBeNull();
       expect(afterCheckIn.busy).toBe(false);
     });
+
+    /// VẾ SONG SINH, và là vế TRƯỚC ĐÂY KHÔNG AI CANH.
+    ///
+    /// `deleteAllConversations` có test ngay trên; `deleteConversation` thì
+    /// không: đo được — gỡ hẳn `if (refused) set({ error: BUSY_REFUSAL })` ở
+    /// `deleteConversation` mà cả bộ vẫn 799/799 xanh, trong khi gỡ đúng dòng ấy
+    /// ở `deleteAllConversations` thì đỏ 1.
+    ///
+    /// Chế độ hỏng khi ai đó "dọn dẹp" mất nó: admin xoá một hội thoại **đang
+    /// mở** giữa lúc `check_in` bay → dòng biến mất khỏi đĩa, panel vẫn ngồi
+    /// trên nó, **màn hình không một chữ**.
+    ///
+    /// Câu này phải sống sót qua `loadConversations()` — nó dọn `error` khi nạp
+    /// được — nên đo SAU khi cú xoá đã về đích, không đo ngay lúc bị từ chối.
+    it("xoá hội thoại ĐANG MỞ lúc check_in đang bay thì admin đọc được vì sao phiên vẫn còn", async () => {
+      const del = deferred<unknown>();
+      const checkIn = deferred<unknown>();
+      invokeWriteCommand.mockImplementation((command: string) =>
+        command === "check_in" ? checkIn.promise : del.promise,
+      );
+      invokeCommand.mockResolvedValue([]);
+      useAssistantStore.setState({
+        pendingAction: sampleAction,
+        pendingActionKey: SESSION_KEY,
+        conversationId: "c1",
+        conversations: [summary("c1", "Hỏi phòng")],
+      });
+
+      // Admin bấm *Xoá* trên đúng hội thoại đang mở, lúc còn rảnh: cửa cho qua.
+      const deleting = useAssistantStore.getState().deleteConversation("c1");
+      // Ngay sau đó lễ tân bấm *Đồng ý* trên thẻ.
+      const approval = useAssistantStore.getState().approve();
+      expect(useAssistantStore.getState().busy).toBe(true);
+
+      del.resolve(1);
+      await deleting;
+
+      // Lệnh xoá CHẠY THẬT — vế dương, nếu không thì chẳng có gì để giải thích.
+      expect(invokeWriteCommand).toHaveBeenCalledWith("delete_assistant_conversation", {
+        conversationId: "c1",
+      });
+      expect(useAssistantStore.getState().error).toBe(BUSY_REFUSAL);
+
+      checkIn.resolve({ id: "B1" });
+      await approval;
+    });
+
+    /// I4(a) — trạng thái nửa vời làm CHẾT PHIÊN, đo đầu-cuối.
+    ///
+    /// Trước bản vá, sau cú dọn phiên bị từ chối ở trên: `conversations = []`
+    /// (đĩa đã rỗng), nhưng `conversationId = "c1"` — hàng đã bị xoá. Lượt kế
+    /// tiếp gửi `assistant_turn { conversation_id: "c1" }`, phía Rust
+    /// `assert_can_read` thấy chủ hội thoại là `None` → `AUTH_FORBIDDEN`,
+    /// `kind == User` nên `return Err`, hỏng cả lượt. `send()` rơi vào `catch`
+    /// và không dọn id ⇒ **mọi câu hỏi sau đều hỏng y hệt, mãi mãi**.
+    ///
+    /// Cách chữa nhỏ nhất là đừng tạo ra trạng thái xấu: bỏ id đi ngay tại đây,
+    /// **không mint khoá phiên**. Ba khẳng định dưới đo đúng ba vế đó — khoá
+    /// không đổi, thẻ vẫn duyệt được, lượt sau mở sổ mới và chạy bình thường.
+    it("cú dọn phiên bị từ chối thì bỏ id hội thoại đã chết mà KHÔNG mint khoá mới", async () => {
+      const del = deferred<unknown>();
+      const checkIn = deferred<unknown>();
+      invokeWriteCommand.mockImplementation((command: string) =>
+        command === "check_in" ? checkIn.promise : del.promise,
+      );
+      invokeCommand.mockResolvedValue([]);
+      useAssistantStore.setState({
+        pendingAction: sampleAction,
+        pendingActionKey: SESSION_KEY,
+        conversationId: "c1",
+        conversations: [summary("c1", "Hỏi phòng")],
+      });
+
+      const deleting = useAssistantStore.getState().deleteConversation("c1");
+      const approval = useAssistantStore.getState().approve();
+      del.resolve(1);
+      await deleting;
+
+      const afterDelete = useAssistantStore.getState();
+      // Id trỏ vào hàng đã chết bị bỏ đi...
+      expect(afterDelete.conversationId).toBeNull();
+      // ...mà khoá phiên KHÔNG đổi, nên lớp 3 và lớp 4 không vứt thẻ đang treo.
+      expect(afterDelete.conversationKey).toBe(SESSION_KEY);
+      expect(afterDelete.pendingAction).toBe(sampleAction);
+      expect(afterDelete.pendingActionKey).toBe(SESSION_KEY);
+
+      // Thẻ vẫn duyệt được thật: kết quả `check_in` tới được màn hình.
+      checkIn.resolve({ id: "B1" });
+      await approval;
+      expect(useAssistantStore.getState().messages).toContainEqual(
+        expect.objectContaining({ kind: "assistant", text: "Đã nhận phòng xong." }),
+      );
+
+      // Và đây là hậu quả thật đang được chữa: lượt kế tiếp mở sổ MỚI thay vì
+      // gửi lên một id đã chết rồi ăn `AUTH_FORBIDDEN` mãi mãi.
+      invokeCommand.mockResolvedValueOnce({
+        ...turnResponse("Còn phòng 201."),
+        conversation_id: "c9",
+      });
+      await useAssistantStore.getState().send("phòng nào trống", { route: "rooms" });
+
+      expect(invokeCommand).toHaveBeenLastCalledWith("assistant_turn", {
+        request: expect.objectContaining({ conversation_id: null }),
+      });
+      expect(useAssistantStore.getState().conversationId).toBe("c9");
+    });
+
+    /// Vế song sinh ở `deleteAllConversations`. Dòng riêng, ở hàm riêng, nên
+    /// phải có đòn sabotage riêng — chỗ đặt một dòng thì không phải một lớp.
+    it("xoá sạch bị từ chối cũng bỏ id hội thoại đã chết, khoá phiên vẫn nguyên", async () => {
+      const del = deferred<unknown>();
+      const checkIn = deferred<unknown>();
+      invokeWriteCommand.mockImplementation((command: string) =>
+        command === "check_in" ? checkIn.promise : del.promise,
+      );
+      invokeCommand.mockResolvedValue([]);
+      useAssistantStore.setState({
+        pendingAction: sampleAction,
+        pendingActionKey: SESSION_KEY,
+        conversationId: "c1",
+        conversations: [summary("c1", "Hỏi phòng")],
+      });
+
+      const deleting = useAssistantStore.getState().deleteAllConversations();
+      const approval = useAssistantStore.getState().approve();
+      del.resolve(2);
+      await deleting;
+
+      const afterDelete = useAssistantStore.getState();
+      expect(afterDelete.conversationId).toBeNull();
+      expect(afterDelete.conversationKey).toBe(SESSION_KEY);
+      expect(afterDelete.pendingActionKey).toBe(SESSION_KEY);
+
+      checkIn.resolve({ id: "B1" });
+      await approval;
+    });
   });
 
   // ─── Nối dây conversation_id và gắn thẻ vào đúng phiên ───
@@ -919,6 +1056,64 @@ describe("useAssistantStore", () => {
       expect(state.busy).toBe(false);
       // Không đổi phiên thì cũng không mint khoá mới: lượt hỏng vẫn thuộc về
       // hội thoại đang mở, hỏi lại được ngay.
+      expect(state.conversationKey).toBe(SESSION_KEY);
+    });
+
+    /// I4(b) — TỰ LÀNH, lưới hứng cho mọi đường sinh ra id chết mà (a) không
+    /// với tới.
+    ///
+    /// (a) dọn id ngay tại cú xoá bị từ chối, nhưng nó không với qua được một
+    /// lượt CHƯA bay về: admin bấm *Xoá vĩnh viễn* ở Cài đặt (panel vẫn nằm bên
+    /// trái) → lễ tân gõ một câu, `send()` bay đi với `conversation_id: "c1"` →
+    /// lệnh xoá về, (a) đặt id về `null` → rồi `assistant_turn` mới về, và
+    /// nhánh thành công gán lại `response.conversation_id ?? state.conversationId`
+    /// = `"c1"`. Id chết sống lại. Chỉ có dòng ở `catch` mới bắt được ca này.
+    ///
+    /// Hai vế trong một test, và vế ÂM là vế dễ làm sai: dọn id ở MỌI lỗi thì
+    /// mạng chập một cái là cuộc trò chuyện đang dở bị chẻ làm hai bản ghi rời.
+    it("lượt bị AUTH_FORBIDDEN thì bỏ id hội thoại đã chết; lỗi thường thì KHÔNG", async () => {
+      useAssistantStore.setState({ conversationId: "c1" });
+
+      // Vế ÂM trước: mạng chập, nhà cung cấp câm — sổ vẫn còn nguyên trên đĩa,
+      // hỏi lại phải là hỏi tiếp đúng sổ đó.
+      invokeCommand.mockRejectedValueOnce(new Error("Nhà cung cấp AI không phản hồi"));
+      await useAssistantStore.getState().send("phòng nào trống", { route: "rooms" });
+      expect(useAssistantStore.getState().conversationId).toBe("c1");
+
+      // Vế DƯƠNG. Ném qua đúng cái factory mà `invokeCommand` thật dùng
+      // (`createAppErrorException`) chứ không tự bịa một object có `code`: cái
+      // phải đo là tên trường khớp với thứ đường thật ném ra, không phải là
+      // store biết đọc một hình dạng do chính test nghĩ ra.
+      invokeCommand.mockRejectedValueOnce(
+        createAppErrorException({
+          code: "AUTH_FORBIDDEN",
+          message: "Không mở được hội thoại này.",
+          kind: "user",
+          support_id: null,
+        }),
+      );
+      await useAssistantStore.getState().send("còn phòng đôi không", { route: "rooms" });
+      expect(useAssistantStore.getState().conversationId).toBeNull();
+
+      // Hậu quả thật: lượt sau KHÔNG hỏng nữa. Không có dòng tự lành thì lượt
+      // này lại gửi `"c1"` và lại ăn `AUTH_FORBIDDEN` — trợ lý chết cứng ở quầy
+      // tới khi lễ tân tự đoán ra là phải bấm *Hội thoại mới*.
+      invokeCommand.mockResolvedValueOnce({
+        ...turnResponse("Còn phòng 201."),
+        conversation_id: "c9",
+      });
+      await useAssistantStore.getState().send("thế phòng 201", { route: "rooms" });
+
+      expect(invokeCommand).toHaveBeenLastCalledWith("assistant_turn", {
+        request: expect.objectContaining({ conversation_id: null }),
+      });
+      const state = useAssistantStore.getState();
+      expect(state.conversationId).toBe("c9");
+      expect(state.messages).toContainEqual(
+        expect.objectContaining({ kind: "assistant", text: "Còn phòng 201." }),
+      );
+      // Sổ chat là tiện ích: dọn id KHÔNG được kéo theo khoá phiên, kẻo thẻ
+      // nhận phòng đang treo chết oan vì một lỗi ghi sổ.
       expect(state.conversationKey).toBe(SESSION_KEY);
     });
   });
@@ -1238,6 +1433,66 @@ describe("useAssistantStore", () => {
       expect(state.messages).toEqual([{ id: "m1", kind: "user", text: "đang dở" }]);
       expect(state.conversations).toEqual([summary("c1", "Hỏi phòng")]);
       expect(state.error).toContain("Chỉ admin mới được thực hiện");
+    });
+
+    /// Câu từ chối KHÔNG được đè lên lỗi của `loadConversations()`.
+    ///
+    /// Hai thứ hỏng cùng lúc, và chỉ một viên `role="alert"` để nói. Tin phải
+    /// giữ là tin **danh sách đang hiện trên màn hình có thể đã cũ**: nó không
+    /// có dấu hiệu nào khác, trong khi "phiên chưa dọn được" thì admin nhìn
+    /// panel là thấy — hội thoại vẫn còn nguyên đó.
+    it("nạp lại danh sách hỏng thì câu từ chối không đè mất tin danh sách đã cũ", async () => {
+      const del = deferred<unknown>();
+      const checkIn = deferred<unknown>();
+      invokeWriteCommand.mockImplementation((command: string) =>
+        command === "check_in" ? checkIn.promise : del.promise,
+      );
+      invokeCommand.mockRejectedValue(new Error("Không đọc được sổ hội thoại"));
+      useAssistantStore.setState({
+        pendingAction: sampleAction,
+        pendingActionKey: SESSION_KEY,
+        conversationId: "c1",
+        conversations: [summary("c1", "Hỏi phòng")],
+      });
+
+      const deleting = useAssistantStore.getState().deleteConversation("c1");
+      const approval = useAssistantStore.getState().approve();
+      del.resolve(1);
+      await deleting;
+
+      const state = useAssistantStore.getState();
+      expect(state.error).toContain("Không đọc được sổ hội thoại");
+      // Và danh sách đúng là đã cũ: hàng "c1" đã bị xoá khỏi đĩa mà vẫn nằm đây.
+      expect(state.conversations).toEqual([summary("c1", "Hỏi phòng")]);
+
+      checkIn.resolve({ id: "B1" });
+      await approval;
+    });
+
+    /// Vế song sinh ở `deleteAllConversations` — dòng riêng, sabotage riêng.
+    it("xoá sạch rồi nạp lại hỏng thì cũng không đè mất tin danh sách đã cũ", async () => {
+      const del = deferred<unknown>();
+      const checkIn = deferred<unknown>();
+      invokeWriteCommand.mockImplementation((command: string) =>
+        command === "check_in" ? checkIn.promise : del.promise,
+      );
+      invokeCommand.mockRejectedValue(new Error("Không đọc được sổ hội thoại"));
+      useAssistantStore.setState({
+        pendingAction: sampleAction,
+        pendingActionKey: SESSION_KEY,
+        conversationId: "c1",
+        conversations: [summary("c1", "Hỏi phòng")],
+      });
+
+      const deleting = useAssistantStore.getState().deleteAllConversations();
+      const approval = useAssistantStore.getState().approve();
+      del.resolve(2);
+      await deleting;
+
+      expect(useAssistantStore.getState().error).toContain("Không đọc được sổ hội thoại");
+
+      checkIn.resolve({ id: "B1" });
+      await approval;
     });
   });
 
