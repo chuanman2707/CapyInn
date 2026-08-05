@@ -26,7 +26,7 @@ vi.mock("@/stores/useHotelStore", () => ({
   useHotelStore: (selector: (state: typeof hotelState) => unknown) => selector(hotelState),
 }));
 
-import { useAssistantStore } from "@/stores/useAssistantStore";
+import { BUSY_REFUSAL, useAssistantStore } from "@/stores/useAssistantStore";
 import { useAuthStore } from "@/stores/useAuthStore";
 import type { AssistantConversationSummary, ProposedAction } from "@/types/assistant";
 import { SUGGESTIONS } from "./AssistantEmptyState";
@@ -56,6 +56,20 @@ function makeSummary(
     updated_at: "2026-08-05T09:30:00+07:00",
     ...overrides,
   };
+}
+
+/// Một promise mở, để test cầm được thời điểm một lệnh "bay về".
+///
+/// Ba test cuối file sống nhờ nó: kịch bản duy nhất còn tới được câu từ chối vì
+/// bận là **hai lệnh cùng bay** — cú đọc sổ của `openConversation()` và một lệnh
+/// ghi — nên không giữ được lệnh nào ở trạng thái lơ lửng thì không dựng lại
+/// được kịch bản. Cùng khuôn với `useAssistantStore.test.ts`.
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((res) => {
+    resolve = res;
+  });
+  return { promise, resolve };
 }
 
 function signIn(role: "admin" | "receptionist") {
@@ -796,6 +810,153 @@ describe("AssistantPanel", () => {
 
     expect(screen.getByRole("listitem")).toBeInTheDocument();
     expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+  });
+
+  // ── Câu từ chối vì BẬN phải đi được từ store ra tới màn hình ─────────────
+  //
+  // `BUSY_REFUSAL` trước vòng này chỉ được khẳng định ở tầng store (7 chỗ trong
+  // `useAssistantStore.test.ts`); không một file `.tsx` nào chạm tới nó. Đường
+  // thì có thật, và chỉ còn ĐÚNG MỘT đường tới được nó từ panel:
+  //
+  //   mở hội thoại từ lịch sử → trong lúc đang đọc sổ, thẻ VẪN vẽ và nút *Đồng ý*
+  //   VẪN sáng → bấm *Đồng ý* → `busy` lên → sổ về → `openConversation()` kiểm
+  //   lại sau `await` → từ chối.
+  //
+  // Mọi cửa mint khoá khác đều `disabled={busy}` nên không bấm được sau khi
+  // `busy` đã bật: *Hội thoại mới* và *Lịch sử* (header), ba nút ở
+  // `AssistantHistoryList`, và nút *Bỏ thẻ và đi tiếp* của hộp lớp 1. Cửa vào
+  // của chính `openConversation()` cũng chỉ **lấy mẫu** — nó chạy trước
+  // `await` — nên câu kiểm SAU `await` là câu duy nhất còn nói ra được.
+  //
+  // Ba test dùng chung kịch bản ấy nhưng chết vì ba đòn sabotage khác nhau: một
+  // canh sợi dây store→DOM, hai canh hai nhánh thành công dọn `error`.
+
+  /// Dựng đúng kịch bản trên tới ngay TRƯỚC lúc sổ bay về.
+  ///
+  /// Trả lại hai tay nắm: `convo` (cú đọc sổ) và `checkIn` (lệnh ghi), cộng bộ
+  /// đếm số cú `check_in` THẬT đã bắn qua biên Tauri.
+  async function raceOpenConversationWithApprove() {
+    const convo = deferred<unknown[]>();
+    const checkIn = deferred<unknown>();
+    let checkInCalls = 0;
+    setMockResponse("get_assistant_conversation", () => convo.promise);
+    setMockResponse("check_in", () => {
+      checkInCalls += 1;
+      return checkIn.promise;
+    });
+    vi.spyOn(useAssistantStore.getState(), "loadConversations").mockResolvedValue(undefined);
+    useAssistantStore.setState({
+      conversations: [makeSummary({ id: "c1" })],
+      pendingAction: makeAction(),
+      pendingActionKey: "phien-dang-mo",
+      conversationKey: "phien-dang-mo",
+    });
+
+    render(<AssistantPanel />);
+    await userEvent.click(screen.getByRole("button", { name: "Lịch sử" }));
+    await userEvent.click(screen.getByRole("button", { name: /^Phòng 201 còn trống không/ }));
+    // Lớp 1 hỏi trước vì đang treo thẻ; đồng ý rồi `openConversation()` mới chạy.
+    await userEvent.click(screen.getByRole("button", { name: "Bỏ thẻ và đi tiếp" }));
+
+    // Vế dương của cả ba test: giữa lúc đang đọc sổ, thẻ VẪN nằm trên màn hình
+    // và nút *Đồng ý* VẪN bấm được. Không có câu này thì một bản vá gỡ thẻ ngay
+    // lúc bắt đầu đọc cũng làm mọi khẳng định bên dưới xanh — mà kịch bản thì
+    // không còn tồn tại.
+    expect(screen.getByText("Xác nhận nhận phòng")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Đồng ý" })).not.toBeDisabled();
+    await userEvent.click(screen.getByRole("button", { name: "Đồng ý" }));
+
+    return { convo, checkIn, checkInCalls: () => checkInCalls };
+  }
+
+  it("đang gửi nhận phòng mà sổ hội thoại về thì panel VẼ RA câu từ chối, và check_in vẫn đúng 1 cú", async () => {
+    const { convo, checkIn, checkInCalls } = await raceOpenConversationWithApprove();
+
+    expect(checkInCalls()).toBe(1);
+    // Chưa có gì bị từ chối thì chưa có viên nào — vế âm, chặn một viên thường trực.
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+
+    await act(async () => {
+      convo.resolve([]);
+    });
+
+    // Sợi dây store→DOM: đúng câu từ chối, ở đúng `role="alert"`.
+    expect(screen.getByRole("alert")).toHaveTextContent(BUSY_REFUSAL);
+    // Và hàng rào giữ đúng thứ nó sinh ra để giữ: khoá phiên KHÔNG đổi, nên thẻ
+    // đang treo không bị lớp 3/lớp 4 vứt giữa lúc lệnh ghi đang bay.
+    expect(useAssistantStore.getState().conversationKey).toBe("phien-dang-mo");
+
+    await act(async () => {
+      checkIn.resolve({ id: "B1" });
+    });
+
+    // Kịch bản nhận phòng HAI LẦN, đo đầu-cuối ở tầng render: vẫn đúng một cú.
+    expect(checkInCalls()).toBe(1);
+    expect(screen.getByText("Đã nhận phòng xong.")).toBeInTheDocument();
+  });
+
+  it("nhận phòng xong thì viên 'đang bận' tắt theo, không nằm cạnh câu Đã nhận phòng xong", async () => {
+    // Viên đỏ nói dối: "còn một lệnh nhận phòng chưa xong. Xong rồi hãy thử
+    // lại." — trong khi dòng ngay bên cạnh là "Đã nhận phòng xong.". Nó tự lành
+    // ở thao tác kế tiếp, nhưng cửa sổ nói dối rơi ĐÚNG LÚC người dùng nhìn màn
+    // hình để quyết định làm gì tiếp.
+    //
+    // Đo bằng `queryAllByRole("alert")` chứ không dừng ở `state.error`: cái phải
+    // biến mất là viên trên màn hình.
+    const { convo, checkIn } = await raceOpenConversationWithApprove();
+
+    await act(async () => {
+      convo.resolve([]);
+    });
+    // Vế dương: viên CÓ hiện. Thiếu nó thì một bản không bao giờ báo từ chối
+    // cũng làm khẳng định bên dưới xanh.
+    expect(screen.getByRole("alert")).toHaveTextContent(BUSY_REFUSAL);
+
+    await act(async () => {
+      checkIn.resolve({ id: "B1" });
+    });
+
+    expect(screen.getByText("Đã nhận phòng xong.")).toBeInTheDocument();
+    expect(screen.queryAllByRole("alert")).toHaveLength(0);
+  });
+
+  it("lượt trả lời xong thì viên 'đang bận' tắt theo, không nằm cạnh câu trả lời", async () => {
+    // Cùng lớp lỗi, nhánh thành công của `send()`. Không treo thẻ nên cú bấm ở
+    // lịch sử đi thẳng, và khung soạn nằm sẵn ngay đó trong lúc sổ còn đang bay.
+    //
+    // Không seed `error` bằng `setState` rồi mới gửi: `send()` đặt `error: null`
+    // ngay ở câu đầu, nên một test kiểu ấy XANH kể cả khi nhánh thành công không
+    // dọn gì — nó sẽ ghim đúng con bug thay vì canh nó.
+    const convo = deferred<unknown[]>();
+    const turn = deferred<unknown>();
+    setMockResponse("get_assistant_conversation", () => convo.promise);
+    setMockResponse("assistant_turn", () => turn.promise);
+    vi.spyOn(useAssistantStore.getState(), "loadConversations").mockResolvedValue(undefined);
+    useAssistantStore.setState({ conversations: [makeSummary({ id: "c1" })] });
+
+    render(<AssistantPanel />);
+    await userEvent.click(screen.getByRole("button", { name: "Lịch sử" }));
+    await userEvent.click(screen.getByRole("button", { name: /^Phòng 201 còn trống không/ }));
+
+    await userEvent.type(screen.getByRole("textbox"), "phòng nào trống");
+    await userEvent.click(screen.getByRole("button", { name: "Gửi tin nhắn" }));
+
+    await act(async () => {
+      convo.resolve([]);
+    });
+    expect(screen.getByRole("alert")).toHaveTextContent(BUSY_REFUSAL);
+
+    await act(async () => {
+      turn.resolve({
+        reply: "Còn phòng 201.",
+        proposed_action: null,
+        history: [],
+        conversation_id: "c9",
+      });
+    });
+
+    expect(screen.getByText("Còn phòng 201.")).toBeInTheDocument();
+    expect(screen.queryAllByRole("alert")).toHaveLength(0);
   });
 
   // ── Hộp hỏi của lớp 1 phải chết theo mọi đường RÚT LUI ───────────────────
