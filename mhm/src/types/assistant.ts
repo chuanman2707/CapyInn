@@ -42,7 +42,38 @@ export type AssistantTurnResponse = {
   reply: string | null;
   proposed_action: ProposedAction | null;
   history: ChatMessage[];
+  /// Id để dùng cho lượt sau. `null` nghĩa là **không tạo được** hội thoại,
+  /// không phải "chưa có" — nên nhận `null` mà đang có id thì giữ id cũ, đừng
+  /// ghi đè. Xem `AssistantTurnResponse` phía Rust.
+  conversation_id: string | null;
 };
+
+/// Một dòng trong danh sách lịch sử. Cùng hình dạng với
+/// `queries::assistant::conversation_queries::ConversationSummary`.
+export type AssistantConversationSummary = {
+  id: string;
+  user_id: string;
+  user_name: string;
+  title: string;
+  updated_at: string;
+};
+
+/// Một hàng đã ghi trong sổ hội thoại.
+///
+/// `kind` để nguyên `string` chứ không thu về union: nó là dữ liệu đã nằm trên
+/// đĩa, và một `kind` lạ (bản cũ, bản sau) phải đi lọt qua đường đọc chứ không
+/// được làm hỏng cả hội thoại. Chỗ nào cần phân nhánh thì tự so chuỗi.
+export type StoredMessage = {
+  id: string;
+  kind: string;
+  text: string;
+  created_at: string;
+};
+
+/// Trần tải một hội thoại, chốt cứng ở `conversation_queries::MESSAGE_WINDOW`
+/// và **không có phân trang**. Chạm trần nghĩa là phần cũ hơn không được gửi
+/// cho nhà cung cấp — đó là thứ phải nói ra chứ không để lễ tân tự đoán.
+export const MESSAGE_WINDOW = 100;
 
 export type AssistantGateMissing = "api_key" | "cloud_data_opt_in" | "model" | "base_url";
 
