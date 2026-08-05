@@ -400,6 +400,47 @@ describe("useAssistantStore", () => {
       expect(useAssistantStore.getState().pendingAction).toBeNull();
       expect(useAssistantStore.getState().pendingActionKey).toBeNull();
     });
+
+    /// ── Bất biến "KHÔNG có `await` nào xen giữa lớp 4 và lệnh ghi" ─────────
+    ///
+    /// Lớp 4 chỉ giữ được tiền khi câu kiểm khoá và `invokeWriteCommand` nằm
+    /// trong CÙNG một lượt đồng bộ. Một `await` xen vào giữa mở ra một khe, và
+    /// ai mint khoá phiên trong khe đó — đăng xuất là đường mint duy nhất chạy
+    /// được sau khi `busy` đã bật — làm `check_in` bay ra **sau** khi thẻ đã bị
+    /// vứt và phiên đã đổi chủ: nhận phòng thật cho một phiên chưa ai bấm đồng
+    /// ý, đúng thứ lớp 4 sinh ra để chặn.
+    ///
+    /// Khẳng định là **khoá phiên TẠI THỜI ĐIỂM lệnh ghi bay**, không phải số
+    /// lần gọi. Đo được: cả bản đúng lẫn bản có khe đều gọi `check_in` đúng một
+    /// lần, chỉ khác nhau ở chỗ nó bay TRƯỚC hay SAU cú mint. Hai test hàng xóm
+    /// tình cờ cũng đỏ khi chèn `await`, nhưng đỏ bằng câu *"Test timed out"* và
+    /// *"gọi 0 lần"* — hai câu không nói gì về đường tiền, và người đọc chúng dễ
+    /// chữa bằng cách nới hạn giờ, tức mở lại đúng cái khe này. Test này đỏ bằng
+    /// một câu chỉ thẳng vào khoá phiên.
+    ///
+    /// Đã đo tính riêng của nó: chèn `await Promise.resolve()` NGAY TRƯỚC
+    /// `invokeWriteCommand` → đỏ; chèn đúng câu ấy NGAY SAU (ngoài cửa sổ được
+    /// canh) → 808/808 xanh. Nó bắt cái khe, không bắt "có thêm một microtask".
+    it("check_in bay ra trong lúc khoá phiên vẫn là khoá đã duyệt", async () => {
+      const keyAtWrite: string[] = [];
+      invokeWriteCommand.mockImplementation(() => {
+        keyAtWrite.push(useAssistantStore.getState().conversationKey);
+        return Promise.resolve(undefined);
+      });
+      useAssistantStore.setState({ pendingAction: sampleAction, pendingActionKey: SESSION_KEY });
+
+      const approval = useAssistantStore.getState().approve();
+      // Mint khoá phiên mới ngay khi `approve()` nhả quyền điều khiển lần đầu.
+      // Bản đúng đã bắn lệnh ghi xong trước lúc này; bản có khe thì chưa.
+      useAssistantStore.getState().resetForLogout();
+      await approval;
+
+      // Tách làm hai khẳng định để câu đỏ đọc được thành lời: so mảng thì
+      // vitest in ra `[ Array(1) ]`, còn so chuỗi thì nó in thẳng cái khoá lạ
+      // mà lệnh ghi đã bay ra dưới quyền.
+      expect(keyAtWrite).toHaveLength(1);
+      expect(keyAtWrite[0]).toBe(SESSION_KEY);
+    });
   });
 
   // ─── BẤT BIẾN SỞ HỮU `busy` — bốn nhánh stale, mỗi nhánh một test ───
