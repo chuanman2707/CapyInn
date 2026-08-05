@@ -35,10 +35,15 @@ function makeAction(): ProposedAction {
   };
 }
 
-const OPEN_BUTTON = "Xoá tất cả hội thoại";
-const CONFIRM_BUTTON = "Xoá vĩnh viễn";
-const PHRASE_BOX = "Gõ XOÁ HẾT để xác nhận";
-const PENDING_WARNING = "Thẻ nhận phòng đang chờ cũng sẽ mất.";
+/// Tên truy cập của cửa ở Cài đặt cố ý KHÁC cửa trong panel — xem chú thích
+/// cạnh `PHRASE_INPUT_ID` trong `AssistantSection.tsx`. Hai bề mặt render cùng
+/// lúc được, và hai nút đỏ cùng tên trên một màn hình là lỗi của người dùng
+/// trước khi là lỗi của test.
+const OPEN_BUTTON = "Xoá sổ hội thoại trợ lý";
+const CONFIRM_BUTTON = "Xoá sổ vĩnh viễn";
+const CANCEL_BUTTON = "Giữ lại sổ";
+const PHRASE_BOX = "Gõ XOÁ HẾT để xoá sổ";
+const PENDING_WARNING = "Thẻ nhận phòng đang chờ trên panel cũng sẽ mất.";
 
 /// Cửa xoá sạch THỨ HAI mà spec dòng 359 đòi: nút phải có ở **cả** cuối danh
 /// sách lịch sử **và** ở Cài đặt → Trợ lý quầy. Task 9 làm cửa thứ nhất; cửa
@@ -133,7 +138,7 @@ describe("AssistantSection — xoá toàn bộ hội thoại", () => {
     // bật nút cũng làm hai khẳng định cuối xanh.
     expect(screen.getByRole("button", { name: CONFIRM_BUTTON })).toBeEnabled();
 
-    await userEvent.click(screen.getByRole("button", { name: "Huỷ" }));
+    await userEvent.click(screen.getByRole("button", { name: CANCEL_BUTTON }));
     await userEvent.click(screen.getByRole("button", { name: OPEN_BUTTON }));
 
     expect(screen.getByRole("textbox", { name: PHRASE_BOX })).toHaveValue("");
@@ -189,7 +194,7 @@ describe("AssistantSection — xoá toàn bộ hội thoại", () => {
     // đọc — đúng lúc nó nói thật thì không ai còn nhìn.
     await openBox();
 
-    expect(screen.getByText("Xoá sạch toàn bộ hội thoại?")).toBeInTheDocument();
+    expect(screen.getByText("Xoá sạch sổ hội thoại trợ lý?")).toBeInTheDocument();
     expect(screen.queryByText(PENDING_WARNING)).not.toBeInTheDocument();
   });
 
@@ -224,5 +229,45 @@ describe("AssistantSection — xoá toàn bộ hội thoại", () => {
     await waitFor(() =>
       expect(screen.queryByRole("button", { name: CONFIRM_BUTTON })).not.toBeInTheDocument(),
     );
+  });
+
+  /// `deleteAll()` không có `try/finally` thì `busy` của CHÍNH màn hình này kẹt
+  /// `true` vĩnh viễn, và cả mục *Trợ lý quầy* xám tới khi khởi động lại app.
+  ///
+  /// Không dựng lại bằng `invokeWriteCommand.mockRejectedValue`: store đã bắt
+  /// hết lỗi của lệnh ghi và nuốt vào `error` của nó, nên đường đó không bao
+  /// giờ ném ra tới đây. Phải thay chính hàm trên store — đó mới là hình dạng
+  /// thật của "một promise không ai lường tới lại reject" (đường bất kỳ trong
+  /// `deleteAllConversations` ném ra ngoài hai khối `catch` sẵn có).
+  ///
+  /// Thay bằng `setState` chứ không bằng `vi.spyOn`: `setState` chép prop sang
+  /// object mới nên `restoreAllMocks` phục hồi trên object cũ đã bị vứt — bẫy
+  /// đã bắt được ở vòng duyệt Task 7. `beforeEach` ở trên hard-reset cả store
+  /// nên hàm thật quay lại nguyên vẹn cho test kế tiếp.
+  it("lệnh xoá ném lỗi thì cả mục Trợ lý quầy vẫn dùng được", async () => {
+    useAssistantStore.setState({
+      deleteAllConversations: async () => {
+        throw new Error("Cơ sở dữ liệu đang bị khoá");
+      },
+    });
+
+    await openBox();
+    await userEvent.type(screen.getByRole("textbox", { name: PHRASE_BOX }), "XOÁ HẾT");
+    // Vế dương: trước cú bấm, mọi thứ đang bật.
+    expect(screen.getByRole("button", { name: "Lưu cấu hình" })).toBeEnabled();
+
+    await userEvent.click(screen.getByRole("button", { name: CONFIRM_BUTTON }));
+
+    // Lỗi phải nói ra...
+    expect(await screen.findByText("Cơ sở dữ liệu đang bị khoá")).toBeInTheDocument();
+    // ...và `busy` phải nhả. Đo tới tận hậu quả, không chỉ một cờ boolean: đây
+    // là những nút thật sự chết theo khi cờ kẹt.
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: "Lưu cấu hình" })).toBeEnabled(),
+    );
+    expect(screen.getByRole("button", { name: OPEN_BUTTON })).toBeEnabled();
+    expect(screen.getByRole("checkbox")).toBeEnabled();
+    // Hộp cũng phải đóng lại — `closeDeleteAll()` nằm cùng khối `finally`.
+    expect(screen.queryByRole("button", { name: CONFIRM_BUTTON })).not.toBeInTheDocument();
   });
 });

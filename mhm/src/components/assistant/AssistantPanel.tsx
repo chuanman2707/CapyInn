@@ -291,14 +291,19 @@ export function AssistantPanel() {
           <div className="flex gap-2">
             {/* CỬA THỨ TƯ mint khoá phiên, và là cửa duy nhất mở được SAU khi
                 `busy` đã bật. Ba nút xoá ở `AssistantHistoryList` đã khoá theo
-                `busy` vì cùng một lý do (xem chú thích ở đó, dòng 26-31), nhưng
-                hộp này mở từ lúc còn rảnh nên khoá ở nút *Hội thoại mới* không
-                với tới: bấm *Hội thoại mới* lúc `busy=false` → hộp hiện → bấm
-                *Đồng ý* trên thẻ → `check_in` bay đi, `busy=true`, hộp VẪN mở →
-                bấm nút này → `startNewChat()` mint khoá phiên mới → lớp 4 vứt
-                kết quả `check_in`, nhưng PHÒNG ĐÃ NHẬN THẬT. Đo được:
-                `messages=[]`, `error=null`, `busy=false` — màn hình sạch trơn
-                sau một lượt nhận phòng có thật. Không mất tiền, mất tin.
+                `busy` vì cùng một lý do, nhưng hộp này mở từ lúc còn rảnh nên
+                khoá ở nút *Hội thoại mới* không với tới: bấm *Hội thoại mới*
+                lúc `busy=false` → hộp hiện → bấm *Đồng ý* trên thẻ → `check_in`
+                bay đi, `busy=true`, hộp VẪN mở → bấm nút này → `startNewChat()`
+                mint khoá phiên mới → lớp 4 vứt kết quả `check_in`, nhưng PHÒNG
+                ĐÃ NHẬN THẬT. Đo được: `messages=[]`, `error=null`, `busy=false`
+                — màn hình sạch trơn sau một lượt nhận phòng có thật.
+
+                `disabled` ở đây giờ là lớp lịch sự, không phải hàng rào: hàng
+                rào nằm trong `startNewChat()` (bất biến sở hữu `busy` ở
+                `useAssistantStore.ts`), vì `disabled` chỉ lấy mẫu lúc render và
+                cú bấm đã đi rồi thì không thu lại được. Bị từ chối thì store
+                đặt `error`, và viên `role="alert"` ngay dưới vẽ nó ra.
 
                 Nút *Ở lại* cố ý KHÔNG khoá: rút lui phải luôn mở, kể cả lúc
                 bận, không thì `busy` treo một hộp hỏi không đường thoát. */}

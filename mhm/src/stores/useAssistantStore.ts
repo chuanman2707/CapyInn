@@ -102,9 +102,25 @@ function buildHistoryNotice(stored: StoredMessage[]): string | null {
   return notices.length > 0 ? notices.join(" ") : null;
 }
 
+/// Câu từ chối dùng chung cho mọi đường mint khoá phiên bị chặn vì đang bận.
+///
+/// Nói cả hai thứ có thể đang bay — lượt trả lời của trợ lý và lệnh nhận phòng
+/// — vì `busy` là MỘT cờ dùng chung cho cả hai, và người đọc câu này cần biết
+/// mình đang chờ cái gì. Được vẽ ở **cả hai** bề mặt: viên `role="alert"` của
+/// panel (`AssistantPanel.tsx`) và dòng lỗi của Cài đặt → Trợ lý quầy.
+export const BUSY_REFUSAL =
+  "Trợ lý đang bận: còn một lượt trả lời hoặc một lệnh nhận phòng chưa xong. Xong rồi hãy thử lại.";
+
 /// Trạng thái của một phiên chat trống. Dùng chung cho *hội thoại mới*, cho
 /// đường xoá, và cho đăng xuất — ba chỗ phải dọn **đúng cùng một tập**, không
 /// thì chỗ nào quên một field là chỗ đó rò sang người kế tiếp.
+///
+/// KHÔNG có `busy` ở đây, và đó là chủ ý — xem bất biến sở hữu `busy` ở
+/// `startNewChat` bên dưới. Hai trong ba đường mint (`startNewChat`,
+/// `openConversation`) chỉ chạy được khi `busy === false`, nên một dòng
+/// `busy: false` ở đây là dòng không kịch bản nào làm sai được; đường thứ ba
+/// (`resetForLogout`) đã đặt tay và **có** test canh. Thêm vào đây là thêm một
+/// dòng không ai canh nổi.
 function emptySession() {
   return {
     // Mint khoá mới: mọi thẻ đang treo lập tức mất quyền duyệt qua lớp 4.
@@ -170,10 +186,13 @@ export const useAssistantStore = create<AssistantState>((set, get) => ({
       // Đổi hội thoại giữa lúc câu trả lời đang bay về. `response.history` là
       // transcript của hội thoại CŨ — tên khách và CCCD của người không liên
       // quan — nên đổ nó vào phiên mới là rò dữ liệu khách, và luật lọc
-      // `user_id` phía Rust không nhìn thấy đường này. Panel khoá nút khi
-      // `busy` (spec), nhưng khoá nút là kỷ luật của panel, không phải hàng rào.
+      // `user_id` phía Rust không nhìn thấy đường này.
+      //
+      // `return` TRẦN, không `set({ busy: false })` — xem bất biến sở hữu
+      // `busy` ở `startNewChat`. Lượt này thuộc về phiên đã chết; `busy` mà nó
+      // thấy bây giờ là `busy` CỦA PHIÊN KHÁC, và dọn hộ là xoá mất trạng thái
+      // "đang gửi lệnh nhận phòng" của người đang đứng ở quầy.
       if (get().conversationKey !== turnKey) {
-        set({ busy: false });
         return;
       }
 
@@ -193,8 +212,8 @@ export const useAssistantStore = create<AssistantState>((set, get) => ({
       }));
     } catch (error) {
       const text = readErrorMessage(error);
+      // `return` trần, cùng lý do như nhánh thành công ngay trên.
       if (get().conversationKey !== turnKey) {
-        set({ busy: false });
         return;
       }
       set((state) => ({
@@ -250,8 +269,14 @@ export const useAssistantStore = create<AssistantState>((set, get) => ({
       // QUẢ thì không được đổ vào phiên đang mở: lễ tân mở chat mới để phục vụ
       // khách kế tiếp mà thấy "Đã nhận phòng xong." ngay trên màn hình của
       // khách đó là đúng kiểu nhầm lẫn trên đường tiền mà lớp 4 sinh ra để chặn.
+      //
+      // `return` trần: xem bất biến sở hữu `busy` ở `startNewChat`. Đây là
+      // nhánh ĐẮT NHẤT trong bốn nhánh — dọn hộ `busy` ở đây là bật lại nút
+      // *Đồng ý* trên một thẻ vẫn đang nằm trên màn hình, và cú bấm thứ hai
+      // bắn `check_in` LẦN NỮA với một `idempotencyKey` mới toanh
+      // (`createIdempotencyKey` sinh UUID mới mỗi lượt gọi) nên backend không
+      // dedupe được: nhận phòng thật, hai lần.
       if (get().conversationKey !== approveKey) {
-        set({ busy: false });
         return;
       }
       set((state) => ({
@@ -267,8 +292,8 @@ export const useAssistantStore = create<AssistantState>((set, get) => ({
       // Cùng lý do như đường thành công, nặng hơn một bậc: chuỗi lỗi của PMS
       // ("Phòng đã có khách") hiện trong một hội thoại không liên quan, còn cái
       // thẻ để sửa thì đã mất theo phiên cũ nên chẳng ai làm gì được với nó.
+      // `return` trần, cùng lý do như nhánh thành công ngay trên.
       if (get().conversationKey !== approveKey) {
-        set({ busy: false });
         return;
       }
       // Giữ nguyên thẻ: người dùng còn sửa hoặc mở form làm tay được.
@@ -278,7 +303,49 @@ export const useAssistantStore = create<AssistantState>((set, get) => ({
 
   dismissAction: () => set({ pendingAction: null, pendingActionKey: null }),
 
-  startNewChat: () => set(emptySession()),
+  // ── BẤT BIẾN SỞ HỮU `busy` ──────────────────────────────────────────────
+  //
+  // **Ai mint khoá phiên mới thì người đó sở hữu `busy` của phiên mới; một lượt
+  // cũ bay về muộn KHÔNG được đụng vào.**
+  //
+  // Hai vế, và phải có cả hai:
+  //
+  // 1. Bốn nhánh "khoá phiên đã đổi" (hai trong `send()`, hai trong `approve()`)
+  //    `return` TRẦN. Trước đây cả bốn `set({ busy: false })` vô điều kiện, và
+  //    đó là con đường duyệt `check_in` HAI LẦN, đo được đầu-cuối:
+  //      A hỏi → nhà cung cấp treo (busy=true) → A đăng xuất (resetForLogout đặt
+  //      busy=false, mint khoá) → B đăng nhập, hỏi, có thẻ → B bấm *Đồng ý*
+  //      (check_in bay, busy=true, nút xám) → lượt CŨ của A về → nhánh stale
+  //      set busy=false → nút *Đồng ý* sáng lại TRÊN CÁI THẺ VẪN CÒN ĐÓ → B bấm
+  //      lần hai → `check_in` bắn lần thứ hai, cùng payload, `idempotencyKey`
+  //      MỚI (`createIdempotencyKey` sinh UUID mỗi lượt gọi) nên backend không
+  //      dedupe. Nhận phòng thật, hai lần, tiền thật.
+  //
+  // 2. Ba đường mint còn lại **từ chối khi đang bận** (`startNewChat` ở đây,
+  //    `openConversation`, và hai đường xoá đi qua `startNewChat`). Đây là hàng
+  //    rào ở TẦNG STORE: `disabled={busy}` trên nút chỉ là **lấy mẫu lúc
+  //    render** — cú bấm đã đi rồi thì `busy` bật lên sau đó không thu lại
+  //    được. Đo được ở cửa xoá sạch của Cài đặt (`AssistantSection.tsx`): admin
+  //    bấm *Xoá vĩnh viễn* lúc rảnh → lễ tân bấm *Đồng ý* trên thẻ ở panel bên
+  //    trái → `check_in` bay đi → lệnh xoá về → `startNewChat()` mint khoá mới
+  //    giữa lúc `check_in` đang bay → lớp 4 vứt kết quả, `pendingAction` mất,
+  //    màn hình KHÔNG NÓI GÌ, mà phòng thì đã nhận thật.
+  //
+  // `resetForLogout` là **ngoại lệ duy nhất**: không thể từ chối một cú đăng
+  // xuất (giao ca là thao tác bình thường, nút không có `disabled` nào ở
+  // `MainShell.tsx:264`/`:274`). Nó mint được cả khi đang bận, và vì thế nó
+  // phải TỰ đặt `busy: false` — nó là chủ phiên mới.
+  //
+  // Từ chối chứ không im lặng: `error` đã được vẽ ở **cả hai** bề mặt (viên
+  // `role="alert"` của panel và dòng lỗi của Cài đặt), nên câu từ chối tới được
+  // mắt người dùng thay vì biến thành một cú bấm không có hồi đáp.
+  startNewChat: () => {
+    if (get().busy) {
+      set({ error: BUSY_REFUSAL });
+      return;
+    }
+    set(emptySession());
+  },
 
   /// Đổi người dùng. Gọi từ `useAuthStore.logout()`, không phải từ panel.
   ///
@@ -294,17 +361,27 @@ export const useAssistantStore = create<AssistantState>((set, get) => ({
   ///   khách. Nó không nằm trong `emptySession()` vì *hội thoại mới* cố ý giữ
   ///   lại danh sách — cùng một người, cùng quyền đọc.
   /// - `open`: panel không được mở sẵn trên tay người kế tiếp.
-  /// - `busy`: cờ "đang chờ trả lời". Bình thường nó tự lành — cả hai nhánh
-  ///   race guard trong `send()` đều `set({ busy: false })` trước khi `return`
-  ///   — nhưng cả hai chỉ chạy khi promise GIẢI QUYẾT. Lệnh không bao giờ bay
-  ///   về (mạng treo, nhà cung cấp AI câm) thì cờ kẹt `true` sang phiên của
-  ///   người kế tiếp, và `send()` tự chặn ở câu đầu tiên: khung soạn của họ
-  ///   chết tới khi khởi động lại app. Đăng xuất là đúng lúc dọn cứng, không
-  ///   phụ thuộc vào một promise đang bay.
+  /// - `busy`: cờ "đang chờ trả lời". Đây là đường mint **duy nhất** chạy được
+  ///   khi đang bận, nên nó là đường duy nhất phải tự đặt lại cờ — bất biến sở
+  ///   hữu `busy` ở `startNewChat` nói đủ vì sao. Hai lý do cộng lại:
+  ///   - Lệnh không bao giờ bay về (mạng treo, nhà cung cấp AI câm) thì không
+  ///     nhánh nào trong `send()` chạy, cờ kẹt `true` sang phiên của người kế
+  ///     tiếp, và `send()` tự chặn ở câu đầu tiên: khung soạn của họ chết tới
+  ///     khi khởi động lại app. Đăng xuất là đúng lúc dọn cứng, không phụ thuộc
+  ///     vào một promise đang bay.
+  ///   - Và kể cả khi lệnh CÓ bay về, bốn nhánh stale nay `return` trần —
+  ///     chúng không còn dọn hộ cờ của phiên mới nữa, nên phiên mới phải bắt
+  ///     đầu từ một cờ sạch do chính nó đặt.
   resetForLogout: () =>
     set({ ...emptySession(), conversations: [], open: false, busy: false }),
 
   openConversation: async (conversationId) => {
+    // Cửa vào — xem bất biến sở hữu `busy` ở `startNewChat`.
+    if (get().busy) {
+      set({ error: BUSY_REFUSAL });
+      return;
+    }
+
     let stored: StoredMessage[];
     try {
       stored = await invokeCommand<StoredMessage[]>("get_assistant_conversation", {
@@ -314,6 +391,19 @@ export const useAssistantStore = create<AssistantState>((set, get) => ({
       // Không đổi phiên khi chưa đọc được gì: nửa chuyển là trạng thái tệ nhất
       // — panel nói đang ở hội thoại kia mà `history` vẫn của hội thoại này.
       set({ error: readErrorMessage(error) });
+      return;
+    }
+
+    // Kiểm LẠI sau `await`, và đây mới là câu chặn thật.
+    //
+    // Cửa vào ở trên cũng chỉ là **lấy mẫu**, y như `disabled={busy}` trên nút:
+    // giữa lúc đọc sổ, thẻ nhận phòng của phiên hiện tại vẫn đang được VẼ (lớp
+    // 3 so `pendingActionKey === conversationKey`, mà khoá chưa đổi) và nút
+    // *Đồng ý* vẫn sáng (`busy` vẫn false). Lễ tân bấm → `check_in` bay →
+    // `busy=true` → sổ đọc xong về tới đây → mint khoá giữa lúc lệnh ghi đang
+    // bay. Đúng con đường của cửa xoá sạch, chỉ khác cửa.
+    if (get().busy) {
+      set({ error: BUSY_REFUSAL });
       return;
     }
 
@@ -354,6 +444,15 @@ export const useAssistantStore = create<AssistantState>((set, get) => ({
   },
 
   deleteConversation: async (conversationId) => {
+    // Cửa vào — xem bất biến sở hữu `busy` ở `startNewChat`. Từ chối cả LỆNH
+    // XOÁ chứ không chỉ cú mint: xoá được nhưng không dọn nổi phiên thì panel
+    // ngồi trên một hội thoại đã biến mất khỏi đĩa, và lượt sau còn gửi kèm
+    // `conversation_id` của một hàng không còn tồn tại.
+    if (get().busy) {
+      set({ error: BUSY_REFUSAL });
+      return;
+    }
+
     try {
       await invokeWriteCommand("delete_assistant_conversation", { conversationId });
     } catch (error) {
@@ -365,13 +464,32 @@ export const useAssistantStore = create<AssistantState>((set, get) => ({
       return;
     }
 
-    if (get().conversationId === conversationId) {
-      get().startNewChat();
-    }
+    // `busy` có thể đã bật lên TRONG lúc lệnh xoá bay — cửa vào ở trên chỉ lấy
+    // mẫu. Không tự dọn phiên ở đây mà đi qua `startNewChat()`, vì hàng rào nằm
+    // trong đó: một chỗ chặn cho cả bốn cửa.
+    const keyBeforeReset = get().conversationKey;
+    const mustReset = get().conversationId === conversationId;
+    if (mustReset) get().startNewChat();
+    // Bị từ chối ⟺ khoá phiên KHÔNG đổi. Đọc bằng khoá chứ không bằng `error`:
+    // `error` lúc này có thể là viên cũ từ trước, mà viên cũ thì
+    // `loadConversations()` được phép dọn (và có test canh đúng việc đó).
+    const refused = mustReset && get().conversationKey === keyBeforeReset;
+
     await get().loadConversations();
+    // Đặt LẠI sau `loadConversations()`: nạp được danh sách thì nó dọn `error`,
+    // và câu từ chối vừa rồi sẽ chết theo — admin bấm xoá, sổ vẫn còn nguyên
+    // trên màn hình, không một chữ giải thích.
+    if (refused) set({ error: BUSY_REFUSAL });
   },
 
   deleteAllConversations: async () => {
+    // Cửa vào — xem bất biến sở hữu `busy` ở `startNewChat`, và cùng lý do từ
+    // chối cả lệnh xoá như `deleteConversation` ngay trên.
+    if (get().busy) {
+      set({ error: BUSY_REFUSAL });
+      return;
+    }
+
     try {
       await invokeWriteCommand("delete_all_assistant_conversations");
     } catch (error) {
@@ -379,7 +497,11 @@ export const useAssistantStore = create<AssistantState>((set, get) => ({
       return;
     }
 
+    const keyBeforeReset = get().conversationKey;
     get().startNewChat();
+    const refused = get().conversationKey === keyBeforeReset;
+
     await get().loadConversations();
+    if (refused) set({ error: BUSY_REFUSAL });
   },
 }));

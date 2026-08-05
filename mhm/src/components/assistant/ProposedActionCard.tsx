@@ -42,11 +42,26 @@ export function ProposedActionCard({
           dòng giúp mắt bám hàng tốt hơn khoảng trắng. Đệm dọc chuyển từ khoảng
           cách giữa các dòng (`space-y-1.5`) sang đệm trong từng dòng (`py-1.5`)
           — nếu không thì đường kẻ dính sát chữ. */}
+      {/* `min-w-0` + `break-words` ở `dd`, `shrink-0` ở `dt`.
+
+          Hàng `guests` là chuỗi DÀI NHẤT của thẻ: `draft.rs` dựng một dòng mỗi
+          khách, giá trị là họ tên + CCCD + địa chỉ. Bề ngang có thật rất hẹp —
+          panel 380px, `px-5` còn 340px, đệm `p-5` của thẻ còn ~300px — và một
+          dãy CCCD 12 chữ số là token KHÔNG NGẮT ĐƯỢC. Mặc định flex item có
+          `min-width: auto`, nghĩa là `dd` từ chối co lại dưới bề rộng nội dung,
+          nên nó tràn thay vì xuống dòng; `min-w-0` gỡ đúng cái đó, còn
+          `break-words` là thứ duy nhất bẻ được dãy số. `dt` giữ `shrink-0` để
+          nhãn ("Khách", "Tổng tiền") không bị bóp theo.
+
+          CHƯA ĐO ĐƯỢC TRÊN TRÌNH DUYỆT THẬT: jsdom không tính layout nên không
+          test nào ở đây khẳng định được là chữ hết tràn — mọi test chỉ đọc lại
+          được đúng cái className vừa viết. Cần một lượt QA tay: mở thẻ có một
+          khách tên dài kèm CCCD 12 số ở panel 380px và nhìn cột phải. */}
       <dl className="divide-y divide-slate-100 text-sm">
         {Object.entries(action.display).map(([key, value]) => (
           <div key={key} className="flex justify-between gap-4 py-1.5">
-            <dt className="text-brand-muted">{FIELD_LABELS[key] ?? key}</dt>
-            <dd className="text-right font-medium">{value}</dd>
+            <dt className="shrink-0 text-brand-muted">{FIELD_LABELS[key] ?? key}</dt>
+            <dd className="min-w-0 text-right font-medium break-words">{value}</dd>
           </div>
         ))}
       </dl>
