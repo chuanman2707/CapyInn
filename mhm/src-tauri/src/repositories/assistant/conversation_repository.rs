@@ -3,20 +3,19 @@
 //! Tầng này không quyết định chính sách: ai được ghi, tên hội thoại cắt ra sao
 //! đều đã chốt ở `services::assistant::conversation_service` trước khi tới đây.
 //!
-//! `repositories` là module riêng của crate. Hai hàm xoá đã bỏ
-//! `#[cfg_attr(not(test), expect(dead_code))]` ở Task 4, khi
-//! `commands::assistant_conversations` vào `generate_handler!` và rustc bắn
-//! `this lint expectation is unfulfilled` cho cả hai. Hai item còn giữ dấu là
-//! `insert_message` và `touch_conversation`: caller sản xuất của chúng —
-//! `commands::assistant` ghi lượt hỏi đáp — mới có ở **Task 5**, và chừng nào
-//! chưa có thì dấu vẫn nằm im chứ không tự nhắc. `cfg_attr(not(test), …)` là bắt
-//! buộc chứ không phải trang trí: bản dựng test **đã có** caller sẵn (chính
-//! `mod tests` bên dưới), nên một `#[expect(dead_code)]` trần làm
-//! `cargo clippy --all-targets -- -D warnings` đỏ ngay hôm nay — đã đo, cả 11 chỗ.
+//! `repositories` là module riêng của crate, nên tới hết Task 3 gần như mọi item
+//! ở đây còn mang `#[cfg_attr(not(test), expect(dead_code))]`. Task 4 gỡ hai dấu
+//! của hai hàm xoá; **Task 5 gỡ nốt hai dấu cuối** — `insert_message` và
+//! `touch_conversation` — khi `commands::assistant::assistant_turn` (đã nằm sẵn
+//! trong `generate_handler!`) bắt đầu gọi chúng. Đo lại lúc gỡ: giữ dấu thì
+//! `cargo clippy --all-targets -- -D warnings` đỏ ngay,
+//! `this lint expectation is unfulfilled`. File này giờ không còn dấu nào.
 //!
-//! Đính chính đo được ở Task 3: `expect` **không** tự bắn `this lint expectation
-//! is unfulfilled` khi caller mới lại là một item đang mang `expect(dead_code)`
-//! — xem ghi chú dài hơn ở đầu `queries::assistant::conversation_queries`.
+//! Đính chính đo được ở Task 3, giữ lại vì nó nói vì sao hai dấu ấy nằm im suốt
+//! ba task: `expect` **không** tự bắn `unfulfilled` khi caller mới lại là một
+//! item đang mang `expect(dead_code)`. Hệ quả còn hiệu lực: quên gọi
+//! `touch_conversation` thì chẳng có gì nhắc — xem ghi chú dài hơn ở đầu
+//! `queries::assistant::conversation_queries`.
 
 use sqlx::{Pool, Sqlite};
 
@@ -41,7 +40,6 @@ pub async fn insert_conversation(
     Ok(())
 }
 
-#[cfg_attr(not(test), expect(dead_code))]
 pub async fn insert_message(
     pool: &Pool<Sqlite>,
     id: &str,
@@ -64,7 +62,9 @@ pub async fn insert_message(
     Ok(())
 }
 
-#[cfg_attr(not(test), expect(dead_code))]
+/// Chỗ **duy nhất** `updated_at` được đổi. Caller phải tự quyết định có gọi hay
+/// không: `commands::assistant::close_turn_record` chỉ gọi khi có ít nhất một
+/// message vào sổ (spec dòng 445).
 pub async fn touch_conversation(
     pool: &Pool<Sqlite>,
     id: &str,

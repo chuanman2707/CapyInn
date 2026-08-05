@@ -206,6 +206,22 @@ fn command_layer_imports_sees_through_a_nested_use_block() {
 /// the dangerous direction for a guard. CI runs `cargo fmt -- --check`, which is
 /// what keeps the assumption true; do not remove that check without revisiting
 /// this function.
+/// `mod tests {` and `pub(crate) mod tests {` are the same thing to this guard —
+/// the `#[cfg(test)]` above them is what makes the block test-only, not the
+/// visibility. Matching `starts_with("mod ")` alone reports a *false red*: a file
+/// that shares its test helper with a sibling module (as
+/// `commands/assistant_conversations.rs` shares its command-shell reader with
+/// `commands/assistant.rs`) has its whole test module counted as production code,
+/// and the SQL ratchet fails a clean file. Measured — that is exactly what
+/// happened when the reader was first shared.
+fn opens_an_inline_module(line: &str) -> bool {
+    ["pub(crate) ", "pub(super) ", "pub "]
+        .iter()
+        .find_map(|visibility| line.strip_prefix(visibility))
+        .unwrap_or(line)
+        .starts_with("mod ")
+}
+
 fn production_source(source: &str) -> String {
     let lines: Vec<&str> = source.lines().collect();
     let mut kept = Vec::with_capacity(lines.len());
@@ -218,7 +234,7 @@ fn production_source(source: &str) -> String {
                 probe += 1;
             }
             let opens_a_module = probe < lines.len()
-                && lines[probe].starts_with("mod ")
+                && opens_an_inline_module(lines[probe])
                 && lines[probe].ends_with('{');
             if opens_a_module {
                 index = probe + 1;
@@ -298,6 +314,19 @@ fn production_source_removes_inline_test_modules_wherever_they_sit() {
     // A blank line between the attribute and the module is the same shape.
     let spaced = "fn real() {}\n\n#[cfg(test)]\n\nmod tests {\n    sqlx::query(\"seed\");\n}\n";
     assert!(!production_source(spaced).contains("sqlx::query"));
+
+    // So is a test module a sibling module reads a shared helper out of. Missing
+    // this shape fails a *clean* file, and the fix everyone reaches for first is
+    // to add that file to COMMANDS_STILL_HOLDING_SQL — loosening the ratchet to
+    // work around a reader bug.
+    for visibility in ["pub(crate) ", "pub(super) ", "pub "] {
+        let shared =
+            format!("fn real() {{}}\n\n#[cfg(test)]\n{visibility}mod tests {{\n    sqlx::query(\"seed\");\n}}\n");
+        assert!(
+            !production_source(&shared).contains("sqlx::query"),
+            "`{visibility}mod tests` is still an inline test module"
+        );
+    }
 
     // `#[cfg(test)]` on a plain item must not swallow anything.
     let cfg_on_item =
