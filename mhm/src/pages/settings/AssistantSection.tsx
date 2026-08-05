@@ -35,6 +35,19 @@ function describeError(caught: unknown): string {
 /// Id riêng, KHÔNG dùng lại id của hộp xoá sạch trong `AssistantHistoryList`:
 /// hai màn hình này render cùng lúc được (panel trợ lý là cột giữa của shell,
 /// còn đây là tab Cài đặt), và hai phần tử cùng id là một id trùng.
+///
+/// **TÊN TRUY CẬP cũng phải riêng, vì cùng một lý do.** Bản đầu chỉ tách `id`
+/// mà để nguyên nhãn, nên khi cả hai bề mặt cùng render — chuyện xảy ra được
+/// ngoài đời, panel là cột giữa còn Cài đặt nằm trong `<main>` — thì trên một
+/// màn hình có **hai** nút `Xoá tất cả hội thoại`, **hai** nút `Xoá vĩnh viễn`,
+/// **hai** ô `Gõ XOÁ HẾT để xác nhận`. Với người dùng đó là hai nút đỏ y hệt
+/// nhau; với test đó là `getByRole` ném lỗi "found multiple elements".
+///
+/// Cách tách là đổi CÁCH GỌI chứ không chắp `(Cài đặt)` vào đuôi: ở đây thao
+/// tác trên **cả sổ** hội thoại (`sổ` là từ đã dùng sẵn trong repo — "sổ hội
+/// thoại", "sổ rỗng"), còn hộp trong panel nằm ngay dưới danh sách nên nó nói
+/// theo danh sách. Chuỗi `XOÁ HẾT` thì vẫn dùng chung — nó là hàng rào, không
+/// phải nhãn (xem `isDeleteAllPhrase` trong `types/assistant.ts`).
 const PHRASE_INPUT_ID = "assistant-settings-delete-all-phrase";
 
 export function AssistantSection() {
@@ -49,11 +62,19 @@ export function AssistantSection() {
   const [phrase, setPhrase] = useState("");
 
   // `busy` của TRỢ LÝ, không phải `busy` của màn hình này. Màn hình Cài đặt
-  // không có sẵn nó nên phải chủ động đọc: `deleteAllConversations()` gọi
-  // `startNewChat()` VÔ ĐIỀU KIỆN → mint khoá phiên mới → kết quả `check_in`
-  // đang bay về bị store bỏ (đúng thiết kế của lớp 4), NHƯNG phòng thì đã nhận
-  // thật và không màn hình nào nói một chữ. Không mất tiền, mất tin. Đây là
-  // cửa xoá sạch thứ năm; bốn cửa trước đã phải bịt đúng lỗ này.
+  // không có sẵn nó nên phải chủ động đọc.
+  //
+  // Trước bản vá, `deleteAllConversations()` gọi `startNewChat()` VÔ ĐIỀU KIỆN
+  // → mint khoá phiên mới → kết quả `check_in` đang bay về bị store bỏ (đúng
+  // thiết kế của lớp 4), NHƯNG phòng thì đã nhận thật và không màn hình nào nói
+  // một chữ. Không mất tiền, mất tin. Đây là cửa xoá sạch thứ năm.
+  //
+  // Hàng rào thật giờ ở tầng store (bất biến sở hữu `busy` trong
+  // `useAssistantStore.ts`), và nó là thứ duy nhất bịt được ca đo được: bấm
+  // *Xoá sổ vĩnh viễn* lúc rảnh → lễ tân bấm *Đồng ý* ở panel bên trái →
+  // `check_in` bay → lệnh xoá mới về. Cú bấm đã đi rồi thì `disabled` dưới đây
+  // không thu lại được. Giữ `disabled` lại vì nó vẫn đúng vai: đừng mời admin
+  // bấm một thứ chắc chắn bị từ chối.
   const assistantBusy = useAssistantStore((state) => state.busy);
   const hasPendingAction = useAssistantStore((state) => state.pendingAction !== null);
 
@@ -119,21 +140,35 @@ export function AssistantSection() {
   /// xoá, phiên đang mở trên panel phải được dọn (`startNewChat`) và danh sách
   /// lịch sử phải nạp lại — chép tay hai bước ấy ở đây là mở một đường thứ hai
   /// để trôi khỏi đường đã được duyệt.
+  ///
+  /// `try/finally` theo đúng khuôn `run()` ngay trên, và đây không phải kiểu
+  /// cách: đo được — cho `deleteAllConversations()` reject thì `setBusy(false)`
+  /// và `closeDeleteAll()` KHÔNG BAO GIỜ chạy, `busy` kẹt `true` **vĩnh viễn**,
+  /// và cả mục *Trợ lý quầy* chết theo — *Lưu cấu hình*, *Lưu khoá*, *Xoá
+  /// khoá*, ô tick đồng ý, cả hai nút xoá đều xám tới khi khởi động lại app.
+  /// Đúng hình dạng con bug `busy` kẹt vừa sửa ở tầng store, dựng lại ở tầng
+  /// component.
   const deleteAll = async () => {
     setBusy(true);
     setError(null);
-    await useAssistantStore.getState().deleteAllConversations();
-    // Store nuốt lỗi vào `error` của CHÍNH NÓ, mà `error` đó chỉ được vẽ trong
-    // `AssistantPanel` — panel gần như luôn đóng khi chủ nhà đang ở tab Cài
-    // đặt. Không bê sang đây thì `AUTH_FORBIDDEN` hay DB khoá là im lặng tuyệt
-    // đối: bấm xong, không thấy gì, tưởng đã xoá.
-    //
-    // Đọc nguyên `error` sau lượt chạy chứ không chỉ bắt exception: đường hỏng
-    // thứ hai — xoá được nhưng `loadConversations()` sau đó hỏng — cũng phải
-    // nói ra, vì lúc ấy danh sách trên panel không còn khớp với đĩa.
-    setError(useAssistantStore.getState().error);
-    setBusy(false);
-    closeDeleteAll();
+    try {
+      await useAssistantStore.getState().deleteAllConversations();
+      // Store nuốt lỗi vào `error` của CHÍNH NÓ, mà `error` đó chỉ được vẽ
+      // trong `AssistantPanel` — panel gần như luôn đóng khi chủ nhà đang ở tab
+      // Cài đặt. Không bê sang đây thì `AUTH_FORBIDDEN`, DB khoá, hay câu từ
+      // chối vì đang bận đều là im lặng tuyệt đối: bấm xong, không thấy gì,
+      // tưởng đã xoá.
+      //
+      // Đọc nguyên `error` sau lượt chạy chứ không chỉ bắt exception: đường
+      // hỏng thứ hai — xoá được nhưng `loadConversations()` sau đó hỏng — cũng
+      // phải nói ra, vì lúc ấy danh sách trên panel không còn khớp với đĩa.
+      setError(useAssistantStore.getState().error);
+    } catch (caught) {
+      setError(describeError(caught));
+    } finally {
+      setBusy(false);
+      closeDeleteAll();
+    }
   };
 
   return (
@@ -305,23 +340,27 @@ export function AssistantSection() {
 
         {confirmingAll ? (
           <div className="mt-3 space-y-3">
-            <p className="text-sm font-semibold">Xoá sạch toàn bộ hội thoại?</p>
+            <p className="text-sm font-semibold">Xoá sạch sổ hội thoại trợ lý?</p>
             <p className="text-xs text-red-700">
-              Không hoàn tác. Ngoài bản sao lưu ở Data &amp; Backup thì đây là bản duy nhất.
+              Không hoàn tác. Ngoài bản sao lưu ở Data &amp; Backup thì đây là bản duy nhất của cả
+              sổ.
             </p>
 
             {/* Chỉ một câu, và có điều kiện — câu cảnh báo thường trực là câu
-                người ta thôi đọc. Xoá sạch gọi `startNewChat()` vô điều kiện
+                người ta thôi đọc. Xoá sạch dọn luôn phiên đang mở trên panel
                 nên thẻ nhận phòng đang chờ mất theo, kể cả khi lệnh xoá không
-                xoá nổi một dòng nào của chính hội thoại đang mở. */}
+                xoá nổi một dòng nào của chính hội thoại đang mở.
+
+                "trên panel" không phải chữ thừa: người đọc câu này đang đứng ở
+                tab Cài đặt, còn cái thẻ thì nằm ở cột bên kia màn hình. */}
             {hasPendingAction && (
               <p className="text-xs font-medium text-red-700">
-                Thẻ nhận phòng đang chờ cũng sẽ mất.
+                Thẻ nhận phòng đang chờ trên panel cũng sẽ mất.
               </p>
             )}
 
             <label htmlFor={PHRASE_INPUT_ID} className="block text-xs text-red-700">
-              Gõ {DELETE_ALL_PHRASE} để xác nhận
+              Gõ {DELETE_ALL_PHRASE} để xoá sổ
             </label>
             <input
               id={PHRASE_INPUT_ID}
@@ -337,10 +376,10 @@ export function AssistantSection() {
                 disabled={busy || assistantBusy || !isDeleteAllPhrase(phrase)}
                 onClick={() => void deleteAll()}
               >
-                Xoá vĩnh viễn
+                Xoá sổ vĩnh viễn
               </Button>
               <Button size="sm" variant="outline" onClick={closeDeleteAll}>
-                Huỷ
+                Giữ lại sổ
               </Button>
             </div>
           </div>
@@ -352,7 +391,7 @@ export function AssistantSection() {
             disabled={busy || assistantBusy}
             onClick={() => setConfirmingAll(true)}
           >
-            Xoá tất cả hội thoại
+            Xoá sổ hội thoại trợ lý
           </Button>
         )}
       </div>

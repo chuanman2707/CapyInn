@@ -9,7 +9,7 @@ vi.mock("@/lib/invokeCommand", () => ({
   createIdempotencyKey: (command: string) => `${command}:test`,
 }));
 
-import { useAssistantStore } from "./useAssistantStore";
+import { BUSY_REFUSAL, useAssistantStore } from "./useAssistantStore";
 import { useAuthStore } from "./useAuthStore";
 import type {
   AssistantConversationSummary,
@@ -56,6 +56,28 @@ const SESSION_KEY = "key-A";
 function storedMessage(id: string, kind: string, text: string): StoredMessage {
   return { id, kind, text, created_at: "2026-08-04T10:00:00+07:00" };
 }
+
+/// Một promise mở, để test cầm được thời điểm lệnh "bay về".
+///
+/// Cả bộ test tranh chấp dưới đây sống nhờ nó: kịch bản duy nhất sinh ra lỗ
+/// duyệt hai lần là **hai lệnh cùng bay** và lệnh cũ về sau, nên không giữ được
+/// lệnh nào ở trạng thái lơ lửng thì không dựng lại được kịch bản.
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((res, rej) => {
+    resolve = res;
+    reject = rej;
+  });
+  return { promise, resolve, reject };
+}
+
+const turnResponse = (reply: string) => ({
+  reply,
+  proposed_action: null,
+  history: [],
+  conversation_id: null,
+});
 
 function summary(id: string, title: string): AssistantConversationSummary {
   return {
@@ -320,10 +342,15 @@ describe("useAssistantStore", () => {
 
     /// Chốt tranh chấp của `approve()`, đường THÀNH CÔNG.
     ///
-    /// Kịch bản đo được: thẻ đang duyệt, `check_in` đang bay, lễ tân bấm *hội
-    /// thoại mới* để phục vụ khách kế tiếp. Lệnh nhận phòng **vẫn phải chạy** —
-    /// nó đã đi rồi — nhưng câu "Đã nhận phòng xong." mà rơi vào phiên mới là
-    /// nó hiện ngay trên màn hình của một người khách khác.
+    /// Kịch bản đo được: thẻ đang duyệt, `check_in` đang bay, phiên đổi. Lệnh
+    /// nhận phòng **vẫn phải chạy** — nó đã đi rồi — nhưng câu "Đã nhận phòng
+    /// xong." mà rơi vào phiên mới là nó hiện ngay trên màn hình của một người
+    /// khách khác.
+    ///
+    /// Đổi phiên bằng `resetForLogout()` chứ không bằng `startNewChat()`: từ
+    /// bất biến sở hữu `busy`, đăng xuất là đường mint **duy nhất** chạy được
+    /// khi đang bận. `startNewChat()` ở đây bị chính hàng rào của nó từ chối,
+    /// nên viết như cũ là dựng một kịch bản không xảy ra được nữa.
     it("đổi hội thoại giữa lúc check_in đang bay về thì lời báo xong không rơi vào phiên mới", async () => {
       let releaseCheckIn: (value: unknown) => void = () => {};
       invokeWriteCommand.mockImplementation(
@@ -335,7 +362,7 @@ describe("useAssistantStore", () => {
       useAssistantStore.setState({ pendingAction: sampleAction, pendingActionKey: SESSION_KEY });
 
       const approval = useAssistantStore.getState().approve();
-      useAssistantStore.getState().startNewChat();
+      useAssistantStore.getState().resetForLogout();
       releaseCheckIn({ id: "B1" });
       await approval;
 
@@ -355,7 +382,7 @@ describe("useAssistantStore", () => {
       useAssistantStore.setState({ pendingAction: sampleAction, pendingActionKey: SESSION_KEY });
 
       const approval = useAssistantStore.getState().approve();
-      useAssistantStore.getState().startNewChat();
+      useAssistantStore.getState().resetForLogout();
       await approval;
 
       expect(invokeWriteCommand).toHaveBeenCalledWith("check_in", { req: sampleAction.payload });
@@ -371,6 +398,363 @@ describe("useAssistantStore", () => {
 
       expect(useAssistantStore.getState().pendingAction).toBeNull();
       expect(useAssistantStore.getState().pendingActionKey).toBeNull();
+    });
+  });
+
+  // ─── BẤT BIẾN SỞ HỮU `busy` — bốn nhánh stale, mỗi nhánh một test ───
+  //
+  // Bất biến: **ai mint khoá phiên mới thì người đó sở hữu `busy` của phiên
+  // mới; một lượt cũ bay về muộn KHÔNG được đụng vào.**
+  //
+  // Trước bộ này, cả bốn nhánh "khoá phiên đã đổi" đều `set({ busy: false })`
+  // vô điều kiện và **KHÔNG một test nào canh chúng theo bất kỳ chiều nào**: đo
+  // được — đổi cả bốn sang `return` trần thì 784/784 vẫn xanh. Nên mỗi nhánh có
+  // đúng một test riêng ở đây, và mỗi test đỏ khi và chỉ khi nhánh của nó dọn
+  // hộ `busy`.
+  //
+  // Hình dạng chung của cả bốn: dựng một `busy` **thuộc về phiên mới**, thả cho
+  // lượt cũ bay về, rồi khẳng định cờ ấy còn nguyên. Đổi phiên luôn bằng
+  // `resetForLogout()` vì đó là đường mint duy nhất chạy được khi đang bận.
+
+  describe("bất biến sở hữu busy — lượt cũ không dọn cờ của phiên mới", () => {
+    it("nhánh stale của send() (đường THÀNH CÔNG) không dọn busy của phiên mới", async () => {
+      const turnA = deferred<unknown>();
+      const turnB = deferred<unknown>();
+      invokeCommand
+        .mockImplementationOnce(() => turnA.promise)
+        .mockImplementationOnce(() => turnB.promise);
+
+      // Lễ tân A hỏi, nhà cung cấp treo.
+      const a = useAssistantStore.getState().send("A hỏi", { route: "rooms" });
+      expect(useAssistantStore.getState().busy).toBe(true);
+
+      // A giao ca. Đăng xuất là đường mint duy nhất chạy được khi đang bận, và
+      // nó tự đặt lại cờ vì nó là chủ phiên mới.
+      useAssistantStore.getState().resetForLogout();
+      expect(useAssistantStore.getState().busy).toBe(false);
+
+      // B hỏi: từ đây `busy` là CỦA B.
+      const b = useAssistantStore.getState().send("B hỏi", { route: "rooms" });
+      expect(useAssistantStore.getState().busy).toBe(true);
+
+      turnA.resolve({
+        reply: "của A",
+        proposed_action: sampleAction,
+        history: [{ role: "user", content: "Khách của A, CCCD 001" }],
+        conversation_id: "c-a",
+      });
+      await a;
+
+      const state = useAssistantStore.getState();
+      // Cờ của B còn nguyên — đây là câu đỏ khi nhánh stale dọn hộ.
+      expect(state.busy).toBe(true);
+      // Và không một mẩu nào của A rơi sang (vế cũ, giữ nguyên).
+      expect(state.messages).toEqual([
+        expect.objectContaining({ kind: "user", text: "B hỏi" }),
+      ]);
+      expect(state.pendingAction).toBeNull();
+      expect(state.history).toEqual([]);
+
+      // Vế dương: lượt của CHÍNH B về thì cờ mới được hạ.
+      turnB.resolve(turnResponse("của B"));
+      await b;
+      expect(useAssistantStore.getState().busy).toBe(false);
+    });
+
+    it("nhánh stale của send() (đường LỖI) không dọn busy của phiên mới", async () => {
+      const turnA = deferred<unknown>();
+      const turnB = deferred<unknown>();
+      invokeCommand
+        .mockImplementationOnce(() => turnA.promise)
+        .mockImplementationOnce(() => turnB.promise);
+
+      const a = useAssistantStore.getState().send("A hỏi", { route: "rooms" });
+      useAssistantStore.getState().resetForLogout();
+      const b = useAssistantStore.getState().send("B hỏi", { route: "rooms" });
+      expect(useAssistantStore.getState().busy).toBe(true);
+
+      turnA.reject(new Error("Nhà cung cấp AI không phản hồi"));
+      await a;
+
+      const state = useAssistantStore.getState();
+      expect(state.busy).toBe(true);
+      // Bong bóng lỗi và viên cảnh báo của A cũng không rơi sang (vế cũ).
+      expect(state.error).toBeNull();
+      expect(state.messages).toEqual([
+        expect.objectContaining({ kind: "user", text: "B hỏi" }),
+      ]);
+
+      turnB.resolve(turnResponse("của B"));
+      await b;
+      expect(useAssistantStore.getState().busy).toBe(false);
+    });
+
+    /// Nhánh ĐẮT NHẤT trong bốn: nó nằm trên đường tiền. Dọn hộ `busy` ở đây là
+    /// bật lại nút *Đồng ý* trên một thẻ vẫn còn trên màn hình.
+    it("nhánh stale của approve() (đường THÀNH CÔNG) không dọn busy của phiên mới", async () => {
+      const checkIn = deferred<unknown>();
+      const turnB = deferred<unknown>();
+      invokeWriteCommand.mockImplementation(() => checkIn.promise);
+      invokeCommand.mockImplementation(() => turnB.promise);
+      useAssistantStore.setState({ pendingAction: sampleAction, pendingActionKey: SESSION_KEY });
+
+      const approval = useAssistantStore.getState().approve();
+      expect(useAssistantStore.getState().busy).toBe(true);
+
+      // Giao ca giữa lúc `check_in` đang bay.
+      useAssistantStore.getState().resetForLogout();
+
+      const b = useAssistantStore.getState().send("B hỏi", { route: "rooms" });
+      expect(useAssistantStore.getState().busy).toBe(true);
+
+      checkIn.resolve({ id: "B1" });
+      await approval;
+
+      const state = useAssistantStore.getState();
+      expect(state.busy).toBe(true);
+      // Câu "Đã nhận phòng xong." của A cũng không rơi sang (vế cũ).
+      expect(state.messages).toEqual([
+        expect.objectContaining({ kind: "user", text: "B hỏi" }),
+      ]);
+
+      turnB.resolve(turnResponse("của B"));
+      await b;
+      expect(useAssistantStore.getState().busy).toBe(false);
+    });
+
+    it("nhánh stale của approve() (đường LỖI) không dọn busy của phiên mới", async () => {
+      const checkIn = deferred<unknown>();
+      const turnB = deferred<unknown>();
+      invokeWriteCommand.mockImplementation(() => checkIn.promise);
+      invokeCommand.mockImplementation(() => turnB.promise);
+      useAssistantStore.setState({ pendingAction: sampleAction, pendingActionKey: SESSION_KEY });
+
+      const approval = useAssistantStore.getState().approve();
+      useAssistantStore.getState().resetForLogout();
+      const b = useAssistantStore.getState().send("B hỏi", { route: "rooms" });
+      expect(useAssistantStore.getState().busy).toBe(true);
+
+      checkIn.reject(new Error("Phòng đã có khách"));
+      await approval;
+
+      const state = useAssistantStore.getState();
+      expect(state.busy).toBe(true);
+      expect(state.error).toBeNull();
+
+      turnB.resolve(turnResponse("của B"));
+      await b;
+      expect(useAssistantStore.getState().busy).toBe(false);
+    });
+
+    /// KỊCH BẢN TIỀN, đo đầu-cuối. Bốn test trên canh từng dòng; test này canh
+    /// cái GIÁ của bốn dòng ấy cộng lại.
+    ///
+    /// Trước bản vá, đo được: `invokeWriteCommand` gọi **2 lần**, cả hai
+    /// `"check_in"`, **cùng payload** — và `createIdempotencyKey` sinh UUID mới
+    /// mỗi lượt gọi nên backend không dedupe được. Nhận phòng thật, hai lần.
+    it("lượt cũ của người trước bay về không mở đường bắn check_in lần thứ hai", async () => {
+      const turnA = deferred<unknown>();
+      const checkIn = deferred<unknown>();
+      invokeCommand
+        .mockImplementationOnce(() => turnA.promise)
+        .mockImplementationOnce(async () => ({
+          reply: null,
+          proposed_action: sampleAction,
+          history: [],
+          conversation_id: "c-b",
+        }));
+      invokeWriteCommand.mockImplementation(() => checkIn.promise);
+
+      // A hỏi → nhà cung cấp treo.
+      const a = useAssistantStore.getState().send("A hỏi", { route: "rooms" });
+      // A đăng xuất, B đăng nhập.
+      useAssistantStore.getState().resetForLogout();
+      // B hỏi và nhận được thẻ nhận phòng.
+      await useAssistantStore.getState().send("nhận phòng R1", { route: "rooms" });
+      expect(useAssistantStore.getState().pendingAction).toEqual(sampleAction);
+
+      // B bấm *Đồng ý*: `check_in` bay đi, nút xám, hiện "Đang gửi lệnh…".
+      const approval = useAssistantStore.getState().approve();
+      expect(useAssistantStore.getState().busy).toBe(true);
+      expect(invokeWriteCommand).toHaveBeenCalledTimes(1);
+
+      // Lượt CŨ của A bay về muộn.
+      turnA.resolve({ reply: "của A", proposed_action: null, history: [], conversation_id: "c-a" });
+      await a;
+
+      const afterStale = useAssistantStore.getState();
+      // Nút *Đồng ý* KHÔNG được sáng lại...
+      expect(afterStale.busy).toBe(true);
+      // ...trong khi thẻ thì vẫn còn nguyên trên màn hình. Chính cặp này —
+      // thẻ còn + nút sáng — là cú bấm thứ hai.
+      expect(afterStale.pendingAction).toEqual(sampleAction);
+
+      // Và cú bấm thứ hai, nếu có, bị store chặn ở câu đầu của `approve()`.
+      await useAssistantStore.getState().approve();
+      const checkInCalls = invokeWriteCommand.mock.calls.filter(([command]) => command === "check_in");
+      expect(checkInCalls).toHaveLength(1);
+
+      checkIn.resolve({ id: "B1" });
+      await approval;
+
+      expect(
+        invokeWriteCommand.mock.calls.filter(([command]) => command === "check_in"),
+      ).toHaveLength(1);
+      expect(useAssistantStore.getState().messages).toContainEqual(
+        expect.objectContaining({ kind: "assistant", text: "Đã nhận phòng xong." }),
+      );
+    });
+  });
+
+  // ─── HÀNG RÀO `busy` Ở TẦNG STORE ───
+  //
+  // `disabled={busy}` trên nút là **lấy mẫu lúc render**, không phải hàng rào:
+  // cú bấm đã đi rồi thì `busy` bật lên sau đó không thu lại được. Comment
+  // trong `send()` viết đúng câu ấy: "khoá nút là kỷ luật của panel, không phải
+  // hàng rào." Bộ này canh hàng rào thật, ở tầng store.
+
+  describe("hàng rào busy — không mint khoá phiên khi lệnh đang bay", () => {
+    it("startNewChat() bị từ chối khi đang bận và KHÔNG dọn gì", () => {
+      useAssistantStore.setState({
+        busy: true,
+        conversationId: "c1",
+        messages: [{ id: "m1", kind: "user", text: "đang dở" }],
+        pendingAction: sampleAction,
+        pendingActionKey: SESSION_KEY,
+      });
+
+      useAssistantStore.getState().startNewChat();
+
+      const state = useAssistantStore.getState();
+      expect(state.conversationKey).toBe(SESSION_KEY);
+      expect(state.conversationId).toBe("c1");
+      expect(state.messages).toEqual([{ id: "m1", kind: "user", text: "đang dở" }]);
+      expect(state.pendingAction).toEqual(sampleAction);
+      // Từ chối phải NÓI RA: `error` được vẽ ở cả panel lẫn Cài đặt, nên một cú
+      // bấm không có hồi đáp là một cú bấm người ta sẽ bấm lại.
+      expect(state.error).toBe(BUSY_REFUSAL);
+      // Và không tự tiện hạ cờ của lệnh đang bay.
+      expect(state.busy).toBe(true);
+    });
+
+    it("openConversation() bị từ chối ngay ở cửa vào, không đọc sổ", async () => {
+      useAssistantStore.setState({ busy: true, conversationId: "c1" });
+
+      await useAssistantStore.getState().openConversation("c2");
+
+      expect(invokeCommand).not.toHaveBeenCalled();
+      const state = useAssistantStore.getState();
+      expect(state.conversationId).toBe("c1");
+      expect(state.conversationKey).toBe(SESSION_KEY);
+      expect(state.error).toBe(BUSY_REFUSAL);
+    });
+
+    /// Cửa vào cũng chỉ là **lấy mẫu**. Trong lúc đọc sổ, thẻ vẫn đang được vẽ
+    /// (lớp 3 so `pendingActionKey === conversationKey`, mà khoá chưa đổi) và
+    /// nút *Đồng ý* vẫn sáng — nên cú bấm rơi đúng vào khe giữa cửa vào và cú
+    /// mint. Câu chặn thật là câu kiểm LẠI sau `await`.
+    it("busy nổi lên giữa lúc đọc sổ thì openConversation() vẫn không mint khoá", async () => {
+      const read = deferred<StoredMessage[]>();
+      invokeCommand.mockImplementation(() => read.promise);
+      invokeWriteCommand.mockImplementation(() => new Promise(() => {}));
+      useAssistantStore.setState({ pendingAction: sampleAction, pendingActionKey: SESSION_KEY });
+
+      const opening = useAssistantStore.getState().openConversation("c2");
+      void useAssistantStore.getState().approve();
+      expect(useAssistantStore.getState().busy).toBe(true);
+
+      read.resolve([storedMessage("m1", "user", "Hỏi giá phòng đôi")]);
+      await opening;
+
+      const state = useAssistantStore.getState();
+      expect(state.conversationKey).toBe(SESSION_KEY);
+      expect(state.conversationId).toBeNull();
+      expect(state.messages).toEqual([]);
+      expect(state.pendingAction).toEqual(sampleAction);
+      expect(state.error).toBe(BUSY_REFUSAL);
+    });
+
+    it("deleteConversation() bị từ chối khi đang bận, không xoá dòng nào", async () => {
+      useAssistantStore.setState({
+        busy: true,
+        conversationId: "c1",
+        conversations: [summary("c1", "Hỏi phòng")],
+      });
+
+      await useAssistantStore.getState().deleteConversation("c1");
+
+      expect(invokeWriteCommand).not.toHaveBeenCalled();
+      const state = useAssistantStore.getState();
+      expect(state.conversations).toEqual([summary("c1", "Hỏi phòng")]);
+      expect(state.conversationKey).toBe(SESSION_KEY);
+      expect(state.error).toBe(BUSY_REFUSAL);
+    });
+
+    it("deleteAllConversations() bị từ chối khi đang bận, không xoá dòng nào", async () => {
+      useAssistantStore.setState({
+        busy: true,
+        conversations: [summary("c1", "Hỏi phòng")],
+      });
+
+      await useAssistantStore.getState().deleteAllConversations();
+
+      expect(invokeWriteCommand).not.toHaveBeenCalled();
+      const state = useAssistantStore.getState();
+      expect(state.conversations).toEqual([summary("c1", "Hỏi phòng")]);
+      expect(state.conversationKey).toBe(SESSION_KEY);
+      expect(state.error).toBe(BUSY_REFUSAL);
+    });
+
+    /// KỊCH BẢN CỬA THỨ NĂM, đo đầu-cuối — cửa xoá sạch ở Cài đặt.
+    ///
+    /// Trước bản vá: admin bấm *Xoá vĩnh viễn* lúc rảnh (cửa cho qua) → lễ tân
+    /// bấm *Đồng ý* trên thẻ ở panel bên trái → `check_in` bay đi → lệnh xoá về
+    /// → `startNewChat()` mint khoá mới giữa lúc lệnh ghi đang bay → lớp 4 vứt
+    /// kết quả `check_in`, `pendingAction` mất, màn hình KHÔNG NÓI GÌ. Phòng đã
+    /// nhận thật. Không mất tiền, mất tin.
+    it("xoá sạch không mint khoá khi check_in đang bay, và kết quả check_in vẫn tới màn hình", async () => {
+      const del = deferred<unknown>();
+      const checkIn = deferred<unknown>();
+      invokeWriteCommand.mockImplementation((command: string) =>
+        command === "check_in" ? checkIn.promise : del.promise,
+      );
+      invokeCommand.mockResolvedValue([]);
+      useAssistantStore.setState({
+        pendingAction: sampleAction,
+        pendingActionKey: SESSION_KEY,
+        conversationId: "c1",
+        conversations: [summary("c1", "Hỏi phòng")],
+      });
+
+      // Admin bấm *Xoá vĩnh viễn* lúc rảnh: cửa vào cho qua.
+      const deleting = useAssistantStore.getState().deleteAllConversations();
+      // Ngay sau đó lễ tân bấm *Đồng ý* trên thẻ ở panel bên trái.
+      const approval = useAssistantStore.getState().approve();
+      expect(useAssistantStore.getState().busy).toBe(true);
+
+      del.resolve(2);
+      await deleting;
+
+      const afterDelete = useAssistantStore.getState();
+      // Không mint khoá phiên giữa lúc một lệnh ghi đang bay...
+      expect(afterDelete.conversationKey).toBe(SESSION_KEY);
+      // ...và admin đọc được vì sao phiên trên panel vẫn còn nguyên. Câu này
+      // phải sống sót qua `loadConversations()` — nó dọn `error` khi nạp được.
+      expect(afterDelete.error).toBe(BUSY_REFUSAL);
+      // Lệnh xoá thì vẫn chạy thật: sổ trên đĩa đã rỗng.
+      expect(afterDelete.conversations).toEqual([]);
+
+      checkIn.resolve({ id: "B1" });
+      await approval;
+
+      const afterCheckIn = useAssistantStore.getState();
+      // Đây là câu quan trọng nhất: kết quả nhận phòng TỚI ĐƯỢC màn hình thay
+      // vì rơi vào hư không.
+      expect(afterCheckIn.messages).toContainEqual(
+        expect.objectContaining({ kind: "assistant", text: "Đã nhận phòng xong." }),
+      );
+      expect(afterCheckIn.pendingAction).toBeNull();
+      expect(afterCheckIn.busy).toBe(false);
     });
   });
 
@@ -469,7 +853,9 @@ describe("useAssistantStore", () => {
       );
 
       const turn = useAssistantStore.getState().send("phòng nào trống", { route: "rooms" });
-      useAssistantStore.getState().startNewChat();
+      // `resetForLogout()` chứ không `startNewChat()`: đăng xuất là đường mint
+      // duy nhất chạy được khi đang bận (bất biến sở hữu `busy`).
+      useAssistantStore.getState().resetForLogout();
       releaseTurn({
         reply: "của hội thoại cũ",
         proposed_action: sampleAction,
@@ -498,7 +884,7 @@ describe("useAssistantStore", () => {
       invokeCommand.mockRejectedValue(new Error("Nhà cung cấp AI không phản hồi"));
 
       const turn = useAssistantStore.getState().send("phòng nào trống", { route: "rooms" });
-      useAssistantStore.getState().startNewChat();
+      useAssistantStore.getState().resetForLogout();
       await turn;
 
       const state = useAssistantStore.getState();
