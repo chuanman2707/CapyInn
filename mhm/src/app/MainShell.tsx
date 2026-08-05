@@ -80,11 +80,18 @@ const PAGE_TITLES: Record<string, string> = {
 export function MainShell() {
   const { activeTab, setTab, setCheckinOpen, setGroupCheckinOpen, checkinRoomId, checkinNights } = useHotelStore();
   const { user, logout } = useAuthStore();
-  const { collapsed, toggleCollapse } = useSidebarCollapse();
 
+  // Từng trường một, không destructure nguyên store: set() của Zustand đổi cả
+  // reference top-level bất kể field nào đổi, mà shell ba cột là gốc của gần
+  // như mọi thứ đang hiện trên màn hình. Cùng idiom với AssistantPanel.tsx.
+  const assistantOpen = useAssistantStore((state) => state.open);
   const assistantSettings = useAssistantStore((state) => state.settings);
   const toggleAssistant = useAssistantStore((state) => state.togglePanel);
   const refreshAssistantSettings = useAssistantStore((state) => state.refreshSettings);
+
+  // Panel trợ lý là cột giữa thường trực, nên mở nó ra là thanh điều hướng tự
+  // thu về icon để nhường chỗ. Lễ tân bấm mở lại được — xem `useSidebarCollapse`.
+  const { collapsed, toggleCollapse } = useSidebarCollapse(assistantOpen);
 
   // Số khách đã đến trong 48h mà chưa nằm trong lô nào được đối chiếu khớp.
   // Con số này làm module hữu ích ngay từ trước khi ai bấm vào tab.
@@ -276,6 +283,9 @@ export function MainShell() {
             className="w-full justify-center rounded-xl opacity-40 hover:opacity-100"
             size="sm"
             onClick={toggleCollapse}
+            // Lúc thu, nút chỉ còn mỗi icon nên không còn tên gọi nào — đặt
+            // `title` như các mục điều hướng ở trên vẫn làm.
+            title={collapsed ? "Mở rộng" : "Thu gọn"}
           >
             {collapsed ? (
               <ChevronsRight size={16} />
@@ -287,6 +297,11 @@ export function MainShell() {
           </Button>
         </div>
       </aside>
+
+      {/* ASSISTANT PANEL — cột giữa, giữa điều hướng và nội dung (bố cục
+          Airtable). Không phải drawer đè lên bên phải: nó đẩy nội dung hẹp lại
+          chứ không che, nên lễ tân vừa hỏi vừa nhìn được màn hình đang làm. */}
+      {assistantAvailable && <AssistantPanel />}
 
       {/* MAIN CONTENT */}
       <main className="flex-1 flex flex-col h-full relative min-w-0">
@@ -377,8 +392,6 @@ export function MainShell() {
           </div>
         </div>
       </main>
-
-      {assistantAvailable && <AssistantPanel />}
 
       <CheckinSheet preSelectedRoomId={checkinRoomId ?? undefined} preSelectedNights={checkinNights ?? undefined} />
       <GroupCheckinSheet />
