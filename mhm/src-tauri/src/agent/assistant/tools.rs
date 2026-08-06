@@ -15,6 +15,31 @@ use serde_json::{json, Value};
 use sqlx::{Pool, Sqlite};
 
 pub const DRAFT_CHECK_IN_TOOL: &str = "draft_check_in";
+pub const DRAFT_RESERVE_TOOL: &str = "draft_reserve";
+
+/// Loại thẻ mà một tool `draft_*` dựng ra.
+///
+/// Tồn tại để vòng lặp trong `mod.rs` chọn hàm dựng thẻ bằng một `match` **vét
+/// cạn trên enum**, không phải bằng chuỗi kèm một nhánh `_ =>` đoán bừa. Thêm
+/// một tool ghi mà quên nối vào vòng lặp thì `every_draft_tool_maps_to_a_builder`
+/// đỏ ngay ở đây, chứ không đợi tới lúc lễ tân bấm *Đồng ý* và không có gì xảy
+/// ra.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DraftToolKind {
+    CheckIn,
+    Reserve,
+}
+
+/// `None` ⇒ tên này **không** phải tool dựng thẻ. Không có nhánh mặc định nào
+/// rơi về `CheckIn`: đoán nhầm ở đây là bắn một thẻ đặt phòng qua đường nhận
+/// phòng, tức đúng con bug đã mở ra cả spec này.
+pub fn draft_tool_kind(name: &str) -> Option<DraftToolKind> {
+    match name {
+        DRAFT_CHECK_IN_TOOL => Some(DraftToolKind::CheckIn),
+        DRAFT_RESERVE_TOOL => Some(DraftToolKind::Reserve),
+        _ => None,
+    }
+}
 
 const FRONT_DESK_ONLY: &[AgentRole] = &[AgentRole::FrontDeskAssistant];
 
@@ -72,17 +97,35 @@ pub const FRONT_DESK_READ_TOOLS: &[AgentToolMeta] = &[
 
 /// Tool **không** có executor. Model gọi tới thì vòng lặp dừng và trả thẻ xác
 /// nhận ra UI. Không thêm hàm thực thi cho bất kỳ tên nào ở đây.
-pub const FRONT_DESK_DRAFT_TOOLS: &[AgentToolMeta] = &[AgentToolMeta {
-    name: DRAFT_CHECK_IN_TOOL,
-    description: "Dựng thẻ xác nhận nhận phòng cho khách ĐANG ĐỨNG Ở QUẦY HÔM NAY, để người dùng \
+pub const FRONT_DESK_DRAFT_TOOLS: &[AgentToolMeta] = &[
+    AgentToolMeta {
+        name: DRAFT_CHECK_IN_TOOL,
+        description:
+            "Dựng thẻ xác nhận nhận phòng cho khách ĐANG ĐỨNG Ở QUẦY HÔM NAY, để người dùng \
                   duyệt. Không tự thực hiện. LUÔN điền `check_in_date` bằng đúng ngày người dùng \
                   nêu, nếu họ có nêu ngày — kể cả khi ngày đó không phải hôm nay. Không bao giờ tự \
                   thay ngày người dùng nêu bằng hôm nay, và không bỏ trống ô ngày để né.",
-    mutation_risk: MutationRisk::HighWrite,
-    data_sensitivity: DataSensitivity::StaffOperational,
-    allowed_roles: FRONT_DESK_ONLY,
-    capability: AgentToolCapability::PmsWrite,
-}];
+        mutation_risk: MutationRisk::HighWrite,
+        data_sensitivity: DataSensitivity::StaffOperational,
+        allowed_roles: FRONT_DESK_ONLY,
+        capability: AgentToolCapability::PmsWrite,
+    },
+    AgentToolMeta {
+        name: DRAFT_RESERVE_TOOL,
+        description:
+            "Dựng thẻ xác nhận ĐẶT PHÒNG TRƯỚC cho một ngày nhận phòng Ở TƯƠNG LAI (khách chưa \
+                  tới), để người dùng duyệt. Không tự thực hiện. Đây là đích của `draft_check_in` \
+                  khi ngày người dùng nêu chưa tới: LUÔN điền `check_in_date` và `check_out_date` \
+                  dạng YYYY-MM-DD bằng đúng hai ngày người dùng nêu. KHÔNG có tham số số đêm — số \
+                  đêm do CapyInn tính từ hai ngày đó. Chỉ ghi được MỘT tên khách: người dùng nêu \
+                  nhiều khách thì vẫn điền một tên chính vào `guest_name` và NÓI RÕ với người dùng \
+                  rằng đặt phòng trước chỉ ghi được một tên.",
+        mutation_risk: MutationRisk::HighWrite,
+        data_sensitivity: DataSensitivity::StaffOperational,
+        allowed_roles: FRONT_DESK_ONLY,
+        capability: AgentToolCapability::PmsWrite,
+    },
+];
 
 pub fn assistant_tool_schemas() -> Vec<AssistantToolSchema> {
     let mut schemas: Vec<AssistantToolSchema> = FRONT_DESK_READ_TOOLS
@@ -94,10 +137,27 @@ pub fn assistant_tool_schemas() -> Vec<AssistantToolSchema> {
         })
         .collect();
 
-    schemas.push(AssistantToolSchema {
-        name: DRAFT_CHECK_IN_TOOL,
-        description: FRONT_DESK_DRAFT_TOOLS[0].description,
-        parameters: json!({
+    schemas.extend(
+        FRONT_DESK_DRAFT_TOOLS
+            .iter()
+            .map(|tool| AssistantToolSchema {
+                name: tool.name,
+                description: tool.description,
+                parameters: draft_tool_parameters(tool.name),
+            }),
+    );
+
+    schemas
+}
+
+/// Schema JSON của một tool dựng thẻ.
+///
+/// Tách khỏi `read_tool_parameters` chứ không gộp: hai họ tool này có luật
+/// khác hẳn nhau, và `every_draft_tool_offers_the_model_a_real_schema` canh
+/// riêng họ này để một tên tool mới không lặng lẽ nhận `{}` rỗng.
+fn draft_tool_parameters(name: &str) -> Value {
+    match name {
+        DRAFT_CHECK_IN_TOOL => json!({
             "type": "object",
             "properties": {
                 "room_id": { "type": "string", "description": "Mã phòng trong PMS" },
@@ -137,9 +197,51 @@ pub fn assistant_tool_schemas() -> Vec<AssistantToolSchema> {
             },
             "required": ["room_id", "nights", "guests"]
         }),
-    });
-
-    schemas
+        DRAFT_RESERVE_TOOL => json!({
+            "type": "object",
+            "properties": {
+                "room_id": { "type": "string", "description": "Mã phòng trong PMS" },
+                // MỘT tên, kiểu chuỗi — khác `draft_check_in` (nhận cả danh
+                // sách khách). `create_reservation` chỉ lưu một khách chính,
+                // nên một ô `array` ở đây là lời hứa mà lệnh phía sau không
+                // giữ được: model điền ba tên rồi hai tên biến mất không ai
+                // báo. Ô là chuỗi thì giới hạn ấy nhìn thấy được, và
+                // `build_reserve_draft` còn cảnh báo lên thẻ khi ô này trông
+                // như đang cõng nhiều tên.
+                "guest_name": {
+                    "type": "string",
+                    "description": "Họ tên MỘT khách chính. Đặt phòng trước chỉ ghi được một tên; nếu người dùng nêu nhiều khách, điền tên khách chính vào đây rồi nói rõ với người dùng rằng chỉ tên đó được ghi."
+                },
+                "guest_phone": { "type": "string" },
+                "guest_doc_number": { "type": "string", "description": "Số giấy tờ (CCCD/hộ chiếu) nếu người dùng có nêu" },
+                "check_in_date": {
+                    "type": "string",
+                    "description": "Ngày nhận phòng, dạng YYYY-MM-DD. BẮT BUỘC, và phải ở tương lai — hôm nay thì dùng `draft_check_in`, quá khứ thì dùng `draft_backfill`. Điền đúng ngày người dùng nêu, không tự đổi."
+                },
+                "check_out_date": {
+                    "type": "string",
+                    "description": "Ngày trả phòng, dạng YYYY-MM-DD. BẮT BUỘC, và phải sau `check_in_date`. Điền đúng ngày người dùng nêu, không suy ra từ số đêm bạn tự đoán."
+                },
+                "deposit_amount": { "type": "integer", "minimum": 0, "description": "Tiền đặt cọc khách đã trả, VND" },
+                "notes": { "type": "string" }
+            },
+            // KHÔNG có `nights`, cố ý. Model đưa cả hai ngày lẫn số đêm thì ba
+            // con số có thể mâu thuẫn và không có cách nào biết vế nào đúng;
+            // hai ngày là nguồn sự thật, số đêm dẫn xuất trong
+            // `build_reserve_draft`. `create_reservation_tx` cũng tự kiểm lại
+            // (`validate_requested_nights`) nên một số đêm lệch sẽ bị lệnh từ
+            // chối — nhưng thà không có ô còn hơn có ô rồi phải canh.
+            //
+            // Cũng KHÔNG có `source`: `create_reservation_tx` mặc định
+            // "phone", và một ô nữa cho model điền là một ô nữa để nó bịa.
+            "required": ["room_id", "guest_name", "check_in_date", "check_out_date"]
+        }),
+        // Tên lạ: schema rỗng. Không đoán schema của một tool không biết —
+        // `every_draft_tool_offers_the_model_a_real_schema` bắt mọi tool có
+        // thật phải có nhánh ở trên, nên nhánh này chỉ với tới được bằng một
+        // lời gọi tay.
+        _ => json!({ "type": "object", "properties": {} }),
+    }
 }
 
 fn read_tool_parameters(name: &str) -> Value {
@@ -407,6 +509,134 @@ mod tests {
             "mô tả tool phải yêu cầu LUÔN điền ngày người dùng nêu: {}",
             draft.description
         );
+    }
+
+    /// Bài học đã trả giá ở Task 1, lặp lại nguyên xi cho `draft_reserve`: mọi
+    /// test của `build_reserve_draft` đều gọi **thẳng** hàm ấy, không đi qua
+    /// schema. Gỡ `check_in_date`/`check_out_date` khỏi schema thì model không
+    /// còn ô nào để đặt ngày vào — bug cũ quay lại y nguyên — mà cả tá test
+    /// trong `draft.rs` vẫn xanh. Test này là chỗ **duy nhất** canh mối nối đó.
+    #[test]
+    fn the_draft_reserve_tool_requires_both_stay_dates_and_offers_no_night_count() {
+        let schemas = assistant_tool_schemas();
+        let draft = schemas
+            .iter()
+            .find(|schema| schema.name == DRAFT_RESERVE_TOOL)
+            .expect("phải có schema cho draft_reserve");
+
+        let properties = draft.parameters["properties"]
+            .as_object()
+            .expect("schema phải có `properties`");
+        let required: Vec<&str> = draft.parameters["required"]
+            .as_array()
+            .expect("schema phải có danh sách `required`")
+            .iter()
+            .filter_map(Value::as_str)
+            .collect();
+
+        // Bốn ô bắt buộc. Thiếu một ô trong `properties` thì model không có chỗ
+        // đặt giá trị; thiếu trong `required` thì nó được mời bỏ trống.
+        for field in ["room_id", "guest_name", "check_in_date", "check_out_date"] {
+            assert!(
+                properties.contains_key(field),
+                "schema thiếu ô `{field}`: {}",
+                draft.parameters
+            );
+            assert!(
+                required.contains(&field),
+                "`{field}` phải nằm trong `required`: {required:?}"
+            );
+        }
+
+        // Hai ô ngày phải nói ra định dạng, không thì model gửi "ngày 8" và
+        // `build_reserve_draft` chỉ còn cách từ chối.
+        for field in ["check_in_date", "check_out_date"] {
+            let description = properties[field]["description"]
+                .as_str()
+                .unwrap_or_default();
+            assert_eq!(properties[field]["type"], json!("string"), "{field}");
+            assert!(
+                description.contains("YYYY-MM-DD"),
+                "mô tả `{field}` phải nêu định dạng: {description}"
+            );
+        }
+
+        // **`nights` KHÔNG được có mặt.** Hai ngày là nguồn sự thật; một ô số
+        // đêm nữa là một con số thứ ba để mâu thuẫn với chúng, và không có cách
+        // nào biết vế nào đúng.
+        assert!(
+            properties.get("nights").is_none(),
+            "schema vẫn mời model tự đưa số đêm: {}",
+            draft.parameters
+        );
+
+        // Bốn ô tuỳ chọn có thật, nhưng KHÔNG nằm trong `required` — bắt buộc
+        // chúng là biến mọi lượt đặt phòng bình thường thành một vòng
+        // `missing_fields` thừa trong ngân sách 4 vòng.
+        for field in ["guest_phone", "guest_doc_number", "deposit_amount", "notes"] {
+            assert!(
+                properties.contains_key(field),
+                "schema thiếu ô tuỳ chọn `{field}`: {}",
+                draft.parameters
+            );
+            assert!(
+                !required.contains(&field),
+                "`{field}` phải là tuỳ chọn: {required:?}"
+            );
+        }
+
+        // Mô tả tool là chỗ model đọc TRƯỚC khi quyết định gọi gì — nó phải nói
+        // ra luật một-tên, vì đó là giới hạn duy nhất của tool này mà schema
+        // không tự nói được.
+        assert!(
+            draft.description.contains("MỘT tên khách"),
+            "mô tả tool phải nói rõ chỉ ghi được một tên: {}",
+            draft.description
+        );
+    }
+
+    /// Một tool có tên trong danh sách nhưng schema `{}` rỗng là một tool model
+    /// không gọi nổi — nó không biết truyền gì. Rơi vào nhánh `_` của
+    /// `draft_tool_parameters` là im lặng, nên bắt ở đây.
+    #[test]
+    fn every_draft_tool_offers_the_model_a_real_schema() {
+        for tool in FRONT_DESK_DRAFT_TOOLS {
+            let parameters = draft_tool_parameters(tool.name);
+            let properties = parameters["properties"]
+                .as_object()
+                .unwrap_or_else(|| panic!("{} thiếu `properties`", tool.name));
+            assert!(
+                !properties.is_empty(),
+                "{} nhận schema rỗng — model không có gì để điền",
+                tool.name
+            );
+        }
+    }
+
+    /// Vòng lặp trong `mod.rs` chọn hàm dựng thẻ qua `draft_tool_kind`. Một tool
+    /// ghi có mặt trong danh sách mà không có `DraftToolKind` thì model gọi được
+    /// nó nhưng vòng lặp coi nó như tool đọc, rồi `execute_read_tool` trả
+    /// `AGENT_TOOL_NOT_ALLOWED` — trợ lý nói "không có công cụ nào cho việc này"
+    /// về đúng công cụ nó vừa gọi.
+    #[test]
+    fn every_draft_tool_maps_to_a_builder() {
+        for tool in FRONT_DESK_DRAFT_TOOLS {
+            assert!(
+                draft_tool_kind(tool.name).is_some(),
+                "{} không có nhánh trong `draft_tool_kind`",
+                tool.name
+            );
+        }
+
+        // Chiều ngược: tool đọc không được lọt vào đường dựng thẻ.
+        for tool in FRONT_DESK_READ_TOOLS {
+            assert!(
+                draft_tool_kind(tool.name).is_none(),
+                "{} là tool đọc mà bị coi là tool dựng thẻ",
+                tool.name
+            );
+        }
+        assert!(draft_tool_kind("rm_minus_rf").is_none());
     }
 
     #[tokio::test]

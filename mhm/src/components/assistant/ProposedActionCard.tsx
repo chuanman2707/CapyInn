@@ -3,10 +3,17 @@ import { AlertTriangle } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { actionKindCopy, isActionExpired, type ProposedAction } from "@/types/assistant";
 
+/// Nhãn tiếng Việt cho từng dòng của thẻ. Khoá nào không có ở đây rơi về **tên
+/// trường thô** (`FIELD_LABELS[key] ?? key`), tức lễ tân đọc `guest_doc_number`
+/// giữa một thẻ tiếng Việt — nên mỗi khoá `display` mới phía Rust phải thêm một
+/// dòng vào đây. Hai khoá cuối là của thẻ đặt phòng trước
+/// (`build_reserve_display`), thẻ nhận phòng không có chúng.
 const FIELD_LABELS: Record<string, string> = {
   room_id: "Phòng",
   guests: "Khách",
   guest_name: "Khách",
+  guest_phone: "Số điện thoại",
+  guest_doc_number: "Số CCCD",
   nights: "Số đêm",
   check_in_date: "Ngày nhận",
   check_out_date: "Ngày trả",
