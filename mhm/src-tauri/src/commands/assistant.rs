@@ -30,7 +30,9 @@ use crate::{
                 validate_assistant_base_url, validate_assistant_model, AssistantConfig,
                 AssistantGateStatus, AssistantPreset,
             },
-            draft::{ProposedAction, CHECK_IN_ACTION_KIND, RESERVE_ACTION_KIND},
+            draft::{
+                ProposedAction, BACKFILL_ACTION_KIND, CHECK_IN_ACTION_KIND, RESERVE_ACTION_KIND,
+            },
             provider::{build_assistant_provider_client, AssistantProviderClient},
             run_assistant_turn, AssistantTurnRequest, AssistantTurnResponse, MAX_MESSAGE_CHARS,
         },
@@ -180,6 +182,7 @@ fn summarize_action(action: &ProposedAction) -> String {
     let heading = match action.kind.as_str() {
         CHECK_IN_ACTION_KIND => "Đề xuất nhận phòng:",
         RESERVE_ACTION_KIND => "Đề xuất đặt phòng trước:",
+        BACKFILL_ACTION_KIND => "Đề xuất ghi bù:",
         _ => "Đề xuất (loại thẻ không rõ):",
     };
     let mut lines = vec![heading.to_string()];
@@ -532,10 +535,11 @@ pub async fn assistant_turn(
 mod tests {
     use super::*;
     use crate::agent::assistant::draft::{
-        build_check_in_display, build_reserve_display, ActionPayload, ProposedAction,
-        CHECK_IN_ACTION_KIND, RESERVE_ACTION_KIND,
+        build_backfill_display, build_check_in_display, build_reserve_display, ActionPayload,
+        ProposedAction, BACKFILL_ACTION_KIND, CHECK_IN_ACTION_KIND, RESERVE_ACTION_KIND,
     };
     use crate::commands::assistant_conversations::tests::{commands_in, CommandShell};
+    use crate::models::BackfillStayRequest;
     use crate::models::CreateReservationRequest;
     use crate::models::{CheckInRequest, CreateGuestRequest, User};
     use crate::queries::assistant::conversation_queries;
@@ -723,6 +727,52 @@ mod tests {
             proposed_action: Some(ProposedAction {
                 kind: RESERVE_ACTION_KIND.to_string(),
                 payload: ActionPayload::Reserve(payload),
+                display,
+                preview,
+                warnings: Vec::new(),
+                built_at_ms: 1_754_300_000_000,
+            }),
+            history: Vec::new(),
+            conversation_id: None,
+            turn_saved: false,
+        })
+    }
+
+    /// Thẻ **ghi bù**, dựng bằng đúng hàm sản xuất `build_backfill_display`.
+    ///
+    /// Khách **còn ở** (`check_out_date: None`) — nhánh khó của thẻ này, vì nó
+    /// là nhánh duy nhất trong cả ba loại thẻ mà ngày trả không phải một ngày.
+    fn backfill_action_card() -> CommandResult<AssistantTurnResponse> {
+        let payload = BackfillStayRequest {
+            room_id: "R201".to_string(),
+            guests: vec![CreateGuestRequest {
+                guest_type: None,
+                full_name: "Trần Thị Bích".to_string(),
+                doc_number: "079301005678".to_string(),
+                dob: None,
+                gender: None,
+                nationality: None,
+                address: None,
+                visa_expiry: None,
+                scan_path: None,
+                phone: Some("0909000111".to_string()),
+            }],
+            check_in_date: "2026-08-02".to_string(),
+            check_out_date: None,
+            expected_checkout_date: Some("2026-08-07".to_string()),
+            total_price: 600_000,
+            paid_amount: 0,
+            source: Some("walk-in".to_string()),
+            notes: None,
+        };
+        let preview = serde_json::json!({ "total": 600000 });
+        let display = build_backfill_display(&payload);
+
+        Ok(AssistantTurnResponse {
+            reply: None,
+            proposed_action: Some(ProposedAction {
+                kind: BACKFILL_ACTION_KIND.to_string(),
+                payload: ActionPayload::Backfill(payload),
                 display,
                 preview,
                 warnings: Vec::new(),
@@ -1166,6 +1216,39 @@ mod tests {
         );
         // Nhãn "Hôm nay" là của thẻ nhận phòng. Trên một thẻ đặt phòng trước nó
         // luôn sai — thẻ ấy chỉ dựng được cho ngày ở tương lai.
+        assert!(!text.contains("Hôm nay"), "{text}");
+    }
+
+    /// Cạnh thứ ba của cùng một luật: một thẻ **ghi bù** ghi vào sổ dưới tên
+    /// "nhận phòng" hay "đặt phòng trước" là in lại nguyên văn câu nói dối đã mở
+    /// ra cả spec này, lần này nằm trên đĩa và người mở lại sổ sẽ tin nó.
+    #[tokio::test]
+    async fn a_backfill_card_is_logged_as_a_backfill_not_a_check_in() {
+        let pool = seeded_pool().await;
+
+        close_turn_record(&pool, &existing_record("c1", true), &backfill_action_card()).await;
+
+        let (kind, text) = logged_message(&pool, "c1").await;
+        assert_eq!(kind, "action");
+        assert!(
+            text.starts_with("Đề xuất ghi bù:"),
+            "thẻ ghi bù bị ghi vào sổ dưới một tên khác: {text}"
+        );
+        assert!(
+            !text.contains("Đề xuất nhận phòng") && !text.contains("Đề xuất đặt phòng trước"),
+            "sổ gọi một lượt ghi bù bằng tên của loại thẻ khác: {text}"
+        );
+        // Bất biến "mọi thẻ đều hiện ngày nhận và ngày trả" phải sống sót qua sổ
+        // — sổ là bằng chứng duy nhất còn lại sau khi thẻ biến mất khỏi màn hình.
+        assert!(
+            text.contains("- check_in_date: 02/08/2026")
+                && text.contains("- check_out_date: Chưa trả phòng (khách còn ở)")
+                && text.contains("- expected_checkout_date: 07/08/2026"),
+            "sổ mất một dòng ngày của thẻ: {text}"
+        );
+        // Tiền phòng của ghi bù là **trường payload**, và nó phải nằm trong sổ:
+        // đây là con số duy nhất trong ba loại thẻ mà lệnh nhận thẳng từ thẻ.
+        assert!(text.contains("- total_price: 600.000 ₫"), "{text}");
         assert!(!text.contains("Hôm nay"), "{text}");
     }
 

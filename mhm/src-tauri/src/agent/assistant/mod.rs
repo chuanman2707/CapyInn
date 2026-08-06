@@ -182,6 +182,9 @@ pub async fn run_assistant_turn(
                 DraftToolKind::Reserve => {
                     draft::build_reserve_draft(pool, &draft_call.arguments, now_local_date).await?
                 }
+                DraftToolKind::Backfill => {
+                    draft::build_backfill_draft(pool, &draft_call.arguments, now_local_date).await?
+                }
             };
 
             // Đường `Ready` thoát thẳng ra frontend; mọi outcome còn lại đều là
@@ -293,6 +296,62 @@ pub async fn run_assistant_turn(
                          ngày. Hôm nay là {now_local_date} — quy đúng ô `{field}` ra dạng YYYY-MM-DD \
                          rồi gọi lại `draft_reserve`. Không đoán bừa, không sửa ô còn lại, không chắc \
                          thì hỏi lại người dùng."
+                    ),
+                }),
+                // Cạnh thứ ba của cùng một luật, cùng một khuôn: chỉ thẳng sang
+                // tool đúng và nhắc lại nguyên văn ngày người dùng nêu.
+                DraftOutcome::WrongDateForBackfill {
+                    requested,
+                    is_today,
+                } => {
+                    let (huong, tool_dung) = if is_today {
+                        ("chính là hôm nay", "draft_check_in")
+                    } else {
+                        ("ở tương lai", "draft_reserve")
+                    };
+                    json!({
+                        "error": "wrong_date_for_backfill",
+                        "requested_check_in_date": requested,
+                        "today": now_local_date,
+                        "hint": format!(
+                            "Ngày vào phòng người dùng nêu ({requested}) {huong} (hôm nay là \
+                             {now_local_date}), nên đây không phải ghi bù. Hãy gọi `{tool_dung}` với \
+                             đúng ngày {requested}. TUYỆT ĐỐI không đổi ngày cho khớp `draft_backfill`."
+                        ),
+                    })
+                }
+                DraftOutcome::UnreadableBackfillDate { field, requested } => json!({
+                    "error": "unreadable_backfill_date",
+                    "field": field,
+                    "requested": requested,
+                    "today": now_local_date,
+                    "hint": format!(
+                        "`{field}` phải đúng dạng YYYY-MM-DD; `{requested}` không đọc được thành một \
+                         ngày. Hôm nay là {now_local_date} — quy đúng ô `{field}` ra dạng YYYY-MM-DD \
+                         rồi gọi lại `draft_backfill`. Không đoán bừa, không sửa ô còn lại, không chắc \
+                         thì hỏi lại người dùng."
+                    ),
+                }),
+                DraftOutcome::ExpectedCheckoutNotAfterToday { requested, today } => json!({
+                    "error": "expected_checkout_not_after_today",
+                    "expected_checkout_date": requested,
+                    "today": today,
+                    "hint": format!(
+                        "Khách còn ở thì `expected_checkout_date` phải SAU hôm nay, mà {requested} \
+                         không sau {today}. Nếu khách đã rời phòng thì điền `check_out_date` = ngày \
+                         khách trả phòng và bỏ trống `expected_checkout_date`. Nếu khách vẫn còn ở, \
+                         hỏi lại người dùng ngày trả dự kiến — không tự đoán."
+                    ),
+                }),
+                DraftOutcome::BackfillCheckOutInTheFuture { requested, today } => json!({
+                    "error": "backfill_check_out_in_the_future",
+                    "check_out_date": requested,
+                    "today": today,
+                    "hint": format!(
+                        "`check_out_date` là ngày khách ĐÃ trả phòng, nên nó không được ở tương lai, \
+                         mà {requested} sau {today}. Nếu khách vẫn còn trong phòng thì bỏ TRỐNG \
+                         `check_out_date` và đưa {requested} vào `expected_checkout_date`. Đừng tự \
+                         đổi ngày."
                     ),
                 }),
             };
@@ -737,6 +796,86 @@ mod tests {
             !format!("{:?}", action.display).contains("06/08/2026"),
             "hôm nay chui vào thẻ đặt phòng: {:?}",
             action.display
+        );
+    }
+
+    /// Cạnh thứ ba: model gọi `draft_backfill` cho một ngày đã qua ⇒ vòng lặp
+    /// dừng và trả ra một thẻ **ghi bù**.
+    ///
+    /// Đây là chỗ **duy nhất** canh nhánh `DraftToolKind::Backfill` của `match`
+    /// chọn hàm dựng thẻ: `every_draft_tool_maps_to_a_builder` chỉ khẳng định
+    /// `draft_tool_kind` trả về `Some`, nó không nhìn thấy việc nhánh ấy gọi
+    /// nhầm `build_reserve_draft`. Nối nhầm thì `kind` ở đây ra `"reserve"` —
+    /// tức nút *Đồng ý* bắn `create_reservation` cho một kỳ ở đã xảy ra.
+    #[tokio::test]
+    async fn a_backfill_tool_call_comes_back_as_a_backfill_card() {
+        let pool = pool().await;
+        seed_room(&pool, "R1", "P904", 400_000).await;
+
+        let calls = Arc::new(AtomicUsize::new(0));
+        let counter = Arc::clone(&calls);
+
+        let endpoint = spawn(Router::new().route(
+            "/v1/chat/completions",
+            post(move || {
+                let counter = Arc::clone(&counter);
+                async move {
+                    counter.fetch_add(1, Ordering::SeqCst);
+                    Json(serde_json::json!({
+                        "choices": [{ "message": {
+                            "role": "assistant",
+                            "content": null,
+                            "tool_calls": [{
+                                "id": "call_1",
+                                "type": "function",
+                                "function": {
+                                    "name": "draft_backfill",
+                                    // Model gửi kèm một con số tiền phòng dù
+                                    // schema không có ô ấy — phải bị bỏ qua trọn
+                                    // vẹn, kể cả khi đi qua cả vòng lặp.
+                                    "arguments": "{\"room_id\":\"R1\",\"guests\":[{\"full_name\":\"Trần Thị Bích\",\"doc_number\":\"079301005678\"}],\"check_in_date\":\"2026-08-03\",\"check_out_date\":\"2026-08-05\",\"total_price\":1}"
+                                }
+                            }]
+                        }}]
+                    }))
+                }
+            }),
+        ))
+        .await;
+
+        let response = run_assistant_turn(
+            &pool,
+            &AssistantProviderClient::new(build_assistant_provider_client().expect("client")),
+            &config_for(&endpoint),
+            "sk-test",
+            request("ghi bù khách phòng R1 vào ngày 3 ra ngày 5 tháng 8"),
+            "2026-08-06",
+        )
+        .await
+        .expect("lượt ghi bù phải chạy");
+
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert!(response.reply.is_none());
+
+        let action = response
+            .proposed_action
+            .expect("phải có thẻ ghi bù để lễ tân duyệt");
+        assert_eq!(action.kind, "backfill");
+        assert_ne!(action.kind, "check_in");
+        assert_ne!(action.kind, "reserve");
+        assert_eq!(
+            action.display.get("check_in_date").map(String::as_str),
+            Some("03/08/2026")
+        );
+        assert_eq!(
+            action.display.get("check_out_date").map(String::as_str),
+            Some("05/08/2026")
+        );
+        // 03/08/2026 là thứ Hai, 04/08 thứ Ba — hai đêm ngày thường × 400.000₫.
+        // Con số 1₫ model gửi kèm không được để lại dấu vết nào.
+        assert_eq!(
+            action.display.get("total_price").map(String::as_str),
+            Some("800.000 ₫")
         );
     }
 

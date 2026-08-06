@@ -204,7 +204,13 @@ pub struct CheckInRequest {
 }
 
 /// Ghi bù một lượt khách đã ở nhưng chưa được nhập máy.
-#[derive(Debug, Deserialize)]
+///
+/// `Serialize, Clone` là để thẻ xác nhận của trợ lý mang **chính** kiểu này làm
+/// payload (`agent::assistant::draft::ActionPayload::Backfill`): thẻ phải
+/// serialize được ra webview, và test đường nối phải nhân bản được payload để
+/// chạy nó qua đúng lệnh `backfill_stay`. Cùng lý do đã thêm hai derive ấy cho
+/// `CreateReservationRequest`.
+#[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct BackfillStayRequest {
     pub room_id: String,
     pub guests: Vec<CreateGuestRequest>,
@@ -214,6 +220,10 @@ pub struct BackfillStayRequest {
     pub check_out_date: Option<String>,
     /// YYYY-MM-DD; bắt buộc khi khách còn ở, phải sau hôm nay.
     pub expected_checkout_date: Option<String>,
+    /// **Số của preview, không phải số model đưa.** `backfill_stay` là lệnh ghi
+    /// duy nhất bắt người gọi đưa tiền phòng vào (`check_in` và
+    /// `create_reservation` tự tính), nên đây là chỗ duy nhất một mô hình ngôn
+    /// ngữ có thể quyết định khách nợ bao nhiêu — xem `build_backfill_draft`.
     pub total_price: MoneyVnd,
     pub paid_amount: MoneyVnd,
     pub source: Option<String>,

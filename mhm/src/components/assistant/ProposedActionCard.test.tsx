@@ -552,4 +552,52 @@ describe("ProposedActionCard", () => {
     expect(labels).toContain("Số điện thoại");
     expect(labels).toContain("Số CCCD");
   });
+
+  /// Cùng phép đo cho thẻ **ghi bù**, và nó bắt được một khoá mà thẻ đặt phòng
+  /// không có: `total_price`. Đây là con số duy nhất trong ba loại thẻ mà lệnh
+  /// PMS nhận thẳng từ payload, tức đúng dòng lễ tân phải đọc kỹ nhất — thiếu
+  /// nhãn thì nó hiện ra giữa một thẻ tiếng Việt dưới dạng `total_price`.
+  ///
+  /// `display` dưới đây mang **đủ** bộ khoá mà `build_backfill_display`
+  /// (`draft.rs`) sinh ra cho nhánh khách-còn-ở, gồm cả dòng "Khách N" cố ý
+  /// không có nhãn (thẻ render generic theo `display`).
+  it("thẻ ghi bù không để lọt tên trường thô lên nhãn", () => {
+    const fullyLabelledBackfill: ProposedAction = {
+      ...backfillAction,
+      display: {
+        room_id: "Phòng 201",
+        check_in_date: "04/08/2026",
+        check_out_date: "Chưa trả phòng (khách còn ở)",
+        expected_checkout_date: "07/08/2026",
+        guests: "1 người",
+        "Khách 1": "Trần Thị Bích · CCCD: 079301005678",
+        total_price: "600.000 ₫",
+        paid_amount: "0 ₫",
+        source: "walk-in",
+        notes: "—",
+      },
+    };
+
+    const { container } = render(
+      <ProposedActionCard
+        action={fullyLabelledBackfill}
+        busy={false}
+        nowMs={action.built_at_ms}
+        onApprove={vi.fn()}
+        onRebuild={vi.fn()}
+        onDismiss={vi.fn()}
+      />,
+    );
+
+    const labels = Array.from(container.querySelectorAll("dt")).map((node) => node.textContent);
+    // Chín trường payload + một dòng khách. "Khách 1" là khoá duy nhất được
+    // phép không có nhãn — nó **là** một nhãn tiếng Việt rồi.
+    expect(labels).toHaveLength(10);
+    expect(labels.filter((label) => label?.includes("_"))).toEqual([]);
+    expect(labels).toContain("Tổng tiền");
+    expect(labels).toContain("Dự kiến trả");
+    // Dòng ngày trả phải nói ra nghĩa thật, không phải một gạch ngang câm mà lễ
+    // tân đọc thành "chưa điền".
+    expect(screen.getByText("Chưa trả phòng (khách còn ở)")).toBeInTheDocument();
+  });
 });

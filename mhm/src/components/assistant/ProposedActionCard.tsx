@@ -6,8 +6,11 @@ import { actionKindCopy, isActionExpired, type ProposedAction } from "@/types/as
 /// Nhãn tiếng Việt cho từng dòng của thẻ. Khoá nào không có ở đây rơi về **tên
 /// trường thô** (`FIELD_LABELS[key] ?? key`), tức lễ tân đọc `guest_doc_number`
 /// giữa một thẻ tiếng Việt — nên mỗi khoá `display` mới phía Rust phải thêm một
-/// dòng vào đây. Hai khoá cuối là của thẻ đặt phòng trước
-/// (`build_reserve_display`), thẻ nhận phòng không có chúng.
+/// dòng vào đây. `guest_phone`/`guest_doc_number`/`deposit_amount` là của thẻ
+/// đặt phòng trước (`build_reserve_display`); `total_price` là của thẻ ghi bù
+/// (`build_backfill_display`) — thẻ ấy KHÔNG có khoá `total`, vì với ghi bù thì
+/// tiền phòng là một trường payload thật chứ không phải một số dẫn xuất từ
+/// preview, và hai dòng tiền in cùng một số là một thẻ người ta ngừng đọc kỹ.
 const FIELD_LABELS: Record<string, string> = {
   room_id: "Phòng",
   guests: "Khách",
@@ -24,6 +27,11 @@ const FIELD_LABELS: Record<string, string> = {
   deposit_amount: "Đặt cọc",
   pricing_type: "Kiểu tính giá",
   total: "Tổng tiền",
+  // Cùng nhãn với `total`, cố ý: hai khoá khác nhau về nguồn (một là trường
+  // payload của `backfill_stay`, một là số dẫn xuất từ preview) nhưng với người
+  // đọc thẻ thì đó là **cùng một thứ** — tiền phòng của kỳ ở này. Đặt tên khác
+  // đi chỉ dạy lễ tân rằng thẻ ghi bù nói về một khoản tiền khác.
+  total_price: "Tổng tiền",
 };
 
 type ProposedActionCardProps = {
