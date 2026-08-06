@@ -46,7 +46,6 @@ const settings: AssistantSettings = {
 
 const summary: AssistantConversationSummary = {
   id: "c1",
-  user_id: "u1",
   user_name: "Lễ tân A",
   title: "Phòng 201 còn trống không?",
   updated_at: "2026-08-05T09:30:00+07:00",

@@ -14,6 +14,7 @@ import { useAuthStore } from "./useAuthStore";
 import { createAppErrorException } from "@/lib/appError";
 import type {
   AssistantConversationSummary,
+  AssistantTurnResponse,
   ChatMessage,
   ProposedAction,
   StoredMessage,
@@ -73,17 +74,27 @@ function deferred<T>() {
   return { promise, resolve, reject };
 }
 
-const turnResponse = (reply: string) => ({
+/// **Có kiểu, cố ý.** `invokeCommand` là một `vi.fn()` trần nên `tsc` không nhìn
+/// vào giá trị nào đi qua nó; hợp đồng lượt chat đổi mà fixture không đổi thì cả
+/// bộ vẫn xanh trên một hình dạng không còn tồn tại. Ghim kiểu ở đây là chỗ duy
+/// nhất `tsc` với tới được.
+///
+/// Cặp `conversation_id: null` + `turn_saved: false` là ca 3a **đúng như đời
+/// thật**: không tạo được hội thoại thì không có chỗ nào để ghi, nên
+/// `close_turn_record` trả `false`. Tổ hợp ngược lại (`null` + `true`) phía Rust
+/// không dựng ra được, và fixture nói dối là cách một khẳng định xanh lên vì
+/// fixture chứ không vì code.
+const turnResponse = (reply: string): AssistantTurnResponse => ({
   reply,
   proposed_action: null,
   history: [],
   conversation_id: null,
+  turn_saved: false,
 });
 
 function summary(id: string, title: string): AssistantConversationSummary {
   return {
     id,
-    user_id: "u1",
     user_name: "Lễ tân A",
     title,
     updated_at: "2026-08-04T10:00:00+07:00",
@@ -116,7 +127,7 @@ describe("useAssistantStore", () => {
   });
 
   it("gửi kèm ngữ cảnh màn hình trong mỗi lượt", async () => {
-    invokeCommand.mockResolvedValue({ reply: "ok", proposed_action: null, history: [] });
+    invokeCommand.mockResolvedValue({ reply: "ok", proposed_action: null, history: [], turn_saved: true });
 
     await useAssistantStore
       .getState()
@@ -135,6 +146,7 @@ describe("useAssistantStore", () => {
       reply: null,
       proposed_action: sampleAction,
       history: [],
+      turn_saved: true,
     });
 
     await useAssistantStore.getState().send("check-in phòng R1", { route: "rooms" });
@@ -204,6 +216,7 @@ describe("useAssistantStore", () => {
       reply: "Đã tạo thẻ xác nhận.",
       proposed_action: null,
       history: returnedHistory,
+      turn_saved: true,
     });
 
     await useAssistantStore.getState().send("check-in phòng R1", { route: "rooms" });
@@ -325,6 +338,7 @@ describe("useAssistantStore", () => {
         proposed_action: sampleAction,
         history: [],
         conversation_id: null,
+        turn_saved: false,
       });
       await useAssistantStore.getState().send("check-in phòng R1", { route: "rooms" });
 
@@ -484,6 +498,7 @@ describe("useAssistantStore", () => {
         proposed_action: sampleAction,
         history: [{ role: "user", content: "Khách của A, CCCD 001" }],
         conversation_id: "c-a",
+        turn_saved: true,
       });
       await a;
 
@@ -604,6 +619,7 @@ describe("useAssistantStore", () => {
           proposed_action: sampleAction,
           history: [],
           conversation_id: "c-b",
+          turn_saved: true,
         }));
       invokeWriteCommand.mockImplementation(() => checkIn.promise);
 
@@ -621,7 +637,7 @@ describe("useAssistantStore", () => {
       expect(invokeWriteCommand).toHaveBeenCalledTimes(1);
 
       // Lượt CŨ của A bay về muộn.
-      turnA.resolve({ reply: "của A", proposed_action: null, history: [], conversation_id: "c-a" });
+      turnA.resolve({ reply: "của A", proposed_action: null, history: [], conversation_id: "c-a", turn_saved: true });
       await a;
 
       const afterStale = useAssistantStore.getState();
@@ -945,6 +961,7 @@ describe("useAssistantStore", () => {
         proposed_action: sampleAction,
         history: [],
         conversation_id: "c1",
+        turn_saved: true,
       });
 
       await useAssistantStore.getState().send("check-in phòng R1", { route: "rooms" });
@@ -960,6 +977,7 @@ describe("useAssistantStore", () => {
         proposed_action: null,
         history: [],
         conversation_id: "c-moi",
+        turn_saved: true,
       });
 
       await useAssistantStore.getState().send("phòng nào trống", { route: "rooms" });
@@ -977,6 +995,7 @@ describe("useAssistantStore", () => {
         proposed_action: null,
         history: [],
         conversation_id: "c-cu",
+        turn_saved: true,
       });
 
       await useAssistantStore.getState().send("hỏi tiếp", { route: "rooms" });
@@ -996,6 +1015,7 @@ describe("useAssistantStore", () => {
         proposed_action: null,
         history: [],
         conversation_id: null,
+        turn_saved: false,
       });
 
       await useAssistantStore.getState().send("hỏi tiếp", { route: "rooms" });
@@ -1011,6 +1031,7 @@ describe("useAssistantStore", () => {
         proposed_action: null,
         history: [],
         conversation_id: null,
+        turn_saved: false,
       });
 
       await useAssistantStore.getState().send("phòng nào trống", { route: "rooms" });
@@ -1039,6 +1060,7 @@ describe("useAssistantStore", () => {
         proposed_action: sampleAction,
         history: [{ role: "user", content: "Khách Nguyễn Văn A, CCCD 001" }],
         conversation_id: "c-cu",
+        turn_saved: true,
       });
       await turn;
 
@@ -1161,6 +1183,149 @@ describe("useAssistantStore", () => {
 
   // ─── history khi đổi hội thoại — đường rò CCCD xuyên hội thoại ───
 
+  // ── Tín hiệu "không lưu được hội thoại này" (spec dòng 446-447) ──────────
+  //
+  // Tầng TRUYỀN của dây backend→store. Panel có test riêng cho dây store→panel;
+  // cả hai đều cần, vì mỗi nấc là một chỗ ghim cứng được mà nấc kia không thấy.
+  describe("saveFailed — lượt chat không vào được sổ", () => {
+    it("đọc thẳng bit của backend, không suy ra từ conversation_id", async () => {
+      // Ca 3b là ca nguy hiểm: hội thoại vẫn còn nên id trả về **giống hệt**
+      // một lượt thành công. Mọi cách suy diễn ở frontend đều suy ra "đã lưu".
+      invokeCommand.mockResolvedValue({
+        reply: "Còn phòng 201.",
+        proposed_action: null,
+        history: [],
+        conversation_id: "c1",
+        turn_saved: false,
+      });
+
+      await useAssistantStore.getState().send("phòng nào trống", { route: "rooms" });
+
+      const state = useAssistantStore.getState();
+      expect(state.saveFailed).toBe(true);
+      // Và sổ hỏng KHÔNG được lấy mất câu trả lời (spec dòng 422-427).
+      expect(state.conversationId).toBe("c1");
+      expect(state.messages).toContainEqual(
+        expect.objectContaining({ kind: "assistant", text: "Còn phòng 201." }),
+      );
+    });
+
+    it("lượt vào sổ trọn vẹn thì không báo gì", async () => {
+      invokeCommand.mockResolvedValue({
+        reply: "Còn phòng 201.",
+        proposed_action: null,
+        history: [],
+        conversation_id: "c1",
+        turn_saved: true,
+      });
+
+      await useAssistantStore.getState().send("phòng nào trống", { route: "rooms" });
+
+      expect(useAssistantStore.getState().saveFailed).toBe(false);
+    });
+
+    it("không cộng dồn: lượt lưu được xoá tín hiệu của lượt hỏng ngay trước", async () => {
+      invokeCommand
+        .mockResolvedValueOnce({
+          reply: "lượt hỏng",
+          proposed_action: null,
+          history: [],
+          conversation_id: "c1",
+          turn_saved: false,
+        })
+        .mockResolvedValueOnce({
+          reply: "lượt lành",
+          proposed_action: null,
+          history: [],
+          conversation_id: "c1",
+          turn_saved: true,
+        });
+
+      await useAssistantStore.getState().send("câu một", { route: "rooms" });
+      expect(useAssistantStore.getState().saveFailed).toBe(true);
+
+      await useAssistantStore.getState().send("câu hai", { route: "rooms" });
+
+      expect(useAssistantStore.getState().saveFailed).toBe(false);
+    });
+
+    it("tín hiệu tắt ngay khi lượt mới bắt đầu, không đợi kết quả bay về", async () => {
+      // Vế thứ nhất của "không cộng dồn", đo TRONG lúc lệnh còn đang bay: một
+      // dòng nói "không lưu được" treo trên màn hình suốt lượt sau là nói về
+      // một lượt đã qua, và người đọc không có cách nào biết nó nói về lượt nào.
+      const turn = deferred<unknown>();
+      invokeCommand.mockImplementationOnce(() => turn.promise);
+      useAssistantStore.setState({ saveFailed: true });
+
+      const pending = useAssistantStore.getState().send("câu mới", { route: "rooms" });
+
+      expect(useAssistantStore.getState().saveFailed).toBe(false);
+
+      turn.resolve({
+        reply: "ok",
+        proposed_action: null,
+        history: [],
+        conversation_id: "c1",
+        turn_saved: true,
+      });
+      await pending;
+    });
+
+    it("lượt hỏng hẳn không tự dựng ra tín hiệu mất sổ", async () => {
+      // Backend không trả `AssistantTurnResponse` nào thì **không có bit nào để
+      // đọc**. Bịa ra một giá trị ở đây là đúng cái "frontend tự đoán" mà cả
+      // trường `turn_saved` sinh ra để cấm — và lượt này đã có câu lỗi thật.
+      invokeCommand.mockRejectedValue(new Error("Nhà cung cấp AI không phản hồi"));
+
+      await useAssistantStore.getState().send("phòng nào trống", { route: "rooms" });
+
+      const state = useAssistantStore.getState();
+      expect(state.saveFailed).toBe(false);
+      expect(state.error).toBe("Nhà cung cấp AI không phản hồi");
+    });
+
+    it("nhánh stale không đụng tín hiệu của phiên mới", async () => {
+      // Cùng bất biến sở hữu `busy`: một lượt cũ bay về muộn không được nói gì
+      // về việc ghi sổ của phiên đang mở. Ở đây hậu quả là lễ tân đọc một dòng
+      // "không lưu được" về hội thoại của **khách trước**.
+      const turnA = deferred<unknown>();
+      invokeCommand.mockImplementationOnce(() => turnA.promise);
+
+      const a = useAssistantStore.getState().send("A hỏi", { route: "rooms" });
+      useAssistantStore.getState().resetForLogout();
+
+      turnA.resolve({
+        reply: "của A",
+        proposed_action: null,
+        history: [],
+        conversation_id: "c-a",
+        turn_saved: false,
+      });
+      await a;
+
+      expect(useAssistantStore.getState().saveFailed).toBe(false);
+    });
+
+    it("mọi đường dọn phiên đều tắt tín hiệu", async () => {
+      // Ba đường cùng đi qua `emptySession()`. Dòng thông báo nói về một lượt
+      // của phiên vừa đóng; mang nó sang phiên mới là để nó tố một hội thoại
+      // nó không nói về — nặng nhất ở `openConversation`, nơi nó nhắc mất dữ
+      // liệu ngay trên một sổ vừa đọc lên nguyên vẹn từ đĩa.
+      useAssistantStore.setState({ saveFailed: true });
+      useAssistantStore.getState().startNewChat();
+      expect(useAssistantStore.getState().saveFailed).toBe(false);
+
+      useAssistantStore.setState({ saveFailed: true });
+      useAssistantStore.getState().resetForLogout();
+      expect(useAssistantStore.getState().saveFailed).toBe(false);
+
+      useAssistantStore.setState({ saveFailed: true });
+      invokeCommand.mockResolvedValue([storedMessage("m1", "user", "câu cũ")]);
+      await useAssistantStore.getState().openConversation("c1");
+      expect(useAssistantStore.getState().saveFailed).toBe(false);
+    });
+  });
+
   describe("startNewChat và openConversation", () => {
     it("startNewChat() dọn sạch phiên và mint khoá mới", () => {
       useAssistantStore.setState({
@@ -1195,6 +1360,7 @@ describe("useAssistantStore", () => {
         proposed_action: null,
         history: [],
         conversation_id: "c-moi",
+        turn_saved: true,
       });
 
       useAssistantStore.getState().startNewChat();
@@ -1627,6 +1793,7 @@ describe("useAssistantStore", () => {
         proposed_action: null,
         history: [],
         conversation_id: null,
+        turn_saved: false,
       });
       await useAssistantStore.getState().send("của người mới", { route: "rooms" });
 

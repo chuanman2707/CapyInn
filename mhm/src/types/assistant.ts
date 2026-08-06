@@ -46,13 +46,25 @@ export type AssistantTurnResponse = {
   /// không phải "chưa có" — nên nhận `null` mà đang có id thì giữ id cũ, đừng
   /// ghi đè. Xem `AssistantTurnResponse` phía Rust.
   conversation_id: string | null;
+  /// Lượt vừa rồi có vào sổ hội thoại **trọn vẹn** hay không.
+  ///
+  /// **Chỉ backend biết, frontend tuyệt đối không đoán.** Ca 3b (hội thoại đã
+  /// có, lệnh chèn message hỏng) trả về **đúng id cũ** — không một trường nào
+  /// khác trên hợp đồng này phân biệt được nó với một lượt thành công. Đoán ở
+  /// frontend là dựng nguồn sự thật thứ hai cho một câu hỏi chỉ có SQLite trả
+  /// lời được. Xem `close_turn_record` (`commands/assistant.rs`).
+  turn_saved: boolean;
 };
 
 /// Một dòng trong danh sách lịch sử. Cùng hình dạng với
 /// `queries::assistant::conversation_queries::ConversationSummary`.
+///
+/// Cố ý KHÔNG có `user_id`. Bản trước có và **không chỗ nào đọc** — cột hiện tên
+/// người tạo dùng `user_name` (`AssistantHistoryList.tsx`) — nhưng nó vẫn được
+/// ship xuống webview cho cả 50 dòng mỗi lần mở lịch sử. Đã bỏ ở cả hai đầu
+/// cùng lúc; xem doc của `ConversationSummary` phía Rust.
 export type AssistantConversationSummary = {
   id: string;
-  user_id: string;
   user_name: string;
   title: string;
   updated_at: string;

@@ -43,8 +43,28 @@ use sqlx::{FromRow, Pool, Sqlite};
 /// Danh sách lịch sử: 50 hội thoại mới nhất.
 pub const CONVERSATION_PAGE: i64 = 50;
 
-/// Mở một hội thoại: 100 tin nhắn mới nhất. `pub` để tầng trên lấy đúng con số
-/// cho dòng "Chỉ 100 tin gần nhất được dùng làm ngữ cảnh" thay vì gõ lại 100.
+/// Mở một hội thoại: 100 tin nhắn mới nhất.
+///
+/// **Không có caller nào ngoài module này** (đo bằng
+/// `grep -rn MESSAGE_WINDOW src-tauri/src/`: chỉ chính file này và một câu nhắc
+/// trong doc của `conversation_service`). Bản chú thích cũ nói `pub` là để "tầng
+/// trên lấy đúng con số thay vì gõ lại 100" — sai cả hai vế, và sai theo hướng
+/// nguy hiểm: nó bảo người đọc rằng con số ĐANG được chia sẻ, nên hạ trần ở đây
+/// là đủ.
+///
+/// Sự thật là nợ, ghi ra chứ không giấu: chỗ dựng dòng "Chỉ 100 tin gần nhất
+/// được dùng làm ngữ cảnh" nằm ở **frontend**, và nó **gõ lại 100**
+/// (`mhm/src/types/assistant.ts:76`). Hai con số ở hai ngôn ngữ, không có gì nối
+/// chúng, nên đổi trần ở đây mà quên bên kia thì lễ tân đọc một câu sai về đúng
+/// dữ liệu khách của mình. Nối thật được thì phải sinh hằng số dùng chung lúc
+/// build — cùng đường với `shared/error-codes.json`, và là một thay đổi riêng.
+/// Trong lúc chờ, cả hai đầu đều có test ghim con số (`the_ceilings_are_the_numbers_the_spec_pinned`
+/// ở đây, và bài đo `MESSAGE_WINDOW` phía store), nên lệch thì đỏ một bên.
+///
+/// `pub` giữ nguyên vì `list_conversations`/`get_messages` là `pub` và con số
+/// này là một phần hợp đồng đọc của chúng — nhưng nó là hằng số **của module
+/// này**, không phải một tham số cho tầng trên truyền vào (spec dòng 340 chốt
+/// trần "cứng ở tầng query").
 pub const MESSAGE_WINDOW: i64 = 100;
 
 /// Ai được thấy những hội thoại nào.
@@ -57,10 +77,19 @@ pub enum ConversationScope<'a> {
     EveryUser,
 }
 
+/// Một dòng trong danh sách lịch sử — và **mọi trường ở đây đều đi thẳng xuống
+/// webview**, cho cả 50 dòng, mỗi lần lễ tân mở màn hình lịch sử.
+///
+/// Cố ý KHÔNG có `user_id`. Bản trước có, và không một chỗ nào ở frontend đọc
+/// tới: cột hiện tên người tạo dùng `user_name`
+/// (`mhm/src/components/assistant/AssistantHistoryList.tsx`), còn phía Rust thì
+/// `grep -rn '\.user_id'` không ra một chỗ đọc nào. Tức nó là dữ liệu chết —
+/// nhưng là dữ liệu chết **đang được ship**: id nhân viên của cả ca trực nằm sẵn
+/// trong bộ nhớ trình duyệt cho bất cứ script nào chạy trong webview đọc, đổi
+/// lại đúng con số không. Trường ít nhất là trường không rò được.
 #[derive(Debug, Clone, Serialize, FromRow)]
 pub struct ConversationSummary {
     pub id: String,
-    pub user_id: String,
     pub user_name: String,
     pub title: String,
     pub updated_at: String,
@@ -93,7 +122,6 @@ pub async fn list_conversations(
         ConversationScope::OwnedBy(user_id) => {
             sqlx::query_as::<_, ConversationSummary>(
                 "SELECT c.id            AS id,
-                        c.user_id       AS user_id,
                         COALESCE(u.name, '(tài khoản đã xoá)') AS user_name,
                         c.title         AS title,
                         c.updated_at    AS updated_at
@@ -111,7 +139,6 @@ pub async fn list_conversations(
         ConversationScope::EveryUser => {
             sqlx::query_as::<_, ConversationSummary>(
                 "SELECT c.id            AS id,
-                        c.user_id       AS user_id,
                         COALESCE(u.name, '(tài khoản đã xoá)') AS user_name,
                         c.title         AS title,
                         c.updated_at    AS updated_at

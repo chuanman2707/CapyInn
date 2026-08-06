@@ -44,6 +44,7 @@ export function AssistantPanel() {
   const pendingActionKey = useAssistantStore((state) => state.pendingActionKey);
   const conversationKey = useAssistantStore((state) => state.conversationKey);
   const historyNotice = useAssistantStore((state) => state.historyNotice);
+  const saveFailed = useAssistantStore((state) => state.saveFailed);
   const error = useAssistantStore((state) => state.error);
   const conversations = useAssistantStore((state) => state.conversations);
   const conversationId = useAssistantStore((state) => state.conversationId);
@@ -325,12 +326,18 @@ export function AssistantPanel() {
         </div>
       )}
 
-      {/* Lỗi của store. Nằm NGOÀI máy chuyển view vì năm trong sáu chỗ đặt
-          `error` không đi qua khung chat: `loadConversations`, `openConversation`
-          và hai lệnh xoá đều nổ trong lúc lễ tân đang đứng ở màn hình lịch sử.
-          Vẽ nó trong khung chat thôi là để y nguyên cái câm mà nó sinh ra để
-          chữa — nặng nhất là `loadConversations` hỏng: danh sách rỗng, và panel
-          nói "Chưa có hội thoại nào.", một câu SAI SỰ THẬT về dữ liệu khách.
+      {/* Lỗi của store. Nằm NGOÀI máy chuyển view vì **phần lớn** đường đặt
+          `error` không đi qua khung chat: `loadConversations`,
+          `openConversation` và hai lệnh xoá đều nổ trong lúc lễ tân đang đứng ở
+          màn hình lịch sử; chỉ `send()` và `approve()` là của khung chat. Vẽ nó
+          trong khung chat thôi là để y nguyên cái câm mà nó sinh ra để chữa —
+          nặng nhất là `loadConversations` hỏng: danh sách rỗng, và panel nói
+          "Chưa có hội thoại nào.", một câu SAI SỰ THẬT về dữ liệu khách.
+
+          Cố ý KHÔNG đếm số chỗ ở đây. Bản trước viết "năm trong sáu chỗ" và con
+          số đã trôi mất trong vòng vài commit (nay `set({… error …})` nhiều hơn
+          gấp đôi) trong khi kết luận thì không đổi. Một con số trong chú thích
+          là một thứ phải bảo trì mà không gì nhắc khi nó sai.
 
           `role="alert"` chứ không phải `role="status"` như `historyNotice`: đây
           là hỏng việc, không phải tin phụ trợ. Nó cũng khác `role="alertdialog"`
@@ -370,7 +377,9 @@ export function AssistantPanel() {
                 `role="status"` vừa đúng nghĩa (tin phụ trợ, không tới mức cảnh báo)
                 vừa cho test khẳng định được "KHÔNG có viên nhắc nào": chỉ dò chữ
                 thì một bản bọc-luôn-vẽ — viên nền vàng rỗng thường trực — vẫn lọt,
-                vì jsdom không thấy nền. Cùng idiom với ProposedActionCard.tsx:76. */}
+                vì jsdom không thấy nền. Cùng idiom với viên `Cảnh báo từ PMS`
+                trong `ProposedActionCard.tsx` — trỏ bằng tên, không bằng số
+                dòng, vì số dòng trôi mà không gì nhắc. */}
             {historyNotice && (
               <p
                 role="status"
@@ -397,6 +406,46 @@ export function AssistantPanel() {
                 {message.text}
               </p>
             ))}
+
+            {/* Spec dòng 446-447. Nằm NGAY DƯỚI câu trả lời nó nói về, và nằm
+                TRONG vùng cuộn — cố ý không ghim cứng như viên `error`.
+
+                Hai lý do. (1) Nó nói về một LƯỢT cụ thể chứ không về trạng thái
+                của cả panel; ghim nó lên đầu là tách nó khỏi thứ nó đang tố.
+                (2) Phần cao cố định của panel đã là ~390px khi mọi thứ cùng
+                hiện (header 88 + hộp lớp 1 ~120 + viên lỗi ~36 + composer 143),
+                và vùng chat co về 0 là con đường đẩy ô nhập xuống dưới đáy. Thêm
+                một viên `shrink-0` nữa là kéo ngưỡng ấy gần lại, mà jsdom không
+                tính layout nên không test nào bắt được — đúng loại rủi ro chỉ QA
+                tay mới thấy.
+
+                `role="status"` chứ không `role="alert"` như viên `error`, và đó
+                là một lựa chọn về nghĩa chứ không phải sao chép: `error` nghĩa
+                là "việc anh vừa làm HỎNG, làm lại đi"; dòng này thì ngược lại —
+                lượt chat đã XONG, câu trả lời đang nằm ngay trên nó, chỉ cái sổ
+                là không giữ được. Spec dòng 422-427 chốt rõ "không chặn lượt
+                chat, trợ lý vẫn trả lời", dẫn lại bài học `lib.rs:136-143`: tiện
+                ích hỏng không được lấy mất công cụ của người dùng. `alert` là
+                assertive — nó cắt ngang trình đọc màn hình đúng lúc câu trả lời
+                đang được xướng lên, tức lấy mất đúng cái thứ lễ tân vừa hỏi.
+
+                Bọc nằm TRONG câu điều kiện, không được bọc-luôn-vẽ-nội-dung-
+                có-điều-kiện — bẫy mà `historyNotice` và `ProposedActionCard`
+                đều đã dính: một viên nền vàng RỖNG thường trực vẫn làm mọi test
+                dò chữ xanh, vì jsdom không nhìn thấy nền. `role="status"` là
+                thứ cho test đếm được số viên đang có, tức khẳng định được
+                "KHÔNG có viên nào" — `name` thì không dùng được, vai `status`
+                không lấy tên truy cập từ nội dung (đã đo: `getByRole("status",
+                { name })` không khớp ngay cả với `historyNotice`). */}
+            {saveFailed && (
+              <p
+                role="status"
+                aria-live="polite"
+                className="rounded-xl bg-amber-50 px-3 py-2 text-[11px] text-amber-800"
+              >
+                Không lưu được hội thoại này.
+              </p>
+            )}
 
             {busy && <p className="text-xs text-brand-muted">Đang tra dữ liệu…</p>}
 

@@ -73,7 +73,13 @@ export function ProposedActionCard({
           điều-kiện: một viên nền vàng RỖNG thường trực vẫn làm mọi test dò chữ
           xanh, vì jsdom không nhìn thấy nền. `aria-label` ở đây không phải
           trang trí — nó là thứ duy nhất cho test khẳng định được "KHÔNG có viên
-          cảnh báo nào". Cùng bẫy mà `historyNotice` đã dính (AssistantPanel.tsx:346). */}
+          cảnh báo nào". Cùng bẫy mà `historyNotice` đã dính — xem viên
+          `{historyNotice && …}` trong `AssistantPanel.tsx`.
+
+          Trỏ bằng TÊN chứ không bằng số dòng: bản trước ghi
+          `AssistantPanel.tsx:346`, mà dòng 346 nay là viên `role="alert"` của
+          `error` — một thứ khác hẳn (báo hỏng việc, không phải tin phụ trợ).
+          Người đọc đi theo con số ấy học nhầm bài học rồi bê `alert` sang đây. */}
       {action.warnings.length > 0 && (
         <ul aria-label="Cảnh báo từ PMS" className="mt-3 space-y-1 rounded-lg bg-amber-50 p-3">
           {action.warnings.map((warning, index) => (

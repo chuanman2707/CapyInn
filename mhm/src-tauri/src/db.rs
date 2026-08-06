@@ -1949,4 +1949,79 @@ mod tests {
 
         assert_eq!(remaining, 0, "xoá hội thoại phải kéo tin nhắn con đi theo");
     }
+
+    /// Spec dòng 633. Và spec dòng 252 nói rõ vì sao nó phải là một **test**:
+    /// "bảo đảm **cấu trúc**, không phải bảo đảm bằng kỷ luật".
+    ///
+    /// Kỷ luật ở đây là một câu chú thích trong `migrate_v27_assistant_conversations`
+    /// ("Đừng thêm cột JSON vào đây"). Chú thích không đỏ. Cái nó canh thì đắt:
+    /// `ProposedAction` gồm `{ kind, payload, display, preview, warnings,
+    /// built_at_ms }`, và `approve()` cần **đúng** `action.payload` để bắn
+    /// `check_in`. Chừng nào database không giữ nổi `payload` thì không tồn tại
+    /// đường nào duyệt lại một thẻ nhận phòng từ lịch sử — tiền thật, và không
+    /// dựng lại được từ một hàng chỉ có chữ. Thêm một cột JSON là mở lại đúng
+    /// đường ấy, im lặng; còn hạn 5 phút (`built_at_ms`) thì hiện chỉ được ép ở
+    /// frontend nên nó cũng không chặn hộ.
+    ///
+    /// **Hai khẳng định, cố ý không gộp.**
+    ///
+    /// Khẳng định thứ nhất là tripwire theo TÊN: `payload` và `built_at_ms`
+    /// không được xuất hiện dù dưới hình dạng nào. Nó sống sót cả khi ai đó cập
+    /// nhật danh sách bên dưới — đúng bài học Task 4, nơi một hàng rào bị vô
+    /// hiệu chỉ bằng cách sửa hai chỗ cùng lúc.
+    ///
+    /// Khẳng định thứ hai ghim **toàn bộ** danh sách cột, vì một cột tên
+    /// `action_json` lách được tripwire kia mà vẫn chứa đủ thứ để duyệt lại. Nó
+    /// đỏ với mọi cột mới, kể cả cột vô hại — đó là chủ ý: thêm cột vào hai bảng
+    /// này phải là một quyết định có người đọc, không phải một dòng đi lọt trong
+    /// một migration khác.
+    #[tokio::test]
+    async fn v27_tables_have_no_column_that_could_hold_a_replayable_action() {
+        let pool = test_pool().await;
+        run_migrations(&pool).await.expect("chạy migration");
+
+        for (table, expected) in [
+            (
+                "assistant_conversations",
+                ["id", "user_id", "title", "created_at", "updated_at"].as_slice(),
+            ),
+            (
+                "assistant_messages",
+                ["id", "conversation_id", "kind", "text", "created_at"].as_slice(),
+            ),
+        ] {
+            let columns: Vec<String> = sqlx::query_scalar::<_, String>(&format!(
+                "SELECT name FROM pragma_table_info('{table}') ORDER BY cid"
+            ))
+            .fetch_all(&pool)
+            .await
+            .expect("đọc pragma_table_info");
+
+            assert!(
+                !columns.is_empty(),
+                "bảng `{table}` không tồn tại sau migration — `pragma_table_info` \
+                 trả RỖNG cho một bảng không có, nên hai khẳng định dưới đây sẽ \
+                 xanh giả nếu không chặn ở đây"
+            );
+
+            for column in &columns {
+                let lowered = column.to_lowercase();
+                assert!(
+                    !lowered.contains("payload") && !lowered.contains("built_at_ms"),
+                    "`{table}.{column}` giữ được dữ liệu để DUYỆT LẠI một thẻ \
+                     nhận phòng từ lịch sử. Bảng này cố ý không chứa nổi \
+                     `payload`/`built_at_ms` (spec dòng 246-252); mở lại đường ấy \
+                     là mở lại một lệnh nhận phòng thật, tiền thật, từ một bản \
+                     ghi cũ"
+                );
+            }
+
+            assert_eq!(
+                columns, expected,
+                "cột của `{table}` vừa đổi. Đây không phải chỗ sed cho xanh: hai \
+                 bảng này chỉ được giữ CHỮ. Muốn thêm cột thì đọc lại spec dòng \
+                 246-252 trước, rồi mới sửa danh sách này"
+            );
+        }
+    }
 }

@@ -585,9 +585,22 @@ async fn the_migrated_special_dates_table_matches_what_the_code_assumes() {
 /// schema_version"`), đừng tin con số ai đó nói miệng. Chọn số cao hơn tất cả;
 /// bỏ trống vài số là vô hại, trùng số thì không.
 ///
-/// Đã khảo sát lại trước khi dời 26 → 27 (nhánh `feat/assistant-ui-airtable`,
-/// task 1 — sổ hội thoại trợ lý quầy): mọi ref (`main` và các nhánh khác) đều
-/// ở 26, DB thật của khách sạn cũng 26.
+/// Khảo sát lúc chốt số **ngày 2026-08-04** (nhánh `feat/assistant-ui-airtable`,
+/// task 1 — sổ hội thoại trợ lý quầy): mọi ref (`main` và các nhánh khác) đều ở
+/// 26, DB thật của khách sạn cũng 26.
+///
+/// Đó là **ảnh chụp tại thời điểm ấy, KHÔNG phải giấy thông hành.** Người merge
+/// nhánh này PHẢI chạy lại đúng cuộc khảo sát vừa mô tả ở trên, ngay trước khi
+/// merge. Lúc chốt số vẫn còn nhánh anh em đang sống cũng ở 26, nên hoàn toàn có
+/// thể một nhánh khác chiếm mất 27 trước — và va chạm đó im lặng: test này chạy
+/// trên DB rỗng nên vẫn xanh, chỉ máy khách sạn mới chết.
+///
+/// Viết trùng ý với doc-comment của `LATEST_SCHEMA_VERSION` (`db.rs:180-186`) là
+/// cố ý. Bản cũ ở đây viết thì quá khứ hoàn thành, không ngày tháng, không đòi
+/// chạy lại — tức nó **miễn** cho người merge đúng cái bước mà 25 dòng ngay phía
+/// trên tồn tại để bắt buộc, và miễn ngay bên trong con canary sinh ra để ép làm
+/// bước ấy. Hai file khi đó nói ngược nhau, mà repo đã ship lỗi trùng số **hai
+/// lần** vì đúng chế độ hỏng này.
 #[tokio::test]
 async fn the_schema_version_is_the_one_this_branch_deliberately_claimed() {
     let db = migrated_db("schema-version").await;
