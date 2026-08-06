@@ -26,6 +26,27 @@ pub struct ProposedAction {
 pub enum DraftOutcome {
     Ready(Box<ProposedAction>),
     MissingFields(Vec<String>),
+    /// Người dùng nêu một ngày nhận phòng **không phải hôm nay**. Không dựng
+    /// thẻ: lệnh `check_in` đóng dấu `Local::now()` lúc bấm nút, nên một thẻ
+    /// nhận phòng cho ngày khác là một thẻ nói dối.
+    ///
+    /// `requested` giữ **nguyên văn** chuỗi model gửi lên, để câu trả về cho
+    /// model nhắc lại đúng ngày người dùng đã nêu chứ không phải một ngày đã
+    /// bị chuẩn hoá lại.
+    WrongDateForCheckIn {
+        requested: String,
+        is_future: bool,
+    },
+    /// `check_in_date` có mặt nhưng không đọc được thành một ngày lịch (model
+    /// gửi thẳng "ngày 8" chẳng hạn).
+    ///
+    /// Tách khỏi `WrongDateForCheckIn` chứ không gộp vào với một `is_future`
+    /// đoán bừa: gộp thì "ngày 8" sẽ bị đoán là quá khứ rồi đẩy sang
+    /// `draft_backfill`, tức ghi bù cho một kỳ ở còn chưa xảy ra. Đoán sai
+    /// hướng còn tệ hơn không đoán.
+    UnreadableCheckInDate {
+        requested: String,
+    },
 }
 
 /// Đổi số đêm thành ngày trả phòng, theo lịch địa phương.
@@ -53,13 +74,55 @@ pub fn check_out_date_from_nights(check_in: &str, nights: i32) -> CommandResult<
     Ok(end.format("%Y-%m-%d").to_string())
 }
 
+/// `YYYY-MM-DD` → `DD/MM/YYYY`, cách người Việt đọc một ngày.
+///
+/// Không đọc được thì trả nguyên chuỗi vào. Thẻ thà hiện một chuỗi lạ còn hơn
+/// hiện một ngày bịa ra hoặc nuốt luôn dòng ngày — nuốt im lặng chính là lớp
+/// lỗi cả đợt này đang sửa.
+fn format_vn_date(date: &str) -> String {
+    NaiveDate::parse_from_str(date, "%Y-%m-%d")
+        .map(|value| value.format("%d/%m/%Y").to_string())
+        .unwrap_or_else(|_| date.to_string())
+}
+
+/// `check_in_date` / `check_out_date` là **khoảng ngày đã dùng để hỏi giá**,
+/// không phải hai trường mới của payload — xem ghi chú trong thân hàm.
 pub fn build_check_in_display(
     payload: &CheckInRequest,
     preview: &Value,
+    check_in_date: &str,
+    check_out_date: &str,
 ) -> BTreeMap<String, String> {
     let mut display = BTreeMap::new();
 
     display.insert("room_id".to_string(), payload.room_id.clone());
+
+    // Hai dòng ngày là thứ đã thiếu khi con bug 06/08 xảy ra: thẻ hiện `nights`
+    // nhưng không hiện ngày nào, nên lễ tân đọc kỹ tới đâu cũng không có gì để
+    // đối chiếu với câu mình vừa gõ ("checkin 8 out 9"). Một cái thẻ ghi sai
+    // ngày trông y hệt một cái thẻ ghi đúng.
+    //
+    // Hai giá trị này **dẫn xuất**, không nằm trong payload — `CheckInRequest`
+    // không có trường ngày nào và giữ nguyên đúng bảy trường như cũ.
+    //
+    // Vì sao điều đó KHÔNG vi phạm bất biến "display không bỏ sót trường
+    // payload": bất biến ấy cấm **bỏ bớt**, không cấm **thêm**. Nó đọc theo
+    // chiều payload → display (mỗi trường payload phải có mặt trên thẻ), nên
+    // một khoá thừa trên thẻ không làm nó sai — xem
+    // `the_card_shows_every_field_of_the_payload`: nó duyệt khoá của *payload*
+    // rồi tìm trên thẻ, chứ không duyệt khoá của *display* rồi tìm trong
+    // payload. Thêm ≠ bớt.
+    //
+    // Nhãn "Hôm nay" viết cứng được là nhờ nhánh từ chối trong
+    // `build_check_in_draft`: thẻ nhận phòng chỉ dựng được khi ngày nhận đúng
+    // là `now_local_date`. Ai gỡ nhánh ấy thì phải quay lại sửa dòng này —
+    // `a_draft_for_tomorrow_is_refused_and_points_at_the_reservation_tool` là
+    // chỗ báo động.
+    display.insert(
+        "check_in_date".to_string(),
+        format!("Hôm nay, {}", format_vn_date(check_in_date)),
+    );
+    display.insert("check_out_date".to_string(), format_vn_date(check_out_date));
 
     // Khách: một dòng đếm đầu người, rồi **mỗi khách một dòng riêng mang mọi
     // trường đã điền** — không phải chỉ họ tên ghép bằng dấu phẩy.
@@ -226,6 +289,52 @@ pub async fn build_check_in_draft(
         missing.push("nights".to_string());
     }
 
+    // ─── Ngày nhận phòng: soi ô ngày trước cả việc thiếu trường ───
+    //
+    // `check_in` đóng dấu `Local::now()` lúc bấm nút (`stay_lifecycle.rs`), nên
+    // thẻ nhận phòng chỉ đúng cho HÔM NAY. Ngày 06/08/2026 lễ tân gõ "checkin 8
+    // out 9 tháng 8": model không có ô nào để đặt số 8 vào nên bỏ luôn, thẻ ghi
+    // ngày hôm nay, phòng 4B bị khoá khỏi tra phòng trống hai ngày và một đêm
+    // chưa xảy ra bị thu 400.000₫. Giờ có ô, và đây là chỗ soi cái ô đó.
+    //
+    // Kiểm **trước** `missing` là cố ý: chọn nhầm tool là lỗi to hơn thiếu một
+    // trường. Hỏi lại tên khách cho một cái thẻ sẽ không bao giờ dựng được vừa
+    // tiêu mất một vòng trong ngân sách `MAX_TOOL_ROUNDS` (4), vừa xác nhận
+    // ngược cho model rằng `draft_check_in` là đường đúng — nó chỉ cần điền nốt
+    // là xong.
+    if let Some(requested) = args
+        .get("check_in_date")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        // So theo NGÀY LỊCH, không so chuỗi và không so timestamp. "Hôm nay" là
+        // một ngày, không phải một thời điểm; và `2026-8-6` với `2026-08-06` là
+        // cùng một ngày, một dấu 0 thiếu không được biến thành lời từ chối.
+        let today = NaiveDate::parse_from_str(now_local_date, "%Y-%m-%d").map_err(|_| {
+            CommandError::system(
+                codes::SYSTEM_INTERNAL_ERROR,
+                format!("Ngày hôm nay `{now_local_date}` không đọc được."),
+            )
+        })?;
+
+        let Ok(requested_date) = NaiveDate::parse_from_str(requested, "%Y-%m-%d") else {
+            // Không đoán, và tuyệt đối không rơi về hôm nay. "ngày 8" có thể là
+            // mùng 8 tháng này, tháng sau hay năm sau — rơi về hôm nay đúng là
+            // con bug này.
+            return Ok(DraftOutcome::UnreadableCheckInDate {
+                requested: requested.to_string(),
+            });
+        };
+
+        if requested_date != today {
+            return Ok(DraftOutcome::WrongDateForCheckIn {
+                requested: requested.to_string(),
+                is_future: requested_date > today,
+            });
+        }
+    }
+
     if !missing.is_empty() {
         return Ok(DraftOutcome::MissingFields(missing));
     }
@@ -289,7 +398,9 @@ pub async fn build_check_in_draft(
     };
 
     let warnings = build_warnings(pool, &room_id, &payload.guests).await?;
-    let display = build_check_in_display(&payload, &preview);
+    // Đúng khoảng ngày vừa dùng để hỏi giá — tiền trên thẻ và ngày trên thẻ
+    // phải nói về cùng một kỳ ở, không phải hai nguồn sự thật tính riêng.
+    let display = build_check_in_display(&payload, &preview, now_local_date, &check_out);
 
     Ok(DraftOutcome::Ready(Box::new(ProposedAction {
         kind: CHECK_IN_ACTION_KIND.to_string(),
@@ -454,7 +565,7 @@ mod tests {
         let payload = sample_payload();
         let preview = serde_json::json!({ "total": 700_000 });
 
-        let display = build_check_in_display(&payload, &preview);
+        let display = build_check_in_display(&payload, &preview, "2026-08-06", "2026-08-08");
 
         let encoded = serde_json::to_value(&payload).expect("payload phải serialize được");
         let fields = encoded.as_object().expect("payload là một object");
@@ -483,7 +594,7 @@ mod tests {
         let payload = sample_payload();
         let preview = serde_json::json!({ "total": 700_000 });
 
-        let display = build_check_in_display(&payload, &preview);
+        let display = build_check_in_display(&payload, &preview, "2026-08-06", "2026-08-08");
 
         let first = display
             .get("Khách 1")
@@ -517,7 +628,12 @@ mod tests {
             ..sample_payload()
         };
 
-        let display = build_check_in_display(&payload, &serde_json::json!({ "total": 0 }));
+        let display = build_check_in_display(
+            &payload,
+            &serde_json::json!({ "total": 0 }),
+            "2026-08-06",
+            "2026-08-08",
+        );
 
         let order: Vec<&str> = display
             .keys()
@@ -533,12 +649,36 @@ mod tests {
         let payload = sample_payload();
         let preview = serde_json::json!({ "total": 700_000 });
 
-        let display = build_check_in_display(&payload, &preview);
+        let display = build_check_in_display(&payload, &preview, "2026-08-06", "2026-08-08");
 
         assert!(display
             .get("total")
             .expect("phải có dòng tổng tiền")
             .contains("700"));
+    }
+
+    /// Lễ tân phải đối chiếu được ngày trên thẻ với câu mình vừa gõ, **trước**
+    /// khi bấm Đồng ý. Đây đúng là thứ đã thiếu hôm 06/08: thẻ hiện `nights`
+    /// nhưng không hiện ngày nào, nên "checkin 8 out 9" và một thẻ ghi hôm nay
+    /// nhìn giống hệt nhau.
+    ///
+    /// Định dạng Việt Nam `DD/MM/YYYY`, không phải `YYYY-MM-DD` của máy: người
+    /// đọc thẻ là người, và `08/06` với `06/08` là hai ngày khác nhau.
+    #[test]
+    fn the_card_shows_the_stay_dates_in_vietnamese_format() {
+        let payload = sample_payload();
+        let preview = serde_json::json!({ "total": 700_000 });
+
+        let display = build_check_in_display(&payload, &preview, "2026-08-06", "2026-08-07");
+
+        assert_eq!(
+            display.get("check_in_date").map(String::as_str),
+            Some("Hôm nay, 06/08/2026")
+        );
+        assert_eq!(
+            display.get("check_out_date").map(String::as_str),
+            Some("07/08/2026")
+        );
     }
 
     #[tokio::test]
@@ -955,6 +1095,292 @@ mod tests {
             warning.contains("làm tay"),
             "cảnh báo phải nói rõ form làm tay không nhận: {warning}"
         );
+    }
+
+    // ─── Ô ngày nhận phòng, và luật từ chối ───
+    //
+    // Ngày 06/08/2026 lễ tân gõ "có booking mới phòng 4B, checkin 8 out 9 tháng
+    // 8". Trợ lý nhận phòng ngay lúc đó — `check_in_at` trùng `created_at` tới
+    // micro-giây. Ngày 8 không đi tới đâu cả.
+    //
+    // Mọi test dưới đây **seed phòng thật**, kể cả những test chỉ mong một lời
+    // từ chối. Phòng không tồn tại thì preview hỏng và test vẫn đỏ ngay cả khi
+    // luật ngày bị gỡ sạch — đỏ vì `AGENT_PREVIEW_UNAVAILABLE`, tức đỏ vì một
+    // vế khác và không canh gì. Có phòng thì nhánh ngày là thứ **duy nhất**
+    // đứng giữa tool call và một cái thẻ.
+
+    /// Ngày nhận đúng hôm nay: đường thường, thẻ dựng bình thường, và hai dòng
+    /// ngày trên thẻ nói đúng kỳ ở vừa dùng để hỏi giá.
+    #[tokio::test]
+    async fn a_draft_for_today_still_builds_the_card() {
+        let pool = test_pool().await;
+        seed_room(
+            &pool,
+            "room-today",
+            "P801",
+            "Standard Room",
+            400_000,
+            "vacant",
+        )
+        .await;
+
+        let args = serde_json::json!({
+            "room_id": "room-today",
+            "nights": 2,
+            "check_in_date": "2026-06-01",
+            "guests": [{ "full_name": "Nguyễn Văn Nam", "doc_number": "079201001234" }]
+        });
+
+        let outcome = build_check_in_draft(&pool, &args, "2026-06-01")
+            .await
+            .expect("ngày nhận đúng hôm nay không phải lỗi");
+
+        let action = match outcome {
+            DraftOutcome::Ready(action) => action,
+            other => panic!("mong đợi Ready, nhận {other:?}"),
+        };
+        assert_eq!(action.kind, CHECK_IN_ACTION_KIND);
+        assert_eq!(
+            action.display.get("check_in_date").map(String::as_str),
+            Some("Hôm nay, 01/06/2026")
+        );
+        assert_eq!(
+            action.display.get("check_out_date").map(String::as_str),
+            Some("03/06/2026")
+        );
+    }
+
+    /// Đường cũ không gãy. Khách đứng ở quầy và không ai nêu ngày nào là ca
+    /// thường nhất của một quầy lễ tân; một trường tuỳ chọn không được biến nó
+    /// thành một vòng `missing_fields` thừa trong ngân sách 4 vòng.
+    #[tokio::test]
+    async fn a_draft_without_a_date_still_builds_the_card_the_old_way() {
+        let pool = test_pool().await;
+        seed_room(
+            &pool,
+            "room-nodate",
+            "P802",
+            "Standard Room",
+            400_000,
+            "vacant",
+        )
+        .await;
+
+        // Không có `check_in_date` — đúng hình dạng tool call trước bản vá này.
+        let args = serde_json::json!({
+            "room_id": "room-nodate",
+            "nights": 2,
+            "guests": [{ "full_name": "Nguyễn Văn Nam", "doc_number": "079201001234" }]
+        });
+
+        let outcome = build_check_in_draft(&pool, &args, "2026-06-01")
+            .await
+            .expect("không nêu ngày là ca hợp lệ");
+
+        let action = match outcome {
+            DraftOutcome::Ready(action) => action,
+            other => panic!("mong đợi Ready, nhận {other:?}"),
+        };
+        // Vắng ngày thì thẻ vẫn phải nói ra nó đang nhận phòng cho hôm nay —
+        // im lặng chính là chỗ con bug cũ trốn được.
+        assert_eq!(
+            action.display.get("check_in_date").map(String::as_str),
+            Some("Hôm nay, 01/06/2026")
+        );
+    }
+
+    /// Chiều tương lai. Ngày mai **không** dựng được thẻ nhận phòng, và ngày
+    /// người dùng nêu đi ra nguyên văn để vòng lặp nhắc lại đúng nó cho model
+    /// khi chỉ sang `draft_reserve`.
+    #[tokio::test]
+    async fn a_draft_for_tomorrow_is_refused_and_points_at_the_reservation_tool() {
+        let pool = test_pool().await;
+        seed_room(
+            &pool,
+            "room-tomorrow",
+            "P803",
+            "Standard Room",
+            400_000,
+            "vacant",
+        )
+        .await;
+
+        let args = serde_json::json!({
+            "room_id": "room-tomorrow",
+            "nights": 1,
+            "check_in_date": "2026-06-02",
+            "guests": [{ "full_name": "Nguyễn Văn Nam", "doc_number": "079201001234" }]
+        });
+
+        let outcome = build_check_in_draft(&pool, &args, "2026-06-01")
+            .await
+            .expect("ngày tương lai không phải lỗi hệ thống");
+
+        // Nhánh `Ready` panic ở đây: không có `ProposedAction` nào được dựng.
+        match outcome {
+            DraftOutcome::WrongDateForCheckIn {
+                requested,
+                is_future,
+            } => {
+                assert_eq!(requested, "2026-06-02");
+                assert!(is_future, "ngày mai phải được nhận ra là tương lai");
+            }
+            other => panic!("mong đợi WrongDateForCheckIn, nhận {other:?}"),
+        }
+    }
+
+    /// Chiều quá khứ — cấm ngang chiều tương lai. Lấy hôm nay thay cho hôm qua
+    /// cũng là thay một ngày người dùng đã nêu, và nó ghi sai luôn cả số đêm đã
+    /// ở thật.
+    #[tokio::test]
+    async fn a_draft_for_yesterday_is_refused_as_a_past_date() {
+        let pool = test_pool().await;
+        seed_room(
+            &pool,
+            "room-yesterday",
+            "P804",
+            "Standard Room",
+            400_000,
+            "vacant",
+        )
+        .await;
+
+        let args = serde_json::json!({
+            "room_id": "room-yesterday",
+            "nights": 1,
+            "check_in_date": "2026-05-31",
+            "guests": [{ "full_name": "Nguyễn Văn Nam", "doc_number": "079201001234" }]
+        });
+
+        let outcome = build_check_in_draft(&pool, &args, "2026-06-01")
+            .await
+            .expect("ngày quá khứ không phải lỗi hệ thống");
+
+        match outcome {
+            DraftOutcome::WrongDateForCheckIn {
+                requested,
+                is_future,
+            } => {
+                assert_eq!(requested, "2026-05-31");
+                assert!(!is_future, "hôm qua không được coi là tương lai");
+            }
+            other => panic!("mong đợi WrongDateForCheckIn, nhận {other:?}"),
+        }
+    }
+
+    /// "ngày 8" là đúng chuỗi model có thể gửi khi nó chép lại lời lễ tân. Đọc
+    /// không ra thì từ chối — và **không** rơi về hôm nay.
+    ///
+    /// Cũng ghim luôn việc nó không bị gộp vào `WrongDateForCheckIn`: gộp thì
+    /// `is_future` phải đoán, đoán "quá khứ" sẽ đẩy sang `draft_backfill`, tức
+    /// ghi bù cho một kỳ ở còn chưa xảy ra.
+    #[tokio::test]
+    async fn an_unreadable_date_is_refused_instead_of_falling_back_to_today() {
+        let pool = test_pool().await;
+        seed_room(
+            &pool,
+            "room-junkdate",
+            "P805",
+            "Standard Room",
+            400_000,
+            "vacant",
+        )
+        .await;
+
+        let args = serde_json::json!({
+            "room_id": "room-junkdate",
+            "nights": 1,
+            "check_in_date": "ngày 8",
+            "guests": [{ "full_name": "Nguyễn Văn Nam", "doc_number": "079201001234" }]
+        });
+
+        let outcome = build_check_in_draft(&pool, &args, "2026-06-01")
+            .await
+            .expect("ngày rác không phải lỗi hệ thống");
+
+        match outcome {
+            DraftOutcome::UnreadableCheckInDate { requested } => {
+                assert_eq!(requested, "ngày 8");
+            }
+            other => panic!("mong đợi UnreadableCheckInDate, nhận {other:?}"),
+        }
+    }
+
+    /// So theo **ngày lịch**, không so chuỗi và không so timestamp. `2026-6-1`
+    /// và `2026-06-01` là cùng một ngày; so chuỗi thì một dấu 0 thiếu biến một
+    /// lượt nhận phòng hợp lệ thành lời từ chối, và lễ tân không có cách nào
+    /// hiểu vì sao.
+    #[tokio::test]
+    async fn a_date_written_without_leading_zeros_is_still_today() {
+        let pool = test_pool().await;
+        seed_room(
+            &pool,
+            "room-shortdate",
+            "P806",
+            "Standard Room",
+            400_000,
+            "vacant",
+        )
+        .await;
+
+        let args = serde_json::json!({
+            "room_id": "room-shortdate",
+            "nights": 1,
+            "check_in_date": "2026-6-1",
+            "guests": [{ "full_name": "Nguyễn Văn Nam", "doc_number": "079201001234" }]
+        });
+
+        let outcome = build_check_in_draft(&pool, &args, "2026-06-01")
+            .await
+            .expect("cùng một ngày lịch thì không phải lỗi");
+
+        assert!(
+            matches!(outcome, DraftOutcome::Ready(_)),
+            "cùng một ngày lịch viết thiếu số 0 vẫn phải dựng được thẻ: {outcome:?}"
+        );
+    }
+
+    /// **Ca thật đã xảy ra**, ghim chiều nguy hiểm: ngày ở tương lai thì không
+    /// có action nào mang ngày hôm nay.
+    ///
+    /// Không dừng ở "outcome khác `Ready`". Soi cả `Debug` của outcome và bắt
+    /// nó không được chứa hôm nay dưới bất kỳ dạng nào — `2026-08-06` (payload,
+    /// preview) hay `06/08/2026` (thẻ). Gỡ nhánh từ chối thì `Ready` mang cả
+    /// hai chuỗi ấy, và test đỏ ngay tại dòng nói đúng lý do nó tồn tại, chứ
+    /// không đỏ nhờ một khẳng định phụ nào khác.
+    #[tokio::test]
+    async fn a_future_date_never_becomes_a_card_stamped_with_today() {
+        let pool = test_pool().await;
+        seed_room(&pool, "room-4b", "4B", "Standard Room", 400_000, "vacant").await;
+
+        // Đúng câu lễ tân đã gõ: "có booking mới phòng 4B, checkin 8 out 9
+        // tháng 8" — trong khi hôm nay là 06/08/2026.
+        let args = serde_json::json!({
+            "room_id": "room-4b",
+            "nights": 1,
+            "check_in_date": "2026-08-08",
+            "guests": [{ "full_name": "Hyungchul Lee", "doc_number": "M12345678" }]
+        });
+
+        let outcome = build_check_in_draft(&pool, &args, "2026-08-06")
+            .await
+            .expect("ngày tương lai không phải lỗi hệ thống");
+
+        let dump = format!("{outcome:?}");
+        assert!(
+            !dump.contains("2026-08-06") && !dump.contains("06/08/2026"),
+            "ngày 08/08 bị nuốt mất và hôm nay chui vào kết quả:\n{dump}"
+        );
+        assert!(
+            dump.contains("2026-08-08"),
+            "ngày người dùng nêu phải đi tiếp nguyên vẹn:\n{dump}"
+        );
+        match outcome {
+            DraftOutcome::WrongDateForCheckIn { is_future, .. } => {
+                assert!(is_future, "08/08 sau 06/08 nên phải là tương lai");
+            }
+            other => panic!("mong đợi WrongDateForCheckIn, nhận {other:?}"),
+        }
     }
 
     #[test]

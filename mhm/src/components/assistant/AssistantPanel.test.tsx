@@ -28,7 +28,12 @@ vi.mock("@/stores/useHotelStore", () => ({
 
 import { BUSY_REFUSAL, useAssistantStore } from "@/stores/useAssistantStore";
 import { useAuthStore } from "@/stores/useAuthStore";
-import type { AssistantConversationSummary, ProposedAction } from "@/types/assistant";
+import {
+  CARD_TTL_MS,
+  type AssistantConversationSummary,
+  type ProposedAction,
+  type ProposedActionKind,
+} from "@/types/assistant";
 import { SUGGESTIONS } from "./AssistantEmptyState";
 import { AssistantPanel, buildScreenContext } from "./AssistantPanel";
 
@@ -49,6 +54,61 @@ function makeAction(): ProposedAction {
     built_at_ms: Date.now(),
   };
 }
+
+/// Ba loại thẻ. Bốn lớp bảo vệ `pendingAction` phải áp cho CẢ BA — thẻ đặt phòng
+/// và thẻ ghi bù cũng là tiền thật — nên hai lớp sống trong panel (lớp 1 hỏi
+/// trước khi đổi hội thoại, lớp 3 không vẽ thẻ của hội thoại khác) được đo trên
+/// cả ba chứ không riêng thẻ nhận phòng.
+///
+/// `builtAtMs` để mở: một test dựng thẻ ĐÃ HẾT HẠN để bấm được nút *Tính lại*.
+function makeActionOfKind(kind: ProposedActionKind, builtAtMs = Date.now()): ProposedAction {
+  if (kind === "reserve") {
+    return {
+      kind: "reserve",
+      payload: {
+        room_id: "R4B",
+        guest_name: "Hyungchul Lee",
+        check_in_date: "2026-08-08",
+        check_out_date: "2026-08-09",
+        nights: 1,
+        guests: null,
+      },
+      display: { room_id: "Phòng 4B", check_in_date: "08/08/2026" },
+      preview: {},
+      warnings: [],
+      built_at_ms: builtAtMs,
+    };
+  }
+  if (kind === "backfill") {
+    return {
+      kind: "backfill",
+      payload: {
+        room_id: "R1",
+        guests: [{ full_name: "Trần Thị Bích", doc_number: "079301005678" }],
+        check_in_date: "2026-08-04",
+        check_out_date: null,
+        expected_checkout_date: "2026-08-07",
+        total_price: 600000,
+        paid_amount: 0,
+      },
+      display: { room_id: "Phòng 201", check_in_date: "04/08/2026" },
+      preview: {},
+      warnings: [],
+      built_at_ms: builtAtMs,
+    };
+  }
+  return { ...makeAction(), built_at_ms: builtAtMs };
+}
+
+/// Nguyên văn, không import từ `ACTION_KIND_COPY` — import là để test so bảng
+/// với chính nó. Cùng lý do đã ghi ở hằng `SAVE_NOTICE` ngay trên.
+const TITLES: Record<ProposedActionKind, string> = {
+  check_in: "Xác nhận nhận phòng",
+  reserve: "Xác nhận đặt phòng",
+  backfill: "Xác nhận ghi bù",
+};
+
+const ALL_KINDS: ProposedActionKind[] = ["check_in", "reserve", "backfill"];
 
 function makeSummary(
   overrides: Partial<AssistantConversationSummary> = {},
@@ -353,6 +413,39 @@ describe("AssistantPanel", () => {
 
     expect(screen.queryByText("Xác nhận nhận phòng")).not.toBeInTheDocument();
   });
+
+  // ── LỚP 3 CANH CẢ BA `kind` ──────────────────────────────────────────────
+  //
+  // Hai test ngay trên chỉ chạy trên thẻ nhận phòng, nên một bản viết
+  // `pendingAction.kind === "check_in" || pendingActionKey === conversationKey`
+  // vẫn xanh cả hai — và ngoài đời thì thẻ đặt phòng của hội thoại A hiện ra
+  // trong hội thoại B, bấm *Đồng ý*, thẻ biến mất không một lời giải thích (lớp
+  // 4 trả về im lặng).
+  //
+  // Mỗi `kind` một test, hai nửa: nửa vẽ (khoá khớp) và nửa không vẽ (khoá
+  // lệch). Thiếu nửa đầu thì một bản không vẽ thẻ bao giờ cũng xanh cả ba.
+  for (const kind of ALL_KINDS) {
+    it(`lớp 3 canh thẻ ${kind}: vẽ ở đúng hội thoại, KHÔNG vẽ ở hội thoại khác`, () => {
+      useAssistantStore.setState({
+        pendingAction: makeActionOfKind(kind),
+        pendingActionKey: "phien-dang-mo",
+        conversationKey: "phien-dang-mo",
+      });
+
+      const sameSession = render(<AssistantPanel />);
+      expect(screen.getByText(TITLES[kind])).toBeInTheDocument();
+      sameSession.unmount();
+
+      useAssistantStore.setState({
+        pendingAction: makeActionOfKind(kind),
+        pendingActionKey: "phien-khac",
+        conversationKey: "phien-dang-mo",
+      });
+
+      render(<AssistantPanel />);
+      expect(screen.queryByText(TITLES[kind])).not.toBeInTheDocument();
+    });
+  }
 
   it("hiện dòng nhắc khi mở lại một hội thoại cũ", () => {
     useAssistantStore.setState({
@@ -695,6 +788,59 @@ describe("AssistantPanel", () => {
     expect(screen.getByRole("button", { name: "Ở lại" })).not.toBeDisabled();
     await userEvent.click(screen.getByRole("button", { name: "Ở lại" }));
     expect(screen.queryByRole("alertdialog")).not.toBeInTheDocument();
+  });
+
+  // ── LỚP 1 CANH CẢ BA `kind` ──────────────────────────────────────────────
+  //
+  // Ba test lớp 1 ngay trên đều chạy trên thẻ nhận phòng. Lớp 1 là lớp *lịch sự*
+  // — nó chỉ hỏi — nhưng thứ nó giữ là **việc đã làm**: hàng `action` trong sổ
+  // chỉ là CHỮ tóm tắt, không mang `payload`, nên thẻ mất là mất hẳn và phải nhờ
+  // trợ lý dựng lại từ đầu. Một thẻ đặt phòng hay ghi bù cũng mất y như thế.
+  for (const kind of ALL_KINDS) {
+    it(`lớp 1 hỏi trước khi bỏ thẻ ${kind}`, async () => {
+      const newChatSpy = vi
+        .spyOn(useAssistantStore.getState(), "startNewChat")
+        .mockImplementation(() => {});
+      useAssistantStore.setState({
+        pendingAction: makeActionOfKind(kind),
+        pendingActionKey: "phien-dang-mo",
+        conversationKey: "phien-dang-mo",
+      });
+
+      render(<AssistantPanel />);
+      await userEvent.click(screen.getByRole("button", { name: "Hội thoại mới" }));
+
+      expect(newChatSpy).not.toHaveBeenCalled();
+      expect(screen.getByRole("alertdialog")).toBeInTheDocument();
+      // Và thẻ vẫn còn nguyên trong lúc hộp hỏi đang mở: hỏi xong mới dọn.
+      expect(screen.getByText(TITLES[kind])).toBeInTheDocument();
+    });
+  }
+
+  it("bấm Tính lại trên thẻ đặt phòng thì nhờ trợ lý tính lại ĐÚNG loại thẻ ấy", async () => {
+    // Dây panel→thẻ, cùng lớp lỗi với `contextLabel` ở trên: `ProposedActionCard`
+    // có test riêng cho nút *Tính lại*, câu nhờ tính lại thì không ai canh.
+    //
+    // Ghim cứng "Tính lại thẻ nhận phòng vừa rồi." cho một thẻ đặt phòng là tự
+    // tay bảo model dựng thẻ nhận phòng — đúng cái búa nó đã đóng nhầm trong sự
+    // cố phòng 4B, chỉ khác là lần này chính panel gợi ý.
+    const sendSpy = vi.spyOn(useAssistantStore.getState(), "send").mockResolvedValue(undefined);
+    useAssistantStore.setState({
+      // Hết hạn ⇒ thẻ đổi sang trạng thái mời *Tính lại*.
+      pendingAction: makeActionOfKind("reserve", Date.now() - CARD_TTL_MS - 1),
+      pendingActionKey: "phien-dang-mo",
+      conversationKey: "phien-dang-mo",
+    });
+
+    render(<AssistantPanel />);
+    await userEvent.click(screen.getByRole("button", { name: /tính lại/i }));
+
+    expect(sendSpy).toHaveBeenCalledWith("Tính lại thẻ đặt phòng vừa rồi.", {
+      route: "rooms",
+      selectedRoomId: undefined,
+      selectedRoomNumber: undefined,
+      selectedBookingId: undefined,
+    });
   });
 
   it("không treo thẻ thì mở hội thoại từ lịch sử đi thẳng", async () => {

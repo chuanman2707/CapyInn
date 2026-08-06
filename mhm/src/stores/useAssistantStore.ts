@@ -1,7 +1,7 @@
 import { create } from "zustand";
 
 import { invokeCommand, invokeWriteCommand } from "@/lib/invokeCommand";
-import { isActionExpired, MESSAGE_WINDOW } from "@/types/assistant";
+import { actionKindCopy, isActionExpired, MESSAGE_WINDOW } from "@/types/assistant";
 import type {
   AssistantConversationSummary,
   AssistantMessage,
@@ -9,6 +9,7 @@ import type {
   AssistantTurnResponse,
   ChatMessage,
   ProposedAction,
+  ProposedActionKind,
   ScreenContext,
   StoredMessage,
 } from "@/types/assistant";
@@ -153,6 +154,32 @@ function buildHistoryNotice(stored: StoredMessage[]): string | null {
 /// panel (`AssistantPanel.tsx`) và dòng lỗi của Cài đặt → Trợ lý quầy.
 export const BUSY_REFUSAL =
   "Trợ lý đang bận: còn một lượt trả lời hoặc một lệnh nhận phòng chưa xong. Xong rồi hãy thử lại.";
+
+/// ── ÁNH XẠ `kind` → LỆNH PMS ────────────────────────────────────────────────
+///
+/// Ba dòng, TƯỜNG MINH, và **không có `default`**. Ba lệnh này ghi ba loại bản
+/// ghi khác hẳn nhau vào cùng một cuốn sổ tiền: `check_in` đóng dấu `Local::now()`
+/// và bắt đầu tính tiền ngay, `create_reservation` giữ chỗ cho một ngày tương
+/// lai, `backfill_stay` ghi lại một kỳ ở đã qua. Đoán nhầm một dòng ở bảng này là
+/// đúng con bug đã mở ra cả spec — một cái búa cho mọi cái đinh.
+///
+/// Là `Record<ProposedActionKind, string>` chứ không object trần: thêm loại thẻ
+/// thứ tư mà quên bảng này thì `tsc` đỏ **tại đây**, chứ không đợi tới lúc lễ tân
+/// bấm *Đồng ý* và không có gì xảy ra.
+const WRITE_COMMAND_BY_KIND: Record<ProposedActionKind, string> = {
+  check_in: "check_in",
+  reserve: "create_reservation",
+  backfill: "backfill_stay",
+};
+
+/// Tra qua `Map`, không `WRITE_COMMAND_BY_KIND[kind]` trần.
+///
+/// `kind` tới từ backend nên nó là một CHUỖI BẤT KỲ, không phải một thành viên
+/// union mà `tsc` đã bảo đảm. Object literal trả về đồ của `Object.prototype` cho
+/// `"toString"`/`"constructor"` thay vì `undefined`, và câu kiểm "kind lạ" bên
+/// dưới sẽ lọt — rồi `invokeWriteCommand` bắn đi một thứ không phải tên lệnh.
+/// `Object.hasOwn` không dùng được: `tsconfig.json` khoá `lib: ES2020`.
+const WRITE_COMMANDS = new Map<string, string>(Object.entries(WRITE_COMMAND_BY_KIND));
 
 /// Trạng thái của một phiên chat trống. Dùng chung cho *hội thoại mới*, cho
 /// đường xoá, và cho đăng xuất — ba chỗ phải dọn **đúng cùng một tập**, không
@@ -350,6 +377,26 @@ export const useAssistantStore = create<AssistantState>((set, get) => ({
       return;
     }
 
+    // Lệnh PMS của đúng loại thẻ này — xem `WRITE_COMMAND_BY_KIND` ở đầu file.
+    //
+    // `kind` LẠ THÌ TỪ CHỐI, không đoán. Không có nhánh nào rơi về `check_in`:
+    // một thẻ đặt phòng trước bị bắn qua đường nhận phòng là đóng dấu ngày hôm
+    // nay lên một kỳ ở của ngày mai, khoá phòng khỏi mọi phép tra phòng trống, và
+    // night audit tính tiền một đêm chưa xảy ra. Đó là bản ghi có thật đã sinh ra
+    // spec này, và nó đến từ đúng một chỗ: đoán bừa khi không biết.
+    //
+    // Ngoài đời `kind` lạ chỉ xảy ra khi frontend và backend lệch hợp đồng, mà
+    // hai bên đóng gói chung một app — nên đây là hàng rào cho một trạng thái
+    // đáng lẽ không tồn tại. Giữ nguyên thẻ (không vứt): lễ tân còn đọc được nó
+    // để làm tay trong PMS, y như nhánh thẻ hết hạn và nhánh PMS trả lỗi.
+    const command = WRITE_COMMANDS.get(pendingAction.kind);
+    if (command === undefined) {
+      set({
+        error: `Trợ lý đề xuất một loại thẻ không duyệt được ("${pendingAction.kind}"). Vui lòng làm bằng tay trong PMS.`,
+      });
+      return;
+    }
+
     // Phiên mà lượt duyệt này thuộc về, chốt TRƯỚC khi bắn lệnh ghi đi — cùng
     // một chốt `send()` đang có. Đây là câu đọc đồng bộ, KHÔNG phải `await`,
     // nên nó không mở khe nào giữa lớp 4 ở trên và `invokeWriteCommand` dưới.
@@ -357,7 +404,7 @@ export const useAssistantStore = create<AssistantState>((set, get) => ({
 
     set({ busy: true, error: null });
     try {
-      await invokeWriteCommand("check_in", { req: pendingAction.payload });
+      await invokeWriteCommand(command, { req: pendingAction.payload });
       // Đổi hội thoại giữa lúc `check_in` đang bay về. Lệnh đã đi rồi và vẫn
       // phải chạy — huỷ một lượt nhận phòng đã bắn là chuyện khác — nhưng KẾT
       // QUẢ thì không được đổ vào phiên đang mở: lễ tân mở chat mới để phục vụ
@@ -381,9 +428,13 @@ export const useAssistantStore = create<AssistantState>((set, get) => ({
         error: null,
         pendingAction: null,
         pendingActionKey: null,
+        // Câu báo xong nói ĐÚNG việc vừa làm. Một thẻ đặt phòng trước duyệt xong
+        // mà báo "Đã nhận phòng xong." là in lại nguyên văn câu nói dối đã mở ra
+        // spec này (mục 1) — chỉ khác là lần này lệnh chạy đúng còn lời kể thì
+        // sai, và lễ tân tin lời kể.
         messages: [
           ...state.messages,
-          { id: nextId(), kind: "assistant", text: "Đã nhận phòng xong." },
+          { id: nextId(), kind: "assistant", text: actionKindCopy(pendingAction.kind).done },
         ],
       }));
     } catch (error) {

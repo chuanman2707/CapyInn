@@ -9,7 +9,7 @@ import { Button } from "@/components/ui/button";
 import { useAssistantStore } from "@/stores/useAssistantStore";
 import { useAuthStore } from "@/stores/useAuthStore";
 import { useHotelStore } from "@/stores/useHotelStore";
-import type { ScreenContext } from "@/types/assistant";
+import { actionKindCopy, type ScreenContext } from "@/types/assistant";
 
 /// Việc lễ tân định làm khi bấm *hội thoại mới* hoặc bấm một dòng trong lịch
 /// sử. Giữ lại nguyên vẹn để chạy tiếp **sau** khi hộp hỏi được đồng ý — xem
@@ -455,7 +455,12 @@ export function AssistantPanel() {
                 busy={busy}
                 nowMs={nowMs}
                 onApprove={approve}
-                onRebuild={() => sendMessage("Tính lại thẻ nhận phòng vừa rồi.")}
+                // Câu *Tính lại* đi theo LOẠI THẺ. Gửi "Tính lại thẻ nhận phòng
+                // vừa rồi." cho một thẻ đặt phòng trước là tự tay bảo model dựng
+                // một thẻ nhận phòng — tức đẩy nó về đúng cái búa nó đã đóng
+                // nhầm, và lần này là do chính panel gợi ý chứ không phải do
+                // model hiểu sai. Xem `ACTION_KIND_COPY` (`types/assistant.ts`).
+                onRebuild={() => sendMessage(actionKindCopy(pendingAction.kind).rebuildPrompt)}
                 onDismiss={dismissAction}
               />
             )}

@@ -2,8 +2,21 @@ import { render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
 
-import { CARD_TTL_MS, type ProposedAction } from "@/types/assistant";
+import { CARD_TTL_MS, type ProposedAction, type ProposedActionKind } from "@/types/assistant";
 import { ProposedActionCard } from "./ProposedActionCard";
+
+/// Ba tiêu đề, viết ra NGUYÊN VĂN ở đây chứ không import từ `ACTION_KIND_COPY`.
+///
+/// Import bảng chữ là để test so bảng với chính nó: đổi "Xác nhận đặt phòng"
+/// thành "Xác nhận nhận phòng" cho cả hai loại thì bảng vẫn khớp bảng và không
+/// một test nào đỏ, trong khi thứ đang phải canh chính là **ba chuỗi ấy khác
+/// nhau**. Cùng bẫy mà `SUGGESTIONS` đã dính, và `AssistantPanel.test.tsx` đã
+/// ghi lại ở hằng `SAVE_NOTICE`.
+const TITLES: Record<ProposedActionKind, string> = {
+  check_in: "Xác nhận nhận phòng",
+  reserve: "Xác nhận đặt phòng",
+  backfill: "Xác nhận ghi bù",
+};
 
 const action: ProposedAction = {
   kind: "check_in",
@@ -42,7 +55,191 @@ const action: ProposedAction = {
   built_at_ms: 1_000_000,
 };
 
+/// Thẻ đặt phòng trước. Payload đúng `CreateReservationRequest` — `guests: null`
+/// (quầy không thu phụ thu thêm người) và `nights` dẫn xuất từ hai ngày.
+const reserveAction: ProposedAction = {
+  kind: "reserve",
+  payload: {
+    room_id: "R4B",
+    guest_name: "Hyungchul Lee",
+    guest_phone: null,
+    guest_doc_number: null,
+    check_in_date: "2026-08-08",
+    check_out_date: "2026-08-09",
+    nights: 1,
+    deposit_amount: 200000,
+    source: "walk-in",
+    notes: null,
+    guests: null,
+  },
+  display: {
+    guest_name: "Hyungchul Lee",
+    room_id: "Phòng 4B",
+    check_in_date: "08/08/2026",
+    check_out_date: "09/08/2026",
+    nights: "1 đêm",
+    deposit_amount: "200.000 ₫",
+    total: "400.000 ₫",
+  },
+  preview: { total: 400000 },
+  warnings: [],
+  built_at_ms: 1_000_000,
+};
+
+/// Thẻ ghi bù. `check_out_date: null` = khách còn ở, nên có
+/// `expected_checkout_date`; `total_price` là số của preview, không phải số model
+/// đưa.
+const backfillAction: ProposedAction = {
+  kind: "backfill",
+  payload: {
+    room_id: "R1",
+    guests: [{ full_name: "Trần Thị Bích", doc_number: "079301005678" }],
+    check_in_date: "2026-08-04",
+    check_out_date: null,
+    expected_checkout_date: "2026-08-07",
+    total_price: 600000,
+    paid_amount: 0,
+    source: "walk-in",
+    notes: null,
+  },
+  display: {
+    room_id: "Phòng 201",
+    guests: "1 người",
+    check_in_date: "04/08/2026",
+    expected_checkout_date: "07/08/2026",
+    total: "600.000 ₫",
+    paid_amount: "0 ₫",
+  },
+  preview: { total: 600000 },
+  warnings: [],
+  built_at_ms: 1_000_000,
+};
+
+const ACTION_BY_KIND: Record<ProposedActionKind, ProposedAction> = {
+  check_in: action,
+  reserve: reserveAction,
+  backfill: backfillAction,
+};
+
+/// Một thẻ mang `kind` NGOÀI hợp đồng — thứ `tsc` không cho viết thẳng, nên phải
+/// ép kiểu.
+///
+/// Ép ở đây không phải để lách kiểu cho tiện: `kind` ngoài đời tới từ backend qua
+/// IPC, chỗ **không có kiểu nào được kiểm lúc chạy**. Ép kiểu chính là mô phỏng
+/// đúng cái ranh giới ấy.
+function actionWithKind(kind: string): ProposedAction {
+  return { ...action, kind } as unknown as ProposedAction;
+}
+
 describe("ProposedActionCard", () => {
+  // ── BA LOẠI THẺ, BA TIÊU ĐỀ ────────────────────────────────────────────────
+  //
+  // Mỗi loại một test riêng, và mỗi test khẳng định **hai vế**: tiêu đề của
+  // chính nó CÓ, tiêu đề của hai loại kia KHÔNG. Vế âm mới là vế phân biệt được
+  // — thiếu nó thì một bản in cả ba tiêu đề lên mọi thẻ vẫn xanh, và ba tiêu đề
+  // cùng lúc thì lễ tân không đọc ra mình sắp làm gì.
+  //
+  // Đây cũng là chỗ đo "khác nhau BẰNG CHỮ": ba chuỗi này phải đọc ra khác nhau
+  // trên DOM. Màu thì jsdom không thấy, và người mù màu cũng không — nên nếu ba
+  // thẻ chỉ khác nhau bằng màu, không test nào ở đây xanh được.
+
+  it("thẻ nhận phòng có tiêu đề Xác nhận nhận phòng", () => {
+    render(
+      <ProposedActionCard
+        action={ACTION_BY_KIND.check_in}
+        busy={false}
+        nowMs={action.built_at_ms}
+        onApprove={vi.fn()}
+        onRebuild={vi.fn()}
+        onDismiss={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByText(TITLES.check_in)).toBeInTheDocument();
+    expect(screen.queryByText(TITLES.reserve)).not.toBeInTheDocument();
+    expect(screen.queryByText(TITLES.backfill)).not.toBeInTheDocument();
+  });
+
+  it("thẻ đặt phòng trước có tiêu đề Xác nhận đặt phòng", () => {
+    render(
+      <ProposedActionCard
+        action={ACTION_BY_KIND.reserve}
+        busy={false}
+        nowMs={action.built_at_ms}
+        onApprove={vi.fn()}
+        onRebuild={vi.fn()}
+        onDismiss={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByText(TITLES.reserve)).toBeInTheDocument();
+    expect(screen.queryByText(TITLES.check_in)).not.toBeInTheDocument();
+    expect(screen.queryByText(TITLES.backfill)).not.toBeInTheDocument();
+  });
+
+  it("thẻ ghi bù có tiêu đề Xác nhận ghi bù", () => {
+    render(
+      <ProposedActionCard
+        action={ACTION_BY_KIND.backfill}
+        busy={false}
+        nowMs={action.built_at_ms}
+        onApprove={vi.fn()}
+        onRebuild={vi.fn()}
+        onDismiss={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByText(TITLES.backfill)).toBeInTheDocument();
+    expect(screen.queryByText(TITLES.check_in)).not.toBeInTheDocument();
+    expect(screen.queryByText(TITLES.reserve)).not.toBeInTheDocument();
+  });
+
+  it("dòng trạng thái lúc gửi cũng đi theo loại thẻ, không ghim cứng chữ nhận phòng", () => {
+    // Cùng lớp lỗi với tiêu đề, ở một dòng chữ khác: thẻ đặt phòng mà báo "Đang
+    // gửi lệnh nhận phòng…" là nói sai đúng lúc lệnh đang bay và không ai rút
+    // lại được. Có test riêng vì test "đang chạy thì hiện thông báo trạng thái"
+    // bên dưới chỉ chạy trên thẻ nhận phòng, nên nó xanh với cả bản ghim cứng.
+    render(
+      <ProposedActionCard
+        action={ACTION_BY_KIND.reserve}
+        busy
+        nowMs={action.built_at_ms}
+        onApprove={vi.fn()}
+        onRebuild={vi.fn()}
+        onDismiss={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByRole("status")).toHaveTextContent("Đang gửi lệnh đặt phòng…");
+    expect(screen.getByRole("status")).not.toHaveTextContent("nhận phòng");
+  });
+
+  it("kind lạ thì thẻ vẫn vẽ được và nói thẳng là không rõ loại", () => {
+    // Hợp đồng frontend↔backend lệch (bản cũ gặp bản mới) là trạng thái đáng lẽ
+    // không tồn tại — hai bên đóng gói chung một app — nhưng nếu nó xảy ra thì
+    // `ACTION_KIND_COPY[kind].title` trần sẽ ném `undefined.title` và thổi bay
+    // **cả panel**, không chỉ cái thẻ. Mất trắng panel tệ hơn hẳn một dòng tiêu
+    // đề nói "không rõ loại".
+    //
+    // Và nó KHÔNG được mượn tên của loại nào: `approve()` đằng nào cũng từ chối
+    // thẻ này, nên gọi nó là "nhận phòng" là dán nhãn sai lên thứ sắp bị chặn.
+    render(
+      <ProposedActionCard
+        action={actionWithKind("modify_reservation")}
+        busy={false}
+        nowMs={action.built_at_ms}
+        onApprove={vi.fn()}
+        onRebuild={vi.fn()}
+        onDismiss={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByText("Thẻ không rõ loại, không duyệt được")).toBeInTheDocument();
+    for (const title of Object.values(TITLES)) {
+      expect(screen.queryByText(title)).not.toBeInTheDocument();
+    }
+  });
+
   it("hiện mọi dòng trong display", () => {
     render(
       <ProposedActionCard
