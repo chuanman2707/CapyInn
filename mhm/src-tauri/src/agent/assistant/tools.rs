@@ -16,6 +16,7 @@ use sqlx::{Pool, Sqlite};
 
 pub const DRAFT_CHECK_IN_TOOL: &str = "draft_check_in";
 pub const DRAFT_RESERVE_TOOL: &str = "draft_reserve";
+pub const DRAFT_BACKFILL_TOOL: &str = "draft_backfill";
 
 /// Loại thẻ mà một tool `draft_*` dựng ra.
 ///
@@ -28,6 +29,7 @@ pub const DRAFT_RESERVE_TOOL: &str = "draft_reserve";
 pub enum DraftToolKind {
     CheckIn,
     Reserve,
+    Backfill,
 }
 
 /// `None` ⇒ tên này **không** phải tool dựng thẻ. Không có nhánh mặc định nào
@@ -37,6 +39,7 @@ pub fn draft_tool_kind(name: &str) -> Option<DraftToolKind> {
     match name {
         DRAFT_CHECK_IN_TOOL => Some(DraftToolKind::CheckIn),
         DRAFT_RESERVE_TOOL => Some(DraftToolKind::Reserve),
+        DRAFT_BACKFILL_TOOL => Some(DraftToolKind::Backfill),
         _ => None,
     }
 }
@@ -120,6 +123,22 @@ pub const FRONT_DESK_DRAFT_TOOLS: &[AgentToolMeta] = &[
                   đêm do CapyInn tính từ hai ngày đó. Chỉ ghi được MỘT tên khách: người dùng nêu \
                   nhiều khách thì vẫn điền một tên chính vào `guest_name` và NÓI RÕ với người dùng \
                   rằng đặt phòng trước chỉ ghi được một tên.",
+        mutation_risk: MutationRisk::HighWrite,
+        data_sensitivity: DataSensitivity::StaffOperational,
+        allowed_roles: FRONT_DESK_ONLY,
+        capability: AgentToolCapability::PmsWrite,
+    },
+    AgentToolMeta {
+        name: DRAFT_BACKFILL_TOOL,
+        description:
+            "Dựng thẻ xác nhận GHI BÙ một lượt khách đã vào phòng từ một ngày Ở QUÁ KHỨ nhưng \
+                  chưa được nhập máy, để người dùng duyệt. Không tự thực hiện. Đây là đích của \
+                  `draft_check_in` khi ngày người dùng nêu đã qua: LUÔN điền `check_in_date` dạng \
+                  YYYY-MM-DD bằng đúng ngày người dùng nêu. Khách ĐÃ trả phòng thì điền \
+                  `check_out_date`; khách CÒN Ở thì bỏ trống `check_out_date` và BẮT BUỘC điền \
+                  `expected_checkout_date` (phải sau hôm nay). KHÔNG có tham số tiền phòng — \
+                  CapyInn tự tra bảng giá cho khoảng ngày đó; tuyệt đối không tự nêu ra một con \
+                  số tiền phòng.",
         mutation_risk: MutationRisk::HighWrite,
         data_sensitivity: DataSensitivity::StaffOperational,
         allowed_roles: FRONT_DESK_ONLY,
@@ -235,6 +254,58 @@ fn draft_tool_parameters(name: &str) -> Value {
             // Cũng KHÔNG có `source`: `create_reservation_tx` mặc định
             // "phone", và một ô nữa cho model điền là một ô nữa để nó bịa.
             "required": ["room_id", "guest_name", "check_in_date", "check_out_date"]
+        }),
+        DRAFT_BACKFILL_TOOL => json!({
+            "type": "object",
+            "properties": {
+                "room_id": { "type": "string", "description": "Mã phòng trong PMS" },
+                // DANH SÁCH khách, giống `draft_check_in` — khác `draft_reserve`
+                // (một tên, kiểu chuỗi). `backfill_stay` ghi trọn một lượt ở
+                // thật, gồm cả hồ sơ từng khách, nên nó nhận đủ danh sách.
+                "guests": {
+                    "type": "array",
+                    "minItems": 1,
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "full_name": { "type": "string" },
+                            "doc_number": { "type": "string" },
+                            "phone": { "type": "string" }
+                        },
+                        "required": ["full_name"]
+                    }
+                },
+                "check_in_date": {
+                    "type": "string",
+                    "description": "Ngày khách vào phòng, dạng YYYY-MM-DD. BẮT BUỘC, và phải ở QUÁ KHỨ — hôm nay thì dùng `draft_check_in`, tương lai thì `draft_reserve`. Điền đúng ngày người dùng nêu, không tự đổi."
+                },
+                "check_out_date": {
+                    "type": "string",
+                    "description": "Ngày khách ĐÃ trả phòng, dạng YYYY-MM-DD. Chỉ điền khi khách đã rời phòng, và ngày đó phải sau `check_in_date` và không ở tương lai. BỎ TRỐNG nếu khách vẫn còn đang ở."
+                },
+                "expected_checkout_date": {
+                    "type": "string",
+                    "description": "Ngày trả phòng dự kiến, dạng YYYY-MM-DD. BẮT BUỘC khi khách CÒN Ở (tức khi `check_out_date` bỏ trống), và phải sau hôm nay. Không đoán: người dùng chưa nói thì hỏi lại."
+                },
+                "paid_amount": { "type": "integer", "minimum": 0, "description": "Số tiền khách ĐÃ trả cho lượt ở này, VND. Bỏ trống nghĩa là chưa trả đồng nào." },
+                "notes": { "type": "string" }
+            },
+            // KHÔNG có `total_price`, cố ý — và đây là ô nguy hiểm nhất trong cả
+            // ba tool. Khác `check_in`/`create_reservation` (tự tính tiền),
+            // `backfill_stay` BẮT người gọi đưa tiền phòng vào, nên một ô ở đây
+            // là mời một mô hình ngôn ngữ quyết định khách nợ bao nhiêu.
+            // `build_backfill_draft` lấy số ấy từ `calculate_room_price_preview`
+            // và không đọc tham số nào của model cho nó.
+            //
+            // Cũng KHÔNG có `source`: `backfill_stay_tx` mặc định "walk-in", và
+            // một ô nữa cho model điền là một ô nữa để nó bịa.
+            //
+            // `expected_checkout_date` bắt buộc **có điều kiện** (chỉ khi khách
+            // còn ở) nên nó không nằm trong `required` — JSON schema nói được
+            // câu ấy bằng `if/then`, nhưng không nhà cung cấp nào bảo đảm tôn
+            // trọng, và `build_backfill_draft` đằng nào cũng phải canh lại. Một
+            // ô `required` mà nửa số ca hợp lệ bỏ trống là một ô dạy model bịa.
+            "required": ["room_id", "guests", "check_in_date"]
         }),
         // Tên lạ: schema rỗng. Không đoán schema của một tool không biết —
         // `every_draft_tool_offers_the_model_a_real_schema` bắt mọi tool có
@@ -592,6 +663,126 @@ mod tests {
             draft.description.contains("MỘT tên khách"),
             "mô tả tool phải nói rõ chỉ ghi được một tên: {}",
             draft.description
+        );
+    }
+
+    /// Cùng cái seam Task 1 và Task 3 đã trả giá để tìm ra, lần thứ ba: mọi test
+    /// của `build_backfill_draft` gọi **thẳng** hàm ấy, không đi qua schema. Gỡ
+    /// `check_in_date` khỏi schema thì model không còn ô nào để đặt ngày vào —
+    /// bug cũ quay lại y nguyên — mà cả tá test trong `draft.rs` vẫn xanh.
+    ///
+    /// Và ở đây có thêm một thứ **không** tool nào khác phải canh: schema này
+    /// tuyệt đối không được có ô tiền phòng.
+    #[test]
+    fn the_draft_backfill_tool_asks_for_dates_and_never_for_a_price() {
+        let schemas = assistant_tool_schemas();
+        let draft = schemas
+            .iter()
+            .find(|schema| schema.name == DRAFT_BACKFILL_TOOL)
+            .expect("phải có schema cho draft_backfill");
+
+        let properties = draft.parameters["properties"]
+            .as_object()
+            .expect("schema phải có `properties`");
+        let required: Vec<&str> = draft.parameters["required"]
+            .as_array()
+            .expect("schema phải có danh sách `required`")
+            .iter()
+            .filter_map(Value::as_str)
+            .collect();
+
+        // ─── ĐIỀU CẤM SỐ MỘT CỦA TOOL NÀY ───
+        //
+        // `backfill_stay` là lệnh ghi DUY NHẤT bắt người gọi đưa tiền phòng vào.
+        // Một ô ở đây là mời một mô hình ngôn ngữ quyết định khách nợ bao nhiêu,
+        // và `BackfillStayRequest.total_price` sẵn sàng nhận con số ấy — kiểu dữ
+        // liệu mời làm sai. Số tiền chỉ đến từ `calculate_room_price_preview`.
+        for money_field in ["total_price", "total", "price", "amount"] {
+            assert!(
+                properties.get(money_field).is_none(),
+                "schema mời model tự đưa tiền phòng qua ô `{money_field}`: {}",
+                draft.parameters
+            );
+        }
+        assert!(
+            draft.description.contains("KHÔNG có tham số tiền phòng"),
+            "mô tả tool phải nói thẳng là không có ô tiền phòng: {}",
+            draft.description
+        );
+
+        // Ba ô bắt buộc **vô điều kiện**.
+        for field in ["room_id", "guests", "check_in_date"] {
+            assert!(
+                properties.contains_key(field),
+                "schema thiếu ô `{field}`: {}",
+                draft.parameters
+            );
+            assert!(
+                required.contains(&field),
+                "`{field}` phải nằm trong `required`: {required:?}"
+            );
+        }
+
+        // Ba ô ngày phải nói ra định dạng, không thì model gửi "ngày 4" và
+        // `build_backfill_draft` chỉ còn cách từ chối.
+        for field in ["check_in_date", "check_out_date", "expected_checkout_date"] {
+            let description = properties[field]["description"]
+                .as_str()
+                .unwrap_or_default();
+            assert_eq!(properties[field]["type"], json!("string"), "{field}");
+            assert!(
+                description.contains("YYYY-MM-DD"),
+                "mô tả `{field}` phải nêu định dạng: {description}"
+            );
+        }
+
+        // `check_in_date` phải nói ra hướng thời gian, không thì model coi
+        // `draft_backfill` là một `draft_check_in` khác tên.
+        let check_in_description = properties["check_in_date"]["description"]
+            .as_str()
+            .unwrap_or_default();
+        assert!(
+            check_in_description.contains("QUÁ KHỨ"),
+            "mô tả ngày vào phải nói rõ là quá khứ: {check_in_description}"
+        );
+
+        // Hai ô ngày trả **tuỳ chọn ở tầng schema** — cái nào bắt buộc phụ thuộc
+        // khách còn ở hay đã đi, mà JSON schema không nói được câu điều kiện ấy
+        // theo cách mọi nhà cung cấp đều tôn trọng. Nên mô tả phải nói ra luật,
+        // và `build_backfill_draft` là chỗ canh thật.
+        for field in [
+            "check_out_date",
+            "expected_checkout_date",
+            "paid_amount",
+            "notes",
+        ] {
+            assert!(
+                properties.contains_key(field),
+                "schema thiếu ô tuỳ chọn `{field}`: {}",
+                draft.parameters
+            );
+            assert!(
+                !required.contains(&field),
+                "`{field}` phải là tuỳ chọn: {required:?}"
+            );
+        }
+        let expected_description = properties["expected_checkout_date"]["description"]
+            .as_str()
+            .unwrap_or_default();
+        assert!(
+            expected_description.contains("BẮT BUỘC khi khách CÒN Ở"),
+            "mô tả `expected_checkout_date` phải nói ra luật bắt buộc có điều kiện: \
+             {expected_description}"
+        );
+
+        // `guests` là DANH SÁCH ở đây (giống `draft_check_in`), không phải một ô
+        // tên kiểu chuỗi như `draft_reserve` — `backfill_stay` ghi trọn hồ sơ
+        // từng khách.
+        assert_eq!(
+            properties["guests"]["type"],
+            json!("array"),
+            "{}",
+            draft.parameters
         );
     }
 
