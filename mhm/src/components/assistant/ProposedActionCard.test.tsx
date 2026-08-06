@@ -506,4 +506,50 @@ describe("ProposedActionCard", () => {
 
     expect(onRebuild).toHaveBeenCalledTimes(1);
   });
+
+  /// Mọi nhãn trên thẻ phải là tiếng Việt. Khoá nào thiếu trong `FIELD_LABELS`
+  /// rơi về **tên trường thô** (`FIELD_LABELS[key] ?? key`), nên lễ tân đọc
+  /// `guest_doc_number` giữa một thẻ tiếng Việt — và không có gì báo cho người
+  /// thêm khoá `display` mới phía Rust biết là họ vừa làm thế.
+  ///
+  /// `display` dưới đây mang **đủ** bộ khoá mà `build_reserve_display`
+  /// (`draft.rs`) sinh ra, không phải bộ rút gọn của fixture ở đầu file: một
+  /// fixture thiếu khoá thì test này chỉ kiểm những khoá nó tình cờ có.
+  it("thẻ đặt phòng không để lọt tên trường thô lên nhãn", () => {
+    const fullyLabelledReserve: ProposedAction = {
+      ...reserveAction,
+      display: {
+        room_id: "Phòng 4B",
+        guest_name: "Hyungchul Lee",
+        guest_phone: "0909000111",
+        guest_doc_number: "M12345678",
+        check_in_date: "08/08/2026",
+        check_out_date: "09/08/2026",
+        nights: "1 đêm",
+        deposit_amount: "200.000 ₫",
+        source: "phone",
+        notes: "—",
+        guests: "Không ghi (không thu phụ thu thêm người)",
+        total: "400.000 ₫",
+      },
+    };
+
+    const { container } = render(
+      <ProposedActionCard
+        action={fullyLabelledReserve}
+        busy={false}
+        nowMs={action.built_at_ms}
+        onApprove={vi.fn()}
+        onRebuild={vi.fn()}
+        onDismiss={vi.fn()}
+      />,
+    );
+
+    const labels = Array.from(container.querySelectorAll("dt")).map((node) => node.textContent);
+    expect(labels).toHaveLength(12);
+    // Dấu gạch dưới chỉ có ở tên trường máy — nhãn tiếng Việt không bao giờ có.
+    expect(labels.filter((label) => label?.includes("_"))).toEqual([]);
+    expect(labels).toContain("Số điện thoại");
+    expect(labels).toContain("Số CCCD");
+  });
 });

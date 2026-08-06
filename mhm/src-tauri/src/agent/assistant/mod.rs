@@ -11,7 +11,7 @@ use crate::{
             AssistantProviderClient, AssistantProviderTurn, ChatMessage, RawToolCall,
             RawToolCallFunction,
         },
-        tools::{assistant_tool_schemas, execute_read_tool, DRAFT_CHECK_IN_TOOL},
+        tools::{assistant_tool_schemas, draft_tool_kind, execute_read_tool, DraftToolKind},
     },
     app_error::{codes, CommandError, CommandResult},
 };
@@ -166,17 +166,28 @@ pub async fn run_assistant_turn(
         };
 
         // Model gọi tool ghi: dừng vòng lặp. Không có executor nào cho nó.
-        if let Some(draft_call) = calls.iter().find(|call| call.name == DRAFT_CHECK_IN_TOOL) {
+        //
+        // Chọn hàm dựng thẻ bằng `match` **vét cạn** trên `DraftToolKind`, không
+        // phải bằng chuỗi kèm một nhánh mặc định: một tool ghi rơi nhầm sang
+        // đường nhận phòng là đóng dấu ngày hôm nay lên một kỳ ở của ngày mai —
+        // đúng bản ghi có thật đã sinh ra cả spec này.
+        if let Some((draft_call, kind)) = calls
+            .iter()
+            .find_map(|call| draft_tool_kind(&call.name).map(|kind| (call, kind)))
+        {
+            let outcome = match kind {
+                DraftToolKind::CheckIn => {
+                    draft::build_check_in_draft(pool, &draft_call.arguments, now_local_date).await?
+                }
+                DraftToolKind::Reserve => {
+                    draft::build_reserve_draft(pool, &draft_call.arguments, now_local_date).await?
+                }
+            };
+
             // Đường `Ready` thoát thẳng ra frontend; mọi outcome còn lại đều là
             // "chưa dựng được thẻ, đây là lý do" và đi chung một khuôn: đẩy
             // ngược lời gọi tool cùng một `tool` message rồi cho model thử lại.
-            let tool_error = match draft::build_check_in_draft(
-                pool,
-                &draft_call.arguments,
-                now_local_date,
-            )
-            .await?
-            {
+            let tool_error = match outcome {
                 DraftOutcome::Ready(action) => {
                     return Ok(AssistantTurnResponse {
                         reply: None,
@@ -231,6 +242,57 @@ pub async fn run_assistant_turn(
                          YYYY-MM-DD rồi gọi lại đúng tool: hôm nay thì `draft_check_in`, tương lai thì \
                          `draft_reserve`, quá khứ thì `draft_backfill`. Không đoán bừa và không bỏ \
                          trống ô ngày; không chắc thì hỏi lại người dùng."
+                    ),
+                }),
+                // Đối xứng với `WrongDateForCheckIn`: chỉ thẳng sang tool đúng
+                // và nhắc lại nguyên văn ngày người dùng nêu. Nói "sai rồi" mà
+                // không nói đi đâu tiếp thì đường thoát dễ nhất của model là
+                // dịch ngày cho khớp cái tool nó đang cầm — tức thay ngày người
+                // dùng nêu, đúng điều cấm số một của cả spec.
+                DraftOutcome::WrongDateForReserve {
+                    requested,
+                    is_today,
+                } => {
+                    let (huong, tool_dung) = if is_today {
+                        ("chính là hôm nay", "draft_check_in")
+                    } else {
+                        ("ở quá khứ", "draft_backfill")
+                    };
+                    json!({
+                        "error": "wrong_date_for_reserve",
+                        "requested_check_in_date": requested,
+                        "today": now_local_date,
+                        "hint": format!(
+                            "Ngày nhận phòng người dùng nêu ({requested}) {huong} (hôm nay là \
+                             {now_local_date}), nên đây không phải đặt phòng trước. Hãy gọi \
+                             `{tool_dung}` với đúng ngày {requested}. TUYỆT ĐỐI không đổi ngày cho \
+                             khớp `draft_reserve`."
+                        ),
+                    })
+                }
+                DraftOutcome::CheckOutNotAfterCheckIn {
+                    check_in_date,
+                    check_out_date,
+                } => json!({
+                    "error": "check_out_not_after_check_in",
+                    "check_in_date": check_in_date,
+                    "check_out_date": check_out_date,
+                    "hint": format!(
+                        "Ngày trả ({check_out_date}) phải SAU ngày nhận ({check_in_date}). Không tự \
+                         cộng thêm một đêm cho đủ — số đêm là tiền khách trả. Hỏi lại người dùng \
+                         ngày trả phòng rồi gọi lại `draft_reserve`."
+                    ),
+                }),
+                DraftOutcome::UnreadableReserveDate { field, requested } => json!({
+                    "error": "unreadable_reserve_date",
+                    "field": field,
+                    "requested": requested,
+                    "today": now_local_date,
+                    "hint": format!(
+                        "`{field}` phải đúng dạng YYYY-MM-DD; `{requested}` không đọc được thành một \
+                         ngày. Hôm nay là {now_local_date} — quy đúng ô `{field}` ra dạng YYYY-MM-DD \
+                         rồi gọi lại `draft_reserve`. Không đoán bừa, không sửa ô còn lại, không chắc \
+                         thì hỏi lại người dùng."
                     ),
                 }),
             };
@@ -596,6 +658,174 @@ mod tests {
         );
         assert!(
             tool_message.contains("2026-08-08"),
+            "phải nhắc lại nguyên văn ngày người dùng nêu: {tool_message}"
+        );
+    }
+
+    /// Đích của lời từ chối ở test trên. Model gọi `draft_reserve` cho ngày
+    /// 08/08 ⇒ vòng lặp dừng và trả ra một thẻ **đặt phòng**, mang đúng ngày
+    /// người dùng nêu.
+    ///
+    /// Không có nhánh này thì trợ lý chỉ biết nói "không làm được": con bug cũ
+    /// hết xảy ra nhưng lễ tân cũng không đặt được phòng.
+    #[tokio::test]
+    async fn a_reserve_tool_call_comes_back_as_a_reservation_card() {
+        let pool = pool().await;
+        seed_room(&pool, "R1", "P902", 400_000).await;
+
+        let calls = Arc::new(AtomicUsize::new(0));
+        let counter = Arc::clone(&calls);
+
+        let endpoint = spawn(Router::new().route(
+            "/v1/chat/completions",
+            post(move || {
+                let counter = Arc::clone(&counter);
+                async move {
+                    counter.fetch_add(1, Ordering::SeqCst);
+                    Json(serde_json::json!({
+                        "choices": [{ "message": {
+                            "role": "assistant",
+                            "content": null,
+                            "tool_calls": [{
+                                "id": "call_1",
+                                "type": "function",
+                                "function": {
+                                    "name": "draft_reserve",
+                                    "arguments": "{\"room_id\":\"R1\",\"guest_name\":\"Hyungchul Lee\",\"guest_doc_number\":\"M12345678\",\"check_in_date\":\"2026-08-08\",\"check_out_date\":\"2026-08-09\"}"
+                                }
+                            }]
+                        }}]
+                    }))
+                }
+            }),
+        ))
+        .await;
+
+        let response = run_assistant_turn(
+            &pool,
+            &AssistantProviderClient::new(build_assistant_provider_client().expect("client")),
+            &config_for(&endpoint),
+            "sk-test",
+            request("đặt phòng R1 cho anh Lee, checkin 8 out 9 tháng 8"),
+            "2026-08-06",
+        )
+        .await
+        .expect("lượt đặt phòng phải chạy");
+
+        // Vòng lặp dừng ngay ở lượt đầu: không có executor nào cho tool ghi.
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert!(response.reply.is_none());
+
+        let action = response
+            .proposed_action
+            .expect("phải có thẻ đặt phòng để lễ tân duyệt");
+        assert_eq!(action.kind, "reserve");
+        assert_ne!(
+            action.kind, "check_in",
+            "thẻ đặt phòng đi qua đường nhận phòng là đúng con bug 06/08"
+        );
+        // Ngày trên thẻ phải là ngày người dùng nêu, không phải hôm nay.
+        assert_eq!(
+            action.display.get("check_in_date").map(String::as_str),
+            Some("08/08/2026")
+        );
+        assert_eq!(
+            action.display.get("check_out_date").map(String::as_str),
+            Some("09/08/2026")
+        );
+        assert!(
+            !format!("{:?}", action.display).contains("06/08/2026"),
+            "hôm nay chui vào thẻ đặt phòng: {:?}",
+            action.display
+        );
+    }
+
+    /// Chiều ngược, để định tuyến không thành một chiều: gọi `draft_reserve`
+    /// cho **hôm nay** thì không có thẻ nào, và model bị chỉ ngược sang
+    /// `draft_check_in`. "Đặt phòng cho hôm nay" đi đường nhận phòng.
+    #[tokio::test]
+    async fn a_reserve_tool_call_for_today_is_sent_back_to_the_check_in_tool() {
+        let pool = pool().await;
+        seed_room(&pool, "R1", "P903", 400_000).await;
+
+        let calls = Arc::new(AtomicUsize::new(0));
+        let counter = Arc::clone(&calls);
+
+        let endpoint = spawn(Router::new().route(
+            "/v1/chat/completions",
+            post(move || {
+                let counter = Arc::clone(&counter);
+                async move {
+                    let nth = counter.fetch_add(1, Ordering::SeqCst);
+                    if nth == 0 {
+                        Json(serde_json::json!({
+                            "choices": [{ "message": {
+                                "role": "assistant",
+                                "content": null,
+                                "tool_calls": [{
+                                    "id": "call_1",
+                                    "type": "function",
+                                    "function": {
+                                        "name": "draft_reserve",
+                                        "arguments": "{\"room_id\":\"R1\",\"guest_name\":\"Nam\",\"check_in_date\":\"2026-08-06\",\"check_out_date\":\"2026-08-07\"}"
+                                    }
+                                }]
+                            }}]
+                        }))
+                    } else {
+                        Json(serde_json::json!({
+                            "choices": [{ "message": {
+                                "role": "assistant",
+                                "content": "Khách đã ở quầy chưa ạ? Hôm nay thì em làm nhận phòng."
+                            }}]
+                        }))
+                    }
+                }
+            }),
+        ))
+        .await;
+
+        let response = run_assistant_turn(
+            &pool,
+            &AssistantProviderClient::new(build_assistant_provider_client().expect("client")),
+            &config_for(&endpoint),
+            "sk-test",
+            request("đặt phòng R1 hôm nay cho anh Nam"),
+            "2026-08-06",
+        )
+        .await
+        .expect("ngày hôm nay không được làm hỏng cả lượt chat");
+
+        // Phòng có thật và mọi trường đều đủ, nên nhánh ngày là thứ duy nhất
+        // đứng giữa tool call và một cái thẻ.
+        assert!(
+            response.proposed_action.is_none(),
+            "hôm nay mà vẫn ra thẻ đặt phòng trước: {:?}",
+            response.proposed_action
+        );
+
+        let tool_message = response
+            .history
+            .iter()
+            .find(|message| {
+                message
+                    .content
+                    .as_deref()
+                    .is_some_and(|content| content.contains("wrong_date_for_reserve"))
+            })
+            .and_then(|message| message.content.clone())
+            .expect("model phải nhận lại lý do từ chối");
+
+        assert!(
+            tool_message.contains("draft_check_in"),
+            "phải chỉ thẳng sang công cụ nhận phòng: {tool_message}"
+        );
+        assert!(
+            !tool_message.contains("draft_backfill"),
+            "hôm nay không được chỉ sang ghi bù: {tool_message}"
+        );
+        assert!(
+            tool_message.contains("2026-08-06"),
             "phải nhắc lại nguyên văn ngày người dùng nêu: {tool_message}"
         );
     }

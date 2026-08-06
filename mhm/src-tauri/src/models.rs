@@ -507,7 +507,12 @@ pub struct CreateUserRequest {
 
 // ── Reservation Calendar DTOs ──
 
-#[derive(Debug, Deserialize)]
+/// `Serialize` + `Clone` để trợ lý quầy mang được **chính** kiểu này ra thẻ xác
+/// nhận (`agent::assistant::draft::ActionPayload::Reserve`). Nút *Đồng ý* gửi
+/// thẳng `payload` của thẻ sang lệnh `create_reservation`, nên payload phải là
+/// kiểu ấy chứ không phải một bản chép tay — bản chép tay là một nguồn sự thật
+/// thứ hai để trôi lệch, và thẻ là thứ con người duyệt trước khi tiền đi.
+#[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct CreateReservationRequest {
     pub room_id: String,
     pub guest_name: String,

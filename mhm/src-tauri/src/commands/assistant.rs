@@ -30,7 +30,7 @@ use crate::{
                 validate_assistant_base_url, validate_assistant_model, AssistantConfig,
                 AssistantGateStatus, AssistantPreset,
             },
-            draft::ProposedAction,
+            draft::{ProposedAction, CHECK_IN_ACTION_KIND, RESERVE_ACTION_KIND},
             provider::{build_assistant_provider_client, AssistantProviderClient},
             run_assistant_turn, AssistantTurnRequest, AssistantTurnResponse, MAX_MESSAGE_CHARS,
         },
@@ -167,8 +167,22 @@ pub async fn set_assistant_cloud_opt_in(
 /// `preview`. Xem comment ở `migrate_v27_assistant_conversations`: bảng cố ý
 /// không có cột chứa nổi chúng, nên nhét JSON vào `text` là lách đúng hàng rào
 /// ấy. `display` là `BTreeMap` nên thứ tự dòng tất định.
+///
+/// Dòng đầu nói **đúng loại thẻ**. Một thẻ đặt phòng trước ghi vào sổ thành "Đề
+/// xuất nhận phòng" là in lại nguyên văn câu nói dối đã mở ra cả spec này (mục
+/// 1: trợ lý báo "Đã nhận phòng xong." trong khi vừa ghi một bản ghi sai) — chỉ
+/// khác là lần này nó nằm trong sổ và người đọc lại sẽ tin nó. Cùng luật
+/// `ACTION_KIND_COPY` bên `types/assistant.ts`.
+///
+/// `kind` lạ **không** được gọi tên theo loại nào: dán nhãn sai còn tệ hơn nói
+/// thẳng là không biết.
 fn summarize_action(action: &ProposedAction) -> String {
-    let mut lines = vec!["Đề xuất nhận phòng:".to_string()];
+    let heading = match action.kind.as_str() {
+        CHECK_IN_ACTION_KIND => "Đề xuất nhận phòng:",
+        RESERVE_ACTION_KIND => "Đề xuất đặt phòng trước:",
+        _ => "Đề xuất (loại thẻ không rõ):",
+    };
+    let mut lines = vec![heading.to_string()];
     for (key, value) in &action.display {
         lines.push(format!("- {key}: {value}"));
     }
@@ -518,9 +532,11 @@ pub async fn assistant_turn(
 mod tests {
     use super::*;
     use crate::agent::assistant::draft::{
-        build_check_in_display, ProposedAction, CHECK_IN_ACTION_KIND,
+        build_check_in_display, build_reserve_display, ActionPayload, ProposedAction,
+        CHECK_IN_ACTION_KIND, RESERVE_ACTION_KIND,
     };
     use crate::commands::assistant_conversations::tests::{commands_in, CommandShell};
+    use crate::models::CreateReservationRequest;
     use crate::models::{CheckInRequest, CreateGuestRequest, User};
     use crate::queries::assistant::conversation_queries;
     use sqlx::sqlite::SqlitePoolOptions;
@@ -670,10 +686,46 @@ mod tests {
             reply: None,
             proposed_action: Some(ProposedAction {
                 kind: CHECK_IN_ACTION_KIND.to_string(),
-                payload,
+                payload: ActionPayload::CheckIn(payload),
                 display,
                 preview,
                 warnings: vec!["Phòng đang ở trạng thái bẩn, chưa dọn.".to_string()],
+                built_at_ms: 1_754_300_000_000,
+            }),
+            history: Vec::new(),
+            conversation_id: None,
+            turn_saved: false,
+        })
+    }
+
+    /// Thẻ **đặt phòng trước**, dựng bằng đúng hàm sản xuất
+    /// `build_reserve_display` — cùng lý do như fixture nhận phòng ngay trên:
+    /// một `display` dựng tay chỉ đo được chính nó.
+    fn reserve_action_card() -> CommandResult<AssistantTurnResponse> {
+        let payload = CreateReservationRequest {
+            room_id: "R201".to_string(),
+            guest_name: "Hyungchul Lee".to_string(),
+            guest_phone: Some("0905000111".to_string()),
+            guest_doc_number: Some("M12345678".to_string()),
+            check_in_date: "2026-08-08".to_string(),
+            check_out_date: "2026-08-09".to_string(),
+            nights: 1,
+            deposit_amount: Some(200_000),
+            source: Some("phone".to_string()),
+            notes: None,
+            guests: None,
+        };
+        let preview = serde_json::json!({ "total": 400000 });
+        let display = build_reserve_display(&payload, &preview);
+
+        Ok(AssistantTurnResponse {
+            reply: None,
+            proposed_action: Some(ProposedAction {
+                kind: RESERVE_ACTION_KIND.to_string(),
+                payload: ActionPayload::Reserve(payload),
+                display,
+                preview,
+                warnings: Vec::new(),
                 built_at_ms: 1_754_300_000_000,
             }),
             history: Vec::new(),
@@ -1083,6 +1135,38 @@ mod tests {
             !text.contains('{') && !text.contains('}'),
             "JSON thô của payload lọt vào text: {text}"
         );
+    }
+
+    /// Sổ hội thoại phải gọi đúng tên việc. Một thẻ **đặt phòng trước** ghi vào
+    /// sổ thành "Đề xuất nhận phòng" là in lại nguyên văn câu nói dối đã mở ra
+    /// cả spec này — lần này nằm trên đĩa, và người mở lại sổ sẽ tin nó.
+    ///
+    /// Ghim luôn hai dòng ngày: đây là bất biến mới áp cho **mọi** thẻ, và sổ là
+    /// bằng chứng duy nhất còn lại sau khi cái thẻ biến mất khỏi màn hình.
+    #[tokio::test]
+    async fn a_reservation_card_is_logged_as_a_reservation_not_a_check_in() {
+        let pool = seeded_pool().await;
+
+        close_turn_record(&pool, &existing_record("c1", true), &reserve_action_card()).await;
+
+        let (kind, text) = logged_message(&pool, "c1").await;
+        assert_eq!(kind, "action");
+        assert!(
+            text.starts_with("Đề xuất đặt phòng trước:"),
+            "thẻ đặt phòng bị ghi vào sổ như một lượt nhận phòng: {text}"
+        );
+        assert!(
+            !text.contains("Đề xuất nhận phòng"),
+            "sổ không được gọi một lượt đặt phòng là nhận phòng: {text}"
+        );
+        assert!(
+            text.contains("- check_in_date: 08/08/2026")
+                && text.contains("- check_out_date: 09/08/2026"),
+            "sổ phải giữ đủ hai ngày của thẻ: {text}"
+        );
+        // Nhãn "Hôm nay" là của thẻ nhận phòng. Trên một thẻ đặt phòng trước nó
+        // luôn sai — thẻ ấy chỉ dựng được cho ngày ở tương lai.
+        assert!(!text.contains("Hôm nay"), "{text}");
     }
 
     /// Câu hỏi phải nằm TRƯỚC câu trả lời khi sổ được đọc lại.
