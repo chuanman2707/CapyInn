@@ -87,6 +87,28 @@ export function AssistantPanel() {
   // `null` khi ghi hỏng, và `null === null` sẽ khớp — đúng cái phải chặn.
   const showAction = pendingAction !== null && pendingActionKey === conversationKey;
 
+  // Câu hỏi của hộp lớp 1, GỌI ĐÚNG TÊN LOẠI THẺ sắp bị vứt.
+  //
+  // Bản trước viết cứng "Bỏ thẻ nhận phòng đang chờ?" cho cả ba loại. Ca hỏng
+  // đo được: thẻ ĐẶT PHÒNG đang treo → bấm *Hội thoại mới* → lễ tân đọc "thẻ
+  // nhận phòng cũ còn sót" → bấm *Bỏ thẻ và đi tiếp* → mất đúng cái thẻ đang
+  // đúng. Nhãn sai không phải chuyện chữ nghĩa ở đây: nó là thứ duy nhất người
+  // bấm dùng để quyết định có vứt hay không.
+  //
+  // MỘT chuỗi cho cả `aria-label` lẫn chữ hiện, cố ý. Hai chỗ viết tay là hai
+  // chỗ trôi độc lập, và đã trôi thật: đổi riêng `aria-label` — thứ DUY NHẤT
+  // người dùng screen-reader nghe được — không làm đỏ một test nào, vì
+  // `getByRole("alertdialog")` không kèm `name` thì nó không đọc tới.
+  //
+  // `pendingAction` null mà hộp còn mở là một khe render có thật: effect dọn
+  // `switchIntent` chạy SAU khi render xong, nên có đúng một lượt vẽ hộp trên
+  // một cái thẻ vừa biến mất. Rơi về "thẻ" trần ở đó chứ không đoán bừa một
+  // loại — cùng luật với `UNKNOWN_KIND_COPY`.
+  const pendingCardNoun = pendingAction
+    ? actionKindCopy(pendingAction.kind).pendingCardNoun
+    : "thẻ";
+  const switchPrompt = `Bỏ ${pendingCardNoun} đang chờ?`;
+
   // Đồng hồ để thẻ tự chuyển sang trạng thái hết hạn mà không cần thao tác.
   // Bám vào thẻ ĐANG VẼ, không phải `pendingAction` trần: thẻ của hội thoại
   // khác không hiện thì cũng không có gì để đếm giờ.
@@ -105,9 +127,9 @@ export function AssistantPanel() {
   //
   // Vế `!pendingAction` là đường thứ ba: bấm *Bỏ thẻ* ngay trên chính thẻ (nút
   // của `ProposedActionCard`, vẫn bấm được trong lúc hộp hỏi đang mở) làm thẻ
-  // biến mất, và một hộp hỏi "Bỏ thẻ nhận phòng đang chờ?" về cái thẻ không còn
-  // tồn tại là câu hỏi suông — nhưng trả lời "Bỏ thẻ và đi tiếp" cho nó thì vẫn
-  // đổi hội thoại thật.
+  // biến mất, và một hộp hỏi "Bỏ thẻ đang chờ?" về cái thẻ không còn tồn tại là
+  // câu hỏi suông — nhưng trả lời "Bỏ thẻ và đi tiếp" cho nó thì vẫn đổi hội
+  // thoại thật.
   //
   // Đây KHÔNG phải nới lỏng lớp 1: nó chỉ gỡ hộp hỏi ở đúng những lúc không còn
   // gì để mất hoặc người dùng đã rời đi. Đường mở hộp (`requestSwitch`) không
@@ -282,10 +304,10 @@ export function AssistantPanel() {
       {switchIntent && (
         <div
           role="alertdialog"
-          aria-label="Bỏ thẻ nhận phòng đang chờ?"
+          aria-label={switchPrompt}
           className="mx-5 mb-3 shrink-0 space-y-3 rounded-2xl border border-amber-300 bg-amber-50 p-4"
         >
-          <p className="text-sm font-semibold">Bỏ thẻ nhận phòng đang chờ?</p>
+          <p className="text-sm font-semibold">{switchPrompt}</p>
           <p className="text-xs text-amber-800">
             Đổi hội thoại là thẻ mất, và phải nhờ trợ lý tính lại từ đầu.
           </p>

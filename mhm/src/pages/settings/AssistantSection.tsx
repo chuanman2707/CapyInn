@@ -175,9 +175,19 @@ export function AssistantSection() {
     <section className="space-y-4">
       <div>
         <h3 className="text-lg font-semibold">Trợ lý quầy</h3>
+        {/* Kể ĐỦ những đường trợ lý ghi được vào PMS, vì đây là chỗ chủ nhà
+            quyết định có bật nó hay không. Bản trước chỉ khai "thẻ xác nhận
+            nhận phòng" trong khi trợ lý còn dựng được thẻ đặt phòng trước và
+            thẻ ghi bù — người đọc đồng ý cho một quyền hẹp hơn quyền thật.
+
+            Thêm loại thẻ thứ tư thì câu này phải sửa theo; `ACTION_KIND_COPY`
+            (`types/assistant.ts`) là danh sách đầy đủ. Cố ý KHÔNG nối bảng ấy
+            thành câu: đây là văn xuôi cho người đang cân nhắc bật/tắt đọc, còn
+            bảng kia là chữ trên thẻ cho lễ tân đang thao tác. */}
         <p className="text-sm text-brand-muted">
-          Trợ lý AI hỗ trợ tra cứu và dựng thẻ xác nhận nhận phòng. PMS vẫn chạy bình thường khi
-          chưa cấu hình.
+          Trợ lý AI hỗ trợ tra cứu và dựng thẻ xác nhận cho ba việc ghi vào PMS: nhận phòng, đặt
+          phòng trước và ghi bù kỳ ở đã qua. Thẻ nào cũng phải có người bấm duyệt. PMS vẫn chạy bình
+          thường khi chưa cấu hình.
         </p>
       </div>
 
@@ -348,14 +358,21 @@ export function AssistantSection() {
 
             {/* Chỉ một câu, và có điều kiện — câu cảnh báo thường trực là câu
                 người ta thôi đọc. Xoá sạch dọn luôn phiên đang mở trên panel
-                nên thẻ nhận phòng đang chờ mất theo, kể cả khi lệnh xoá không
-                xoá nổi một dòng nào của chính hội thoại đang mở.
+                nên thẻ đang chờ mất theo, kể cả khi lệnh xoá không xoá nổi một
+                dòng nào của chính hội thoại đang mở.
 
                 "trên panel" không phải chữ thừa: người đọc câu này đang đứng ở
-                tab Cài đặt, còn cái thẻ thì nằm ở cột bên kia màn hình. */}
+                tab Cài đặt, còn cái thẻ thì nằm ở cột bên kia màn hình.
+
+                TRUNG TÍNH với loại thẻ: `hasPendingAction` là một `boolean`,
+                chỗ này không biết — và không cần biết — thẻ đang treo là nhận
+                phòng, đặt phòng hay ghi bù. Gọi bừa nó là "thẻ nhận phòng" như
+                bản trước thì hai phần ba số lần là nói sai về thứ sắp mất. Muốn
+                nói đúng tên thì phải chuyền `kind` qua hai lớp prop, đổi lấy
+                một danh từ mà người đọc đang không cần. */}
             {hasPendingAction && (
               <p className="text-xs font-medium text-red-700">
-                Thẻ nhận phòng đang chờ trên panel cũng sẽ mất.
+                Thẻ đang chờ duyệt trên panel cũng sẽ mất.
               </p>
             )}
 

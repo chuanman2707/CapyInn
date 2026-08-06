@@ -33,7 +33,7 @@ type AssistantHistoryListProps = {
   /// bấm và cú mint. Nó vốn không làm nổi việc đó: `disabled` là **lấy mẫu lúc
   /// render**, cú bấm đã đi rồi thì không thu lại được.
   busy: boolean;
-  /// Có thẻ nhận phòng đang chờ duyệt hay không. Chỉ dùng để CẢNH BÁO trong hộp
+  /// Có thẻ nào đang chờ duyệt hay không — bất kể loại. Chỉ dùng để CẢNH BÁO trong hộp
   /// xoá sạch, **không** dựng thêm một cửa hỏi kiểu lớp 1: spec dòng 474-475
   /// liệt kê đúng hai hành vi phải hỏi trước — bấm *hội thoại mới* và mở một hội
   /// thoại từ lịch sử — còn xoá là hành động khác và đã có hàng rào riêng
@@ -151,11 +151,16 @@ export function AssistantHistoryList({
                 Không hoàn tác. Ngoài bản sao lưu ở Data &amp; Backup thì đây là bản duy nhất.
               </p>
 
-              {/* Xoá sạch dọn luôn phiên đang mở, nên thẻ nhận phòng đang chờ
-                  mất theo — kể cả ở ca `conversationId === null` (ghi sổ hỏng,
-                  hội thoại chưa hề vào sổ), tức mất thẻ vì một lệnh xoá không
-                  xoá nổi một dòng nào của chính hội thoại đó. Chỉ một câu, có
-                  điều kiện: câu cảnh báo thường trực là câu người ta thôi đọc.
+              {/* Xoá sạch dọn luôn phiên đang mở, nên thẻ đang chờ mất theo —
+                  kể cả ở ca `conversationId === null` (ghi sổ hỏng, hội thoại
+                  chưa hề vào sổ), tức mất thẻ vì một lệnh xoá không xoá nổi một
+                  dòng nào của chính hội thoại đó. Chỉ một câu, có điều kiện:
+                  câu cảnh báo thường trực là câu người ta thôi đọc.
+
+                  TRUNG TÍNH với loại thẻ: `hasPendingAction` là một `boolean`,
+                  chỗ này không biết thẻ đang treo là nhận phòng, đặt phòng hay
+                  ghi bù — và gọi bừa nó là "thẻ nhận phòng" như bản trước thì
+                  hai phần ba số lần là nói sai về thứ sắp mất.
 
                   Cố ý KHÔNG đặt câu này trong hộp xoá từng dòng: ở đó
                   `deleteConversation` chỉ dọn phiên khi xoá đúng hội thoại đang
@@ -164,7 +169,7 @@ export function AssistantHistoryList({
                   gian. */}
               {hasPendingAction && (
                 <p className="text-xs font-medium text-red-700">
-                  Thẻ nhận phòng đang chờ cũng sẽ mất.
+                  Thẻ đang chờ duyệt cũng sẽ mất.
                 </p>
               )}
               <label htmlFor={PHRASE_INPUT_ID} className="block text-xs text-red-700">

@@ -148,12 +148,25 @@ function buildHistoryNotice(stored: StoredMessage[]): string | null {
 
 /// Câu từ chối dùng chung cho mọi đường mint khoá phiên bị chặn vì đang bận.
 ///
-/// Nói cả hai thứ có thể đang bay — lượt trả lời của trợ lý và lệnh nhận phòng
-/// — vì `busy` là MỘT cờ dùng chung cho cả hai, và người đọc câu này cần biết
+/// Nói cả hai thứ có thể đang bay — lượt trả lời của trợ lý và một lệnh ghi —
+/// vì `busy` là MỘT cờ dùng chung cho cả hai, và người đọc câu này cần biết
 /// mình đang chờ cái gì. Được vẽ ở **cả hai** bề mặt: viên `role="alert"` của
 /// panel (`AssistantPanel.tsx`) và dòng lỗi của Cài đặt → Trợ lý quầy.
+///
+/// KHÔNG nêu tên loại lệnh, cố ý. Bản trước viết "một lệnh **nhận phòng** chưa
+/// xong" trong khi `busy` bật cho cả ba lệnh (`WRITE_COMMAND_BY_KIND` ngay
+/// dưới): bấm *Đồng ý* trên thẻ đặt phòng rồi bấm *Hội thoại mới* thì viên đỏ
+/// khẳng định có một cú nhận phòng chưa xong, mà không có cú nào cả. Đây không
+/// phải nhãn lệch — nó là một khẳng định về một cú GHI TIỀN đang diễn ra, và
+/// phản ứng đúng của lễ tân khi đọc nó (mở PMS đi gỡ một cú nhận phòng) chính
+/// là thao tác sửa tay đã xảy ra trong sự cố.
+///
+/// Nói đúng loại thì phải đọc `pendingAction.kind` tại từng chỗ từ chối, mà
+/// trong bảy chỗ ấy có những chỗ không có thẻ nào để đọc (`busy` do một lượt
+/// CHAT bật, không phải do thẻ) — bảy đường dựng câu là bảy chỗ trôi được, đổi
+/// lấy một danh từ. Câu trung tính đúng ở cả bảy.
 export const BUSY_REFUSAL =
-  "Trợ lý đang bận: còn một lượt trả lời hoặc một lệnh nhận phòng chưa xong. Xong rồi hãy thử lại.";
+  "Trợ lý đang bận: còn một lượt trả lời hoặc một lệnh ghi vào PMS chưa xong. Xong rồi hãy thử lại.";
 
 /// ── ÁNH XẠ `kind` → LỆNH PMS ────────────────────────────────────────────────
 ///

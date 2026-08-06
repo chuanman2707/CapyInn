@@ -32,11 +32,29 @@ const action: ProposedAction = {
     paid_amount: 500000,
     pricing_type: "nightly",
   },
-  // Đúng hình dạng `build_check_in_display` (Rust) sinh ra: một dòng đếm đầu
-  // người, rồi mỗi khách một dòng mang đủ trường đã điền. Khoá "Khách N" cố ý
-  // không có trong FIELD_LABELS — thẻ phải render generic theo display.
+  // Cùng BỘ KHOÁ mà `build_check_in_display` (Rust) sinh ra, cộng một khoá lạ
+  // cố ý ở cuối: một dòng đếm đầu người, rồi mỗi khách một dòng mang đủ trường
+  // đã điền. Thứ tự viết ở đây là cho người đọc — phía Rust `display` là một
+  // `BTreeMap`, nó xuống dây theo thứ tự chuỗi của khoá. Thẻ render generic nên
+  // khác biệt đó không đổi thứ gì test này đo.
+  //
+  // HAI DÒNG NGÀY LÀ THỨ ĐÃ THIẾU HÔM XẢY RA SỰ CỐ. Bản trước của fixture này
+  // không có `check_in_date`/`check_out_date` — tức mô hình chuẩn của thẻ nhận
+  // phòng trong test frontend vẫn đúng là cái thẻ không ngày đã để một cú nhận
+  // phòng sai ngày đi lọt — trong khi câu chú thích ở đây vẫn tự nhận là "đúng
+  // hình dạng `build_check_in_display` sinh ra". Câu đó sai, và một fixture sai
+  // hình dạng là một bộ test đo nhầm cái thẻ.
+  //
+  // Tiền tố "Hôm nay, " không phải chữ trang trí: `build_check_in_draft` chỉ
+  // dựng được thẻ nhận phòng khi ngày nhận đúng là hôm nay, và Rust viết cứng
+  // nhãn ấy dựa vào đúng nhánh từ chối đó.
+  //
+  // Khoá "Khách N" cố ý không có trong FIELD_LABELS — thẻ phải render generic
+  // theo display.
   display: {
     room_id: "Phòng 201",
+    check_in_date: "Hôm nay, 06/08/2026",
+    check_out_date: "08/08/2026",
     guests: "2 người",
     "Khách 1": "Nguyễn Văn Nam · CCCD: 079201001234 · SĐT: 0909000111",
     "Khách 2": "Trần Thị Bích · CCCD: 079301005678",
@@ -129,6 +147,39 @@ const ACTION_BY_KIND: Record<ProposedActionKind, ProposedAction> = {
 /// đúng cái ranh giới ấy.
 function actionWithKind(kind: string): ProposedAction {
   return { ...action, kind } as unknown as ProposedAction;
+}
+
+/// Khoá động `Khách N` — nhãn duy nhất được phép không có trong `FIELD_LABELS`.
+///
+/// `build_check_in_display`/`build_backfill_display` sinh khoá này theo số
+/// khách (và đệm 0 khi từ 10 khách trở lên), nên không có dòng cố định nào để
+/// tra — và nó vốn ĐÃ là một nhãn tiếng Việt.
+const DYNAMIC_GUEST_KEY = /^Khách \d+$/;
+
+/// Những khoá `display` đang hiện lên thẻ dưới dạng TÊN TRƯỜNG THÔ.
+///
+/// `ProposedActionCard` render `FIELD_LABELS[key] ?? key`, nên "nhãn đọc lên
+/// trùng đúng tên khoá" **là** dấu hiệu khoá ấy thiếu nhãn. Đo thẳng thứ lễ tân
+/// đọc trên DOM, không đọc lại bảng tra — bảng tra so với chính nó thì luôn
+/// khớp.
+///
+/// PHÉP ĐO CŨ SAI, VÀ SAI ĐO ĐƯỢC. Nó lọc `labels.filter((l) => l.includes("_"))`
+/// — coi "có gạch dưới" là dấu hiệu tên máy. Nhưng 5 trong 16 khoá `display`
+/// phía Rust sinh ra KHÔNG có gạch dưới (`guests`, `nights`, `source`, `notes`,
+/// `total`), nên chúng thiếu nhãn bao nhiêu cũng đi lọt: xoá dòng `total` khỏi
+/// `FIELD_LABELS` thì thẻ hiện dòng tiền dưới cái nhãn `total` và cả bộ vẫn
+/// xanh. (`pricing_type` có gạch dưới nhưng chỉ nằm trên thẻ nhận phòng, mà thẻ
+/// nhận phòng trước vòng này không có test loại này — nên nó cũng không ai
+/// canh.)
+///
+/// Ghép nhãn với khoá THEO THỨ TỰ: component render `Object.entries(display)`,
+/// nên `dt` thứ i thuộc về khoá thứ i. Người gọi khẳng định số dòng trước, nên
+/// một bản render thiếu dòng không lẻn qua được bằng cách làm lệch cặp.
+function rawFieldNamesOnCard(container: HTMLElement, display: Record<string, string>): string[] {
+  const labels = Array.from(container.querySelectorAll("dt")).map((node) => node.textContent);
+  return Object.keys(display).filter(
+    (key, index) => !DYNAMIC_GUEST_KEY.test(key) && labels[index] === key,
+  );
 }
 
 describe("ProposedActionCard", () => {
@@ -547,8 +598,10 @@ describe("ProposedActionCard", () => {
 
     const labels = Array.from(container.querySelectorAll("dt")).map((node) => node.textContent);
     expect(labels).toHaveLength(12);
-    // Dấu gạch dưới chỉ có ở tên trường máy — nhãn tiếng Việt không bao giờ có.
-    expect(labels.filter((label) => label?.includes("_"))).toEqual([]);
+    // MỌI khoá phải có nhãn — không phải "mọi khoá có gạch dưới". Xem
+    // `rawFieldNamesOnCard`: phép đo cũ để lọt `guests`, `nights`, `source`,
+    // `notes`, `total`.
+    expect(rawFieldNamesOnCard(container, fullyLabelledReserve.display)).toEqual([]);
     expect(labels).toContain("Số điện thoại");
     expect(labels).toContain("Số CCCD");
   });
@@ -593,11 +646,88 @@ describe("ProposedActionCard", () => {
     // Chín trường payload + một dòng khách. "Khách 1" là khoá duy nhất được
     // phép không có nhãn — nó **là** một nhãn tiếng Việt rồi.
     expect(labels).toHaveLength(10);
-    expect(labels.filter((label) => label?.includes("_"))).toEqual([]);
+    expect(rawFieldNamesOnCard(container, fullyLabelledBackfill.display)).toEqual([]);
     expect(labels).toContain("Tổng tiền");
     expect(labels).toContain("Dự kiến trả");
     // Dòng ngày trả phải nói ra nghĩa thật, không phải một gạch ngang câm mà lễ
     // tân đọc thành "chưa điền".
     expect(screen.getByText("Chưa trả phòng (khách còn ở)")).toBeInTheDocument();
+  });
+
+  /// Vế THỨ BA của cùng phép đo, và là vế trước vòng này KHÔNG có.
+  ///
+  /// Thẻ nhận phòng không có test "không để lọt tên trường thô" nào cả, nên
+  /// `pricing_type` — khoá chỉ xuất hiện trên loại thẻ này — chưa từng được
+  /// canh. Nó cũng là loại thẻ đã gây ra sự cố, tức loại đáng canh nhất.
+  ///
+  /// `display` dưới đây mang **đủ** bộ khoá `build_check_in_display` (`draft.rs`)
+  /// sinh ra cho một khách.
+  it("thẻ nhận phòng không để lọt tên trường thô lên nhãn", () => {
+    const fullyLabelledCheckIn: ProposedAction = {
+      ...action,
+      display: {
+        room_id: "Phòng 201",
+        check_in_date: "Hôm nay, 06/08/2026",
+        check_out_date: "08/08/2026",
+        guests: "1 người",
+        "Khách 1": "Nguyễn Văn Nam · CCCD: 079201001234",
+        nights: "2 đêm",
+        source: "walk-in",
+        notes: "—",
+        paid_amount: "500.000 ₫",
+        pricing_type: "nightly",
+        total: "700.000 ₫",
+      },
+    };
+
+    const { container } = render(
+      <ProposedActionCard
+        action={fullyLabelledCheckIn}
+        busy={false}
+        nowMs={action.built_at_ms}
+        onApprove={vi.fn()}
+        onRebuild={vi.fn()}
+        onDismiss={vi.fn()}
+      />,
+    );
+
+    const labels = Array.from(container.querySelectorAll("dt")).map((node) => node.textContent);
+    // Mười khoá cố định + một dòng khách.
+    expect(labels).toHaveLength(11);
+    expect(rawFieldNamesOnCard(container, fullyLabelledCheckIn.display)).toEqual([]);
+    // Hai khoá chỉ có ở loại thẻ này, gọi tên riêng để đọc log đỡ phải đoán.
+    expect(labels).toContain("Kiểu tính giá");
+    expect(labels).toContain("Tổng tiền");
+  });
+
+  /// HAI DÒNG NGÀY TRÊN THẺ NHẬN PHÒNG — thứ đã thiếu hôm xảy ra sự cố.
+  ///
+  /// Thẻ cũ hiện `nights` mà không hiện ngày nào, nên lễ tân đọc kỹ tới đâu
+  /// cũng không có gì để đối chiếu với câu mình vừa gõ ("checkin 8 out 9"): một
+  /// cái thẻ ghi sai ngày trông y hệt một cái thẻ ghi đúng. Rust đã ghim ở
+  /// `build_check_in_display`; đây là vế frontend, trên đúng cái fixture mà cả
+  /// bộ test này dùng làm mô hình chuẩn của thẻ nhận phòng.
+  ///
+  /// Đọc theo CẶP nhãn→giá trị chứ không `getByText` hai chuỗi rời: một thẻ vẽ
+  /// đủ hai nhãn nhưng ghép nhầm giá trị vẫn xanh với phép đo rời, mà ghép nhầm
+  /// ngày chính là con bug.
+  it("thẻ nhận phòng hiện ĐỦ hai dòng ngày, mỗi dòng đúng giá trị của nó", () => {
+    const { container } = render(
+      <ProposedActionCard
+        action={action}
+        busy={false}
+        nowMs={action.built_at_ms}
+        onApprove={vi.fn()}
+        onRebuild={vi.fn()}
+        onDismiss={vi.fn()}
+      />,
+    );
+
+    const valueOf = (label: string) =>
+      Array.from(container.querySelectorAll("dt")).find((node) => node.textContent === label)
+        ?.nextElementSibling?.textContent ?? null;
+
+    expect(valueOf("Ngày nhận")).toBe("Hôm nay, 06/08/2026");
+    expect(valueOf("Ngày trả")).toBe("08/08/2026");
   });
 });

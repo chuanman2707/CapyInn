@@ -44,11 +44,20 @@ const HISTORY_NOTICE = "Đây là bản ghi. Hỏi tiếp thì trợ lý không 
 /// đỏ gì cả — đúng cái bẫy `SUGGESTIONS` đã dính.
 const SAVE_NOTICE = "Không lưu được hội thoại này.";
 
+/// `display` rút gọn — panel không đọc từng dòng thẻ, `ProposedActionCard` mới
+/// là chỗ có test cho việc ấy. Nhưng HAI DÒNG NGÀY thì có mặt: bản trước chỉ có
+/// `room_id`, nên cái thẻ nhận phòng mà mọi test panel chạy qua vẫn đúng là cái
+/// thẻ không ngày đã để một cú nhận phòng sai ngày đi lọt. Tiền tố "Hôm nay, "
+/// là của `build_check_in_display` — thẻ nhận phòng chỉ dựng được cho hôm nay.
 function makeAction(): ProposedAction {
   return {
     kind: "check_in",
     payload: { room_id: "R1", guests: [{ full_name: "Nguyễn Văn Nam" }], nights: 1 },
-    display: { room_id: "Phòng 201" },
+    display: {
+      room_id: "Phòng 201",
+      check_in_date: "Hôm nay, 06/08/2026",
+      check_out_date: "07/08/2026",
+    },
     preview: {},
     warnings: [],
     built_at_ms: Date.now(),
@@ -106,6 +115,21 @@ const TITLES: Record<ProposedActionKind, string> = {
   check_in: "Xác nhận nhận phòng",
   reserve: "Xác nhận đặt phòng",
   backfill: "Xác nhận ghi bù",
+};
+
+/// Câu hỏi của hộp lớp 1, một câu cho mỗi loại thẻ. Nguyên văn, cùng lý do với
+/// `TITLES`.
+///
+/// Bản trước viết cứng "Bỏ thẻ nhận phòng đang chờ?" cho cả ba loại, và không
+/// một test nào đỏ khi đổi nó — đo được: sửa `aria-label` ⇒ 56/56 xanh, sửa
+/// riêng chữ hiện ⇒ 56/56 xanh, vì `getByRole("alertdialog")` không kèm `name`
+/// thì nó không đọc tới chuỗi nào cả. Ngoài đời: thẻ đặt phòng đang treo, lễ
+/// tân đọc "thẻ nhận phòng cũ còn sót", bấm *Bỏ thẻ và đi tiếp*, mất đúng cái
+/// thẻ đang đúng.
+const SWITCH_PROMPTS: Record<ProposedActionKind, string> = {
+  check_in: "Bỏ thẻ nhận phòng đang chờ?",
+  reserve: "Bỏ thẻ đặt phòng đang chờ?",
+  backfill: "Bỏ thẻ ghi bù đang chờ?",
 };
 
 const ALL_KINDS: ProposedActionKind[] = ["check_in", "reserve", "backfill"];
@@ -811,7 +835,19 @@ describe("AssistantPanel", () => {
       await userEvent.click(screen.getByRole("button", { name: "Hội thoại mới" }));
 
       expect(newChatSpy).not.toHaveBeenCalled();
-      expect(screen.getByRole("alertdialog")).toBeInTheDocument();
+      // Khẳng định trên TÊN TRUY CẬP của hộp, không chỉ trên chữ hiện.
+      //
+      // `aria-label` là thứ duy nhất người dùng screen-reader nghe được, và
+      // trước vòng này nó muốn ghi gì cũng được — không test nào đọc tới. Đây
+      // cũng là chỗ hộp phải gọi ĐÚNG TÊN loại thẻ sắp bị vứt: nhãn sai là thứ
+      // duy nhất người bấm dùng để quyết định có vứt hay không.
+      expect(screen.getByRole("alertdialog", { name: SWITCH_PROMPTS[kind] })).toBeInTheDocument();
+      // Và chữ hiện, vì hai bề mặt ấy đã từng là hai chuỗi viết tay rời nhau.
+      expect(screen.getByText(SWITCH_PROMPTS[kind])).toBeInTheDocument();
+      // Không gọi nhầm sang loại khác — vế bắt đúng con bug đã đo được.
+      for (const other of ALL_KINDS.filter((item) => item !== kind)) {
+        expect(screen.queryByText(SWITCH_PROMPTS[other])).not.toBeInTheDocument();
+      }
       // Và thẻ vẫn còn nguyên trong lúc hộp hỏi đang mở: hỏi xong mới dọn.
       expect(screen.getByText(TITLES[kind])).toBeInTheDocument();
     });
@@ -964,7 +1000,7 @@ describe("AssistantPanel", () => {
     await userEvent.click(screen.getByRole("button", { name: "Lịch sử" }));
     await userEvent.click(screen.getByRole("button", { name: "Xoá tất cả hội thoại" }));
 
-    expect(screen.getByText("Thẻ nhận phòng đang chờ cũng sẽ mất.")).toBeInTheDocument();
+    expect(screen.getByText("Thẻ đang chờ duyệt cũng sẽ mất.")).toBeInTheDocument();
   });
 
   it("không treo thẻ thì hộp xoá sạch KHÔNG cảnh báo suông", async () => {
@@ -981,7 +1017,7 @@ describe("AssistantPanel", () => {
     // Hộp thật sự đã mở — thiếu câu này thì "không thấy cảnh báo" chỉ là hệ quả
     // của việc chẳng thấy hộp nào.
     expect(screen.getByRole("button", { name: "Xoá vĩnh viễn" })).toBeInTheDocument();
-    expect(screen.queryByText("Thẻ nhận phòng đang chờ cũng sẽ mất.")).not.toBeInTheDocument();
+    expect(screen.queryByText("Thẻ đang chờ duyệt cũng sẽ mất.")).not.toBeInTheDocument();
   });
 
   it("đang chờ trả lời thì cả dòng lịch sử lẫn hai nút xoá khoá theo", async () => {

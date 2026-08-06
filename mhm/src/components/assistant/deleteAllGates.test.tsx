@@ -69,7 +69,7 @@ const PANEL_GATE = {
   cancel: "Huỷ",
   phrase: "Gõ XOÁ HẾT để xác nhận",
   heading: "Xoá sạch toàn bộ hội thoại?",
-  pendingWarning: "Thẻ nhận phòng đang chờ cũng sẽ mất.",
+  pendingWarning: "Thẻ đang chờ duyệt cũng sẽ mất.",
 };
 
 /// Tên của cửa ở Cài đặt → Trợ lý quầy — ĐỔI để phân biệt được.
@@ -79,7 +79,7 @@ const SETTINGS_GATE = {
   cancel: "Giữ lại sổ",
   phrase: "Gõ XOÁ HẾT để xoá sổ",
   heading: "Xoá sạch sổ hội thoại trợ lý?",
-  pendingWarning: "Thẻ nhận phòng đang chờ trên panel cũng sẽ mất.",
+  pendingWarning: "Thẻ đang chờ duyệt trên panel cũng sẽ mất.",
 };
 
 /// HAI CỬA XOÁ SẠCH TRÊN CÙNG MỘT MÀN HÌNH.
