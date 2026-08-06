@@ -110,6 +110,18 @@ export type ActionKindCopy = {
   done: string;
   /// Câu gửi cho trợ lý khi bấm *Tính lại* trên một thẻ đã hết hạn.
   rebuildPrompt: string;
+  /// Tên gọi cái thẻ khi câu văn nói VỀ nó chứ không đứng trên nó — "Bỏ **thẻ
+  /// đặt phòng** đang chờ?". Chữ thường, không hoa đầu: nó luôn nằm giữa câu.
+  ///
+  /// Cần một trường riêng chứ không cắt từ `title`: `title` là một MỆNH LỆNH
+  /// ("Xác nhận đặt phòng"), nhét nguyên vào giữa câu hỏi thành "Bỏ Xác nhận
+  /// đặt phòng đang chờ?". Cắt chuỗi để lấy phần đuôi thì hộp hỏi phụ thuộc vào
+  /// cách viết hoa của một câu khác — đúng kiểu ràng buộc mà không ai canh.
+  ///
+  /// Ở CÙNG bảng này chứ không một bảng thứ hai: bảng thứ hai là chỗ trôi độc
+  /// lập, và cái trôi được thì đúng là thứ đã dán nhãn "nhận phòng" lên cả ba
+  /// loại thẻ.
+  pendingCardNoun: string;
 };
 
 /// BA BỘ CHỮ KHÁC NHAU **BẰNG CHỮ**, không chỉ bằng màu.
@@ -129,18 +141,21 @@ const ACTION_KIND_COPY: Record<ProposedActionKind, ActionKindCopy> = {
     sending: "Đang gửi lệnh nhận phòng…",
     done: "Đã nhận phòng xong.",
     rebuildPrompt: "Tính lại thẻ nhận phòng vừa rồi.",
+    pendingCardNoun: "thẻ nhận phòng",
   },
   reserve: {
     title: "Xác nhận đặt phòng",
     sending: "Đang gửi lệnh đặt phòng…",
     done: "Đã đặt phòng xong.",
     rebuildPrompt: "Tính lại thẻ đặt phòng vừa rồi.",
+    pendingCardNoun: "thẻ đặt phòng",
   },
   backfill: {
     title: "Xác nhận ghi bù",
     sending: "Đang gửi lệnh ghi bù…",
     done: "Đã ghi bù xong.",
     rebuildPrompt: "Tính lại thẻ ghi bù vừa rồi.",
+    pendingCardNoun: "thẻ ghi bù",
   },
 };
 
@@ -154,6 +169,7 @@ const UNKNOWN_KIND_COPY: ActionKindCopy = {
   sending: "Đang gửi lệnh…",
   done: "Đã xong.",
   rebuildPrompt: "Tính lại thẻ vừa rồi.",
+  pendingCardNoun: "thẻ",
 };
 
 /// Tra qua `Map` chứ không `ACTION_KIND_COPY[kind]`: bảng trên là object literal

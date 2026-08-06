@@ -33,8 +33,14 @@ const sampleAction: ProposedAction = {
     paid_amount: 500000,
     pricing_type: "nightly",
   },
+  // Bộ khoá của `build_check_in_display` (Rust), GỒM CẢ HAI DÒNG NGÀY. Bản
+  // trước không có ngày nào — tức mô hình chuẩn của thẻ nhận phòng ở tầng store
+  // vẫn đúng là cái thẻ không ngày đã để một cú nhận phòng sai ngày đi lọt.
+  // Tiền tố "Hôm nay, " là của Rust: thẻ nhận phòng chỉ dựng được cho hôm nay.
   display: {
     room_id: "R1",
+    check_in_date: "Hôm nay, 06/08/2026",
+    check_out_date: "08/08/2026",
     guests: "Nguyễn Văn Nam",
     nights: "2 đêm",
     source: "walk-in",
@@ -969,6 +975,46 @@ describe("useAssistantStore", () => {
   // hàng rào." Bộ này canh hàng rào thật, ở tầng store.
 
   describe("hàng rào busy — không mint khoá phiên khi lệnh đang bay", () => {
+    /// Câu từ chối viết NGUYÊN VĂN ở đây, không `toBe(BUSY_REFUSAL)`.
+    ///
+    /// Bảy chỗ còn lại trong bộ này so hằng số với chính nó, và đo được là
+    /// chúng không canh gì: viết lại nguyên câu thành "PHA HOAI: …" thì cả bộ
+    /// vẫn xanh. Một chỗ ghim chữ là đủ — ghim ở cả bảy thì đổi câu phải sửa
+    /// bảy chỗ, và đó là cách người ta học thói quen sửa test cho khớp code.
+    ///
+    /// Đi qua một cú từ chối THẬT chứ không đọc thẳng hằng số: thứ phải canh là
+    /// chữ tới được mắt lễ tân, không phải một dòng `export`.
+    ///
+    /// Vế `not.toMatch(/nhận phòng/)` là con bug chứ không phải chuyện chữ
+    /// nghĩa. `busy` ở kịch bản này do `create_reservation` bật — KHÔNG có cú
+    /// nhận phòng nào — mà câu cũ khẳng định "còn một lệnh nhận phòng chưa
+    /// xong". Đọc xong câu ấy, việc đúng đắn phải làm của lễ tân là mở PMS đi
+    /// gỡ một cú nhận phòng không tồn tại: đúng thao tác sửa tay đã xảy ra
+    /// trong sự cố.
+    it("câu từ chối không khẳng định sai về loại lệnh đang bay", () => {
+      // Lệnh treo mãi: `busy` bật rồi ở nguyên đó cho tới hết test.
+      invokeWriteCommand.mockImplementation(() => new Promise(() => {}));
+      useAssistantStore.setState({
+        pendingAction: reserveAction,
+        pendingActionKey: SESSION_KEY,
+      });
+
+      void useAssistantStore.getState().approve();
+      // Cột mốc của kịch bản: thứ đang bay là ĐẶT PHÒNG.
+      expect(invokeWriteCommand).toHaveBeenCalledWith("create_reservation", {
+        req: reserveAction.payload,
+      });
+      expect(invokeWriteCommand).not.toHaveBeenCalledWith("check_in", expect.anything());
+
+      useAssistantStore.getState().startNewChat();
+
+      const { error } = useAssistantStore.getState();
+      expect(error).toBe(
+        "Trợ lý đang bận: còn một lượt trả lời hoặc một lệnh ghi vào PMS chưa xong. Xong rồi hãy thử lại.",
+      );
+      expect(error).not.toMatch(/nhận phòng/);
+    });
+
     it("startNewChat() bị từ chối khi đang bận và KHÔNG dọn gì", () => {
       useAssistantStore.setState({
         busy: true,
@@ -1252,6 +1298,35 @@ describe("useAssistantStore", () => {
   // ─── Nối dây conversation_id và gắn thẻ vào đúng phiên ───
 
   describe("khoá phiên và conversation_id", () => {
+    /// GIẢ ĐỊNH CẢ BỐN LỚP BẢO VỆ ĐỨNG TRÊN, và trước test này không ai canh.
+    ///
+    /// Cơ chế là "mint khoá phiên mới ⇒ thẻ cũ mất quyền". Mọi test khoá phiên
+    /// khác trong file chỉ kiểm `.not.toBe(SESSION_KEY)` — khác khoá CŨ — nên
+    /// chúng xanh y nguyên với một khoá hằng: đo được, đặt `"khoa-co-dinh"` vào
+    /// `emptySession()` thì cả bộ vẫn xanh.
+    ///
+    /// Ngoài đời cái hằng ấy nghĩa là: bấm *Hội thoại mới* hai lần liên tiếp
+    /// thì thẻ của phiên thứ nhất KHỚP khoá của phiên thứ hai, đi lọt cả lớp 3
+    /// (panel vẫn vẽ nó) lẫn lớp 4 (`approve()` vẫn cho chạy) — một cái thẻ
+    /// người dùng tưởng đã vứt vẫn ghi được vào PMS.
+    ///
+    /// Production đang an toàn nhờ `nextId()` gọi `crypto.randomUUID()`, nhưng
+    /// không có gì giữ nó ở đó. Test này là thứ giữ.
+    ///
+    /// Ba lần chứ không hai: hai lần cũng bắt được hằng số, nhưng một `nextId()`
+    /// kiểu "lật qua lật lại giữa hai giá trị" thì chỉ ba lần trở lên mới thấy.
+    it("mỗi lần mint ra một khoá phiên KHÁC NHAU, không phải một hằng số", () => {
+      const keys = [useAssistantStore.getState().conversationKey];
+
+      for (let mint = 0; mint < 3; mint += 1) {
+        useAssistantStore.getState().startNewChat();
+        keys.push(useAssistantStore.getState().conversationKey);
+      }
+
+      expect(new Set(keys).size).toBe(keys.length);
+      expect(keys.every((key) => typeof key === "string" && key.length > 0)).toBe(true);
+    });
+
     it("send() gắn thẻ vào đúng phiên nó được dựng ra", async () => {
       invokeCommand.mockResolvedValue({
         reply: null,

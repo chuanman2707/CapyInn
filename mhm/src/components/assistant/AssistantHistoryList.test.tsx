@@ -290,7 +290,7 @@ describe("AssistantHistoryList", () => {
 
     await userEvent.click(screen.getByRole("button", { name: "Xoá tất cả hội thoại" }));
 
-    expect(screen.getByText("Thẻ nhận phòng đang chờ cũng sẽ mất.")).toBeInTheDocument();
+    expect(screen.getByText("Thẻ đang chờ duyệt cũng sẽ mất.")).toBeInTheDocument();
   });
 
   it("không treo thẻ thì hộp xoá sạch không doạ chuyện không có", async () => {
@@ -302,7 +302,7 @@ describe("AssistantHistoryList", () => {
     await userEvent.click(screen.getByRole("button", { name: "Xoá tất cả hội thoại" }));
 
     expect(screen.getByText("Xoá sạch toàn bộ hội thoại?")).toBeInTheDocument();
-    expect(screen.queryByText("Thẻ nhận phòng đang chờ cũng sẽ mất.")).not.toBeInTheDocument();
+    expect(screen.queryByText("Thẻ đang chờ duyệt cũng sẽ mất.")).not.toBeInTheDocument();
   });
 
   it("đang chờ trả lời thì không mở được hội thoại nào", async () => {

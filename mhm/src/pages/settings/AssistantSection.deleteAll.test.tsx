@@ -43,7 +43,7 @@ const OPEN_BUTTON = "Xoá sổ hội thoại trợ lý";
 const CONFIRM_BUTTON = "Xoá sổ vĩnh viễn";
 const CANCEL_BUTTON = "Giữ lại sổ";
 const PHRASE_BOX = "Gõ XOÁ HẾT để xoá sổ";
-const PENDING_WARNING = "Thẻ nhận phòng đang chờ trên panel cũng sẽ mất.";
+const PENDING_WARNING = "Thẻ đang chờ duyệt trên panel cũng sẽ mất.";
 
 /// Cửa xoá sạch THỨ HAI mà spec dòng 359 đòi: nút phải có ở **cả** cuối danh
 /// sách lịch sử **và** ở Cài đặt → Trợ lý quầy. Task 9 làm cửa thứ nhất; cửa
