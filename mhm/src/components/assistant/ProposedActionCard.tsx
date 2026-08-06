@@ -1,15 +1,20 @@
 import { AlertTriangle } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
-import { isActionExpired, type ProposedAction } from "@/types/assistant";
+import { actionKindCopy, isActionExpired, type ProposedAction } from "@/types/assistant";
 
 const FIELD_LABELS: Record<string, string> = {
   room_id: "Phòng",
   guests: "Khách",
+  guest_name: "Khách",
   nights: "Số đêm",
+  check_in_date: "Ngày nhận",
+  check_out_date: "Ngày trả",
+  expected_checkout_date: "Dự kiến trả",
   source: "Nguồn",
   notes: "Ghi chú",
   paid_amount: "Trả trước",
+  deposit_amount: "Đặt cọc",
   pricing_type: "Kiểu tính giá",
   total: "Tổng tiền",
 };
@@ -32,10 +37,21 @@ export function ProposedActionCard({
   onDismiss,
 }: ProposedActionCardProps) {
   const expired = isActionExpired(action, nowMs);
+  // Ba loại thẻ, ba bộ chữ — xem `ACTION_KIND_COPY` (`types/assistant.ts`).
+  //
+  // Tra bằng hàm chứ không viết `if (kind === …)` ở đây: dòng tiêu đề, dòng
+  // trạng thái và câu *Tính lại* phải đổi CÙNG NHAU theo loại thẻ, và ba câu
+  // `if` rời nhau là ba chỗ trôi độc lập.
+  const copy = actionKindCopy(action.kind);
 
   return (
     <div className="rounded-xl border border-brand-primary/30 bg-white p-5 shadow-soft">
-      <p className="mb-3 text-sm font-semibold">Xác nhận nhận phòng</p>
+      {/* Tiêu đề KHÁC NHAU BẰNG CHỮ giữa ba loại thẻ, không phân biệt bằng màu:
+          lễ tân mù màu không có tín hiệu màu, mà dòng này là thứ duy nhất nói
+          cho người sắp bấm *Đồng ý* biết họ đang ghi cái gì vào PMS. Thẻ này
+          giữ nguyên một khung và một màu cho cả ba loại, nên chữ là toàn bộ
+          tín hiệu — cố ý. */}
+      <p className="mb-3 text-sm font-semibold">{copy.title}</p>
 
       {/* `divide-y` thay `space-y`: các dòng của thẻ là một BẢNG giá trị mà
           người bấm phải soi từng dòng (có cả số CCCD), nên đường kẻ giữa các
@@ -108,7 +124,7 @@ export function ProposedActionCard({
           <>
             {busy && (
               <p role="status" aria-live="polite" className="flex-1 text-xs text-brand-muted">
-                Đang gửi lệnh nhận phòng…
+                {copy.sending}
               </p>
             )}
             <Button size="sm" disabled={busy} onClick={onApprove}>

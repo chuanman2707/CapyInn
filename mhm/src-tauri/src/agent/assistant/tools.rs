@@ -74,7 +74,10 @@ pub const FRONT_DESK_READ_TOOLS: &[AgentToolMeta] = &[
 /// nhận ra UI. Không thêm hàm thực thi cho bất kỳ tên nào ở đây.
 pub const FRONT_DESK_DRAFT_TOOLS: &[AgentToolMeta] = &[AgentToolMeta {
     name: DRAFT_CHECK_IN_TOOL,
-    description: "Dựng thẻ xác nhận nhận phòng để người dùng duyệt. Không tự thực hiện.",
+    description: "Dựng thẻ xác nhận nhận phòng cho khách ĐANG ĐỨNG Ở QUẦY HÔM NAY, để người dùng \
+                  duyệt. Không tự thực hiện. LUÔN điền `check_in_date` bằng đúng ngày người dùng \
+                  nêu, nếu họ có nêu ngày — kể cả khi ngày đó không phải hôm nay. Không bao giờ tự \
+                  thay ngày người dùng nêu bằng hôm nay, và không bỏ trống ô ngày để né.",
     mutation_risk: MutationRisk::HighWrite,
     data_sensitivity: DataSensitivity::StaffOperational,
     allowed_roles: FRONT_DESK_ONLY,
@@ -99,6 +102,22 @@ pub fn assistant_tool_schemas() -> Vec<AssistantToolSchema> {
             "properties": {
                 "room_id": { "type": "string", "description": "Mã phòng trong PMS" },
                 "nights": { "type": "integer", "minimum": 1 },
+                // Cái ô này **là** bản vá của con bug đã xảy ra ngày 06/08/2026.
+                // Model nghe "checkin 8 out 9 tháng 8" nhưng không có trường nào
+                // để đặt số 8 vào, nên nó bỏ đi và gọi tool với phần còn lại;
+                // thẻ dựng ra ghi ngày hôm nay, phòng bị khoá sớm hai ngày và
+                // một đêm chưa xảy ra bị tính tiền. Có ô rồi thì `draft.rs` mới
+                // soi được — không có ô thì luật "không thay ngày người dùng
+                // nêu" chỉ là một câu trong system prompt, và prompt không phải
+                // hàng rào.
+                //
+                // **Tuỳ chọn**, cố ý: bắt buộc thì mọi lượt nhận phòng bình
+                // thường (khách đứng ở quầy, không ai nêu ngày) phải qua một
+                // vòng `missing_fields` thừa.
+                "check_in_date": {
+                    "type": "string",
+                    "description": "Ngày nhận phòng người dùng nêu, dạng YYYY-MM-DD. LUÔN điền nếu người dùng có nêu ngày, kể cả khi ngày đó KHÔNG phải hôm nay. Không tự đổi thành hôm nay, không bỏ trống để né. Chỉ bỏ trống khi người dùng hoàn toàn không nêu ngày nào."
+                },
                 "guests": {
                     "type": "array",
                     "minItems": 1,
@@ -331,6 +350,62 @@ mod tests {
         assert_eq!(
             schemas.len(),
             FRONT_DESK_READ_TOOLS.len() + FRONT_DESK_DRAFT_TOOLS.len()
+        );
+    }
+
+    /// Con bug ngày 06/08/2026 không phải một dòng code sai: model nghe thấy
+    /// "checkin 8 out 9 tháng 8" mà **không có ô nào** để đặt con số ấy vào,
+    /// nên nó bỏ đi và gọi tool với phần còn lại.
+    ///
+    /// Cái ô này chính là bản vá. Gỡ nó khỏi schema thì nhánh từ chối trong
+    /// `draft.rs` không bao giờ được gọi tới nữa — bug quay lại y nguyên trong
+    /// khi mọi test của `draft.rs` vẫn xanh, vì chúng gọi thẳng
+    /// `build_check_in_draft` chứ không đi qua schema. Test này là chỗ duy nhất
+    /// canh mối nối đó.
+    #[test]
+    fn the_draft_check_in_tool_gives_the_model_a_slot_for_the_date() {
+        let schemas = assistant_tool_schemas();
+        let draft = schemas
+            .iter()
+            .find(|schema| schema.name == DRAFT_CHECK_IN_TOOL)
+            .expect("phải có schema cho draft_check_in");
+
+        let field = draft.parameters["properties"]
+            .get("check_in_date")
+            .unwrap_or_else(|| {
+                panic!(
+                    "schema thiếu ô `check_in_date`; model không có chỗ đặt ngày người dùng nêu: {}",
+                    draft.parameters
+                )
+            });
+        assert_eq!(field["type"], json!("string"), "{field}");
+
+        let field_description = field["description"].as_str().unwrap_or_default();
+        assert!(
+            field_description.contains("YYYY-MM-DD"),
+            "mô tả ô ngày phải nêu định dạng: {field_description}"
+        );
+        assert!(
+            field_description.contains("LUÔN"),
+            "mô tả ô ngày phải bảo model LUÔN điền khi người dùng có nêu ngày: {field_description}"
+        );
+
+        // **Tuỳ chọn**, không nằm trong `required`: bắt buộc thì mọi lượt nhận
+        // phòng bình thường phải qua một vòng `missing_fields` thừa.
+        let required = draft.parameters["required"]
+            .as_array()
+            .expect("schema phải có danh sách `required`");
+        assert!(
+            !required.contains(&json!("check_in_date")),
+            "ô ngày phải là tuỳ chọn: {required:?}"
+        );
+
+        // Mô tả tool là chỗ model đọc trước khi quyết định gọi gì. Nó phải nói
+        // ra luật, không chỉ tên trường.
+        assert!(
+            draft.description.contains("check_in_date") && draft.description.contains("LUÔN điền"),
+            "mô tả tool phải yêu cầu LUÔN điền ngày người dùng nêu: {}",
+            draft.description
         );
     }
 

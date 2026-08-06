@@ -662,7 +662,9 @@ mod tests {
             pricing_type: None,
         };
         let preview = serde_json::json!({ "total": 500000 });
-        let display = build_check_in_display(&payload, &preview);
+        // Khoảng ngày y như đường thật: `build_check_in_draft` truyền
+        // `now_local_date` và ngày trả suy ra từ `nights` (2 đêm từ 04/08).
+        let display = build_check_in_display(&payload, &preview, "2026-08-04", "2026-08-06");
 
         Ok(AssistantTurnResponse {
             reply: None,
@@ -1054,6 +1056,8 @@ mod tests {
              - Khách 1: Nguyễn Văn A · CCCD: 012345678901 · SĐT: 0905000111 · \
              Ngày sinh: 1990-01-02 · Địa chỉ: 12 Lê Lợi, Huế · \
              Ảnh giấy tờ: /anh-giay-to/cccd-a.jpg\n\
+             - check_in_date: Hôm nay, 04/08/2026\n\
+             - check_out_date: 06/08/2026\n\
              - guests: 1 người\n\
              - nights: 2 đêm\n\
              - notes: —\n\

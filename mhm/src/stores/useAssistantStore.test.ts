@@ -17,6 +17,7 @@ import type {
   AssistantTurnResponse,
   ChatMessage,
   ProposedAction,
+  ProposedActionKind,
   StoredMessage,
 } from "@/types/assistant";
 import { isActionExpired, CARD_TTL_MS, MESSAGE_WINDOW } from "@/types/assistant";
@@ -46,6 +47,95 @@ const sampleAction: ProposedAction = {
   warnings: [],
   built_at_ms: 1_000_000,
 };
+
+/// Thẻ **đặt phòng trước** → `create_reservation`. Payload đúng
+/// `CreateReservationRequest`: một khách kiểu chuỗi, hai ngày bắt buộc, `nights`
+/// dẫn xuất, `guests: null` (quầy không thu phụ thu thêm người).
+const reserveAction: ProposedAction = {
+  kind: "reserve",
+  payload: {
+    room_id: "R4B",
+    guest_name: "Hyungchul Lee",
+    guest_phone: null,
+    guest_doc_number: null,
+    check_in_date: "2026-08-08",
+    check_out_date: "2026-08-09",
+    nights: 1,
+    deposit_amount: 200000,
+    source: "walk-in",
+    notes: null,
+    guests: null,
+  },
+  display: {
+    guest_name: "Hyungchul Lee",
+    room_id: "Phòng 4B",
+    check_in_date: "08/08/2026",
+    check_out_date: "09/08/2026",
+    nights: "1 đêm",
+    total: "400.000 ₫",
+  },
+  preview: { total: 400000 },
+  warnings: [],
+  built_at_ms: 1_000_000,
+};
+
+/// Thẻ **ghi bù** → `backfill_stay`. `check_out_date: null` = khách còn ở, nên
+/// có `expected_checkout_date`.
+const backfillAction: ProposedAction = {
+  kind: "backfill",
+  payload: {
+    room_id: "R1",
+    guests: [{ full_name: "Trần Thị Bích", doc_number: "079301005678" }],
+    check_in_date: "2026-08-04",
+    check_out_date: null,
+    expected_checkout_date: "2026-08-07",
+    total_price: 600000,
+    paid_amount: 0,
+    source: "walk-in",
+    notes: null,
+  },
+  display: {
+    room_id: "Phòng 201",
+    guests: "1 người",
+    check_in_date: "04/08/2026",
+    expected_checkout_date: "07/08/2026",
+    total: "600.000 ₫",
+  },
+  preview: { total: 600000 },
+  warnings: [],
+  built_at_ms: 1_000_000,
+};
+
+/// Ba thẻ, tra được theo `kind`. Bốn lớp bảo vệ `pendingAction` phải áp cho CẢ
+/// BA — thẻ đặt phòng và thẻ ghi bù cũng là tiền thật — nên các test lớp bảo vệ
+/// chạy vòng qua bảng này thay vì chỉ chạy trên thẻ nhận phòng.
+const ACTION_BY_KIND: Record<ProposedActionKind, ProposedAction> = {
+  check_in: sampleAction,
+  reserve: reserveAction,
+  backfill: backfillAction,
+};
+
+/// Ba lệnh PMS, viết ra NGUYÊN VĂN chứ không import `WRITE_COMMAND_BY_KIND`.
+/// Import bảng ánh xạ là để test so bảng với chính nó — đổi `reserve` sang
+/// `check_in` ở cả hai nơi thì vẫn khớp và không một test nào đỏ, trong khi
+/// đúng cái phải canh là **thẻ nào bắn lệnh nào**.
+const COMMAND_BY_KIND: Record<ProposedActionKind, string> = {
+  check_in: "check_in",
+  reserve: "create_reservation",
+  backfill: "backfill_stay",
+};
+
+const ALL_KINDS: ProposedActionKind[] = ["check_in", "reserve", "backfill"];
+
+/// Một thẻ mang `kind` NGOÀI hợp đồng — thứ `tsc` không cho viết thẳng, nên phải
+/// ép kiểu.
+///
+/// Ép ở đây không phải để lách kiểu cho tiện: `kind` ngoài đời tới từ backend qua
+/// IPC, chỗ **không có kiểu nào được kiểm lúc chạy**. Ép kiểu chính là mô phỏng
+/// đúng cái ranh giới ấy — và `approve()` là chỗ duy nhất còn chặn được.
+function actionWithKind(kind: string): ProposedAction {
+  return { ...sampleAction, kind } as unknown as ProposedAction;
+}
 
 // Mốc "hiện tại" giả lập cho cả file: 1 giây sau khi sampleAction được dựng,
 // nên sampleAction luôn còn hạn trừ khi một test tự dời built_at_ms đi chỗ khác.
@@ -229,6 +319,150 @@ describe("useAssistantStore", () => {
     // Chiều về: store phải thay bằng đúng lịch sử backend trả, không giữ lại
     // lịch sử cũ và không tự chế thêm.
     expect(useAssistantStore.getState().history).toEqual(returnedHistory);
+  });
+
+  // ─── ÁNH XẠ `kind` → LỆNH PMS ───
+  //
+  // Ba loại thẻ, ba lệnh ghi khác hẳn nhau vào cùng một cuốn sổ tiền. Mỗi test ở
+  // đây có **vế âm bắt buộc**: một bản gọi ĐÚNG lệnh cần gọi mà gọi thêm cả
+  // `check_in` vẫn làm mọi khẳng định dương xanh, và ngoài đời thì đó là hai bản
+  // ghi cho một khách — một cái đúng ngày và một cái đóng dấu hôm nay.
+  //
+  // Vế âm viết bằng `not.toHaveBeenCalledWith(<tên lệnh>, …)` chứ không bằng
+  // `toHaveBeenCalledTimes(1)`: số lần gọi cũng bắt được ca gọi hai lệnh, nhưng
+  // câu đỏ của nó ("expected 1, got 2") không nói lệnh nào là lệnh thừa, mà tên
+  // lệnh thừa mới là thứ người đọc cần.
+
+  describe("ba kind, ba lệnh — approve() gọi đúng một lệnh và không gọi lệnh nào khác", () => {
+    it("thẻ nhận phòng gọi check_in, KHÔNG gọi create_reservation hay backfill_stay", async () => {
+      invokeWriteCommand.mockResolvedValue({ id: "B1" });
+      useAssistantStore.setState({
+        pendingAction: ACTION_BY_KIND.check_in,
+        pendingActionKey: SESSION_KEY,
+      });
+
+      await useAssistantStore.getState().approve();
+
+      expect(invokeWriteCommand).toHaveBeenCalledWith("check_in", {
+        req: ACTION_BY_KIND.check_in.payload,
+      });
+      expect(invokeWriteCommand).not.toHaveBeenCalledWith(
+        "create_reservation",
+        expect.anything(),
+      );
+      expect(invokeWriteCommand).not.toHaveBeenCalledWith("backfill_stay", expect.anything());
+    });
+
+    it("thẻ đặt phòng gọi create_reservation, KHÔNG gọi check_in", async () => {
+      // Đây là ca thật đã xảy ra, chỉ khác chỗ nó xảy ra: lễ tân gõ "checkin 8
+      // out 9 tháng 8", hệ thống ghi `check_in_at` = đúng lúc bấm nút. Bản vá
+      // phía Rust không cho model dựng thẻ nhận phòng cho ngày 8 nữa; vế còn lại
+      // là ở đây — cái thẻ đặt phòng ấy phải bắn `create_reservation`, và tuyệt
+      // đối không được rơi về `check_in`.
+      invokeWriteCommand.mockResolvedValue({ id: "B1" });
+      useAssistantStore.setState({
+        pendingAction: ACTION_BY_KIND.reserve,
+        pendingActionKey: SESSION_KEY,
+      });
+
+      await useAssistantStore.getState().approve();
+
+      expect(invokeWriteCommand).toHaveBeenCalledWith("create_reservation", {
+        req: ACTION_BY_KIND.reserve.payload,
+      });
+      expect(invokeWriteCommand).not.toHaveBeenCalledWith("check_in", expect.anything());
+      expect(invokeWriteCommand).not.toHaveBeenCalledWith("backfill_stay", expect.anything());
+    });
+
+    it("thẻ ghi bù gọi backfill_stay, KHÔNG gọi check_in", async () => {
+      invokeWriteCommand.mockResolvedValue({ id: "B1" });
+      useAssistantStore.setState({
+        pendingAction: ACTION_BY_KIND.backfill,
+        pendingActionKey: SESSION_KEY,
+      });
+
+      await useAssistantStore.getState().approve();
+
+      expect(invokeWriteCommand).toHaveBeenCalledWith("backfill_stay", {
+        req: ACTION_BY_KIND.backfill.payload,
+      });
+      expect(invokeWriteCommand).not.toHaveBeenCalledWith("check_in", expect.anything());
+      expect(invokeWriteCommand).not.toHaveBeenCalledWith(
+        "create_reservation",
+        expect.anything(),
+      );
+    });
+
+    it("kind lạ thì KHÔNG gọi lệnh nào, báo lỗi và giữ nguyên thẻ", async () => {
+      // Không đoán. Ba lệnh này ghi ba thứ khác hẳn nhau và không cái nào là
+      // "mặc định an toàn" — `check_in` bắt đầu tính tiền ngay, `backfill_stay`
+      // ghi một kỳ ở đã qua. Thứ duy nhất đúng khi không biết là dừng lại.
+      //
+      // `mockResolvedValue` cố ý đặt sẵn: nếu có một nhánh nào lỡ gọi lệnh thì
+      // nó chạy trót lọt và thẻ biến mất — và khi đó chỉ còn `invokeWriteCommand`
+      // nói được sự thật, chứ "thẻ còn hay mất" thì không.
+      invokeWriteCommand.mockResolvedValue({ id: "B1" });
+      const strangeAction = actionWithKind("modify_reservation");
+      useAssistantStore.setState({
+        pendingAction: strangeAction,
+        pendingActionKey: SESSION_KEY,
+      });
+
+      await useAssistantStore.getState().approve();
+
+      expect(invokeWriteCommand).not.toHaveBeenCalled();
+      const state = useAssistantStore.getState();
+      expect(state.error).toContain("modify_reservation");
+      // Giữ thẻ: lễ tân còn đọc được nó để làm tay trong PMS. Và `busy` phải về
+      // đúng chỗ cũ — nhánh từ chối này `return` TRƯỚC khi bật cờ, nên một bản
+      // bật cờ rồi mới từ chối sẽ treo cứng cả panel.
+      expect(state.pendingAction).toEqual(strangeAction);
+      expect(state.busy).toBe(false);
+    });
+
+    it("kind rác trùng tên trên Object.prototype cũng không tra ra lệnh nào", async () => {
+      // `WRITE_COMMAND_BY_KIND["toString"]` trên một object literal trả về HÀM
+      // của prototype chứ không phải `undefined`, nên một bản tra bằng `[]` trần
+      // sẽ đi lọt qua câu kiểm "kind lạ" rồi gọi `invokeWriteCommand` với một
+      // thứ không phải tên lệnh. Bảng tra bằng `Map` không có cửa đó.
+      invokeWriteCommand.mockResolvedValue({ id: "B1" });
+      useAssistantStore.setState({
+        pendingAction: actionWithKind("toString"),
+        pendingActionKey: SESSION_KEY,
+      });
+
+      await useAssistantStore.getState().approve();
+
+      expect(invokeWriteCommand).not.toHaveBeenCalled();
+      expect(useAssistantStore.getState().error).toContain("toString");
+    });
+
+    it("câu báo xong nói đúng việc vừa làm, không phải câu nhận phòng cho cả ba", async () => {
+      // Spec mục 1: trợ lý trả lời "Đã nhận phòng xong." trong khi vừa ghi một
+      // bản ghi sai — lễ tân tin lời kể chứ không đi đọc DB. Lệnh chạy đúng mà
+      // lời kể sai thì lỗ hổng ấy còn nguyên, chỉ đổi chỗ.
+      const messages: Record<ProposedActionKind, string> = {
+        check_in: "Đã nhận phòng xong.",
+        reserve: "Đã đặt phòng xong.",
+        backfill: "Đã ghi bù xong.",
+      };
+
+      for (const kind of ALL_KINDS) {
+        invokeWriteCommand.mockReset();
+        invokeWriteCommand.mockResolvedValue({ id: "B1" });
+        useAssistantStore.setState({
+          messages: [],
+          pendingAction: ACTION_BY_KIND[kind],
+          pendingActionKey: SESSION_KEY,
+          conversationKey: SESSION_KEY,
+        });
+
+        await useAssistantStore.getState().approve();
+
+        const said = useAssistantStore.getState().messages.map((message) => message.text);
+        expect(said, `kind=${kind}`).toEqual([messages[kind]]);
+      }
+    });
   });
 
   // ─── Lớp 4: chốt duyệt nằm BÊN TRONG approve(), trên đường tiền ───
@@ -455,6 +689,69 @@ describe("useAssistantStore", () => {
       expect(keyAtWrite).toHaveLength(1);
       expect(keyAtWrite[0]).toBe(SESSION_KEY);
     });
+
+    // ── LỚP 4 CANH CẢ BA `kind` ────────────────────────────────────────────
+    //
+    // Lớp 4 là lớp DUY NHẤT nằm trên đường tiền, và nó không được có một câu
+    // `if (kind === "check_in")` nào: một thẻ đặt phòng hay một thẻ ghi bù duyệt
+    // nhầm ở hội thoại khác cũng là một bản ghi thật, tiền thật, gắn nhầm chỗ.
+    //
+    // Mỗi `kind` một test, sinh trong vòng lặp để câu đỏ đọc ra ngay loại nào bị
+    // hở. Mỗi test có **hai nửa**: nửa chặn (khoá lệch ⇒ không lệnh nào bay) và
+    // nửa cho qua (khoá khớp ⇒ đúng lệnh của loại ấy bay). Thiếu nửa sau thì một
+    // bản `approve()` không bao giờ ghi gì cũng xanh cả ba.
+    for (const kind of ALL_KINDS) {
+      it(`lớp 4 canh thẻ ${kind}: khoá lệch thì không lệnh nào bay, khoá khớp thì đúng lệnh của nó bay`, async () => {
+        invokeWriteCommand.mockResolvedValue({ id: "B1" });
+        useAssistantStore.setState({
+          pendingAction: ACTION_BY_KIND[kind],
+          pendingActionKey: "key-A",
+          conversationKey: "key-B",
+        });
+
+        await useAssistantStore.getState().approve();
+
+        // Khẳng định trên LỜI GỌI LỆNH, không trên "thẻ còn hay mất": với mock
+        // thành công thì thẻ biến mất ở CẢ HAI đường — bị lớp 4 vứt, hoặc đã ghi
+        // xong thật — nên trạng thái của thẻ không phân biệt được gì.
+        expect(invokeWriteCommand).not.toHaveBeenCalled();
+
+        useAssistantStore.setState({
+          pendingAction: ACTION_BY_KIND[kind],
+          pendingActionKey: "key-B",
+          conversationKey: "key-B",
+        });
+
+        await useAssistantStore.getState().approve();
+
+        expect(invokeWriteCommand).toHaveBeenCalledTimes(1);
+        expect(invokeWriteCommand).toHaveBeenCalledWith(COMMAND_BY_KIND[kind], {
+          req: ACTION_BY_KIND[kind].payload,
+        });
+      });
+    }
+
+    // ── LỚP 2 CANH CẢ BA `kind` ────────────────────────────────────────────
+    //
+    // `emptySession()` là chỗ thẻ thật sự bị dọn khi đổi hội thoại. Cùng lý do
+    // như lớp 4: không có `kind` nào được ở lại sống sót qua một cú mint khoá,
+    // vì thẻ sống sót là thẻ duyệt được ở một phiên nó không thuộc về.
+    for (const kind of ALL_KINDS) {
+      it(`lớp 2 dọn thẻ ${kind} khi mint khoá phiên mới`, () => {
+        useAssistantStore.setState({
+          pendingAction: ACTION_BY_KIND[kind],
+          pendingActionKey: SESSION_KEY,
+          conversationKey: SESSION_KEY,
+        });
+
+        useAssistantStore.getState().startNewChat();
+
+        const state = useAssistantStore.getState();
+        expect(state.pendingAction).toBeNull();
+        expect(state.pendingActionKey).toBeNull();
+        expect(state.conversationKey).not.toBe(SESSION_KEY);
+      });
+    }
   });
 
   // ─── BẤT BIẾN SỞ HỮU `busy` — bốn nhánh stale, mỗi nhánh một test ───
