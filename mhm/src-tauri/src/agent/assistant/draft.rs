@@ -4,7 +4,7 @@ use crate::{
         status, BackfillStayRequest, CheckInRequest, CreateGuestRequest, CreateReservationRequest,
     },
     queries::rooms::assistant_queries::{load_free_rooms_between, load_room_status_now},
-    services::booking::pricing_service,
+    services::booking::{pricing_service, reservation_lifecycle::MAX_RESERVATION_NIGHTS},
 };
 use chrono::NaiveDate;
 use serde::Serialize;
@@ -147,6 +147,50 @@ pub enum DraftOutcome {
     BackfillCheckOutInTheFuture {
         requested: String,
         today: String,
+    },
+    /// Một ô tiền có mặt nhưng không đọc được thành số nguyên đồng.
+    ///
+    /// Trước biến thể này, `and_then(Value::as_i64)` trả `None` cho `"400000"`
+    /// và `400000.0` y như khi ô ấy vắng mặt, rồi `unwrap_or(0)` biến `None`
+    /// thành "chưa trả đồng nào": khách đưa 400.000₫ ở quầy, PMS ghi đã trả 0,
+    /// và trên thẻ không có một chữ nào nói ra. Đó là ảnh soi gương của sự cố
+    /// 06/08 — lần đó **tạo** một khoản thu không có thật, ca này **xoá** một
+    /// khoản thu có thật.
+    ///
+    /// `requested` giữ nguyên văn JSON model gửi, để lời từ chối chỉ đúng vào
+    /// hình dạng nó vừa gửi chứ không mô tả chung chung.
+    UnreadableAmount {
+        field: &'static str,
+        requested: String,
+    },
+    /// Một ô tiền âm. `minimum: 0` trong JSON schema **không** phải hàng rào —
+    /// không tầng nào kiểm lại nó, nên `paid_amount = -500000` dựng ra thẻ ghi
+    /// "-500.000 ₫" rồi lệnh mới từ chối, **sau** khi lễ tân đã bấm *Đồng ý*.
+    ///
+    /// Cảnh báo "đã thu quá tiền phòng" không bắt được ca này: số âm luôn nhỏ
+    /// hơn tổng.
+    NegativeAmount {
+        field: &'static str,
+        requested: i64,
+    },
+    /// Một hoặc nhiều mục trong ô `guests` không cho ra được tên khách.
+    ///
+    /// `positions` đếm từ 1 theo đúng thứ tự model gửi, để lời từ chối chỉ được
+    /// đúng mục hỏng. Trước biến thể này những mục ấy bị **bỏ trong im lặng**:
+    /// ba khách vào, hai khách ra, model không nhận được lời nào và người thứ ba
+    /// biến mất khỏi hồ sơ khai báo tạm trú.
+    UnreadableGuestName {
+        positions: Vec<usize>,
+    },
+    /// Khoảng ngày đặt phòng dài hơn trần `MAX_RESERVATION_NIGHTS`.
+    ///
+    /// `create_reservation` từ chối ("Number of nights must not exceed 90"),
+    /// nhưng tầng thẻ không kiểm gì: một lỗi gõ năm (`2027` thay `2026`) dựng ra
+    /// cái thẻ "122 đêm" kèm đủ tiền phòng cho 122 đêm, rồi lệnh mới từ chối —
+    /// **sau** khi lễ tân đã bấm *Đồng ý*.
+    TooManyNights {
+        nights: i32,
+        max: i64,
     },
 }
 
@@ -496,7 +540,14 @@ pub async fn build_check_in_draft(
         missing.push("room_id".to_string());
     }
 
-    let guests = parse_guest_list(args);
+    let GuestList { guests, unreadable } = parse_guest_list(args);
+    if !unreadable.is_empty() {
+        // Trước cả `missing`: một mục khách không đọc được là một CON NGƯỜI sắp
+        // rơi khỏi hồ sơ khai báo tạm trú, còn `missing` chỉ là một ô trống.
+        return Ok(DraftOutcome::UnreadableGuestName {
+            positions: unreadable,
+        });
+    }
     if guests.is_empty() {
         missing.push("guests".to_string());
     }
@@ -519,12 +570,17 @@ pub async fn build_check_in_draft(
     // tiêu mất một vòng trong ngân sách `MAX_TOOL_ROUNDS` (4), vừa xác nhận
     // ngược cho model rằng `draft_check_in` là đường đúng — nó chỉ cần điền nốt
     // là xong.
-    if let Some(requested) = args
-        .get("check_in_date")
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-    {
+    //
+    // Đọc qua `read_date`, **không** qua `as_str()`: một ô ngày không phải chuỗi
+    // (model nghe "ngày 8" rồi gửi số `8`) đi qua `as_str()` thành `None`, và
+    // `None` ở đây nghĩa là "không nêu ngày nào" — tức bỏ qua trọn khối này rồi
+    // đóng dấu hôm nay lên thẻ. Xem [`ArgValue`].
+    let requested_check_in = match read_date(args, "check_in_date") {
+        Ok(value) => value,
+        Err(requested) => return Ok(DraftOutcome::UnreadableCheckInDate { requested }),
+    };
+
+    if let Some((requested, requested_date)) = requested_check_in {
         // So theo NGÀY LỊCH, không so chuỗi và không so timestamp. "Hôm nay" là
         // một ngày, không phải một thời điểm; và `2026-8-6` với `2026-08-06` là
         // cùng một ngày, một dấu 0 thiếu không được biến thành lời từ chối.
@@ -535,22 +591,22 @@ pub async fn build_check_in_draft(
             )
         })?;
 
-        let Ok(requested_date) = NaiveDate::parse_from_str(requested, "%Y-%m-%d") else {
-            // Không đoán, và tuyệt đối không rơi về hôm nay. "ngày 8" có thể là
-            // mùng 8 tháng này, tháng sau hay năm sau — rơi về hôm nay đúng là
-            // con bug này.
-            return Ok(DraftOutcome::UnreadableCheckInDate {
-                requested: requested.to_string(),
-            });
-        };
-
         if requested_date != today {
             return Ok(DraftOutcome::WrongDateForCheckIn {
-                requested: requested.to_string(),
+                requested,
                 is_future: requested_date > today,
             });
         }
     }
+
+    // Ô tiền cũng soi **trước** `missing`, cùng một lý do như ô ngày: một khoản
+    // tiền không đọc được mà rơi vào `missing_fields` thì model được bảo "thiếu
+    // `paid_amount`" trong khi nó vừa gửi `"400000"` — lời bảo ấy mời nó gửi
+    // lại đúng hình dạng cũ.
+    let paid_amount = match read_amount(args, "paid_amount") {
+        Ok(value) => value,
+        Err(outcome) => return Ok(outcome),
+    };
 
     if !missing.is_empty() {
         return Ok(DraftOutcome::MissingFields(missing));
@@ -610,11 +666,12 @@ pub async fn build_check_in_draft(
             .get("notes")
             .and_then(Value::as_str)
             .map(str::to_string),
-        paid_amount: args.get("paid_amount").and_then(Value::as_i64),
+        paid_amount,
         pricing_type: Some(pricing_type),
     };
 
-    let warnings = build_warnings(pool, &room_id, &payload.guests).await?;
+    let warnings =
+        build_warnings(pool, &room_id, &payload.guests, now_local_date, &check_out).await?;
     // Đúng khoảng ngày vừa dùng để hỏi giá — tiền trên thẻ và ngày trên thẻ
     // phải nói về cùng một kỳ ở, không phải hai nguồn sự thật tính riêng.
     let display = build_check_in_display(&payload, &preview, now_local_date, &check_out);
@@ -630,10 +687,15 @@ pub async fn build_check_in_draft(
 }
 
 /// Cảnh báo tra từ PMS, không phải lời model viết ra.
+///
+/// `check_in_date`/`check_out_date` là **đúng khoảng ngày vừa dùng để hỏi giá**
+/// và đúng khoảng ngày in trên thẻ — xem khối dò trùng lịch trong thân hàm.
 async fn build_warnings(
     pool: &Pool<Sqlite>,
     room_id: &str,
     guests: &[CreateGuestRequest],
+    check_in_date: &str,
+    check_out_date: &str,
 ) -> CommandResult<Vec<String>> {
     let rooms = load_room_status_now(pool).await.map_err(|error| {
         CommandError::system(
@@ -642,14 +704,58 @@ async fn build_warnings(
         )
     })?;
 
+    // Hai câu dưới đây nói giọng **từ chối**, không phải giọng "lưu ý":
+    // `check_in_tx` bắt `room_status != 'vacant'` là `Conflict` và trả về ngay,
+    // nên phòng bẩn hay phòng đang có khách đều không nhận phòng được. Cảnh báo
+    // của `draft_reserve`/`draft_backfill` viết thẳng "lệnh sẽ từ chối"; hai câu
+    // này từng không nói ra, nên lễ tân đọc chúng như lời khuyên có thể bỏ qua
+    // rồi bấm *Đồng ý* để nhận một lỗi.
     let mut warnings = Vec::new();
     if let Some(room) = rooms.iter().find(|room| room.room_id == room_id) {
         if room.status.eq_ignore_ascii_case("dirty") {
-            warnings.push("Phòng đang ở trạng thái bẩn, chưa dọn.".to_string());
+            warnings.push(
+                "Phòng đang ở trạng thái bẩn, chưa dọn. `check_in` sẽ TỪ CHỐI: nó chỉ nhận \
+                 phòng đang trống. Phải dọn và đổi trạng thái phòng trước."
+                    .to_string(),
+            );
         }
         if room.booking_id.is_some() {
-            warnings.push("Phòng đang có khách ở.".to_string());
+            warnings.push(
+                "Phòng đang có khách ở. `check_in` sẽ TỪ CHỐI: nó chỉ nhận phòng đang trống. \
+                 Phải trả phòng cho khách hiện tại trước."
+                    .to_string(),
+            );
         }
+    }
+
+    // ─── Dò trùng lịch trên CẢ KỲ Ở, không chỉ "ngay bây giờ" ───
+    //
+    // Hai câu trên đọc `load_room_status_now` — trạng thái *lúc này*. Một phòng
+    // trống hôm nay mà có người đặt từ ngày kia thì không câu nào ở trên bắt
+    // được, trong khi `check_in_tx` quét `room_calendar` trên trọn khoảng
+    // `[nhận, trả)` và trả `Conflict` ("Room has a reservation starting …").
+    // Đo được: phòng trống, reservation từ 08/08, `nights = 4` ⇒ thẻ ghi ngày
+    // trả 10/08 với `warnings []` rồi lệnh từ chối — **một ngày sai in trên
+    // thẻ**, đúng lớp lỗi cả nhánh này sinh ra để diệt.
+    //
+    // Dùng đúng truy vấn và đúng biên `[from, to)` mà `draft_reserve` và
+    // `draft_backfill` đã dùng, nên ba cái thẻ nói về phòng trống bằng cùng một
+    // nguồn sự thật.
+    let free_rooms = load_free_rooms_between(pool, check_in_date, check_out_date)
+        .await
+        .map_err(|error| {
+            CommandError::system(
+                codes::SYSTEM_INTERNAL_ERROR,
+                format!("Không đọc được lịch phòng trống: {error}"),
+            )
+        })?;
+    if !free_rooms.iter().any(|room| room.room_id == room_id) {
+        warnings.push(format!(
+            "Phòng đã có lượt ở hoặc lượt đặt khác trong khoảng {} – {}. `check_in` sẽ TỪ CHỐI \
+             vì trùng lịch, dù ngay lúc này phòng có vẻ trống.",
+            format_vn_date(check_in_date),
+            format_vn_date(check_out_date),
+        ));
     }
 
     // Trợ lý dựng được một khách mà chính form của PMS sẽ từ chối: ở trên,
@@ -683,48 +789,220 @@ async fn build_warnings(
 /// Bảy trường còn lại của `CreateGuestRequest` để `None` vì schema tool chỉ mở
 /// ba ô (`full_name`, `doc_number`, `phone`): thêm ô là thêm chỗ cho model bịa,
 /// và những trường ấy lễ tân điền ở form làm tay khi có giấy tờ trên tay.
-fn parse_guest_list(args: &Value) -> Vec<CreateGuestRequest> {
-    args.get("guests")
-        .and_then(Value::as_array)
-        .map(|entries| {
-            entries
-                .iter()
-                .filter_map(|entry| {
-                    let full_name = entry.get("full_name")?.as_str()?.trim();
-                    if full_name.is_empty() {
-                        return None;
-                    }
-                    Some(CreateGuestRequest {
-                        guest_type: None,
-                        full_name: full_name.to_string(),
-                        doc_number: entry
-                            .get("doc_number")
-                            .and_then(Value::as_str)
-                            .unwrap_or_default()
-                            .to_string(),
-                        dob: None,
-                        gender: None,
-                        nationality: None,
-                        address: None,
-                        visa_expiry: None,
-                        scan_path: None,
-                        phone: entry
-                            .get("phone")
-                            .and_then(Value::as_str)
-                            .map(str::to_string),
-                    })
-                })
-                .collect()
-        })
-        .unwrap_or_default()
+///
+/// ─── KHÔNG BỎ AI TRONG IM LẶNG ───
+///
+/// Hàm này từng `filter_map` thẳng: một mục có `full_name` không phải chuỗi (hay
+/// rỗng) bị **loại khỏi danh sách mà không ai được báo** — ba khách vào, hai
+/// khách ra, model không nhận được lời nào, và người thứ ba biến mất khỏi hồ sơ
+/// khai báo tạm trú. Trên thẻ cũng không có gì để đối chiếu: nó chỉ ghi "2
+/// người". Giờ những mục ấy đi ra ngoài theo `unreadable` và người gọi phải xử
+/// lý.
+fn parse_guest_list(args: &Value) -> GuestList {
+    let Some(entries) = args.get("guests").and_then(Value::as_array) else {
+        return GuestList::default();
+    };
+
+    let mut list = GuestList::default();
+    for (index, entry) in entries.iter().enumerate() {
+        let full_name = entry
+            .get("full_name")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty());
+
+        let Some(full_name) = full_name else {
+            // Đếm từ 1: con số này đi thẳng vào lời từ chối cho model, và "mục
+            // khách thứ 0" là câu không ai đọc được.
+            list.unreadable.push(index + 1);
+            continue;
+        };
+
+        list.guests.push(CreateGuestRequest {
+            guest_type: None,
+            full_name: full_name.to_string(),
+            doc_number: entry
+                .get("doc_number")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_string(),
+            dob: None,
+            gender: None,
+            nationality: None,
+            address: None,
+            visa_expiry: None,
+            scan_path: None,
+            phone: entry
+                .get("phone")
+                .and_then(Value::as_str)
+                .map(str::to_string),
+        });
+    }
+    list
+}
+
+/// Ô `guests` đã đọc: người dựng được, và **vị trí** những mục không dựng được.
+#[derive(Default)]
+struct GuestList {
+    guests: Vec<CreateGuestRequest>,
+    /// Vị trí (đếm từ 1) của những mục không cho ra được tên khách.
+    unreadable: Vec<usize>,
 }
 
 /// Đọc một tham số chuỗi đã cắt khoảng trắng; rỗng coi như vắng mặt.
+///
+/// CHỈ dùng cho ô CHỮ (`room_id`, `guest_name`, `notes`…). Ô **ngày** dùng
+/// [`date_arg`] và ô **tiền** dùng [`amount_arg`]: ở hai loại ấy, gộp "vắng mặt"
+/// với "có mà không đọc được" là cách con bug 06/08 sống lại — xem ghi chú của
+/// hai hàm đó.
 fn trimmed_arg<'a>(args: &'a Value, key: &str) -> Option<&'a str> {
     args.get(key)
         .and_then(Value::as_str)
         .map(str::trim)
         .filter(|value| !value.is_empty())
+}
+
+/// Một ô của model, đã tách "vắng mặt" khỏi "có mà không đọc được".
+///
+/// ─── VÌ SAO PHẢI CÓ KIỂU NÀY ───
+///
+/// `Value::as_str()` trả `None` cho **mọi thứ không phải chuỗi JSON**, và ở chỗ
+/// đọc `check_in_date` thì `None` nghĩa là *"người dùng không nêu ngày nào"* —
+/// tức bỏ qua trọn vẹn khối soi ngày rồi đóng dấu hôm nay lên thẻ. Model nghe
+/// "ngày 8" và điền `"check_in_date": 8` (số JSON, hình dạng model thật vẫn gửi)
+/// là đủ để dựng lại đúng sự cố 06/08, lần này qua cửa kiểu dữ liệu thay vì cửa
+/// ngày — và model không nhận được lời từ chối nào nên vòng tự sửa cũng không
+/// khởi động.
+///
+/// `null` cố ý xếp vào `Absent`, không phải `Unreadable`: model nào cũng điền
+/// `null` cho một ô tuỳ chọn nó bỏ trống, và xử `null` như rác thì mọi lượt
+/// nhận phòng bình thường tốn thêm một vòng trong ngân sách bốn vòng.
+enum ArgValue {
+    /// Không có khoá, hoặc có mà là `null`.
+    Absent,
+    /// Đọc được, đã cắt khoảng trắng.
+    Text(String),
+    /// Có mặt nhưng không dùng được: sai kiểu, hoặc chuỗi rỗng/toàn khoảng
+    /// trắng. Mang theo **nguyên văn JSON** model gửi để lời từ chối chỉ đúng
+    /// vào hình dạng nó vừa gửi.
+    Unreadable(String),
+}
+
+/// Đọc một ô NGÀY. Xem [`ArgValue`] cho lý do không dùng thẳng `as_str()`.
+fn date_arg(args: &Value, key: &str) -> ArgValue {
+    match args.get(key) {
+        None | Some(Value::Null) => ArgValue::Absent,
+        Some(Value::String(text)) => {
+            let trimmed = text.trim();
+            if trimmed.is_empty() {
+                // Chuỗi toàn khoảng trắng là "có gửi mà không nói gì", không
+                // phải "không gửi": đo được nó cũng ra thẻ mang ngày hôm nay.
+                ArgValue::Unreadable(text.clone())
+            } else {
+                ArgValue::Text(trimmed.to_string())
+            }
+        }
+        Some(other) => ArgValue::Unreadable(other.to_string()),
+    }
+}
+
+/// Đọc một ô ngày rồi quy ra ngày lịch.
+///
+/// `Ok(Some((nguyên_văn, ngày)))` — đọc được; nguyên văn đi kèm vì mọi lời từ
+/// chối đều nhắc lại **đúng chuỗi người dùng nêu**, không phải một ngày đã bị
+/// chuẩn hoá lại.
+/// `Ok(None)` — vắng mặt (hoặc `null`).
+/// `Err(nguyên_văn)` — có mặt mà không đọc được; người gọi bọc nó vào biến thể
+/// `Unreadable*Date` gọi đúng tên ô của tool mình.
+fn read_date(args: &Value, field: &str) -> Result<Option<(String, NaiveDate)>, String> {
+    match date_arg(args, field) {
+        ArgValue::Absent => Ok(None),
+        ArgValue::Unreadable(requested) => Err(requested),
+        ArgValue::Text(requested) => match NaiveDate::parse_from_str(&requested, "%Y-%m-%d") {
+            Ok(parsed) => Ok(Some((requested, parsed))),
+            // Không đoán, và tuyệt đối không rơi về hôm nay. "ngày 8" có thể là
+            // mùng 8 tháng này, tháng sau hay năm sau — rơi về hôm nay đúng là
+            // con bug 06/08.
+            Err(_) => Err(requested),
+        },
+    }
+}
+
+/// Một ô TIỀN của model, đã soi kiểu.
+enum AmountArg {
+    Absent,
+    Amount(i64),
+    Unreadable(String),
+}
+
+/// Đọc một ô TIỀN thành số nguyên đồng.
+///
+/// ─── ẢNH SOI GƯƠNG CỦA SỰ CỐ 06/08 ───
+///
+/// `and_then(Value::as_i64)` trả `None` cho `400000.0` và cho `"400000"` y hệt
+/// khi ô ấy vắng mặt, rồi `.unwrap_or(0)` biến `None` thành "chưa trả đồng nào".
+/// Khách đưa 400.000₫ ở quầy, PMS ghi **đã trả 0**, khách gánh nguyên khoản nợ —
+/// và trên thẻ không có một chữ nào nói ra. Sự cố 06/08 *tạo* một khoản thu
+/// không có thật; ca này *xoá* một khoản thu có thật. Cùng một lớp lỗi: bỏ im
+/// lặng.
+///
+/// **Số nguyên gửi dạng số thực (`400000.0`) được nhận**, đúng giá trị: model
+/// hay gửi tiền như vậy, và từ chối cả ca ấy là bắt lễ tân gõ tay một khoản đã
+/// đúng. Đó là quyết định có chủ ý và có test riêng
+/// (`a_whole_number_sent_as_a_float_reaches_the_payload_at_its_exact_value`).
+/// Phần thập phân khác 0 thì KHÔNG nhận: tiền Việt không có đơn vị nhỏ hơn đồng,
+/// nên `400000.5` là một con số hỏng chứ không phải một con số cần làm tròn.
+///
+/// Chuỗi cũng KHÔNG nhận, kể cả `"400000"`: `"400.000"` là bốn trăm nghìn theo
+/// cách viết Việt và bốn trăm phẩy không theo cách đọc số của máy. Đoán giữa hai
+/// nghĩa ấy là đoán hộ một khoản tiền.
+fn amount_arg(args: &Value, key: &str) -> AmountArg {
+    match args.get(key) {
+        None | Some(Value::Null) => AmountArg::Absent,
+        Some(Value::Number(number)) => {
+            if let Some(value) = number.as_i64() {
+                return AmountArg::Amount(value);
+            }
+            match number.as_f64() {
+                // `as_i64` đã loại hết số nguyên vừa `i64`, nên tới đây chỉ còn
+                // số thực và số nguyên tràn `i64`. Cả hai đều phải qua cùng một
+                // cửa: chỉ nhận khi không có phần lẻ VÀ vừa `i64`.
+                Some(value)
+                    if value.fract() == 0.0
+                        && value >= i64::MIN as f64
+                        && value <= i64::MAX as f64 =>
+                {
+                    AmountArg::Amount(value as i64)
+                }
+                _ => AmountArg::Unreadable(number.to_string()),
+            }
+        }
+        Some(other) => AmountArg::Unreadable(other.to_string()),
+    }
+}
+
+/// Soi một ô tiền và trả về `DraftOutcome` từ chối nếu nó hỏng.
+///
+/// Gộp cả hai luật vào một chỗ để ba tool không trôi khỏi nhau: không đọc được
+/// ⇒ [`DraftOutcome::UnreadableAmount`]; âm ⇒ [`DraftOutcome::NegativeAmount`].
+///
+/// Số âm cần một hàng rào riêng vì `minimum: 0` trong JSON schema **không** phải
+/// hàng rào — không tầng nào kiểm lại nó. Đo được `paid_amount = -500000` dựng
+/// ra thẻ ghi "-500.000 ₫" với `warnings []`, rồi lệnh mới từ chối, **sau** khi
+/// lễ tân đã bấm *Đồng ý*. Cảnh báo "đã thu quá tiền phòng" cũng không bắt được
+/// ca ấy: số âm luôn nhỏ hơn tổng.
+fn read_amount(args: &Value, field: &'static str) -> Result<Option<i64>, DraftOutcome> {
+    match amount_arg(args, field) {
+        AmountArg::Absent => Ok(None),
+        AmountArg::Unreadable(requested) => {
+            Err(DraftOutcome::UnreadableAmount { field, requested })
+        }
+        AmountArg::Amount(value) if value < 0 => Err(DraftOutcome::NegativeAmount {
+            field,
+            requested: value,
+        }),
+        AmountArg::Amount(value) => Ok(Some(value)),
+    }
 }
 
 /// Thẻ **đặt phòng trước** → lệnh `create_reservation`.
@@ -755,39 +1033,41 @@ pub async fn build_reserve_draft(
     // vừa tiêu một vòng trong ngân sách `MAX_TOOL_ROUNDS`, vừa xác nhận ngược
     // cho model rằng `draft_reserve` là đường đúng — nó chỉ cần điền nốt là
     // xong.
-    let check_in = match trimmed_arg(args, "check_in_date") {
-        Some(requested) => {
-            let Ok(parsed) = NaiveDate::parse_from_str(requested, "%Y-%m-%d") else {
-                return Ok(DraftOutcome::UnreadableReserveDate {
-                    field: "check_in_date",
-                    requested: requested.to_string(),
-                });
-            };
+    //
+    // `read_date`, không `trimmed_arg`: `trimmed_arg` đứng trên `as_str()` nên
+    // một ô ngày không phải chuỗi (`8`) tụt xuống `MissingFields` — model **có**
+    // thấy, nhưng nó bị bảo "thiếu ngày" trong khi vừa gửi một ngày, và lời bảo
+    // ấy mời nó gửi lại đúng hình dạng cũ. Xem [`ArgValue`].
+    let check_in = match read_date(args, "check_in_date") {
+        Err(requested) => {
+            return Ok(DraftOutcome::UnreadableReserveDate {
+                field: "check_in_date",
+                requested,
+            })
+        }
+        Ok(None) => None,
+        Ok(Some((requested, parsed))) => {
             // So theo NGÀY LỊCH. Hôm nay là hôm nay bất kể người dùng gọi nó là
             // "đặt" hay "nhận": `create_reservation` ghi `status='booked'` và
             // giữ chỗ, còn khách đang đứng ở quầy cần một lượt ở đang mở.
             if parsed <= today {
                 return Ok(DraftOutcome::WrongDateForReserve {
-                    requested: requested.to_string(),
+                    requested,
                     is_today: parsed == today,
                 });
             }
             Some(parsed)
         }
-        None => None,
     };
 
-    let check_out = match trimmed_arg(args, "check_out_date") {
-        Some(requested) => {
-            let Ok(parsed) = NaiveDate::parse_from_str(requested, "%Y-%m-%d") else {
-                return Ok(DraftOutcome::UnreadableReserveDate {
-                    field: "check_out_date",
-                    requested: requested.to_string(),
-                });
-            };
-            Some(parsed)
+    let check_out = match read_date(args, "check_out_date") {
+        Err(requested) => {
+            return Ok(DraftOutcome::UnreadableReserveDate {
+                field: "check_out_date",
+                requested,
+            })
         }
-        None => None,
+        Ok(value) => value.map(|(_, parsed)| parsed),
     };
 
     if let (Some(check_in), Some(check_out)) = (check_in, check_out) {
@@ -800,6 +1080,13 @@ pub async fn build_reserve_draft(
             });
         }
     }
+
+    // Soi ô tiền trước `missing`, cùng lý do như ô ngày — xem
+    // `build_check_in_draft`.
+    let deposit_amount = match read_amount(args, "deposit_amount") {
+        Ok(value) => value,
+        Err(outcome) => return Ok(outcome),
+    };
 
     let mut missing = Vec::new();
     if room_id.is_none() {
@@ -840,6 +1127,18 @@ pub async fn build_reserve_draft(
             "Khoảng ngày đặt phòng quá dài.",
         )
     })?;
+
+    // Trần đọc từ **chính hằng số của lệnh**, không chép tay con số 90: chép tay
+    // là dựng ra hai chính sách trôi độc lập, rồi một hôm cái thẻ cho qua đúng
+    // thứ lệnh vừa siết. Không có nhánh này thì một lỗi gõ năm (`2027` thay
+    // `2026`) dựng ra cái thẻ "122 đêm" kèm tiền phòng của 122 đêm, và lời từ
+    // chối chỉ tới sau khi lễ tân đã bấm *Đồng ý*.
+    if i64::from(nights) > MAX_RESERVATION_NIGHTS {
+        return Ok(DraftOutcome::TooManyNights {
+            nights,
+            max: MAX_RESERVATION_NIGHTS,
+        });
+    }
 
     // Số tiền trên thẻ đến từ preview, KHÔNG từ model — schema không có ô tiền
     // phòng, và preview hỏng thì không có thẻ, không có số mặc định.
@@ -882,7 +1181,7 @@ pub async fn build_reserve_draft(
         check_in_date: check_in_date.clone(),
         check_out_date: check_out_date.clone(),
         nights,
-        deposit_amount: args.get("deposit_amount").and_then(Value::as_i64),
+        deposit_amount,
         // Viết cứng, không cho model điền: `create_reservation_tx` mặc định
         // `"phone"` khi vắng, nên gửi `None` thì thẻ hiện "—" trong khi sổ ghi
         // "phone" — thẻ nói một đằng, bản ghi một nẻo. Nêu thẳng ra để hai bên
@@ -1006,7 +1305,15 @@ pub async fn build_backfill_draft(
     })?;
 
     let room_id = trimmed_arg(args, "room_id");
-    let guests = parse_guest_list(args);
+    let GuestList { guests, unreadable } = parse_guest_list(args);
+    if !unreadable.is_empty() {
+        // Cùng luật với `build_check_in_draft`: một mục khách không đọc được là
+        // một CON NGƯỜI sắp rơi khỏi hồ sơ khai báo tạm trú, không phải một ô
+        // trống.
+        return Ok(DraftOutcome::UnreadableGuestName {
+            positions: unreadable,
+        });
+    }
 
     // ─── Soi ba ô ngày TRƯỚC khi kể trường thiếu ───
     //
@@ -1014,52 +1321,47 @@ pub async fn build_backfill_draft(
     // trường, và hỏi lại tên khách cho một cái thẻ không bao giờ dựng được vừa
     // tiêu một vòng trong ngân sách `MAX_TOOL_ROUNDS` vừa xác nhận ngược cho
     // model rằng `draft_backfill` là đường đúng.
-    let check_in = match trimmed_arg(args, "check_in_date") {
-        Some(requested) => {
-            let Ok(parsed) = NaiveDate::parse_from_str(requested, "%Y-%m-%d") else {
-                return Ok(DraftOutcome::UnreadableBackfillDate {
-                    field: "check_in_date",
-                    requested: requested.to_string(),
-                });
-            };
+    // `read_date` cho cả ba ô, không `trimmed_arg` — xem `build_reserve_draft`.
+    let check_in = match read_date(args, "check_in_date") {
+        Err(requested) => {
+            return Ok(DraftOutcome::UnreadableBackfillDate {
+                field: "check_in_date",
+                requested,
+            })
+        }
+        Ok(None) => None,
+        Ok(Some((requested, parsed))) => {
             // So theo NGÀY LỊCH. `backfill_stay` kiểm lại đúng bất đẳng thức này
             // (`check_in >= today` ⇒ lỗi): ghi bù cho hôm nay là nhận phòng, và
             // ghi bù cho ngày mai là ghi lại một kỳ ở chưa xảy ra.
             if parsed >= today {
                 return Ok(DraftOutcome::WrongDateForBackfill {
-                    requested: requested.to_string(),
+                    requested,
                     is_today: parsed == today,
                 });
             }
             Some(parsed)
         }
-        None => None,
     };
 
-    let check_out = match trimmed_arg(args, "check_out_date") {
-        Some(requested) => {
-            let Ok(parsed) = NaiveDate::parse_from_str(requested, "%Y-%m-%d") else {
-                return Ok(DraftOutcome::UnreadableBackfillDate {
-                    field: "check_out_date",
-                    requested: requested.to_string(),
-                });
-            };
-            Some(parsed)
+    let check_out = match read_date(args, "check_out_date") {
+        Err(requested) => {
+            return Ok(DraftOutcome::UnreadableBackfillDate {
+                field: "check_out_date",
+                requested,
+            })
         }
-        None => None,
+        Ok(value) => value.map(|(_, parsed)| parsed),
     };
 
-    let expected_checkout = match trimmed_arg(args, "expected_checkout_date") {
-        Some(requested) => {
-            let Ok(parsed) = NaiveDate::parse_from_str(requested, "%Y-%m-%d") else {
-                return Ok(DraftOutcome::UnreadableBackfillDate {
-                    field: "expected_checkout_date",
-                    requested: requested.to_string(),
-                });
-            };
-            Some(parsed)
+    let expected_checkout = match read_date(args, "expected_checkout_date") {
+        Err(requested) => {
+            return Ok(DraftOutcome::UnreadableBackfillDate {
+                field: "expected_checkout_date",
+                requested,
+            })
         }
-        None => None,
+        Ok(value) => value.map(|(_, parsed)| parsed),
     };
 
     if let (Some(check_in), Some(check_out)) = (check_in, check_out) {
@@ -1096,6 +1398,13 @@ pub async fn build_backfill_draft(
             }
         }
     }
+
+    // Soi ô tiền trước `missing`, cùng lý do như ô ngày — xem
+    // `build_check_in_draft`.
+    let paid_amount = match read_amount(args, "paid_amount") {
+        Ok(value) => value,
+        Err(outcome) => return Ok(outcome),
+    };
 
     let mut missing = Vec::new();
     if room_id.is_none() {
@@ -1181,7 +1490,7 @@ pub async fn build_backfill_draft(
         // Tiền khách đã trả thì model **được** đưa: đó là một sự kiện đã xảy ra
         // ở quầy, không phải một con số tính ra được. Vắng ⇒ 0, chứ không suy ra
         // "chắc trả đủ rồi" — suy hộ ở đây là xoá một khoản nợ.
-        paid_amount: args.get("paid_amount").and_then(Value::as_i64).unwrap_or(0),
+        paid_amount: paid_amount.unwrap_or(0),
         // Viết cứng, khớp mặc định của `backfill_stay_tx`
         // (`req.source.as_deref().unwrap_or("walk-in")`): gửi `None` thì thẻ
         // hiện "—" trong khi sổ ghi "walk-in" — thẻ nói một đằng, bản ghi một
@@ -1893,6 +2202,12 @@ mod tests {
     /// chỉ dựa vào người đọc code. Không so sánh rỗng/không-rỗng chung chung:
     /// so khớp đúng nội dung tiếng Việt và đúng số lượng, để một cảnh báo giả
     /// hoặc một cảnh báo thứ hai lọt vào cũng bị bắt.
+    ///
+    /// Câu cảnh báo phải nói ra rằng lệnh sẽ **từ chối**, không phải một lời
+    /// "lưu ý": `check_in_tx` bắt mọi `status` khác `vacant` là `Conflict` và
+    /// trả về ngay, nên phòng bẩn thì không nhận phòng được, chấm hết. Cảnh báo
+    /// của `draft_reserve`/`draft_backfill` viết thẳng điều đó; câu này từng
+    /// không, nên lễ tân đọc ra là lời khuyên có thể bỏ qua.
     #[tokio::test]
     async fn a_ready_draft_carries_a_pms_warning_when_the_room_is_dirty() {
         let pool = test_pool().await;
@@ -1925,7 +2240,11 @@ mod tests {
 
         assert_eq!(
             action.warnings,
-            vec!["Phòng đang ở trạng thái bẩn, chưa dọn.".to_string()]
+            vec![
+                "Phòng đang ở trạng thái bẩn, chưa dọn. `check_in` sẽ TỪ CHỐI: nó chỉ nhận \
+                 phòng đang trống. Phải dọn và đổi trạng thái phòng trước."
+                    .to_string()
+            ]
         );
     }
 
@@ -3819,6 +4138,14 @@ mod tests {
     /// dò trùng lịch bằng so sánh **chuỗi** (`rc.date >= ? AND rc.date < ?`) y
     /// như `create_reservation_tx` — một dấu 0 thiếu làm phép dò quét nhầm
     /// khoảng. Payload phải mang dạng đã chuẩn hoá.
+    ///
+    /// **Cả ba** ô ngày, không phải hai. `expected_checkout_date` từng được
+    /// chuẩn hoá mà không có ai canh: thay nó bằng nguyên văn chuỗi model gửi
+    /// thì không test nào đỏ. Hậu quả nằm ở
+    /// `backfill::build_backfill_hash_payload` — nó nhét chuỗi ấy vào khoá
+    /// idempotency, nên `2026-6-20` và `2026-06-20` thành hai khoá khác nhau và
+    /// **cùng một lượt ghi bù gửi hai lần sẽ không khử trùng**: hai lượt ở, hai
+    /// lần tính tiền, cho một khách.
     #[tokio::test]
     async fn a_backfill_date_written_without_leading_zeros_reaches_the_payload_normalised() {
         let pool = test_pool().await;
@@ -3837,6 +4164,26 @@ mod tests {
         let payload = backfill_payload(&action);
         assert_eq!(payload.check_in_date, "2026-06-08");
         assert_eq!(payload.check_out_date.as_deref(), Some("2026-06-10"));
+
+        // Ô thứ ba, ở nhánh duy nhất nó được điền: khách **còn ở**.
+        let mut args = backfill_args_still_staying();
+        args["check_in_date"] = serde_json::json!("2026-6-10");
+        args["expected_checkout_date"] = serde_json::json!("2026-6-12");
+
+        let action = ready(
+            build_backfill_draft(&pool, &args, BACKFILL_TODAY)
+                .await
+                .expect("cùng một ngày lịch viết thiếu số 0 vẫn phải dựng được thẻ"),
+        );
+
+        let payload = backfill_payload(&action);
+        assert_eq!(payload.check_in_date, "2026-06-10");
+        assert_eq!(
+            payload.expected_checkout_date.as_deref(),
+            Some("2026-06-12"),
+            "ngày trả dự kiến đi vào khoá idempotency — nguyên văn `2026-6-12` \
+             làm hai lần gửi cùng một lượt ghi bù không khử trùng được"
+        );
     }
 
     /// Cảnh báo của thẻ ghi bù chỉ được nói những câu `backfill_stay` sẽ nói khi
@@ -3972,6 +4319,681 @@ mod tests {
         );
     }
 
+    // ─── Ô ngày KHÔNG PHẢI CHUỖI ───
+    //
+    // Con bug 06/08 sống lại qua cửa sau: `Value::as_str()` trả `None` cho mọi
+    // thứ không phải chuỗi JSON, và `None` ở chỗ đọc `check_in_date` nghĩa là
+    // "người dùng không nêu ngày nào" — tức bỏ trọn khối soi ngày rồi đóng dấu
+    // hôm nay lên thẻ. Model nghe "ngày 8" và điền `8` (số) là hình dạng model
+    // thật vẫn gửi.
+    //
+    // Mọi test dưới đây seed phòng thật, cùng lý do đã ghi ở khối trên: phòng
+    // không tồn tại thì preview hỏng và test đỏ vì fixture chứ không canh gì.
+
+    /// Bảng các hình dạng sai, chạy chung một khẳng định: **có mặt mà không đọc
+    /// được ⇒ từ chối**, không phải một cái thẻ mang ngày hôm nay.
+    ///
+    /// Soi cả `Debug` của outcome: hôm nay không được xuất hiện dưới bất kỳ
+    /// dạng nào (`2026-06-01` của payload/preview hay `01/06/2026` của thẻ).
+    /// Chỉ khẳng định "khác `Ready`" thì một biến thể từ chối nào đó vẫn có thể
+    /// cõng ngày hôm nay đi tiếp mà không ai thấy.
+    #[tokio::test]
+    async fn a_check_in_date_that_is_not_text_is_refused_instead_of_counting_as_absent() {
+        for (ten, gia_tri) in [
+            ("số", serde_json::json!(8)),
+            ("object", serde_json::json!({ "day": 8 })),
+            ("mảng", serde_json::json!(["2026-06-08"])),
+            ("số thực", serde_json::json!(8.0)),
+            ("bool", serde_json::json!(true)),
+            ("chuỗi toàn khoảng trắng", serde_json::json!("   ")),
+        ] {
+            let pool = test_pool().await;
+            seed_room(
+                &pool,
+                "room-typed",
+                "P810",
+                "Standard Room",
+                400_000,
+                "vacant",
+            )
+            .await;
+
+            let args = serde_json::json!({
+                "room_id": "room-typed",
+                "nights": 1,
+                "check_in_date": gia_tri,
+                "guests": [{ "full_name": "Nguyễn Văn Nam", "doc_number": "079201001234" }]
+            });
+
+            let outcome = build_check_in_draft(&pool, &args, "2026-06-01")
+                .await
+                .unwrap_or_else(|error| {
+                    panic!("{ten}: kiểu sai không phải lỗi hệ thống: {error:?}")
+                });
+
+            let dump = format!("{outcome:?}");
+            assert!(
+                !dump.contains("2026-06-01") && !dump.contains("01/06/2026"),
+                "{ten}: ô ngày bị bỏ qua và hôm nay chui vào kết quả:\n{dump}"
+            );
+            match outcome {
+                DraftOutcome::UnreadableCheckInDate { .. } => {}
+                other => panic!("{ten}: mong đợi UnreadableCheckInDate, nhận {other:?}"),
+            }
+        }
+    }
+
+    /// `null` là "không có giá trị", không phải "có mà không đọc được": model
+    /// nào cũng điền `null` cho một ô tuỳ chọn nó bỏ trống. Xử như rác thì mọi
+    /// lượt nhận phòng hôm nay tốn thêm một vòng trong ngân sách bốn vòng.
+    ///
+    /// Ghim lại quyết định ấy: `null` đi cùng đường với **vắng mặt** — thẻ hôm
+    /// nay, y hệt `a_draft_without_a_date_still_builds_the_card_the_old_way`.
+    #[tokio::test]
+    async fn a_null_check_in_date_counts_as_absent_and_still_builds_todays_card() {
+        let pool = test_pool().await;
+        seed_room(
+            &pool,
+            "room-null",
+            "P811",
+            "Standard Room",
+            400_000,
+            "vacant",
+        )
+        .await;
+
+        let args = serde_json::json!({
+            "room_id": "room-null",
+            "nights": 1,
+            "check_in_date": serde_json::Value::Null,
+            "guests": [{ "full_name": "Nguyễn Văn Nam", "doc_number": "079201001234" }]
+        });
+
+        let action = ready(
+            build_check_in_draft(&pool, &args, "2026-06-01")
+                .await
+                .expect("`null` không phải lỗi hệ thống"),
+        );
+        assert_eq!(
+            action.display.get("check_in_date").map(String::as_str),
+            Some("Hôm nay, 01/06/2026")
+        );
+    }
+
+    /// Cùng lỗ hổng kiểu dữ liệu, hai tool còn lại. `trimmed_arg` cũng đứng trên
+    /// `as_str()`, nên một ô ngày không phải chuỗi rơi vào `MissingFields` —
+    /// model **có** thấy, nhưng nó được bảo "thiếu ngày" trong khi nó vừa gửi
+    /// một ngày, và lời bảo ấy mời nó gửi lại đúng hình dạng cũ. Phải gọi đúng
+    /// tên: đọc không được.
+    #[tokio::test]
+    async fn a_reserve_date_that_is_not_text_names_the_field_instead_of_calling_it_missing() {
+        let pool = test_pool().await;
+        seed_room(
+            &pool,
+            "room-res",
+            "P812",
+            "Standard Room",
+            400_000,
+            "vacant",
+        )
+        .await;
+
+        let mut args = reserve_args("2026-06-10", "2026-06-12");
+        args["check_in_date"] = serde_json::json!(8);
+
+        let outcome = build_reserve_draft(&pool, &args, "2026-06-01")
+            .await
+            .expect("kiểu sai không phải lỗi hệ thống");
+
+        match outcome {
+            DraftOutcome::UnreadableReserveDate { field, .. } => {
+                assert_eq!(field, "check_in_date");
+            }
+            other => panic!("mong đợi UnreadableReserveDate, nhận {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn a_backfill_date_that_is_not_text_names_the_field_instead_of_calling_it_missing() {
+        let pool = test_pool().await;
+        seed_room(&pool, "room-bf", "P813", "Standard Room", 400_000, "vacant").await;
+
+        let mut args = backfill_args_checked_out();
+        args["check_out_date"] = serde_json::json!({ "day": 10 });
+
+        let outcome = build_backfill_draft(&pool, &args, BACKFILL_TODAY)
+            .await
+            .expect("kiểu sai không phải lỗi hệ thống");
+
+        match outcome {
+            DraftOutcome::UnreadableBackfillDate { field, .. } => {
+                assert_eq!(field, "check_out_date");
+            }
+            other => panic!("mong đợi UnreadableBackfillDate, nhận {other:?}"),
+        }
+    }
+
+    // ─── Ô TIỀN không đọc được ───
+    //
+    // Ảnh soi gương của sự cố 06/08: lần đó **tạo** một khoản thu không có thật,
+    // đây **xoá** một khoản thu có thật. `and_then(Value::as_i64)` trả `None`
+    // cho `400000.0` và cho `"400000"`, rồi `.unwrap_or(0)` biến `None` thành
+    // "chưa trả đồng nào" — khách đưa tiền ở quầy xong vẫn gánh nguyên khoản nợ,
+    // và trên thẻ không có một chữ nào nói ra chuyện đó.
+
+    /// Ô tiền có mặt mà không đọc được thành số nguyên đồng ⇒ **không dựng thẻ**.
+    /// Không có nhánh nào được im lặng về 0.
+    #[tokio::test]
+    async fn a_money_field_that_is_not_a_whole_number_is_refused_not_silently_zero() {
+        for (ten, gia_tri) in [
+            ("chuỗi", serde_json::json!("400000")),
+            ("chuỗi có dấu chấm", serde_json::json!("400.000")),
+            ("số thực lẻ", serde_json::json!(400_000.5)),
+            ("object", serde_json::json!({ "vnd": 400_000 })),
+            ("mảng", serde_json::json!([400_000])),
+            ("bool", serde_json::json!(true)),
+        ] {
+            let pool = test_pool().await;
+            seed_room(&pool, "room-bf", "P820", "Standard Room", 400_000, "vacant").await;
+
+            let mut args = backfill_args_checked_out();
+            args["paid_amount"] = gia_tri.clone();
+
+            let outcome = build_backfill_draft(&pool, &args, BACKFILL_TODAY)
+                .await
+                .unwrap_or_else(|error| {
+                    panic!("{ten}: kiểu sai không phải lỗi hệ thống: {error:?}")
+                });
+
+            match outcome {
+                DraftOutcome::UnreadableAmount { field, .. } => {
+                    assert_eq!(field, "paid_amount", "{ten}");
+                }
+                DraftOutcome::Ready(action) => panic!(
+                    "{ten}: tiền bị nuốt về 0 và thẻ vẫn dựng: {:?} / {:?}",
+                    action.display, action.warnings
+                ),
+                other => panic!("{ten}: mong đợi UnreadableAmount, nhận {other:?}"),
+            }
+        }
+    }
+
+    /// Số nguyên gửi dạng `400000.0` **được** nhận, đúng giá trị. Model hay gửi
+    /// tiền dạng số thực; từ chối cả ca này là bắt lễ tân gõ tay một khoản đã
+    /// đúng. Nhận là quyết định có chủ ý, nên nó có test riêng — và test này
+    /// cũng là chỗ báo động nếu ai đó siết lại.
+    #[tokio::test]
+    async fn a_whole_number_sent_as_a_float_reaches_the_payload_at_its_exact_value() {
+        let pool = test_pool().await;
+        seed_room(&pool, "room-bf", "P821", "Standard Room", 400_000, "vacant").await;
+
+        let mut args = backfill_args_checked_out();
+        args["paid_amount"] = serde_json::json!(400_000.0);
+
+        let action = ready(
+            build_backfill_draft(&pool, &args, BACKFILL_TODAY)
+                .await
+                .expect("400000.0 là một số tiền hợp lệ"),
+        );
+        assert_eq!(backfill_payload(&action).paid_amount, 400_000);
+        assert_eq!(
+            action.display.get("paid_amount").map(String::as_str),
+            Some("400.000 ₫")
+        );
+    }
+
+    #[tokio::test]
+    async fn a_check_in_paid_amount_that_is_not_a_number_is_refused_not_silently_zero() {
+        let pool = test_pool().await;
+        seed_room(
+            &pool,
+            "room-paid",
+            "P822",
+            "Standard Room",
+            400_000,
+            "vacant",
+        )
+        .await;
+
+        let args = serde_json::json!({
+            "room_id": "room-paid",
+            "nights": 1,
+            "paid_amount": "400000",
+            "guests": [{ "full_name": "Nguyễn Văn Nam", "doc_number": "079201001234" }]
+        });
+
+        let outcome = build_check_in_draft(&pool, &args, "2026-06-01")
+            .await
+            .expect("kiểu sai không phải lỗi hệ thống");
+
+        match outcome {
+            DraftOutcome::UnreadableAmount { field, .. } => assert_eq!(field, "paid_amount"),
+            DraftOutcome::Ready(action) => panic!(
+                "tiền bị nuốt mất và thẻ vẫn dựng: {:?}",
+                check_in_payload(&action).paid_amount
+            ),
+            other => panic!("mong đợi UnreadableAmount, nhận {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn a_reserve_deposit_that_is_not_a_number_is_refused_not_silently_dropped() {
+        let pool = test_pool().await;
+        seed_room(
+            &pool,
+            "room-res",
+            "P823",
+            "Standard Room",
+            400_000,
+            "vacant",
+        )
+        .await;
+
+        let mut args = reserve_args("2026-06-10", "2026-06-12");
+        args["deposit_amount"] = serde_json::json!("200000");
+
+        let outcome = build_reserve_draft(&pool, &args, "2026-06-01")
+            .await
+            .expect("kiểu sai không phải lỗi hệ thống");
+
+        match outcome {
+            DraftOutcome::UnreadableAmount { field, .. } => assert_eq!(field, "deposit_amount"),
+            DraftOutcome::Ready(action) => panic!(
+                "cọc bị nuốt mất và thẻ vẫn dựng: {:?}",
+                reserve_payload(&action).deposit_amount
+            ),
+            other => panic!("mong đợi UnreadableAmount, nhận {other:?}"),
+        }
+    }
+
+    /// `null` ở ô tiền = vắng mặt, cùng luật với ô ngày.
+    #[tokio::test]
+    async fn a_null_money_field_counts_as_absent() {
+        let pool = test_pool().await;
+        seed_room(&pool, "room-bf", "P824", "Standard Room", 400_000, "vacant").await;
+
+        let mut args = backfill_args_checked_out();
+        args["paid_amount"] = serde_json::Value::Null;
+
+        let action = ready(
+            build_backfill_draft(&pool, &args, BACKFILL_TODAY)
+                .await
+                .expect("`null` không phải lỗi hệ thống"),
+        );
+        assert_eq!(backfill_payload(&action).paid_amount, 0);
+    }
+
+    // ─── TIỀN ÂM ───
+    //
+    // `minimum: 0` trong JSON schema không phải hàng rào — không tầng nào kiểm
+    // lại nó. Đo được: `paid_amount = -500000` dựng ra thẻ ghi "-500.000 ₫",
+    // `warnings []`, rồi lệnh từ chối **sau** khi lễ tân đã bấm Đồng ý. Cảnh báo
+    // "đã thu quá tiền phòng" không bắt được vì số âm luôn nhỏ hơn tổng.
+
+    #[tokio::test]
+    async fn a_negative_amount_never_becomes_a_card() {
+        let pool = test_pool().await;
+
+        // Ghi bù.
+        seed_room(&pool, "room-bf", "P830", "Standard Room", 400_000, "vacant").await;
+        let mut args = backfill_args_checked_out();
+        args["paid_amount"] = serde_json::json!(-500_000);
+        match build_backfill_draft(&pool, &args, BACKFILL_TODAY)
+            .await
+            .expect("số âm không phải lỗi hệ thống")
+        {
+            DraftOutcome::NegativeAmount { field, .. } => assert_eq!(field, "paid_amount"),
+            other => panic!("ghi bù: mong đợi NegativeAmount, nhận {other:?}"),
+        }
+
+        // Nhận phòng.
+        let pool = test_pool().await;
+        seed_room(
+            &pool,
+            "room-neg",
+            "P831",
+            "Standard Room",
+            400_000,
+            "vacant",
+        )
+        .await;
+        let args = serde_json::json!({
+            "room_id": "room-neg",
+            "nights": 1,
+            "paid_amount": -500_000,
+            "guests": [{ "full_name": "Nguyễn Văn Nam", "doc_number": "079201001234" }]
+        });
+        match build_check_in_draft(&pool, &args, "2026-06-01")
+            .await
+            .expect("số âm không phải lỗi hệ thống")
+        {
+            DraftOutcome::NegativeAmount { field, .. } => assert_eq!(field, "paid_amount"),
+            other => panic!("nhận phòng: mong đợi NegativeAmount, nhận {other:?}"),
+        }
+
+        // Đặt phòng trước.
+        let pool = test_pool().await;
+        seed_room(
+            &pool,
+            "room-res",
+            "P832",
+            "Standard Room",
+            400_000,
+            "vacant",
+        )
+        .await;
+        let mut args = reserve_args("2026-06-10", "2026-06-12");
+        args["deposit_amount"] = serde_json::json!(-500_000);
+        match build_reserve_draft(&pool, &args, "2026-06-01")
+            .await
+            .expect("số âm không phải lỗi hệ thống")
+        {
+            DraftOutcome::NegativeAmount { field, .. } => assert_eq!(field, "deposit_amount"),
+            other => panic!("đặt phòng: mong đợi NegativeAmount, nhận {other:?}"),
+        }
+    }
+
+    // ─── Danh sách khách: không được rơi ai trong im lặng ───
+
+    /// Ba khách vào, hai khách ra, model không được báo — đúng lớp lỗi cả nhánh
+    /// này tồn tại để diệt. Một khách bị bỏ khỏi hồ sơ khai báo tạm trú, và trên
+    /// thẻ chỉ hiện "2 người" chứ không có chỗ nào nói người thứ ba đã biến mất.
+    #[tokio::test]
+    async fn a_guest_entry_that_yields_no_name_is_reported_not_dropped() {
+        for (ten, gia_tri) in [
+            ("số", serde_json::json!(123)),
+            (
+                "object lồng",
+                serde_json::json!({ "ho": "Lê", "ten": "Cường" }),
+            ),
+            ("chuỗi rỗng", serde_json::json!("")),
+            ("chuỗi toàn khoảng trắng", serde_json::json!("   ")),
+        ] {
+            let pool = test_pool().await;
+            seed_room(
+                &pool,
+                "room-glist",
+                "P840",
+                "Standard Room",
+                400_000,
+                "vacant",
+            )
+            .await;
+
+            let args = serde_json::json!({
+                "room_id": "room-glist",
+                "nights": 1,
+                "guests": [
+                    { "full_name": "Nguyễn Văn Nam", "doc_number": "079201001234" },
+                    { "full_name": gia_tri, "doc_number": "079088007766" },
+                    { "full_name": "Phạm Thị Dung", "doc_number": "079301005678" }
+                ]
+            });
+
+            let outcome = build_check_in_draft(&pool, &args, "2026-06-01")
+                .await
+                .unwrap_or_else(|error| panic!("{ten}: không phải lỗi hệ thống: {error:?}"));
+
+            match outcome {
+                DraftOutcome::UnreadableGuestName { positions } => {
+                    assert_eq!(positions, vec![2], "{ten}: phải gọi đúng vị trí khách hỏng");
+                }
+                DraftOutcome::Ready(action) => panic!(
+                    "{ten}: khách thứ hai bị bỏ trong im lặng, thẻ chỉ còn {} người: {:?}",
+                    check_in_payload(&action).guests.len(),
+                    action.display
+                ),
+                other => panic!("{ten}: mong đợi UnreadableGuestName, nhận {other:?}"),
+            }
+        }
+    }
+
+    /// Cùng hàm đọc, tool kia — `parse_guest_list` dùng chung nên lỗ hổng cũng
+    /// dùng chung.
+    #[tokio::test]
+    async fn a_backfill_guest_entry_that_yields_no_name_is_reported_not_dropped() {
+        let pool = test_pool().await;
+        seed_room(&pool, "room-bf", "P841", "Standard Room", 400_000, "vacant").await;
+
+        let mut args = backfill_args_checked_out();
+        args["guests"] = serde_json::json!([
+            { "full_name": "Trần Thị Bích", "doc_number": "079301005678" },
+            { "full_name": 123 }
+        ]);
+
+        match build_backfill_draft(&pool, &args, BACKFILL_TODAY)
+            .await
+            .expect("không phải lỗi hệ thống")
+        {
+            DraftOutcome::UnreadableGuestName { positions } => assert_eq!(positions, vec![2]),
+            DraftOutcome::Ready(action) => panic!(
+                "khách bị bỏ trong im lặng, còn {} người",
+                backfill_payload(&action).guests.len()
+            ),
+            other => panic!("mong đợi UnreadableGuestName, nhận {other:?}"),
+        }
+    }
+
+    // ─── Thẻ nhận phòng phải dò trùng lịch trên CẢ KỲ Ở ───
+    //
+    // `build_warnings` chỉ đọc `load_room_status_now` — trạng thái *ngay lúc
+    // này*. Phòng trống hôm nay nhưng có người đặt từ ngày kia thì thẻ vẫn ghi
+    // một ngày trả mà `check_in` sẽ không bao giờ nhận: đo được `nights = 4` ra
+    // thẻ "10/08/2026" rồi lệnh trả `Conflict: Room has a reservation starting
+    // 2026-08-08`. Một ngày sai trên thẻ, ở đúng cái tool sinh ra vì con bug
+    // ngày. Hai tool mới đã hỏi `load_free_rooms_between`; tool này thì chưa.
+
+    #[tokio::test]
+    async fn a_room_free_today_but_booked_inside_the_stay_is_warned_about() {
+        let pool = test_pool().await;
+        seed_room(&pool, "room-4b", "4B", "Standard Room", 400_000, "vacant").await;
+        seed_guest(&pool, "guest-later", "Khách đặt trước").await;
+        seed_reservation(
+            &pool,
+            "book-later",
+            "room-4b",
+            "guest-later",
+            "2026-08-08",
+            "2026-08-09",
+        )
+        .await;
+        seed_room_calendar_day(&pool, "room-4b", "2026-08-08", "book-later").await;
+
+        let args = serde_json::json!({
+            "room_id": "room-4b",
+            "nights": 4,
+            "guests": [{ "full_name": "Nguyễn Văn Nam", "doc_number": "079201001234" }]
+        });
+
+        let action = ready(
+            build_check_in_draft(&pool, &args, "2026-08-06")
+                .await
+                .expect("phòng bận vẫn tra được giá — không phải lỗi hệ thống"),
+        );
+
+        // Thẻ ghi 10/08 — ngày `check_in` sẽ từ chối. Nó phải nói ra, và phải
+        // nêu đúng khoảng ngày đang nói tới.
+        let overlap = action
+            .warnings
+            .iter()
+            .find(|warning| warning.contains("10/08/2026"))
+            .unwrap_or_else(|| {
+                panic!(
+                    "thẻ ghi ngày trả 10/08/2026 mà không cảnh báo trùng lịch: {:?}",
+                    action.warnings
+                )
+            });
+        assert!(overlap.contains("06/08/2026"), "{overlap}");
+        assert!(
+            overlap.contains("check_in"),
+            "cảnh báo phải nói rõ lệnh nào sẽ từ chối: {overlap}"
+        );
+    }
+
+    /// Chiều ngược lại, để test trên không đúng một cách vô nghĩa: trống suốt kỳ
+    /// ở thì **im lặng**. Một cảnh báo bật lên ở ca hợp lệ dạy lễ tân bỏ qua
+    /// cảnh báo — tệ hơn hẳn không có cảnh báo.
+    #[tokio::test]
+    async fn a_room_free_across_the_whole_stay_gets_no_overlap_warning() {
+        let pool = test_pool().await;
+        seed_room(&pool, "room-4b", "4B", "Standard Room", 400_000, "vacant").await;
+        seed_guest(&pool, "guest-later", "Khách đặt trước").await;
+        seed_reservation(
+            &pool,
+            "book-later",
+            "room-4b",
+            "guest-later",
+            "2026-08-20",
+            "2026-08-21",
+        )
+        .await;
+        seed_room_calendar_day(&pool, "room-4b", "2026-08-20", "book-later").await;
+
+        let args = serde_json::json!({
+            "room_id": "room-4b",
+            "nights": 2,
+            "guests": [{ "full_name": "Nguyễn Văn Nam", "doc_number": "079201001234" }]
+        });
+
+        let action = ready(
+            build_check_in_draft(&pool, &args, "2026-08-06")
+                .await
+                .expect("ca thường không được lỗi"),
+        );
+        assert!(
+            action.warnings.is_empty(),
+            "phòng trống suốt kỳ ở mà vẫn bị cảnh báo: {:?}",
+            action.warnings
+        );
+    }
+
+    /// Giọng của cảnh báo phải khớp cái lệnh thật sự làm.
+    ///
+    /// `check_in_tx` bắt **mọi** `status` khác `vacant` là `Conflict` và trả về
+    /// ngay — phòng đang có khách thì không nhận phòng được, chấm hết. Câu cảnh
+    /// báo cũ ("Phòng đang có khách ở.") đọc như một lời lưu ý có thể cân nhắc
+    /// rồi bấm *Đồng ý*, trong khi cảnh báo của `draft_reserve`/`draft_backfill`
+    /// viết thẳng "lệnh sẽ từ chối". Test này ghim sự chênh lệch ấy đã đóng.
+    #[tokio::test]
+    async fn the_check_in_card_says_the_command_will_refuse_an_occupied_room() {
+        let pool = test_pool().await;
+        seed_room(
+            &pool,
+            "room-busy",
+            "P850",
+            "Standard Room",
+            400_000,
+            "occupied",
+        )
+        .await;
+        seed_guest(&pool, "guest-now", "Khách đang ở").await;
+        seed_booking(
+            &pool,
+            "book-now",
+            "room-busy",
+            "guest-now",
+            "2026-06-01",
+            "2026-06-03",
+        )
+        .await;
+
+        let args = serde_json::json!({
+            "room_id": "room-busy",
+            "nights": 1,
+            "guests": [{ "full_name": "Nguyễn Văn Nam", "doc_number": "079201001234" }]
+        });
+
+        let action = ready(
+            build_check_in_draft(&pool, &args, "2026-06-01")
+                .await
+                .expect("phòng bận vẫn tra được giá"),
+        );
+
+        let warning = action
+            .warnings
+            .iter()
+            .find(|warning| warning.contains("Phòng đang có khách ở."))
+            .unwrap_or_else(|| panic!("thiếu cảnh báo phòng bận: {:?}", action.warnings));
+        assert!(
+            warning.contains("TỪ CHỐI") && warning.contains("check_in"),
+            "cảnh báo phải nói rõ lệnh nào sẽ từ chối, không nói giọng lưu ý: {warning}"
+        );
+    }
+
+    // ─── Trần số đêm của đặt phòng trước ───
+
+    /// `create_reservation` từ chối quá 90 đêm
+    /// (`reservation_lifecycle::MAX_RESERVATION_NIGHTS`), nhưng tầng thẻ không
+    /// kiểm gì: một lỗi gõ năm (`2027` thay `2026`) dựng ra cái thẻ "122 đêm"
+    /// với đủ tiền phòng cho 122 đêm, rồi lệnh mới từ chối **sau** khi lễ tân
+    /// đã bấm *Đồng ý*.
+    ///
+    /// Cùng khuôn với mọi luật khác của tầng này: lời từ chối là một câu chỉ
+    /// đường cho model, không phải một lỗi ràng buộc thô nổ ra ở cuối.
+    #[tokio::test]
+    async fn a_reservation_longer_than_the_cap_never_becomes_a_card() {
+        let pool = test_pool().await;
+        seed_room(
+            &pool,
+            "room-res",
+            "P851",
+            "Standard Room",
+            400_000,
+            "vacant",
+        )
+        .await;
+
+        // Đúng hình dạng lỗi gõ năm: nhận 10/06/2026, trả 10/10/2026 — 122 đêm.
+        let outcome = build_reserve_draft(
+            &pool,
+            &reserve_args("2026-06-10", "2026-10-10"),
+            "2026-06-01",
+        )
+        .await
+        .expect("khoảng ngày quá dài không phải lỗi hệ thống");
+
+        match outcome {
+            DraftOutcome::TooManyNights { nights, max } => {
+                assert_eq!(nights, 122);
+                assert_eq!(max, MAX_RESERVATION_NIGHTS);
+            }
+            DraftOutcome::Ready(action) => panic!(
+                "thẻ 122 đêm dựng được rồi lệnh mới từ chối: {:?}",
+                action.display
+            ),
+            other => panic!("mong đợi TooManyNights, nhận {other:?}"),
+        }
+    }
+
+    /// Biên: đúng trần thì vẫn dựng được thẻ. Không có test này thì một hàng rào
+    /// lệch một đơn vị (`>=` thay `>`) vẫn xanh, và nó chặn mất một lượt đặt
+    /// phòng hoàn toàn hợp lệ.
+    #[tokio::test]
+    async fn a_reservation_exactly_at_the_cap_still_builds_a_card() {
+        let pool = test_pool().await;
+        seed_room(
+            &pool,
+            "room-res",
+            "P852",
+            "Standard Room",
+            400_000,
+            "vacant",
+        )
+        .await;
+
+        // 10/06 + 90 đêm = 08/09/2026.
+        let action = ready(
+            build_reserve_draft(
+                &pool,
+                &reserve_args("2026-06-10", "2026-09-08"),
+                "2026-06-01",
+            )
+            .await
+            .expect("đúng trần vẫn hợp lệ"),
+        );
+        assert_eq!(reserve_payload(&action).nights, 90);
+    }
+
     #[test]
     fn nights_become_a_local_date_range() {
         assert_eq!(
@@ -4073,6 +5095,40 @@ mod tests {
         .execute(pool)
         .await
         .expect("seed booking");
+    }
+
+    /// Một **đặt phòng trước** (`status='booked'`), khác hẳn `seed_booking` ở
+    /// trên (`'active'` = khách đang nằm trong phòng).
+    ///
+    /// Phân biệt này không phải chi tiết vụn: `load_room_status_now` LEFT JOIN
+    /// `bookings` với `b.status = 'active'`, nên một reservation của tuần sau mà
+    /// seed nhầm thành `'active'` làm phòng trông như **đang có khách ngay lúc
+    /// này**. Test dò trùng lịch dùng fixture ấy sẽ đỏ/xanh nhờ cảnh báo
+    /// trạng-thái-bây-giờ chứ không nhờ phép dò khoảng ngày — đúng kiểu đỏ vì
+    /// một guard hàng xóm.
+    async fn seed_reservation(
+        pool: &Pool<Sqlite>,
+        id: &str,
+        room_id: &str,
+        guest_id: &str,
+        check_in_at: &str,
+        expected_checkout: &str,
+    ) {
+        sqlx::query(
+            "INSERT INTO bookings (
+                id, room_id, primary_guest_id, check_in_at, expected_checkout,
+                nights, total_price, paid_amount, status, created_at
+             ) VALUES (?, ?, ?, ?, ?, 1, 0, 0, 'booked', ?)",
+        )
+        .bind(id)
+        .bind(room_id)
+        .bind(guest_id)
+        .bind(check_in_at)
+        .bind(expected_checkout)
+        .bind(check_in_at)
+        .execute(pool)
+        .await
+        .expect("seed reservation");
     }
 
     async fn seed_room_calendar_day(
