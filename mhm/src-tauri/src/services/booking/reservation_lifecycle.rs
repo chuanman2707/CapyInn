@@ -1005,7 +1005,12 @@ pub async fn modify_reservation_idempotent(
 /// gì thay thế trần cũ, nên một lỗi gõ năm (`2036` thay vì `2026`) tạo ra một
 /// đặt phòng khoảng 3650 đêm, khoá phòng đó cả thập kỷ trong `room_calendar`.
 /// Đây là khôi phục lại trần cũ, không phải đặt ra chính sách mới.
-const MAX_RESERVATION_NIGHTS: i64 = 90;
+///
+/// `pub` vì tầng dựng thẻ của trợ lý (`agent::assistant::draft`) kiểm lại đúng
+/// trần này **trước** khi dựng thẻ đặt phòng, để lễ tân không bấm *Đồng ý* cho
+/// một cái thẻ mà lệnh chắc chắn sẽ từ chối. Hai chỗ đọc **cùng một** hằng số:
+/// chép tay con số 90 sang bên kia là dựng ra hai chính sách trôi độc lập.
+pub const MAX_RESERVATION_NIGHTS: i64 = 90;
 
 fn validate_requested_nights(
     check_in_date: &str,

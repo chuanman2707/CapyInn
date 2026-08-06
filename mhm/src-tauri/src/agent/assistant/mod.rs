@@ -382,6 +382,53 @@ pub async fn run_assistant_turn(
                          đổi ngày."
                     ),
                 }),
+                // Ô tiền: **không** rơi vào `missing_fields`. Bảo model "thiếu
+                // `paid_amount`" trong khi nó vừa gửi `"400000"` là mời nó gửi
+                // lại đúng hình dạng cũ. Nói thẳng hình dạng sai và hình dạng
+                // đúng.
+                DraftOutcome::UnreadableAmount { field, requested } => json!({
+                    "error": "unreadable_amount",
+                    "field": field,
+                    "requested": requested,
+                    "hint": format!(
+                        "`{field}` phải là một SỐ NGUYÊN tiền đồng, không dấu chấm, không dấu nháy, \
+                         không đơn vị — bốn trăm nghìn đồng viết là 400000. `{requested}` không đọc \
+                         được như vậy. Đây là tiền khách đã đưa ở quầy: đừng bỏ trống để đi tiếp \
+                         (bỏ trống nghĩa là KHÁCH CHƯA TRẢ ĐỒNG NÀO và khách sẽ bị đòi lại khoản đã \
+                         trả), và đừng tự làm tròn. Không chắc thì hỏi lại người dùng."
+                    ),
+                }),
+                DraftOutcome::NegativeAmount { field, requested } => json!({
+                    "error": "negative_amount",
+                    "field": field,
+                    "requested": requested,
+                    "hint": format!(
+                        "`{field}` không được âm, mà {requested} là số âm. Chưa trả đồng nào thì để \
+                         0 hoặc bỏ trống ô này. Nếu người dùng đang nói tới một khoản HOÀN TRẢ thì \
+                         thẻ này không làm được — nói lại với lễ tân, đừng đổi dấu."
+                    ),
+                }),
+                DraftOutcome::TooManyNights { nights, max } => json!({
+                    "error": "too_many_nights",
+                    "nights": nights,
+                    "max_nights": max,
+                    "hint": format!(
+                        "Khoảng ngày này dài {nights} đêm, quá trần {max} đêm của một lượt đặt \
+                         phòng — `create_reservation` sẽ từ chối. Gần như luôn là gõ nhầm NĂM ở \
+                         một trong hai ô ngày; đọc lại cả hai. Không tự cắt ngắn khoảng ngày cho \
+                         vừa trần: hỏi lại người dùng."
+                    ),
+                }),
+                DraftOutcome::UnreadableGuestName { positions } => json!({
+                    "error": "unreadable_guest_name",
+                    "positions": positions,
+                    "hint": format!(
+                        "Mục khách thứ {positions:?} trong ô `guests` không có `full_name` đọc được \
+                         (phải là một chuỗi khác rỗng). CapyInn KHÔNG tự bỏ những mục ấy đi: mỗi mục \
+                         là một con người trong hồ sơ khai báo tạm trú. Điền đủ họ tên cho từng mục \
+                         rồi gọi lại, hoặc hỏi lại người dùng tên của những người còn thiếu."
+                    ),
+                }),
             };
 
             messages.push(ChatMessage::assistant_tool_calls(vec![RawToolCall {
@@ -1176,6 +1223,75 @@ mod tests {
         assert_eq!(
             action.display.get("check_out_date").map(String::as_str),
             Some("06/08/2026")
+        );
+    }
+
+    /// Cạnh thứ ba của cùng khớp nối, và là cạnh **không ai canh** cho tới đây:
+    /// ô ngày có mặt nhưng không đọc được.
+    ///
+    /// Hôm nay 06/08. Model nghe "ngày 8" rồi điền `check_in_date: 8` — một số
+    /// JSON, đúng hình dạng model thật vẫn gửi. Trước bản vá, `Value::as_str()`
+    /// trả `None` cho số, `None` nghĩa là "không nêu ngày nào", khối soi ngày bị
+    /// bỏ qua trọn vẹn và thẻ ra đời mang ngày **hôm nay** — đúng con bug 06/08,
+    /// lần này chui qua cửa kiểu dữ liệu thay vì cửa ngày. Model cũng không nhận
+    /// được lời từ chối nào nên vòng tự sửa không bao giờ khởi động.
+    ///
+    /// Test chạy trọn đường: model gửi số ⇒ vòng lặp từ chối và chỉ dẫn ⇒ model
+    /// gọi lại `draft_check_in` với đúng `2026-08-08` ⇒ ra thẻ. Ngày 08/08 là
+    /// **tương lai** so với hôm nay, nên lần gọi lại rơi vào nhánh
+    /// `WrongDateForCheckIn` và được đẩy tiếp sang `draft_reserve`: hai vòng sửa
+    /// liên tiếp, đúng cái ngân sách bốn vòng phải cõng được.
+    #[tokio::test]
+    async fn a_check_in_date_sent_as_a_number_self_corrects_into_a_dated_card() {
+        let pool = pool().await;
+        seed_room(&pool, "R1", "P907", 400_000).await;
+
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let endpoint = spawn(a_model_that_switches_tool_when_the_loop_tells_it_to(
+            Arc::clone(&calls),
+            json!({
+                "name": "draft_check_in",
+                "arguments": "{\"room_id\":\"R1\",\"nights\":1,\"check_in_date\":8,\"guests\":[{\"full_name\":\"Hyungchul Lee\"}]}"
+            }),
+            // Mã lỗi, không phải tên tool: đây là chỗ đo xem lời từ chối có tới
+            // được model hay không.
+            "unreadable_check_in_date",
+            json!({
+                "name": "draft_reserve",
+                "arguments": "{\"room_id\":\"R1\",\"guest_name\":\"Hyungchul Lee\",\"check_in_date\":\"2026-08-08\",\"check_out_date\":\"2026-08-09\"}"
+            }),
+        ))
+        .await;
+
+        let response = run_assistant_turn(
+            &pool,
+            &AssistantProviderClient::new(build_assistant_provider_client().expect("client")),
+            &config_for(&endpoint),
+            "sk-test",
+            request("có booking mới phòng R1 hyungchul lee ngày 8"),
+            "2026-08-06",
+        )
+        .await;
+
+        // Đứng TRƯỚC `.expect(..)`, cùng lý do đã ghi ở test trên: cắt đường
+        // truyền chỉ dẫn thì model lặp lại lời gọi cũ tới hết ngân sách vòng và
+        // lượt chat chết bằng `AGENT_TOOL_LOOP_LIMIT` — một `.expect` đứng trước
+        // sẽ báo mã lỗi ấy và giấu mất lý do thật.
+        assert_eq!(
+            *calls.lock().expect("nhật ký tool"),
+            vec!["draft_check_in".to_string(), "draft_reserve".to_string()],
+            "ô ngày không đọc được phải sinh ra một lời từ chối model nhìn thấy"
+        );
+
+        let action = response
+            .expect("vòng lặp tự sửa phải chạy trọn")
+            .proposed_action
+            .expect("phải ra thẻ");
+        // Ngày người dùng nêu, không phải hôm nay. Đây là câu duy nhất của test
+        // này thật sự nói về con bug gốc.
+        assert_eq!(
+            action.display.get("check_in_date").map(String::as_str),
+            Some("08/08/2026")
         );
     }
 
