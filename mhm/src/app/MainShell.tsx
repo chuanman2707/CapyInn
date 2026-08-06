@@ -2,6 +2,7 @@ import { type ComponentType, useEffect, useState } from "react";
 import {
   BarChart3,
   BedDouble,
+  Bot,
   Calendar,
   ChevronsLeft,
   ChevronsRight,
@@ -205,7 +206,14 @@ export function MainShell() {
       )}
 
       {/* SIDEBAR */}
+      {/* `aria-label` không phải trang trí: nó là thứ DUY NHẤT cho test khẳng
+          định được nút Trợ lý nằm ở thanh điều hướng chứ không phải ở header.
+          Không có nó thì test chỉ nói được "có một nút tên Trợ lý ở đâu đó" —
+          đúng câu nó nói được cả trước lẫn sau khi nút bị trả về header, tức
+          không canh gì. Panel trợ lý cũng là một `<aside>` có nhãn
+          (`AssistantPanel.tsx`), nên hai vùng phân biệt được nhau. */}
       <aside
+        aria-label="Điều hướng"
         className={`${
           collapsed ? "w-[72px]" : "w-[260px]"
         } bg-white border-r border-slate-100 flex flex-col z-20 shrink-0 transition-all duration-300`}
@@ -214,6 +222,56 @@ export function MainShell() {
         <div className={`${collapsed ? "px-4 py-6" : "p-6"} mb-4 flex justify-center`}>
           <AppLogo className={collapsed ? "h-10 w-10 shrink-0" : "h-14 w-14 shrink-0"} />
         </div>
+
+        {/* TRỢ LÝ — ngay dưới logo, TRÊN cả nhóm điều hướng (bố cục Airtable).
+            Đứng riêng một khối có vạch ngăn vì nó KHÔNG cùng loại với các mục
+            bên dưới: chúng gọi `setTab()` để đổi trang, nút này gọi
+            `togglePanel()` để mở/đóng cột giữa. Trộn nó vào nhóm MAIN là dạy
+            người dùng rằng bấm vào sẽ chuyển sang một trang tên "Trợ lý".
+
+            Vạch ngăn nằm TRONG câu điều kiện, không bọc-luôn-vẽ-nội-dung-có-
+            điều-kiện: chưa bật opt-in thì cả khối biến mất, không để lại một
+            vạch kẻ lơ lửng dưới logo. jsdom không nhìn thấy đường kẻ nên không
+            test nào bắt được lỗi ấy — cùng bẫy `historyNotice` và
+            `ProposedActionCard` đã dính, xem chú thích ở đó. */}
+        {assistantAvailable && (
+          <div
+            className={`${collapsed ? "px-2" : "px-4"} mb-3 border-b border-slate-100 pb-3`}
+          >
+            <Button
+              variant={assistantOpen ? "secondary" : "ghost"}
+              className={`w-full justify-start rounded-xl font-medium ${
+                collapsed ? "px-3" : ""
+              } ${
+                assistantOpen
+                  ? "bg-brand-primary/10 text-brand-primary hover:bg-brand-primary/20"
+                  : "text-brand-muted hover:text-brand-text"
+              }`}
+              size="lg"
+              onClick={toggleAssistant}
+              // `aria-pressed` là chỗ phân biệt NÚT BẬT/TẮT với mục điều hướng.
+              // Các mục dưới kia không có nó vì chúng chuyển trang; nút này thì
+              // có, và nó là thứ test khẳng định được thay vì đi so class CSS.
+              aria-pressed={assistantOpen}
+              // Mở panel thì sidebar TỰ THU (`useSidebarCollapse`), nên lúc
+              // panel đang mở nút gần như luôn ở dạng chỉ-icon và `title` là
+              // nhãn duy nhất còn lại. Đổi theo trạng thái để nó nói được việc
+              // bấm tiếp sẽ làm gì — cùng lối Airtable đổi thành "Close Omni".
+              title={assistantOpen ? "Đóng trợ lý quầy" : "Mở trợ lý quầy"}
+            >
+              {/* `Bot`, KHÔNG phải `Sparkles`. `Sparkles` là icon của mục
+                  *Housekeeping* ngay bên dưới (dòng 59), và ở thanh này lúc thu
+                  gọn thì icon là thứ DUY NHẤT còn lại — hai mục cùng hình cách
+                  nhau bốn dòng là không phân biệt được. Bản cũ dùng `Sparkles`
+                  vô hại vì nút đứng tận header, xa nhóm điều hướng.
+                  `Bot` cũng chính là icon của mục *Trợ lý quầy* trong Cài đặt
+                  (`pages/settings/index.tsx`), nên hai chỗ nói về cùng một thứ
+                  nay trông giống nhau. */}
+              <Bot className={collapsed ? "" : "mr-3"} size={20} />
+              {!collapsed && "Trợ lý"}
+            </Button>
+          </div>
+        )}
 
         {/* Navigation */}
         <nav
@@ -339,16 +397,9 @@ export function MainShell() {
                 {gatewayRunning ? "● MCP Gateway" : "○ Gateway Off"}
               </Badge>
             )}
-            {assistantAvailable && (
-              <Button
-                variant="ghost"
-                className="rounded-xl"
-                onClick={toggleAssistant}
-                title="Trợ lý quầy"
-              >
-                <Sparkles size={16} className="mr-1.5" /> Trợ lý
-              </Button>
-            )}
+            {/* Nút Trợ lý ĐÃ CHUYỂN sang thanh điều hướng, ngay dưới logo —
+                nó mở/đóng cột giữa nên nó thuộc về cột trái, không thuộc về
+                cụm trạng thái ở đây. */}
             <Badge className="bg-green-50 text-green-700 border-0 rounded-full py-1.5 px-3 uppercase tracking-wider text-[10px] font-bold">
               ● Scanner Ready
             </Badge>

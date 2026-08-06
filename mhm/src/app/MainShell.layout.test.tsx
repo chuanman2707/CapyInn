@@ -81,7 +81,11 @@ const READY_SETTINGS: AssistantSettings = {
 /// `aria-label` vừa bền vừa thật: nó đặt tên cho landmark, không phải móc chỉ
 /// để test bám vào.
 function landmarks(container: HTMLElement) {
-  const nav = container.querySelector("nav")?.closest("aside");
+  // Thanh điều hướng nay cũng tìm bằng `aria-label`, cùng lý do đã viết ở trên
+  // cho panel. Bản cũ đi vòng `querySelector("nav")?.closest("aside")` vì lúc
+  // đó `<aside>` này chưa có tên; nó gãy nếu thẻ `<nav>` bị bọc thêm một lớp,
+  // và im lặng trỏ nhầm nếu một `<nav>` khác xuất hiện trước.
+  const nav = container.querySelector('aside[aria-label="Điều hướng"]');
   const panel = container.querySelector('aside[aria-label="Trợ lý quầy"]');
   const content = container.querySelector("main");
   const inDocumentOrder = Array.from(container.querySelectorAll("aside, main"));
@@ -171,5 +175,111 @@ describe("MainShell — bố cục ba cột", () => {
     // Quét cả cây, không quét trong `<main>`: panel là anh em của `<main>` chứ
     // không phải con, nên tìm trong `<main>` là một khẳng định luôn đúng.
     expect(within(container).queryByPlaceholderText("Hỏi hoặc ra việc…")).toBeNull();
+  });
+
+  // ── Nút Trợ lý ở thanh điều hướng ────────────────────────────────────────
+  //
+  // Nút này TỪNG nằm ở cụm phải của header, cạnh `SCANNER READY`. Nó mở/đóng
+  // cột giữa, nên chỗ của nó là cột trái — ngay dưới logo, trên cả nhóm điều
+  // hướng, cùng lối Airtable đặt nút Omni.
+  //
+  // Test đầu tiên là test SEAM: nó hỏi nút nằm Ở ĐÂU. Hai test cũ trong
+  // `App.experimentalRuntime.test.tsx` chỉ hỏi "có một nút tên Trợ lý không" —
+  // câu đó đúng cả trước lẫn sau khi ai đó trả nút về header, tức chúng không
+  // canh vị trí. Đây là lớp lỗi nhánh trợ lý đã dính ba lần.
+  describe("nút Trợ lý", () => {
+    it("nằm trong thanh điều hướng, KHÔNG nằm ở header", async () => {
+      const { container } = render(<MainShell />);
+      await waitFor(() => expect(screen.getByText("Dashboard page")).toBeInTheDocument());
+
+      const { nav } = landmarks(container);
+      const header = container.querySelector("header")!;
+
+      expect(within(nav as HTMLElement).getByRole("button", { name: /trợ lý/i })).toBeInTheDocument();
+      // Vế âm mới là vế có răng: thiếu nó thì một bản vẽ nút ở CẢ HAI chỗ vẫn
+      // xanh, mà hai nút cùng việc là đúng thứ thay đổi này đi dọn.
+      expect(within(header).queryByRole("button", { name: /trợ lý/i })).toBeNull();
+    });
+
+    it("đứng trên cả nhóm điều hướng, không lẫn vào giữa các mục", async () => {
+      const { container } = render(<MainShell />);
+      await waitFor(() => expect(screen.getByText("Dashboard page")).toBeInTheDocument());
+
+      const nav = landmarks(container).nav as HTMLElement;
+      const assistant = within(nav).getByRole("button", { name: /trợ lý/i });
+      const dashboard = within(nav).getByRole("button", { name: /dashboard/i });
+      // `Element[]`, không phải `HTMLButtonElement[]`: `getByRole` trả về
+      // `HTMLElement`, nên để nguyên kiểu hẹp của `querySelectorAll` thì
+      // `indexOf` không chịu — và `npm test` vẫn xanh vì vitest KHÔNG typecheck.
+      const order: Element[] = Array.from(nav.querySelectorAll("button"));
+
+      expect(order.indexOf(assistant)).toBeLessThan(order.indexOf(dashboard));
+    });
+
+    it("sáng lên khi panel mở, tắt khi panel đóng", async () => {
+      const user = userEvent.setup();
+      const { container } = render(<MainShell />);
+      await waitFor(() => expect(screen.getByText("Dashboard page")).toBeInTheDocument());
+
+      const find = () =>
+        within(landmarks(container).nav as HTMLElement).getByRole("button", { name: /trợ lý/i });
+
+      // `aria-pressed`, không phải class CSS. Đây là chỗ khai báo nút này là
+      // BẬT/TẮT chứ không phải một mục chuyển trang — và là thứ trình đọc màn
+      // hình đọc được. So class thì chỉ đo được màu, không đo được nghĩa.
+      expect(find()).toHaveAttribute("aria-pressed", "false");
+
+      await user.click(find());
+
+      await waitFor(() => expect(landmarks(container).panel).not.toBeNull());
+      expect(find()).toHaveAttribute("aria-pressed", "true");
+
+      await user.click(find());
+
+      await waitFor(() => expect(landmarks(container).panel).toBeNull());
+      expect(find()).toHaveAttribute("aria-pressed", "false");
+    });
+
+    it("không dùng chung icon với mục Housekeeping ngay bên dưới", async () => {
+      const { container } = render(<MainShell />);
+      await waitFor(() => expect(screen.getByText("Dashboard page")).toBeInTheDocument());
+
+      const nav = landmarks(container).nav as HTMLElement;
+      const iconOf = (name: RegExp) =>
+        within(nav).getByRole("button", { name }).querySelector("svg")?.getAttribute("class") ?? "";
+
+      const assistant = iconOf(/trợ lý/i);
+      const housekeeping = iconOf(/housekeeping/i);
+
+      // Chặn trước: cả hai phải đọc ra được. Không có dòng này thì lucide đổi
+      // cách đặt class sẽ biến phép so thành `"" !== ""` — sai, nhưng theo
+      // hướng nào thì cũng không còn đo gì nữa.
+      expect(assistant).not.toBe("");
+      expect(housekeeping).not.toBe("");
+      // Lúc thanh thu về icon (mở trợ lý là nó tự thu), icon là thứ DUY NHẤT
+      // còn lại để phân biệt hai mục cách nhau bốn dòng.
+      expect(assistant).not.toBe(housekeeping);
+    });
+
+    it("chưa bật trợ lý thì không có cả nút lẫn vạch kẻ thừa", async () => {
+      const notReady: AssistantSettings = {
+        ...READY_SETTINGS,
+        gate: { ready: false, missing: ["api_key"] },
+      };
+      setMockResponses({ get_assistant_settings: () => notReady });
+      useAssistantStore.setState({ settings: notReady });
+
+      const { container } = render(<MainShell />);
+      await waitFor(() => expect(screen.getByText("Dashboard page")).toBeInTheDocument());
+
+      const nav = landmarks(container).nav as HTMLElement;
+      expect(within(nav).queryByRole("button", { name: /trợ lý/i })).toBeNull();
+      // Vạch kẻ phải đi theo nút. Bọc-luôn-vẽ để lại một đường kẻ lơ lửng dưới
+      // logo, và jsdom không nhìn thấy đường kẻ nên KHÔNG test dò chữ nào bắt
+      // được — phải hỏi thẳng cái phần tử. `border-b` chỉ xuất hiện đúng một
+      // lần trong `MainShell` (các vạch trong nav là `border-t`), nên phép hỏi
+      // này trỏ đúng vào khối đang xét.
+      expect(nav.querySelector("div.border-b")).toBeNull();
+    });
   });
 });
