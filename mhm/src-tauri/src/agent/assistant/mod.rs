@@ -72,6 +72,25 @@ pub struct AssistantTurnResponse {
     /// `run_assistant_turn` luôn đặt `None`: nó không đọc và không ghi sổ hội
     /// thoại, tầng command mới là chỗ ghi đè giá trị thật.
     pub conversation_id: Option<String>,
+    /// Lượt này có vào sổ **trọn vẹn** hay không: `true` ⟺ mọi hàng lẽ ra phải
+    /// ghi (câu hỏi, và câu trả lời/thẻ/lỗi nếu có) đều đã nằm trên đĩa.
+    ///
+    /// Đây là bit duy nhất phân biệt được ca 3b với một lượt thành công: cả hai
+    /// trả về **cùng một id cũ**, cùng một `reply`, cùng một `history`. Không có
+    /// nó thì DB khoá hay đầy đĩa trông y hệt đường thường — trợ lý trả lời bình
+    /// thường, lễ tân không thấy gì, và sổ mất tin nhắn im lặng. Mở lại hội thoại
+    /// về sau chỉ còn một khoảng trống không ai giải thích được, mà sổ này chứa
+    /// tên khách và số CCCD và chủ nhà đã chọn "giữ nguyên, không tự xoá".
+    /// Spec dòng 446-447 đòi một dòng thông báo; dòng ấy đọc đúng trường này.
+    ///
+    /// **`run_assistant_turn` luôn đặt `false`, và chiều đó là chủ ý.** Hàm này
+    /// không đọc và không ghi sổ nên nó không biết được câu trả lời; tầng command
+    /// mới biết, và nó ghi đè — cùng khuôn với `conversation_id` ngay trên. Chọn
+    /// `false` chứ không `true` vì hai chế độ hỏng không cân nhau: quên ghi đè mà
+    /// mặc định `true` là im lặng vĩnh viễn, đúng con bug trường này sinh ra để
+    /// giết; mặc định `false` thì hỏng thành một dòng thông báo thừa — phiền,
+    /// nhưng nhìn thấy được và báo lại được.
+    pub turn_saved: bool,
 }
 
 pub async fn run_assistant_turn(
@@ -140,6 +159,7 @@ pub async fn run_assistant_turn(
                     proposed_action: None,
                     history: strip_system(messages),
                     conversation_id: None,
+                    turn_saved: false,
                 });
             }
             AssistantProviderTurn::ToolCalls(calls) => calls,
@@ -154,6 +174,7 @@ pub async fn run_assistant_turn(
                         proposed_action: Some(*action),
                         history: strip_system(messages),
                         conversation_id: None,
+                        turn_saved: false,
                     });
                 }
                 DraftOutcome::MissingFields(fields) => {

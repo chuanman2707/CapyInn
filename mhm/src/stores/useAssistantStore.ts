@@ -35,6 +35,20 @@ type AssistantState = {
   conversations: AssistantConversationSummary[];
   /// Dòng nhắc khi mở lại một hội thoại cũ. `null` là không nhắc gì.
   historyNotice: string | null;
+  /// Lượt chat **gần nhất** không vào được sổ. Đọc thẳng từ `turn_saved` của
+  /// backend, không suy ra từ bất cứ thứ gì khác — xem `AssistantTurnResponse`.
+  ///
+  /// Là một `boolean` của LƯỢT GẦN NHẤT, cố ý không phải một danh sách và cũng
+  /// không phải một bộ đếm: spec dòng 446-447 đòi "một lần cho mỗi lượt chat
+  /// hỏng, **không cộng dồn**", và cách rẻ nhất để bảo đảm điều đó là làm cho
+  /// việc cộng dồn **không diễn đạt được**. Mỗi lượt ghi đè giá trị này, nên
+  /// lượt sau lưu được là dòng thông báo tự biến mất; không có đường nào để hai
+  /// lượt hỏng thành hai dòng.
+  ///
+  /// Khác `historyNotice` (dòng nhắc 100 tin / bản-ghi-cũ) cả về nguồn lẫn về
+  /// vòng đời: `historyNotice` đọc từ dữ liệu đã tải khi MỞ một hội thoại, còn
+  /// cờ này đọc từ kết quả GỬI một lượt. Spec đòi riêng từng dòng.
+  saveFailed: boolean;
 
   togglePanel: () => void;
   refreshSettings: () => Promise<void>;
@@ -161,6 +175,11 @@ function emptySession() {
     pendingActionKey: null,
     historyNotice: null,
     error: null,
+    // Dòng "Không lưu được hội thoại này" nói về một lượt của phiên VỪA ĐÓNG.
+    // Mang nó sang phiên mới là để nó tố một hội thoại nó không nói về, và ở
+    // `openConversation` thì còn tệ hơn: nhắc mất dữ liệu ngay trên một sổ vừa
+    // đọc lên nguyên vẹn từ đĩa.
+    saveFailed: false,
   };
 }
 
@@ -177,6 +196,7 @@ export const useAssistantStore = create<AssistantState>((set, get) => ({
   pendingActionKey: null,
   conversations: [],
   historyNotice: null,
+  saveFailed: false,
 
   togglePanel: () => set((state) => ({ open: !state.open })),
 
@@ -199,6 +219,12 @@ export const useAssistantStore = create<AssistantState>((set, get) => ({
     set((state) => ({
       busy: true,
       error: null,
+      // Vế thứ nhất của "không cộng dồn": dòng thông báo của lượt TRƯỚC chết
+      // ngay lúc lượt mới bắt đầu. Không có dòng này thì một lượt hỏng để lại
+      // một dòng nằm lì suốt phần còn lại của phiên, kể cả khi mọi lượt sau đó
+      // đều lưu được — và một dòng cảnh báo thường trực thì người ta thôi đọc,
+      // đúng lúc nó nói thật thì không ai nhìn.
+      saveFailed: false,
       messages: [...state.messages, { id: nextId(), kind: "user", text: trimmed }],
     }));
 
@@ -239,6 +265,13 @@ export const useAssistantStore = create<AssistantState>((set, get) => ({
         // Cùng lớp lỗi `loadConversations()` đã bịt bằng `error: null`; câu từ
         // chối vì bận mở lại lớp ấy ở đây và ở `approve()`.
         error: null,
+        // Vế thứ hai của "không cộng dồn": mỗi lượt GHI ĐÈ, không cộng thêm.
+        //
+        // Đọc thẳng bit của backend, không suy diễn — `conversation_id` của ca
+        // 3b giống hệt của một lượt thành công, nên mọi cách đoán ở đây đều là
+        // đoán sai. Đảo dấu đúng một lần, ở đúng chỗ này: `turn_saved` mang
+        // chiều "an toàn thì true" để một backend quên đặt sẽ kêu chứ không im.
+        saveFailed: !response.turn_saved,
         history: response.history,
         pendingAction: response.proposed_action,
         // Gắn thẻ vào đúng phiên nó được dựng ra, ngay tại thời điểm gán.
@@ -260,6 +293,13 @@ export const useAssistantStore = create<AssistantState>((set, get) => ({
       set((state) => ({
         busy: false,
         error: text,
+        // `saveFailed` cố ý KHÔNG đặt ở đây, và nó đang là `false` do cú dọn ở
+        // đầu `send()`. Lượt hỏng thì backend không trả `AssistantTurnResponse`
+        // nào cả, nên **không có bit nào để đọc** — dựng một giá trị ở đây là
+        // đúng cái "frontend tự đoán" mà trường `turn_saved` sinh ra để cấm. Và
+        // lượt này đã có câu lỗi thật (viên đỏ + một bong bóng trong dòng hội
+        // thoại); chồng thêm "Không lưu được hội thoại này" là đoán mò về một
+        // hàng `kind='error'` mà `close_turn_record` rất có thể đã ghi xong.
         // TỰ LÀNH — đường (b) của I4. Backend vừa từ chối chính cái
         // `conversation_id` này, nên giữ nó lại là bảo đảm **mọi lượt sau hỏng
         // y hệt, mãi mãi**, tới khi lễ tân tự đoán ra là phải bấm *Hội thoại

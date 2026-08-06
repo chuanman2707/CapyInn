@@ -34,6 +34,11 @@ import { AssistantPanel, buildScreenContext } from "./AssistantPanel";
 
 const HISTORY_NOTICE = "Đây là bản ghi. Hỏi tiếp thì trợ lý không nhớ thẻ đã đề xuất trước đó.";
 
+/// Đúng nguyên văn spec dòng 446. Viết ra ở đây chứ không import từ component:
+/// hằng số dùng chung thì test so mã với chính nó, và đổi câu chữ sẽ không làm
+/// đỏ gì cả — đúng cái bẫy `SUGGESTIONS` đã dính.
+const SAVE_NOTICE = "Không lưu được hội thoại này.";
+
 function makeAction(): ProposedAction {
   return {
     kind: "check_in",
@@ -50,7 +55,6 @@ function makeSummary(
 ): AssistantConversationSummary {
   return {
     id: "c1",
-    user_id: "u1",
     user_name: "Lễ tân A",
     title: "Phòng 201 còn trống không?",
     updated_at: "2026-08-05T09:30:00+07:00",
@@ -192,6 +196,31 @@ describe("AssistantPanel", () => {
     expect(context.route).toBe("rooms");
     expect(context.selectedRoomId).toBe("R1");
     expect(context.selectedRoomNumber).toBe("Phòng 201");
+  });
+
+  it("nhãn ngữ cảnh trên khung soạn đi theo màn hình đang mở, không phải chuỗi cứng", () => {
+    // ── Dây `contextLabel` panel→composer ────────────────────────────────────
+    //
+    // Cùng lớp lỗi đã bịt cho `hasPendingAction` và `busy`, và là **cùng một
+    // lời gọi JSX, cách nhau một prop**: `buildScreenContext` có test riêng, ô
+    // nhập có test riêng, còn chỗ TRUYỀN thì không ai canh. Đo được: ghim cứng
+    // `contextLabel="Đang xem: x"` để lại 88/88 xanh, vì test cũ chỉ dò
+    // `/đang xem/i`.
+    //
+    // Hai lần render với hai nguồn khác nhau — nhánh có phòng đang chọn và
+    // nhánh rơi về `route` — nên không một chuỗi cứng nào thoả được cả hai.
+    // Nhãn này là thứ nói cho lễ tân biết câu hỏi sắp gửi đi kèm ngữ cảnh nào;
+    // nói sai nó là để trợ lý trả lời về một phòng khác phòng đang mở.
+    hotelState.activeTab = "bookings";
+    hotelState.roomDetail = null;
+    const withoutRoom = render(<AssistantPanel />);
+    expect(screen.getByText("Đang xem: bookings")).toBeInTheDocument();
+    withoutRoom.unmount();
+
+    hotelState.roomDetail = { room: { id: "R1", name: "Phòng 201" } };
+    render(<AssistantPanel />);
+    expect(screen.getByText("Đang xem: Phòng 201")).toBeInTheDocument();
+    expect(screen.queryByText("Đang xem: bookings")).not.toBeInTheDocument();
   });
 
   it("nút gửi có tên truy cập cho công nghệ hỗ trợ", () => {
@@ -352,6 +381,125 @@ describe("AssistantPanel", () => {
     render(<AssistantPanel />);
 
     expect(screen.queryByRole("status")).not.toBeInTheDocument();
+  });
+
+  // ── Dòng "Không lưu được hội thoại này" (spec dòng 446-447) ───────────────
+  //
+  // Bốn test dưới đây đo **dây nối store→panel**, không đo component. Đó là chỗ
+  // nhánh này đã thủng ba lần (`hasPendingAction`, `busy`, `contextLabel`): một
+  // component có đủ test dương/âm mà chỗ *đọc giá trị ra* thì không ai canh, nên
+  // ghim cứng `const saveFailed = false` để lại cả bộ xanh. Vì thế chúng đi qua
+  // `send()` THẬT với một `assistant_turn` giả, không `setState` tay.
+  //
+  // Hậu quả thật nếu dây này đứt: DB khoá hoặc đầy đĩa → trợ lý vẫn trả lời như
+  // thường → lễ tân không thấy gì → sổ mất tin nhắn im lặng. Sổ ấy mang tên
+  // khách và số CCCD, và chủ nhà đã chọn "giữ nguyên, không tự xoá".
+
+  it("báo không lưu được khi backend nói lượt vừa rồi không vào sổ", async () => {
+    setMockResponse("assistant_turn", () => ({
+      reply: "Còn phòng 201.",
+      proposed_action: null,
+      history: [],
+      // Ca 3b: hội thoại VẪN CÒN và id trả về y hệt một lượt thành công. Không
+      // có `turn_saved` thì không một trường nào trên hợp đồng phân biệt được
+      // hai ca ấy.
+      conversation_id: "c1",
+      turn_saved: false,
+    }));
+
+    render(<AssistantPanel />);
+    await userEvent.type(screen.getByRole("textbox"), "phòng nào trống");
+    await userEvent.click(screen.getByRole("button", { name: "Gửi tin nhắn" }));
+
+    // Câu trả lời vẫn tới — mất sổ KHÔNG được lấy mất câu trả lời (spec dòng
+    // 422-427).
+    expect(screen.getByText("Còn phòng 201.")).toBeInTheDocument();
+    // Ghim cả CHỮ lẫn VAI trên cùng một phần tử. Chỉ dò chữ thì một dòng
+    // thường không được trình đọc màn hình xướng lên vẫn xanh; chỉ dò vai thì
+    // `historyNotice` (cùng `role="status"`) làm hộ.
+    expect(screen.getByText(SAVE_NOTICE)).toHaveAttribute("role", "status");
+  });
+
+  it("không báo gì khi lượt vào sổ trọn vẹn", async () => {
+    // Vế âm, và nó không thừa: thiếu nó thì một bản in cứng dòng thông báo
+    // (hoặc `saveFailed` bật vĩnh viễn) vẫn xanh ở test trên. Nhắc sai thường
+    // trực là cách chắc chắn nhất để lần nhắc ĐÚNG không ai đọc.
+    setMockResponse("assistant_turn", () => ({
+      reply: "Còn phòng 201.",
+      proposed_action: null,
+      history: [],
+      conversation_id: "c1",
+      turn_saved: true,
+    }));
+
+    render(<AssistantPanel />);
+    await userEvent.type(screen.getByRole("textbox"), "phòng nào trống");
+    await userEvent.click(screen.getByRole("button", { name: "Gửi tin nhắn" }));
+
+    expect(screen.getByText("Còn phòng 201.")).toBeInTheDocument();
+    // Đếm PHẦN TỬ, không dò chữ: bọc-luôn-vẽ để lại một viên `role="status"`
+    // RỖNG thường trực, mà jsdom không thấy nền nên `queryByText` mù với nó.
+    // `historyNotice` đang `null` ở test này, nên 0 là 0 thật.
+    expect(screen.queryAllByRole("status")).toHaveLength(0);
+  });
+
+  it("dòng thông báo không cộng dồn: hai lượt hỏng vẫn một dòng, lượt lưu được thì mất hẳn", async () => {
+    let saved = false;
+    setMockResponse("assistant_turn", () => ({
+      reply: "Còn phòng 201.",
+      proposed_action: null,
+      history: [],
+      conversation_id: "c1",
+      turn_saved: saved,
+    }));
+
+    render(<AssistantPanel />);
+    const box = screen.getByRole("textbox");
+    const sendButton = screen.getByRole("button", { name: "Gửi tin nhắn" });
+
+    for (const question of ["lượt hỏng thứ nhất", "lượt hỏng thứ hai"]) {
+      await userEvent.type(box, question);
+      await userEvent.click(sendButton);
+    }
+
+    // "một lần cho mỗi lượt chat hỏng, không cộng dồn" — hai lượt hỏng liên
+    // tiếp vẫn đúng MỘT dòng, không phải hai dòng chồng nhau.
+    expect(screen.queryAllByRole("status")).toHaveLength(1);
+    expect(screen.getByText(SAVE_NOTICE)).toBeInTheDocument();
+
+    // Và vế đắt hơn: lượt sau lưu được thì dòng cũ phải **biến mất**, không
+    // nằm lại tố một lượt đã qua.
+    saved = true;
+    await userEvent.type(box, "lượt này lưu được");
+    await userEvent.click(sendButton);
+
+    expect(screen.queryAllByRole("status")).toHaveLength(0);
+    expect(screen.queryByText(SAVE_NOTICE)).not.toBeInTheDocument();
+  });
+
+  it("dòng nhắc lịch sử và dòng không-lưu-được là hai viên riêng, không đè nhau", async () => {
+    // Spec đòi RIÊNG hai dòng: `historyNotice` nói về ngữ cảnh gửi cho nhà cung
+    // cấp AI khi mở lại sổ cũ, dòng kia nói về việc ghi đĩa của lượt vừa gửi.
+    // Gộp làm một là mất một trong hai tin. Cả hai cùng `role="status"`, nên
+    // test phải phân biệt bằng TÊN chứ không bằng vai.
+    setMockResponse("assistant_turn", () => ({
+      reply: "Còn phòng 201.",
+      proposed_action: null,
+      history: [],
+      conversation_id: "c1",
+      turn_saved: false,
+    }));
+    useAssistantStore.setState({ historyNotice: HISTORY_NOTICE });
+
+    render(<AssistantPanel />);
+    await userEvent.type(screen.getByRole("textbox"), "phòng nào trống");
+    await userEvent.click(screen.getByRole("button", { name: "Gửi tin nhắn" }));
+
+    // Hai viên riêng biệt, cùng vai — nên phép đếm mới là khẳng định thật.
+    // Gộp chúng thành một câu ghép sẽ để lại đúng 1, và test đỏ.
+    expect(screen.queryAllByRole("status")).toHaveLength(2);
+    expect(screen.getByText(HISTORY_NOTICE)).toHaveAttribute("role", "status");
+    expect(screen.getByText(SAVE_NOTICE)).toHaveAttribute("role", "status");
   });
 
   it("header nói Hội thoại mới khi chưa mở hội thoại nào", () => {
@@ -952,6 +1100,7 @@ describe("AssistantPanel", () => {
         proposed_action: null,
         history: [],
         conversation_id: "c9",
+        turn_saved: true,
       });
     });
 

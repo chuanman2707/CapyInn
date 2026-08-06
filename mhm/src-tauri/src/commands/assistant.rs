@@ -365,27 +365,43 @@ async fn open_turn_record(
 /// được nhấc khi có ít nhất một message vào sổ (spec dòng 445). Danh sách lịch
 /// sử sắp theo `updated_at DESC`, nên touch vô điều kiện là đẩy một hội thoại
 /// rỗng lên đầu sổ.
+///
+/// **Trả về `AssistantTurnResponse::turn_saved`** — `true` ⟺ lượt này vào sổ
+/// TRỌN VẸN. Đây là chỗ duy nhất trong cả luồng biết được điều đó: `record`
+/// nói câu hỏi có vào không, còn câu trả lời thì chỉ hàm này ghi. Trước bản
+/// này bit ấy chết ngay trong `close_turn_record` (chỉ dùng để quyết định bump
+/// `updated_at`) và không bao giờ ra tới biên — xem doc của trường `turn_saved`.
+///
+/// Ba đường trả `false` và cả ba đều là mất dữ liệu thật, không phải trạng thái
+/// trung tính: sổ đóng (`Off`), ca 3a (không có hội thoại để ghi vào), và ca 3b
+/// / bước-5-hỏng (ghi trượt một trong hai hàng).
 async fn close_turn_record(
     pool: &Pool<Sqlite>,
     log: &TurnLog,
     outcome: &CommandResult<AssistantTurnResponse>,
-) {
+) -> bool {
     // Sổ đóng cho riêng lượt này (không xác minh được quyền): không ghi hàng
-    // nào, không nhấc `updated_at`. Xem `TurnLog`.
+    // nào, không nhấc `updated_at`. Không ghi gì nghĩa là KHÔNG lưu được —
+    // hội thoại vẫn còn trên đĩa nhưng lượt vừa rồi thì không vào đó.
     let TurnLog::On(record) = log else {
-        return;
+        return false;
     };
 
     // Ca 3a: không có hội thoại nào để ghi vào thì bỏ qua hoàn toàn, không cố
     // tạo lại giữa chừng.
     let Some(conversation_id) = record.conversation_id.as_deref() else {
-        return;
+        return false;
     };
 
     let answered_at = chrono::Local::now().to_rfc3339();
 
+    // Tách "có gì để ghi không" khỏi "ghi có trúng không". Gộp hai câu đó vào
+    // một cờ là báo mất dữ liệu cho một lượt chẳng có gì để mất.
+    let row_to_write = summarize_turn_for_log(outcome);
+    let has_row_to_write = row_to_write.is_some();
+
     let mut wrote_reply = false;
-    if let Some((kind, text)) = summarize_turn_for_log(outcome) {
+    if let Some((kind, text)) = row_to_write {
         wrote_reply = conversation_repository::insert_message(
             pool,
             &uuid::Uuid::new_v4().to_string(),
@@ -402,6 +418,8 @@ async fn close_turn_record(
         let _ =
             conversation_repository::touch_conversation(pool, conversation_id, &answered_at).await;
     }
+
+    record.persisted && (wrote_reply || !has_row_to_write)
 }
 
 #[tauri::command]
@@ -469,7 +487,7 @@ pub async fn assistant_turn(
     )
     .await;
 
-    close_turn_record(&state.db, &log, &outcome).await;
+    let turn_saved = close_turn_record(&state.db, &log, &outcome).await;
 
     // ĐƯỜNG LÁCH CÒN ĐỂ NGỎ, ghi lại vì hậu quả là thứ lễ tân nhìn thấy.
     //
@@ -489,6 +507,10 @@ pub async fn assistant_turn(
     // — việc của một thay đổi riêng, không phải của bản vá này.
     let mut response = outcome?;
     response.conversation_id = log.conversation_id();
+    // Hai dòng, cùng một luật: `run_assistant_turn` không biết gì về sổ hội
+    // thoại nên nó trả về hai giá trị giữ chỗ, và tầng này — chỗ DUY NHẤT chạm
+    // sổ — ghi đè cả hai bằng giá trị thật.
+    response.turn_saved = turn_saved;
     Ok(response)
 }
 
@@ -603,6 +625,10 @@ mod tests {
             proposed_action: None,
             history: Vec::new(),
             conversation_id: None,
+            // Giá trị giữ chỗ của `run_assistant_turn`, đúng như đường thật:
+            // `close_turn_record` nhận `outcome` chứ không nhận cờ, nên fixture
+            // đặt gì ở đây cũng không đổi được kết quả nó trả về.
+            turn_saved: false,
         })
     }
 
@@ -650,6 +676,7 @@ mod tests {
             }),
             history: Vec::new(),
             conversation_id: None,
+            turn_saved: false,
         })
     }
 
@@ -866,6 +893,125 @@ mod tests {
             Some("c1"),
             "id phải đi tiếp về frontend: rơi về None là bảo nó mở hội thoại mới, \
              và mỗi lần bấm gửi lại đẻ thêm một hội thoại rác"
+        );
+    }
+
+    // ─── `turn_saved`: bit đi ra tới biên ───
+    //
+    // Spec dòng 446-447 đòi một dòng "Không lưu được hội thoại này". Ca 3b trả
+    // **đúng id cũ** — giống hệt một lượt thành công — nên nếu bit này không ra
+    // được tới `AssistantTurnResponse` thì frontend không có cách nào phân biệt,
+    // và sổ mất tin nhắn hoàn toàn im lặng. Bốn test dưới ghim bốn nhánh của
+    // `close_turn_record`, cộng một test canh chiều ngược (đường thường KHÔNG
+    // được báo mất) — không có nó thì `false` cứng cũng xanh cả bộ.
+
+    /// Đường thường: hỏi được, trả lời được, cả hai hàng vào sổ → không báo mất.
+    #[tokio::test]
+    async fn a_clean_turn_reports_itself_as_saved() {
+        let pool = seeded_pool().await;
+
+        let saved = close_turn_record(
+            &pool,
+            &existing_record("c1", true),
+            &reply_only("Còn phòng 101."),
+        )
+        .await;
+
+        assert!(
+            saved,
+            "lượt vào sổ trọn vẹn mà vẫn báo mất là dạy lễ tân bỏ qua dòng thông \
+             báo — nhắc sai thường trực thì người ta thôi đọc"
+        );
+    }
+
+    /// Ca 3b và ca "bước 5 hỏng" gộp làm một ở đây: hội thoại vẫn còn, vẫn kiểm
+    /// quyền được, chỉ đường ghi message gãy. Đây là ca NGUY HIỂM NHẤT — id trả
+    /// về giống hệt một lượt thành công.
+    ///
+    /// **`persisted: true` là cả bài test.** Bản đầu truyền `false`, và như thế
+    /// thì `record.persisted &&` một mình đã trả `false` — cùng nhánh mà
+    /// `a_turn_that_lost_only_the_question_still_reports_not_saved` ngay dưới
+    /// đang ghim, nên hai test đo trùng một vế và vế `wrote_reply` **không ai
+    /// canh**. Đo được: rút gọn thân hàm còn đúng `record.persisted` để lại
+    /// 36/36 XANH. Câu hỏi đã vào sổ rồi thì `false` ở đây chỉ có thể tới từ lệnh
+    /// ghi câu trả lời — tức đây là chỗ duy nhất ca 3b bị bắt.
+    #[tokio::test]
+    async fn a_turn_whose_rows_could_not_be_written_reports_not_saved() {
+        let pool = seeded_pool().await;
+        sqlx::query("DROP TABLE assistant_messages")
+            .execute(&pool)
+            .await
+            .expect("bỏ bảng tin nhắn để ép mọi lệnh ghi message hỏng");
+
+        let saved = close_turn_record(
+            &pool,
+            &existing_record("c1", true),
+            &reply_only("Còn phòng 101."),
+        )
+        .await;
+
+        assert!(
+            !saved,
+            "DB khoá hay đầy đĩa mà báo là đã lưu thì lễ tân không bao giờ biết \
+             sổ đang mất tin nhắn — mở lại về sau chỉ thấy một khoảng trống"
+        );
+    }
+
+    /// Câu hỏi trượt nhưng câu trả lời vào được: vẫn là **mất một nửa lượt**.
+    ///
+    /// Ghim riêng vế này vì `record.persisted &&` là chỗ duy nhất canh nó — bỏ
+    /// đi thì sổ có câu trả lời mà không có câu hỏi, đọc lại không hiểu trợ lý
+    /// đang trả lời cái gì, và không một dòng thông báo nào.
+    #[tokio::test]
+    async fn a_turn_that_lost_only_the_question_still_reports_not_saved() {
+        let pool = seeded_pool().await;
+
+        let saved = close_turn_record(
+            &pool,
+            &existing_record("c1", false),
+            &reply_only("Còn phòng 101."),
+        )
+        .await;
+
+        assert_eq!(
+            logged_message(&pool, "c1").await.0,
+            "assistant",
+            "fixture phải ghi được câu trả lời, không thì test đo nhầm nhánh"
+        );
+        assert!(!saved, "mất câu hỏi cũng là mất, không phải nửa thành công");
+    }
+
+    /// Ca 3a: không tạo được hội thoại nên không có chỗ nào để ghi.
+    #[tokio::test]
+    async fn a_turn_without_a_conversation_reports_not_saved() {
+        let pool = seeded_pool().await;
+        let log = TurnLog::On(TurnRecord {
+            conversation_id: None,
+            persisted: false,
+            failure: None,
+        });
+
+        let saved = close_turn_record(&pool, &log, &reply_only("Còn phòng 101.")).await;
+
+        assert!(!saved);
+    }
+
+    /// `TurnLog::Off`: sổ đóng cho riêng lượt này. Hội thoại có thật và id vẫn
+    /// đi tiếp về frontend, nhưng lượt vừa rồi thì không vào đó — nên vẫn phải
+    /// báo mất.
+    #[tokio::test]
+    async fn a_closed_log_reports_not_saved() {
+        let pool = seeded_pool().await;
+        let log = TurnLog::Off {
+            conversation_id: "c1".to_string(),
+        };
+
+        let saved = close_turn_record(&pool, &log, &reply_only("Còn phòng 101.")).await;
+
+        assert!(
+            !saved,
+            "id đi tiếp KHÔNG có nghĩa là đã lưu — hai câu hỏi khác nhau, và \
+             gộp chúng là cách làm mất tin nhắn im lặng"
         );
     }
 
@@ -1316,7 +1462,16 @@ mod tests {
         );
         assert_eq!(
             struct_fields(source, "AssistantTurnResponse"),
-            ["reply", "proposed_action", "history", "conversation_id"]
+            [
+                "reply",
+                "proposed_action",
+                "history",
+                "conversation_id",
+                "turn_saved"
+            ],
+            "`turn_saved` là tín hiệu spec dòng 446-447 đòi; bỏ nó đi là để việc \
+             mất tin nhắn trở lại im lặng, và `mhm/src/types/assistant.ts` phải \
+             đổi theo cùng lúc"
         );
     }
 }
