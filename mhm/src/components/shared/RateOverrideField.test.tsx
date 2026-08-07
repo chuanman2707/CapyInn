@@ -51,4 +51,39 @@ describe("RateOverrideField", () => {
     fireEvent.click(screen.getByRole("button", { name: /về giá gốc/i }));
     expect(onChange).toHaveBeenCalledWith(null);
   });
+
+  // Sáu test trên chỉ đọc giá trị input được prefill hoặc truyền sẵn qua prop
+  // — không test nào thật sự gõ vào ô input. Ba test dưới đây bơm sự kiện
+  // change trực tiếp lên rate-input để phủ chính đường mà người dùng gõ giá,
+  // gồm cả dòng bảo toàn tiền nguyên (Math.trunc) mà sáu test trên không chạm tới.
+
+  it("gõ số thập phân thì cắt về số nguyên trước khi báo lên onChange", () => {
+    const onChange = vi.fn();
+    render(
+      <RateOverrideField engineTotal={1300000} nights={3} value={400000} onChange={onChange} />,
+    );
+    fireEvent.change(screen.getByTestId("rate-input"), {
+      target: { value: "500000.7" },
+    });
+    // Tiền là số nguyên VND — phần thập phân phải bị cắt trước khi ra khỏi component.
+    expect(onChange).toHaveBeenCalledWith(500000);
+  });
+
+  it("xoá trắng ô nhập thì báo 0, không phải null (null chỉ dành cho nút Về giá gốc)", () => {
+    const onChange = vi.fn();
+    render(
+      <RateOverrideField engineTotal={1300000} nights={3} value={400000} onChange={onChange} />,
+    );
+    fireEvent.change(screen.getByTestId("rate-input"), { target: { value: "" } });
+    expect(onChange).toHaveBeenCalledWith(0);
+  });
+
+  it("gõ số âm thì báo nguyên số âm lên — component không tự chặn, backend sẽ từ chối", () => {
+    const onChange = vi.fn();
+    render(
+      <RateOverrideField engineTotal={1300000} nights={3} value={400000} onChange={onChange} />,
+    );
+    fireEvent.change(screen.getByTestId("rate-input"), { target: { value: "-500" } });
+    expect(onChange).toHaveBeenCalledWith(-500);
+  });
 });
