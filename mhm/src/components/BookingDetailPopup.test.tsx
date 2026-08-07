@@ -3,7 +3,7 @@
 process.env.TZ = "Asia/Ho_Chi_Minh";
 
 import type { ButtonHTMLAttributes } from "react";
-import { render, screen } from "@testing-library/react";
+import { fireEvent, render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
 
@@ -13,7 +13,22 @@ vi.mock("@/components/ui/button", () => ({
   ),
 }));
 
+// Thay bằng bản giả tối giản: bài test ở đây chỉ cần xác nhận cách
+// BookingDetailPopup NỐI DÂY với VoidBookingDialog (mở khi bấm "Xóa lượt
+// này", đóng cả popup khi onVoided bắn), không phải lặp lại hành vi bên
+// trong VoidBookingDialog — cái đó đã có VoidBookingDialog.test.tsx lo.
+// Nền `bg-black/40` không tự stopPropagation, giống hệt bản thật, để bài
+// test "bấm ra nền" bắt đúng lỗi nổi bọt nếu popup quên chặn nó.
+vi.mock("@/components/VoidBookingDialog", () => ({
+  default: ({ onClose, onVoided }: { onClose: () => void; onVoided: () => void }) => (
+    <div className="fixed inset-0 bg-black/40" onClick={onClose}>
+      <button onClick={onVoided}>mock xác nhận xóa</button>
+    </div>
+  ),
+}));
+
 import BookingDetailPopup from "./BookingDetailPopup";
+import { useAuthStore } from "@/stores/useAuthStore";
 import type { BookingWithGuest } from "@/types";
 
 function booking(overrides: Partial<BookingWithGuest> = {}): BookingWithGuest {
@@ -35,9 +50,15 @@ function booking(overrides: Partial<BookingWithGuest> = {}): BookingWithGuest {
     scheduled_checkin: "2026-07-23",
     scheduled_checkout: "2026-07-25",
     guest_phone: "0900000000",
+    group_id: null,
     ...overrides,
   } as BookingWithGuest;
 }
+
+// "Đã trả — Hoseo Kim": lượt đã trả phòng dùng chung cho các test nút xoá,
+// vì `booking()` mặc định đã đúng hình dạng đó (status checked_out, có
+// actual_checkout).
+const checkedOutBooking = booking();
 
 describe("BookingDetailPopup", () => {
   it("shows reservation actions in reservation mode", async () => {
@@ -220,5 +241,103 @@ describe("BookingDetailPopup", () => {
     const button = screen.getByRole("button", { name: /đang tạo/i });
     expect(button).toBeDisabled();
     expect(screen.queryByRole("button", { name: /xem hóa đơn/i })).toBeNull();
+  });
+
+  it("admin thấy nút xóa ở lượt đã trả", () => {
+    useAuthStore.setState({
+      user: { id: "u1", name: "Chủ", role: "admin", active: true, created_at: "2026-08-07T09:00:00+07:00" },
+    });
+    render(
+      <BookingDetailPopup booking={checkedOutBooking} mode="readonly" onClose={vi.fn()} />,
+    );
+    const button = screen.getByRole("button", { name: /xóa lượt này/i });
+    expect(button.hasAttribute("disabled")).toBe(false);
+  });
+
+  it("lễ tân thấy nút xóa nhưng bị khoá, kèm lời giải thích", () => {
+    useAuthStore.setState({
+      user: { id: "u2", name: "Lễ tân", role: "receptionist", active: true, created_at: "2026-08-07T09:00:00+07:00" },
+    });
+    render(
+      <BookingDetailPopup booking={checkedOutBooking} mode="readonly" onClose={vi.fn()} />,
+    );
+    expect(screen.getByRole("button", { name: /xóa lượt này/i }).hasAttribute("disabled")).toBe(
+      true,
+    );
+    expect(screen.getByText(/chỉ chủ khách sạn xóa được/i)).toBeTruthy();
+  });
+
+  it("booking thuộc đoàn thì nút xóa bị khoá với lý do riêng", () => {
+    useAuthStore.setState({
+      user: { id: "u1", name: "Chủ", role: "admin", active: true, created_at: "2026-08-07T09:00:00+07:00" },
+    });
+    render(
+      <BookingDetailPopup
+        booking={{ ...checkedOutBooking, group_id: "G-1" }}
+        mode="readonly"
+        onClose={vi.fn()}
+      />,
+    );
+    expect(screen.getByRole("button", { name: /xóa lượt này/i }).hasAttribute("disabled")).toBe(
+      true,
+    );
+    expect(screen.getByText(/thuộc đoàn/i)).toBeTruthy();
+  });
+
+  it("nút xóa cũng có mặt ở chế độ reservation, dưới hàng nút chính", () => {
+    useAuthStore.setState({
+      user: { id: "u1", name: "Chủ", role: "admin", active: true, created_at: "2026-08-07T09:00:00+07:00" },
+    });
+    render(
+      <BookingDetailPopup
+        booking={booking({ status: "booked", actual_checkout: null })}
+        mode="reservation"
+        onClose={vi.fn()}
+      />,
+    );
+    expect(screen.getByRole("button", { name: /xóa lượt này/i }).hasAttribute("disabled")).toBe(
+      false,
+    );
+  });
+
+  // Cả popup chi tiết lẫn VoidBookingDialog đều tự đóng khi bấm ra nền của
+  // chính nó (`onClick={onClose}` trên div `fixed inset-0` ngoài cùng), và
+  // VoidBookingDialog không tự stopPropagation ở nền của nó. Nếu
+  // VoidBookingDialog được chèn thẳng vào cây DOM của popup mà không chặn,
+  // bấm ra nền của hộp xác nhận xoá (định huỷ MỖI việc xoá) sẽ nổi bọt lên
+  // và kích hoạt luôn `onClose` của popup bên dưới — đóng nhầm cả hai.
+  it("bấm ra nền của hộp xác nhận xoá không đóng theo popup chi tiết", async () => {
+    const user = userEvent.setup();
+    const onClose = vi.fn();
+    useAuthStore.setState({
+      user: { id: "u1", name: "Chủ", role: "admin", active: true, created_at: "2026-08-07T09:00:00+07:00" },
+    });
+    const { container } = render(
+      <BookingDetailPopup booking={checkedOutBooking} mode="readonly" onClose={onClose} />,
+    );
+
+    await user.click(screen.getByRole("button", { name: /xóa lượt này/i }));
+
+    const voidBackdrop = container.querySelector('[class*="bg-black/40"]');
+    expect(voidBackdrop).not.toBeNull();
+    fireEvent.click(voidBackdrop!);
+
+    expect(onClose).not.toHaveBeenCalled();
+  });
+
+  it("void thành công thì đóng luôn popup chi tiết", async () => {
+    const user = userEvent.setup();
+    const onClose = vi.fn();
+    useAuthStore.setState({
+      user: { id: "u1", name: "Chủ", role: "admin", active: true, created_at: "2026-08-07T09:00:00+07:00" },
+    });
+    render(
+      <BookingDetailPopup booking={checkedOutBooking} mode="readonly" onClose={onClose} />,
+    );
+
+    await user.click(screen.getByRole("button", { name: /xóa lượt này/i }));
+    await user.click(screen.getByRole("button", { name: /mock xác nhận xóa/i }));
+
+    expect(onClose).toHaveBeenCalledTimes(1);
   });
 });

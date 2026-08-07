@@ -337,6 +337,7 @@ export interface BookingWithGuest {
   scheduled_checkout: string | null;
   guest_phone: string | null;
   guests: number | null;
+  group_id: string | null;
 }
 
 export interface ActivityItem {

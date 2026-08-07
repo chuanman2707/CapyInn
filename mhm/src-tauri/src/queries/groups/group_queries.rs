@@ -14,7 +14,7 @@ const GROUP_BOOKINGS_SQL: &str =
             b.check_in_at, b.expected_checkout, b.actual_checkout, b.nights,
             b.total_price, b.paid_amount, b.status, b.source,
             b.booking_type, b.deposit_amount, b.scheduled_checkin, b.scheduled_checkout,
-            b.guest_phone, b.guests
+            b.guest_phone, b.guests, b.group_id
      FROM bookings b
      JOIN rooms r ON r.id = b.room_id
      JOIN guests g ON g.id = b.primary_guest_id
@@ -145,6 +145,7 @@ fn map_group_booking(row: &sqlx::sqlite::SqliteRow) -> BookingWithGuest {
         scheduled_checkout: row.get("scheduled_checkout"),
         guest_phone: row.get("guest_phone"),
         guests: row.get("guests"),
+        group_id: row.get("group_id"),
     }
 }
 
@@ -203,6 +204,10 @@ mod tests {
             scheduled_checkout: None,
             guest_phone: None,
             guests: None,
+            // `load_group_bookings` chỉ trả về hàng có `WHERE b.group_id = ?`,
+            // nên mọi booking từ hàm này thực tế luôn thuộc một đoàn — khớp id
+            // với fixture `group()` ở trên thay vì để trống cho đúng bản chất.
+            group_id: Some("GRP-1".to_string()),
         }
     }
 

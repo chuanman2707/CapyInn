@@ -450,6 +450,7 @@ pub struct BookingWithGuest {
     pub scheduled_checkout: Option<String>,
     pub guest_phone: Option<String>,
     pub guests: Option<i32>,
+    pub group_id: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
