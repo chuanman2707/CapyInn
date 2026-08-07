@@ -106,7 +106,7 @@ export default function RoomDrawer({ open, onClose, roomId }: RoomDrawerProps) {
         );
     }
 
-    const { room, booking, guests } = roomDetail;
+    const { room, booking, guests, group_id } = roomDetail;
     const roomTypeLabel = getRoomTypeLabel(room.type);
     // Giá loại phòng từ engine, không phải `room.base_price`.
     const nightlyRate = nightlyRateDisplay(roomTypeRates, room.type);
@@ -405,18 +405,28 @@ export default function RoomDrawer({ open, onClose, roomId }: RoomDrawerProps) {
             </button>
         ) : null;
 
-    // Chỉ hiện với một lượt ĐANG Ở thật sự — phòng trống (booking null) hay
-    // đã trả (status khác active) thì không có gì để xóa qua đường này.
+    // Chỉ hiện với một lượt ĐANG Ở thật sự — phòng trống (booking null) hay đã
+    // trả (status khác active) thì không có gì để xóa qua đường này. Gate
+    // hiển thị này là thứ BookingDetailPopup (Task 11) không có (nó luôn hiện
+    // nút cho cả reservation lẫn đã trả) — giữ nguyên, không rút gọn theo
+    // Task 11 khi mirror logic khoá bên dưới.
     //
-    // Khác BookingDetailPopup (Task 11): `Booking` do `get_room_detail` trả
-    // về (xem mhm/src-tauri/src/queries/booking/room_queries.rs) không có cột
-    // `group_id` như `BookingWithGuest` — nên không có dữ liệu ở đây để tự
-    // khoá trước cho lượt thuộc đoàn. An toàn vẫn đủ mà không cần việc đó:
-    // VoidBookingDialog tự phát hiện `is_group_booking` qua preview và khoá
-    // nút giữ-để-xóa kèm lý do riêng trước khi cho giữ, còn void_booking_tx
-    // từ chối đoàn vô điều kiện ở backend, độc lập với mọi trạng thái UI.
-    const voidDisabled = !isAdmin;
-    const voidHint = isAdmin ? null : "Chỉ chủ khách sạn xóa được";
+    // Khoá cho lượt thuộc đoàn: mirror đúng BookingDetailPopup (Task 11).
+    // Trước bản sửa này `get_room_detail` không trả `group_id` nên nút luôn
+    // hiện bật cho tới khi bấm mới biết bị chặn ở preview — hai lối vào của
+    // cùng một hành động phá hoại cư xử khác nhau. Giờ `RoomWithBooking.group_id`
+    // (thêm ở mhm/src-tauri/src/queries/booking/room_queries.rs — KHÔNG thêm
+    // vào `Booking` dùng chung nơi khác) mang dữ liệu đó lên tới đây. An toàn
+    // vẫn không đổi — vẫn chỉ là gợi ý sớm: VoidBookingDialog tự phát hiện
+    // `is_group_booking` qua preview và void_booking_tx từ chối đoàn vô điều
+    // kiện ở backend, độc lập với mọi trạng thái UI.
+    const isGroupBooking = Boolean(group_id);
+    const voidDisabled = !isAdmin || isGroupBooking;
+    const voidHint = isGroupBooking
+        ? "Lượt này thuộc đoàn — chưa hỗ trợ xóa"
+        : !isAdmin
+          ? "Chỉ chủ khách sạn xóa được"
+          : null;
 
     const voidSection =
         booking && booking.status === "active" ? (

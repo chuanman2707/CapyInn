@@ -114,6 +114,8 @@ export interface RoomWithBooking {
   room: Room;
   booking: Booking | null;
   guests: Guest[];
+  /** group_id của lượt đang ở (nếu có); null khi không thuộc đoàn hoặc không có lượt nào. */
+  group_id?: string | null;
 }
 
 export interface DashboardStats {
