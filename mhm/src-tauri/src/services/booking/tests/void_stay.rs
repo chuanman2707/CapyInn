@@ -629,11 +629,13 @@ async fn voiding_twice_with_the_same_key_only_acts_once() {
     .await
     .expect("replay returns the stored result instead of failing");
 
-    assert_eq!(first.response, second.response);
+    assert_replayed_pair(&first, &second);
 
     let status: String = sqlx::query_scalar("SELECT status FROM bookings WHERE id = 'B-8'")
         .fetch_one(&pool)
         .await
         .expect("reads booking status");
     assert_eq!(status, "voided");
+
+    assert_single_outbox_event(&pool, &ctx, "booking.voided").await;
 }
