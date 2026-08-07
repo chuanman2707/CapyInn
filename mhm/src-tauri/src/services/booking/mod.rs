@@ -10,6 +10,7 @@ pub mod reservation_lifecycle;
 pub mod room_change;
 pub mod stay_lifecycle;
 pub mod support;
+pub mod void_lifecycle;
 
 #[cfg(test)]
 mod tests;

@@ -22,7 +22,7 @@ mod prelude {
         models::{
             AddGroupServiceRequest, BackfillStayRequest, CheckOutRequest, CheckoutSettlementMode,
             CheckoutSettlementPreviewRequest, CreateGuestRequest, CreateReservationRequest,
-            GroupCheckoutRequest, ModifyReservationRequest,
+            GroupCheckoutRequest, ModifyReservationRequest, VoidBookingRequest,
         },
         money::MAX_TRANSPORT_SAFE_MONEY_VND,
         queries::booking::{audit_queries, billing_queries, revenue_queries},
@@ -62,3 +62,4 @@ mod room_change;
 mod shorten_stay;
 mod stay_error_mapping;
 mod stays;
+mod void_stay;
