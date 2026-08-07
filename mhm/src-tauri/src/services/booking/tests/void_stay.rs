@@ -593,3 +593,47 @@ async fn voiding_a_checked_out_stay_leaves_an_unrelated_uncleaned_task_in_the_sa
         "task không liên quan trong cùng phòng không được bị cuốn theo"
     );
 }
+
+/// Gọi hai lần cùng `idempotency_key` chỉ được tác dụng một lần — mạng chập
+/// hay người dùng bấm đúp không được xoá hai thứ.
+#[tokio::test]
+async fn voiding_twice_with_the_same_key_only_acts_once() {
+    let pool = test_pool().await;
+    seed_active_booking_with_room(&pool, "B-8", "R-8")
+        .await
+        .expect("seeds active booking");
+
+    let ctx = cmd("void_booking", "idem-void-1");
+
+    let first = void_lifecycle::void_booking_idempotent(
+        &pool,
+        &ctx,
+        VoidBookingRequest {
+            booking_id: "B-8".to_string(),
+            reason: None,
+        },
+        "admin-1".to_string(),
+    )
+    .await
+    .expect("first void succeeds");
+
+    let second = void_lifecycle::void_booking_idempotent(
+        &pool,
+        &ctx,
+        VoidBookingRequest {
+            booking_id: "B-8".to_string(),
+            reason: None,
+        },
+        "admin-1".to_string(),
+    )
+    .await
+    .expect("replay returns the stored result instead of failing");
+
+    assert_eq!(first.response, second.response);
+
+    let status: String = sqlx::query_scalar("SELECT status FROM bookings WHERE id = 'B-8'")
+        .fetch_one(&pool)
+        .await
+        .expect("reads booking status");
+    assert_eq!(status, "voided");
+}
