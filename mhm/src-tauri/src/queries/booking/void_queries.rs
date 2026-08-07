@@ -24,9 +24,6 @@ fn local_calendar_date(value: &str) -> Option<NaiveDate> {
         .and_then(|slice| NaiveDate::parse_from_str(slice, "%Y-%m-%d").ok())
 }
 
-/// `#[allow(dead_code)]`: chưa lệnh nào gọi tới (Task 8 nối dây). Xem cùng ghi
-/// chú ở `VoidBookingRequest`/`VoidBookingResponse` trong `models.rs`.
-#[allow(dead_code)]
 pub async fn load_void_preview(
     pool: &Pool<Sqlite>,
     booking_id: &str,

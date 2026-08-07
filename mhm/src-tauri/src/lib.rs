@@ -323,6 +323,8 @@ pub fn run() {
             commands::rooms::backfill_stay,
             commands::rooms::get_room_detail,
             commands::rooms::check_out,
+            commands::bookings::void_booking,
+            commands::bookings::preview_void_booking,
             commands::rooms::preview_checkout_settlement,
             commands::rooms::extend_stay,
             commands::rooms::shorten_stay,

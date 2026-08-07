@@ -33,10 +33,6 @@ use super::{
 
 /// Trạng thái nào được phép xoá. `cancelled` và `no_show` đã là kết cục cuối,
 /// xoá thêm không thay đổi gì trong báo cáo mà chỉ làm rối lịch sử.
-// `#[allow(dead_code)]` trên cả hàm này lẫn `void_booking_tx`: chưa command
-// nào gọi tới ngoài test (Task 8 nối dây). Bỏ khi Task 8 xong — xem cùng ghi
-// chú ở `VoidBookingRequest`/`VoidBookingResponse` trong models.rs.
-#[allow(dead_code)]
 fn ensure_voidable(current_status: &str) -> BookingResult<()> {
     match current_status {
         // Nhận đủ ba trạng thái sống: `booked`, `active`, `checked_out` — thân
@@ -54,7 +50,6 @@ fn ensure_voidable(current_status: &str) -> BookingResult<()> {
     }
 }
 
-#[allow(dead_code)]
 pub async fn void_booking_tx(
     tx: &mut Transaction<'_, Sqlite>,
     req: &VoidBookingRequest,
@@ -189,11 +184,6 @@ pub async fn void_booking_tx(
     })
 }
 
-// `#[allow(dead_code)]` trên cả ba hàm dưới đây (`build_void_hash_payload`,
-// `void_initial_lock_keys_from_payload`, `void_booking_idempotent`): cùng lý
-// do như `void_booking_tx` ở trên — chưa command nào gọi tới ngoài test (Task
-// 8 nối dây). Bỏ khi Task 8 xong.
-#[allow(dead_code)]
 fn build_void_hash_payload(req: &VoidBookingRequest) -> serde_json::Value {
     json!({
         "booking_id": req.booking_id,
@@ -201,7 +191,6 @@ fn build_void_hash_payload(req: &VoidBookingRequest) -> serde_json::Value {
     })
 }
 
-#[allow(dead_code)]
 fn void_initial_lock_keys_from_payload(
     hash_payload: &serde_json::Value,
 ) -> CommandResult<Vec<String>> {
@@ -215,7 +204,6 @@ fn void_initial_lock_keys_from_payload(
     ])
 }
 
-#[allow(dead_code)]
 pub async fn void_booking_idempotent(
     pool: &Pool<Sqlite>,
     ctx: &WriteCommandContext,
