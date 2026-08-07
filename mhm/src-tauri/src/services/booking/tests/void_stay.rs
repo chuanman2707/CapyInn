@@ -91,6 +91,14 @@ async fn voiding_an_already_voided_booking_is_rejected() {
 /// tổng tiền và hoá đơn của cả đoàn. Guard phải chặn TRƯỚC khi ghi bất cứ gì —
 /// một guard chặn nhưng lỡ ghi trước rồi còn tệ hơn không có guard nào cả, nên
 /// bài test này siết cả hai vế: có lỗi đúng nội dung, và không có gì đổi.
+///
+/// Hai phép đọc trạng thái bên dưới chạy qua `&mut *tx` — đọc ngay trong
+/// transaction còn mở, TRƯỚC khi rollback. Transaction thấy được ghi chưa
+/// commit của chính nó, nên đây là cách duy nhất phân biệt "guard chặn trước
+/// khi ghi" với "guard chặn sau khi ghi rồi rollback xoá dấu vết": đọc qua
+/// pool (một kết nối khác) sau khi đã rollback thì hai trường hợp trông giống
+/// hệt nhau — nếu guard bị dời xuống chạy sau UPDATE/DELETE, test vẫn sẽ xanh
+/// trong khi bug đã lọt.
 #[tokio::test]
 async fn voiding_a_booking_in_a_group_is_rejected_and_changes_nothing() {
     let pool = test_pool().await;
@@ -120,15 +128,17 @@ async fn voiding_a_booking_in_a_group_is_rejected_and_changes_nothing() {
     let error = void_lifecycle::void_booking_tx(&mut tx, &req, "admin-1", Local::now(), "R-3")
         .await
         .expect_err("grouped booking must be rejected");
-    tx.rollback().await.expect("rolls back");
 
     assert!(
         error.to_string().contains("thuộc đoàn"),
         "thông báo phải nói rõ lượt thuộc đoàn, thấy: {error}"
     );
 
+    // Đọc qua &mut *tx — trong transaction còn mở, trước rollback — xem chú
+    // thích ở đầu test: đây là phần phân biệt "chặn trước khi ghi" khỏi "chặn
+    // sau khi ghi rồi rollback xoá dấu vết".
     let status: String = sqlx::query_scalar("SELECT status FROM bookings WHERE id = 'B-3'")
-        .fetch_one(&pool)
+        .fetch_one(&mut *tx)
         .await
         .expect("reads booking status after rejection");
     assert_eq!(
@@ -138,11 +148,13 @@ async fn voiding_a_booking_in_a_group_is_rejected_and_changes_nothing() {
 
     let calendar_rows: i64 =
         sqlx::query_scalar("SELECT COUNT(*) FROM room_calendar WHERE booking_id = 'B-3'")
-            .fetch_one(&pool)
+            .fetch_one(&mut *tx)
             .await
             .expect("counts calendar rows");
     assert_eq!(
         calendar_rows, 2,
         "room_calendar không được xoá khi lượt bị từ chối vì thuộc đoàn"
     );
+
+    tx.rollback().await.expect("rolls back");
 }
