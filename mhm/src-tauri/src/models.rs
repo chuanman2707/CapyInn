@@ -11,6 +11,10 @@ pub mod status {
         pub const BOOKED: &str = "booked";
         pub const CANCELLED: &str = "cancelled";
         pub const NO_SHOW: &str = "no_show";
+        /// Lượt bị xoá vì nhập sai. Không phải sự kiện kinh doanh — khác hẳn
+        /// `CANCELLED` (khách thật sự huỷ, có thể giữ cọc và ghi phí huỷ).
+        /// Mọi báo cáo tiền phải loại trạng thái này.
+        pub const VOIDED: &str = "voided";
     }
     pub mod room {
         pub const VACANT: &str = "vacant";

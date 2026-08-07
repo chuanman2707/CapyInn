@@ -562,12 +562,12 @@ async fn the_migrated_special_dates_table_matches_what_the_code_assumes() {
 /// Dây bẫy số hiệu schema. Con số dưới đây cố ý viết cứng chứ không đọc
 /// `LATEST_SCHEMA_VERSION` — đọc hằng số thì test luôn xanh và chẳng canh gì cả.
 ///
-/// Hợp đồng nó canh: **số hiệu này đã được dời có chủ đích, hiện là 27.** Bản
+/// Hợp đồng nó canh: **số hiệu này đã được dời có chủ đích, hiện là 28.** Bản
 /// thân tính năng mùa cao điểm không cần migration riêng (nó chỉ ghi vào
 /// `special_dates`, có từ v3); con số ở đây phản ánh migration mới nhất của cả
-/// repo, hiện là `migrate_v27_assistant_conversations` (26 là
-/// `migrate_v26_booking_rate_override`, 25 là `migrate_v25_invoice_settlement_note`
-/// đến từ main).
+/// repo, hiện là `migrate_v28_booking_void` (27 là
+/// `migrate_v27_assistant_conversations`, 26 là `migrate_v26_booking_rate_override`,
+/// 25 là `migrate_v25_invoice_settlement_note` đến từ main).
 ///
 /// Nếu test này đỏ, nghĩa là ai đó vừa thêm migration. **Đừng tăng số này lên
 /// một rồi đi tiếp.** Số hiệu bị trùng là lỗi im lặng và chết người: gate
@@ -585,14 +585,16 @@ async fn the_migrated_special_dates_table_matches_what_the_code_assumes() {
 /// schema_version"`), đừng tin con số ai đó nói miệng. Chọn số cao hơn tất cả;
 /// bỏ trống vài số là vô hại, trùng số thì không.
 ///
-/// Khảo sát lúc chốt số **ngày 2026-08-04** (nhánh `feat/assistant-ui-airtable`,
-/// task 1 — sổ hội thoại trợ lý quầy): mọi ref (`main` và các nhánh khác) đều ở
-/// 26, DB thật của khách sạn cũng 26.
+/// Khảo sát lúc chốt số **ngày 2026-08-07** (nhánh
+/// `feat/void-booking-and-manual-rate`, task 1 — migration v28 và hằng số
+/// trạng thái voided): mọi ref (`main` và các nhánh khác) đều ở 27, DB thật của
+/// khách sạn cũng 27.
 ///
 /// Đó là **ảnh chụp tại thời điểm ấy, KHÔNG phải giấy thông hành.** Người merge
 /// nhánh này PHẢI chạy lại đúng cuộc khảo sát vừa mô tả ở trên, ngay trước khi
-/// merge. Lúc chốt số vẫn còn nhánh anh em đang sống cũng ở 26, nên hoàn toàn có
-/// thể một nhánh khác chiếm mất 27 trước — và va chạm đó im lặng: test này chạy
+/// merge. Lúc chốt số vẫn còn nhánh anh em đang sống cũng ở 27 (ví dụ
+/// `feat/assistant-rail`, `feat/assistant-stay-dates`), nên hoàn toàn có thể
+/// một nhánh khác chiếm mất 28 trước — và va chạm đó im lặng: test này chạy
 /// trên DB rỗng nên vẫn xanh, chỉ máy khách sạn mới chết.
 ///
 /// Viết trùng ý với doc-comment của `LATEST_SCHEMA_VERSION` (`db.rs:180-186`) là
@@ -611,7 +613,7 @@ async fn the_schema_version_is_the_one_this_branch_deliberately_claimed() {
         .expect("đọc schema_version");
 
     assert_eq!(
-        version, 27,
+        version, 28,
         "một migration mới vừa xuất hiện — quét mọi ref và đọc DB thật để chắc \
          số hiệu chưa bị nhánh nào chiếm, rồi mới nâng con số này"
     );

@@ -259,3 +259,21 @@ pub(super) async fn migrate_v27_assistant_conversations(
     tx.commit().await?;
     Ok(())
 }
+
+/// V28: dấu vết xoá một lượt nhập sai.
+///
+/// Ba cột này chỉ có nghĩa khi `bookings.status = 'voided'`. Trạng thái mới —
+/// chứ không phải cờ boolean — là chủ đích: mọi query doanh thu đang lọc
+/// `status IN ('active','checked_out')`, nên một giá trị lạ tự động bị loại mà
+/// không phải sửa từng câu SQL.
+pub(super) async fn migrate_v28_booking_void(pool: &Pool<Sqlite>) -> Result<(), sqlx::Error> {
+    let mut tx = pool.begin().await?;
+
+    execute_compat_alter(&mut tx, "ALTER TABLE bookings ADD COLUMN voided_at TEXT").await?;
+    execute_compat_alter(&mut tx, "ALTER TABLE bookings ADD COLUMN voided_by TEXT").await?;
+    execute_compat_alter(&mut tx, "ALTER TABLE bookings ADD COLUMN void_reason TEXT").await?;
+
+    set_schema_version(&mut tx, 28).await?;
+    tx.commit().await?;
+    Ok(())
+}
