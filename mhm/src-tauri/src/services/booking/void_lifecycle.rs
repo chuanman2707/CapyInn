@@ -29,12 +29,12 @@ use super::{
 #[allow(dead_code)]
 fn ensure_voidable(current_status: &str) -> BookingResult<()> {
     match current_status {
-        // Nhận `booked` và `active` — thân `void_booking_tx` biết dọn cho cả
-        // hai (xoá room_calendar cho cả hai, trả phòng về vacant thêm cho
-        // active). Task 5 sẽ thêm `| status::booking::CHECKED_OUT` cùng bước
-        // xử lý hoá đơn — mỗi trạng thái chỉ được nhận sau khi thân hàm biết
-        // dọn theo nó. Đừng nới nhánh này ra trước.
-        status::booking::BOOKED | status::booking::ACTIVE => Ok(()),
+        // Nhận đủ ba trạng thái sống: `booked`, `active`, `checked_out` — thân
+        // `void_booking_tx` biết dọn cho cả ba (xoá room_calendar cho cả ba,
+        // trả phòng về vacant thêm cho active/checked_out, gỡ task dọn phòng
+        // và huỷ hoá đơn thêm cho checked_out). Mỗi trạng thái chỉ được nhận
+        // sau khi thân hàm biết dọn theo nó — đừng nới nhánh này ra trước.
+        status::booking::BOOKED | status::booking::ACTIVE | status::booking::CHECKED_OUT => Ok(()),
         status::booking::VOIDED => Err(invalid_state_transition(
             "Lượt này đã được xóa rồi — vui lòng tải lại trang",
         )),
@@ -108,21 +108,66 @@ pub async fn void_booking_tx(
         .map_err(BookingError::from)
         .map_err(mark_write_db_error)?;
 
-    if previous_status == status::booking::ACTIVE {
-        let result = sqlx::query("UPDATE rooms SET status = ? WHERE id = ? AND status = ?")
-            .bind(status::room::VACANT)
+    match previous_status.as_str() {
+        status::booking::ACTIVE => {
+            let result = sqlx::query("UPDATE rooms SET status = ? WHERE id = ? AND status = ?")
+                .bind(status::room::VACANT)
+                .bind(&room_id)
+                .bind(status::room::OCCUPIED)
+                .execute(&mut **tx)
+                .await
+                .map_err(BookingError::from)
+                .map_err(mark_write_db_error)?;
+            ensure_one_row_affected(
+                result,
+                format!(
+                    "Phòng {room_id} vừa đổi trạng thái bởi thao tác khác — vui lòng tải lại trang"
+                ),
+            )?;
+        }
+        status::booking::CHECKED_OUT => {
+            // 0 dòng ảnh hưởng ở ĐÂY là hợp lệ, khác mọi chỗ khác trong repo:
+            // phòng có thể đã được bán lại cho khách khác giữa lúc trả phòng và
+            // lúc phát hiện nhập sai. Khách mới không được bị đá ra. Đừng "sửa
+            // lỗi" chỗ này thành `ensure_one_row_affected`.
+            sqlx::query("UPDATE rooms SET status = ? WHERE id = ? AND status = ?")
+                .bind(status::room::VACANT)
+                .bind(&room_id)
+                .bind(status::room::CLEANING)
+                .execute(&mut **tx)
+                .await
+                .map_err(BookingError::from)
+                .map_err(mark_write_db_error)?;
+
+            // `housekeeping` không có cột `booking_id`. `check_out_tx` chèn task
+            // với `triggered_at` bằng đúng `actual_checkout` của booking, nên bộ
+            // ba (phòng, thời điểm, chưa dọn xong) nhận diện được task do chính
+            // lượt này sinh ra — và chỉ nó.
+            sqlx::query(
+                "DELETE FROM housekeeping
+                 WHERE room_id = ?
+                   AND cleaned_at IS NULL
+                   AND triggered_at = (
+                       SELECT actual_checkout FROM bookings WHERE id = ?
+                   )",
+            )
             .bind(&room_id)
-            .bind(status::room::OCCUPIED)
+            .bind(&req.booking_id)
             .execute(&mut **tx)
             .await
             .map_err(BookingError::from)
             .map_err(mark_write_db_error)?;
-        ensure_one_row_affected(
-            result,
-            format!(
-                "Phòng {room_id} vừa đổi trạng thái bởi thao tác khác — vui lòng tải lại trang"
-            ),
-        )?;
+
+            // Hoá đơn đã xuất giữ nguyên số — dãy số không được thủng lỗ không
+            // giải thích được. Cột `status` đã có sẵn, mặc định 'issued'.
+            sqlx::query("UPDATE invoices SET status = 'voided' WHERE booking_id = ?")
+                .bind(&req.booking_id)
+                .execute(&mut **tx)
+                .await
+                .map_err(BookingError::from)
+                .map_err(mark_write_db_error)?;
+        }
+        _ => {}
     }
 
     Ok(VoidBookingResponse {
