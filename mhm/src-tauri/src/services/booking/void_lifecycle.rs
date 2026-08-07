@@ -9,16 +9,26 @@
 //! không nhờ việc xoá dữ liệu.
 
 use chrono::{DateTime, Local};
-use sqlx::{Row, Sqlite, Transaction};
+use serde_json::json;
+use sqlx::{Pool, Row, Sqlite, Transaction};
 
 use crate::{
+    app_error::CommandResult,
+    command_idempotency::{
+        system_error, CommandLedgerResultSummary, CommandLedgerSummary, IdempotentCommandResult,
+        ResolvedWriteCommandGuard, SanitizedLedgerIntent, WriteCommandContext,
+        WriteCommandExecutor, WriteCommandRequest,
+    },
     domain::booking::{BookingError, BookingResult},
     models::{status, VoidBookingRequest, VoidBookingResponse},
+    outbox::{OutboxAggregateKeySource, OutboxEventSpec},
 };
 
 use super::{
-    stay_lifecycle::mark_write_db_error,
-    support::{ensure_one_row_affected, invalid_state_transition},
+    stay_lifecycle::{map_check_out_command_error as map_void_command_error, mark_write_db_error},
+    support::{
+        ensure_one_row_affected, invalid_state_transition, lock_booking_and_read_room, FolioLock,
+    },
 };
 
 /// Trạng thái nào được phép xoá. `cancelled` và `no_show` đã là kết cục cuối,
@@ -177,4 +187,97 @@ pub async fn void_booking_tx(
         previous_status,
         voided_at,
     })
+}
+
+// `#[allow(dead_code)]` trên cả ba hàm dưới đây (`build_void_hash_payload`,
+// `void_initial_lock_keys_from_payload`, `void_booking_idempotent`): cùng lý
+// do như `void_booking_tx` ở trên — chưa command nào gọi tới ngoài test (Task
+// 8 nối dây). Bỏ khi Task 8 xong.
+#[allow(dead_code)]
+fn build_void_hash_payload(req: &VoidBookingRequest) -> serde_json::Value {
+    json!({
+        "booking_id": req.booking_id,
+        "reason_present": req.reason.is_some(),
+    })
+}
+
+#[allow(dead_code)]
+fn void_initial_lock_keys_from_payload(
+    hash_payload: &serde_json::Value,
+) -> CommandResult<Vec<String>> {
+    let booking_id = hash_payload
+        .get("booking_id")
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| system_error("void lock payload missing booking_id"))?;
+    Ok(vec![
+        crate::aggregate_locks::booking_key(booking_id)?,
+        crate::aggregate_locks::folio_key(booking_id)?,
+    ])
+}
+
+#[allow(dead_code)]
+pub async fn void_booking_idempotent(
+    pool: &Pool<Sqlite>,
+    ctx: &WriteCommandContext,
+    req: VoidBookingRequest,
+    actor_id: String,
+) -> CommandResult<IdempotentCommandResult<serde_json::Value>> {
+    let hash_payload = build_void_hash_payload(&req);
+    let ledger_intent = SanitizedLedgerIntent::from_pairs([
+        ("schema", json!("stay.void.v1")),
+        ("booking_present", json!(true)),
+        ("reason_present", json!(req.reason.is_some())),
+    ])?;
+    let summary = CommandLedgerSummary::new("Void booking")?.with_aggregate_ref(
+        "booking",
+        "booking",
+        None::<String>,
+    )?;
+    let request = WriteCommandRequest::new_sanitized(hash_payload.clone(), ledger_intent, summary)?
+        .with_primary_aggregate_key(format!("booking:{}", req.booking_id))
+        .with_lock_key_deriver(void_initial_lock_keys_from_payload)
+        .with_success_summary(CommandLedgerResultSummary::success("Booking voided")?)
+        .with_outbox_event(OutboxEventSpec::new(
+            "booking.voided",
+            OutboxAggregateKeySource::response_field("booking", "booking_id"),
+            &["bookings", "rooms", "housekeeping"],
+        )?);
+
+    let pool_for_lookup = pool.clone();
+    let booking_id_for_lookup = req.booking_id.clone();
+
+    WriteCommandExecutor::new(pool.clone())
+        .execute_with_resolved_guard(
+            ctx,
+            request,
+            move || async move {
+                let (guard, room_id) = lock_booking_and_read_room(
+                    &pool_for_lookup,
+                    &booking_id_for_lookup,
+                    FolioLock::Include,
+                    map_void_command_error,
+                )
+                .await?;
+                let guard = guard
+                    .acquire_next(
+                        crate::aggregate_locks::global_manager(),
+                        [crate::aggregate_locks::room_key(&room_id)?],
+                    )
+                    .await?;
+                let lock_keys = guard.keys().to_vec();
+
+                Ok(ResolvedWriteCommandGuard::new((guard, room_id), lock_keys))
+            },
+            move |tx, resolved| {
+                Box::pin(async move {
+                    let (_guard, locked_room_id) = resolved;
+                    let response =
+                        void_booking_tx(tx, &req, &actor_id, Local::now(), &locked_room_id)
+                            .await
+                            .map_err(map_void_command_error)?;
+                    serde_json::to_value(&response).map_err(system_error)
+                })
+            },
+        )
+        .await
 }
