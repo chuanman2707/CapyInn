@@ -676,6 +676,57 @@ async fn preview_reports_the_full_total_for_a_checked_out_stay() {
     assert_eq!(preview.nights_recognized, 1);
 }
 
+/// Trả phòng có cả dịch vụ ghi vào folio lẫn phí huỷ: cả hai bị `status !=
+/// 'voided'` lọc khỏi báo cáo giống hệt tiền phòng (`load_folio_revenue`,
+/// `load_cancellation_fee_revenue`, `revenue_queries.rs`), nên voided gỡ cả
+/// ba khoản chứ không riêng tiền phòng. Ba số tiền phòng/folio/phí huỷ khác
+/// nhau và không tròn để một phép cộng thiếu một số hạng (hay cộng nhầm cặp)
+/// ra một tổng rõ ràng sai, không trùng ngẫu nhiên với tổng của hai số kia.
+#[tokio::test]
+async fn preview_reports_room_revenue_plus_folio_plus_cancellation_fee_for_a_checked_out_stay() {
+    let pool = test_pool().await;
+    seed_active_booking_with_room(&pool, "B-FOLIO-FEE", "R-FOLIO-FEE")
+        .await
+        .expect("seeds booking");
+    sqlx::query(
+        "UPDATE bookings SET status = 'checked_out',
+                actual_checkout = '2026-04-16T10:00:00+07:00', total_price = 317000
+         WHERE id = 'B-FOLIO-FEE'",
+    )
+    .execute(&pool)
+    .await
+    .expect("marks checked out");
+    sqlx::query("UPDATE rooms SET status = 'cleaning' WHERE id = 'R-FOLIO-FEE'")
+        .execute(&pool)
+        .await
+        .expect("marks room cleaning");
+    seed_folio_line(&pool, "B-FOLIO-FEE", 142_500, "2026-04-15T20:00:00+07:00")
+        .await
+        .expect("seeds folio line");
+    seed_transaction(
+        &pool,
+        "B-FOLIO-FEE",
+        68_300,
+        "cancellation_fee",
+        "Phí huỷ",
+        "2026-04-16T09:00:00+07:00",
+    )
+    .await
+    .expect("seeds cancellation fee");
+
+    let preview = void_queries::load_void_preview(&pool, "B-FOLIO-FEE")
+        .await
+        .expect("loads preview");
+
+    assert_eq!(preview.previous_status, "checked_out");
+    assert_eq!(
+        preview.revenue_impact,
+        317_000 + 142_500 + 68_300,
+        "phải cộng đủ tiền phòng (317.000) + folio (142.500) + phí huỷ (68.300) — thiếu một \
+         số hạng nào cũng ra một tổng khác hẳn, không phải cùng con số làm tròn khác đi"
+    );
+}
+
 /// Phòng đã bán lại: preview phải báo trước, để hộp xác nhận nói đúng câu
 /// "trạng thái phòng giữ nguyên".
 #[tokio::test]
@@ -710,6 +761,11 @@ async fn preview_flags_a_room_that_was_already_reused() {
 /// vừa bắt đầu — không phải 1. Chọn 300.000/3 đêm để một công thức thiếu "+1"
 /// (chỉ đếm số ngày đã trôi qua, không tính đêm đang bắt đầu) ra 100.000 — một
 /// con số KHÁC hẳn, không phải cùng con số làm tròn khác đi.
+///
+/// Cũng khoá `revenue_date` bám ngày check-in, KHÔNG phải hôm nay: `is_audited`
+/// chỉ bật theo ngày check-in <= ngày đã chạy audit, nên hai trường phải mô tả
+/// cùng một ngày — xem chú thích ở nhánh `active` của `revenue_date` trong
+/// `void_queries.rs`.
 #[tokio::test]
 async fn preview_reports_partial_recognition_for_an_active_stay_on_its_second_of_three_nights() {
     let pool = test_pool().await;
@@ -740,7 +796,12 @@ async fn preview_reports_partial_recognition_for_an_active_stay_on_its_second_of
         "nhận phòng hôm qua, còn 3 đêm: đã qua đêm 1, đang ở đêm 2 — 2 đêm ghi nhận"
     );
     assert_eq!(preview.revenue_impact, 200_000);
-    assert_eq!(preview.revenue_date, today.format("%Y-%m-%d").to_string());
+    assert_eq!(
+        preview.revenue_date,
+        check_in_date.format("%Y-%m-%d").to_string(),
+        "revenue_date phải bám ngày check-in — is_audited chỉ chốt theo ngày check-in, \
+         không phải hôm nay, nên hai trường phải mô tả cùng một ngày"
+    );
     assert!(
         !preview.room_was_reused,
         "phòng đang có khách CHÍNH lượt này ở — không phải bị bán lại"
@@ -816,10 +877,13 @@ async fn preview_caps_recognition_at_nights_total_for_an_overstaying_active_gues
     assert_eq!(preview.revenue_impact, 300_000);
 }
 
-/// Lượt đặt trước có cọc: gỡ đúng tiền cọc, chưa đêm nào được ghi nhận vì
-/// khách chưa tới. Cũng là bài duy nhất khẳng định `booking_id`/`room_id`/
-/// `guest_name` không phải giá trị giả — hai test gốc của Task 7 không đụng
-/// tới ba trường này.
+/// Lượt đặt trước có cọc: cọc KHÔNG bị gỡ khỏi doanh thu vì nó chưa từng ở
+/// trong đó — `recognized_room_revenue_filter_sql` (`revenue_queries.rs`) đòi
+/// `status IN ('active', 'checked_out')`, nên một lượt `booked` chưa đóng góp
+/// đồng doanh thu phòng nào. `revenue_impact` phải là 0 (không seed folio hay
+/// phí huỷ); tiền cọc hiển thị RIÊNG qua `deposit_amount`, không cộng vào.
+/// Cũng là bài duy nhất khẳng định `booking_id`/`room_id`/`guest_name` không
+/// phải giá trị giả — hai test gốc của Task 7 không đụng tới ba trường này.
 #[tokio::test]
 async fn preview_reports_the_deposit_for_a_booked_reservation_with_a_deposit() {
     let pool = test_pool().await;
@@ -837,8 +901,16 @@ async fn preview_reports_the_deposit_for_a_booked_reservation_with_a_deposit() {
     assert_eq!(preview.guest_name, "Reserved Guest B-BOOKED-DEP");
     assert_eq!(preview.previous_status, "booked");
     assert_eq!(
-        preview.revenue_impact, 50_000,
-        "đúng bằng deposit_amount đã seed"
+        preview.revenue_impact, 0,
+        "chưa nhận phòng nên chưa đồng doanh thu phòng nào; không seed folio/phí huỷ nên cũng 0"
+    );
+    assert_eq!(
+        preview.deposit_amount, 50_000,
+        "đúng bằng deposit_amount đã seed — tách riêng khỏi revenue_impact"
+    );
+    assert_eq!(
+        preview.revenue_date, "2026-04-20",
+        "rơi về ngày nhận phòng dự kiến — cọc không có ngày ghi nhận thật"
     );
     assert_eq!(
         preview.nights_recognized, 0,
@@ -872,6 +944,10 @@ async fn preview_reports_zero_for_a_booked_reservation_without_a_deposit() {
 
     assert_eq!(preview.previous_status, "booked");
     assert_eq!(preview.revenue_impact, 0);
+    assert_eq!(
+        preview.deposit_amount, 0,
+        "cột NULL phải đọc ra 0, không panic"
+    );
 }
 
 /// `is_audited` đọc thẳng từ cột, không phải hằng số: mặc định seed là 0

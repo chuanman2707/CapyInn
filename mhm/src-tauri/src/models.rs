@@ -290,12 +290,25 @@ pub struct VoidBookingPreview {
     pub guest_name: String,
     pub room_id: String,
     pub previous_status: String,
-    /// Số tiền sẽ biến mất khỏi doanh thu. Với lượt đã trả phòng là toàn bộ
-    /// `total_price`; với lượt đang ở chỉ là phần đã ghi nhận tới hôm nay; với
-    /// lượt đặt trước là tiền cọc (hoặc 0).
+    /// Số tiền sẽ biến mất khỏi doanh thu: tiền phòng đã ghi nhận (toàn bộ
+    /// `total_price` nếu đã trả phòng, phần theo tỉ lệ đêm nếu đang ở, 0 nếu
+    /// mới đặt — chưa nhận phòng thì chưa được tính vào doanh thu phòng) CỘNG
+    /// toàn bộ `folio_lines` và các `transactions` loại `cancellation_fee` của
+    /// booking này — cả hai đều bị lọc khỏi báo cáo bởi `status != 'voided'`
+    /// giống tiền phòng, nên đều là tiền thật sự "biến mất" khi voided.
+    ///
+    /// KHÔNG gồm `deposit_amount` — xem field đó.
     pub revenue_impact: MoneyVnd,
     /// Ngày mà con số trên đang được tính vào, `YYYY-MM-DD`.
     pub revenue_date: String,
+    /// Tiền cọc đã thu, hiển thị RIÊNG khỏi `revenue_impact` — ĐỪNG gộp lại.
+    /// Cọc là một khoản THU (`transactions` loại `deposit`), không phải doanh
+    /// thu: không báo cáo doanh thu nào cộng cọc vào cả, và `transactions` là
+    /// append-only nên voided không xoá dòng cọc này — tiền cọc không "biến
+    /// mất" khỏi đâu cả khi xoá. Gộp vào `revenue_impact` sẽ báo nhầm một
+    /// khoản tiền chưa từng ở trong doanh thu là tiền "biến mất khỏi doanh
+    /// thu".
+    pub deposit_amount: MoneyVnd,
     pub nights_recognized: i32,
     pub nights_total: i32,
     pub is_audited: bool,
