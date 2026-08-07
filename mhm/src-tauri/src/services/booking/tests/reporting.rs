@@ -623,3 +623,116 @@ async fn billing_and_export_queries_preserve_canonical_revenue_columns() {
     assert_eq!(export_rows[0].folio_total, 35_000);
     assert_eq!(export_rows[0].recognized_revenue, 285_000);
 }
+
+/// Đổi `bookings.status` thành `voided` một mình nó KHÔNG đủ: ba nhánh trong
+/// `revenue_queries` đọc thẳng `folio_lines` / `transactions` mà không hề join
+/// `bookings`. Test này canh đúng ba nhánh đó.
+#[tokio::test]
+async fn voided_booking_disappears_from_every_revenue_path() {
+    let pool = test_pool().await;
+    seed_room(&pool, "R-VOID").await.expect("seeds room");
+    seed_active_booking(&pool, "B-VOID", "R-VOID")
+        .await
+        .expect("seeds booking");
+
+    seed_folio_line(&pool, "B-VOID", 120_000, "2026-04-15T11:00:00+07:00")
+        .await
+        .expect("seeds folio line");
+    seed_transaction(
+        &pool,
+        "B-VOID",
+        80_000,
+        "cancellation_fee",
+        "Phí huỷ",
+        "2026-04-15T11:00:00+07:00",
+    )
+    .await
+    .expect("seeds cancellation fee");
+
+    let before = revenue_queries::load_total_revenue(&pool, "2026-04-15", "2026-04-15")
+        .await
+        .expect("reads revenue before void");
+    assert!(
+        before >= 200_000,
+        "fixture phải có tiền để void làm mất đi, thấy {before}"
+    );
+
+    sqlx::query("UPDATE bookings SET status = 'voided' WHERE id = 'B-VOID'")
+        .execute(&pool)
+        .await
+        .expect("voids booking");
+
+    let after = revenue_queries::load_total_revenue(&pool, "2026-04-15", "2026-04-15")
+        .await
+        .expect("reads revenue after void");
+    assert_eq!(
+        after, 0,
+        "lượt đã xoá không được còn đồng nào trong doanh thu"
+    );
+
+    let analytics = revenue_queries::load_analytics(&pool, "2026-04-15", "2026-04-15", 1)
+        .await
+        .expect("reads analytics after void");
+    assert_eq!(
+        analytics
+            .revenue_by_source
+            .iter()
+            .map(|row| row.value)
+            .sum::<i64>(),
+        0,
+        "doanh thu theo nguồn cũng không được đếm lượt đã xoá"
+    );
+}
+
+/// Bản xuất báo cáo booking có `WHERE` ba nhánh nối bằng `OR`; hai nhánh cho
+/// lượt `voided` lọt qua. Mỗi hàng mang `recognized_revenue` cộng từ charge +
+/// phí huỷ + folio, nên lượt đã xoá sẽ hiện nguyên tiền nếu không lọc.
+#[tokio::test]
+async fn voided_booking_disappears_from_the_booking_export() {
+    let pool = test_pool().await;
+    seed_room(&pool, "R-EXP").await.expect("seeds room");
+    seed_active_booking(&pool, "B-EXP", "R-EXP")
+        .await
+        .expect("seeds booking");
+    seed_transaction(
+        &pool,
+        "B-EXP",
+        250_000,
+        "charge",
+        "Tiền phòng",
+        "2026-04-15T10:00:00+07:00",
+    )
+    .await
+    .expect("seeds charge");
+    seed_transaction(
+        &pool,
+        "B-EXP",
+        90_000,
+        "cancellation_fee",
+        "Phí huỷ",
+        "2026-04-15T10:00:00+07:00",
+    )
+    .await
+    .expect("seeds cancellation fee");
+
+    let before = audit_queries::load_booking_export_rows(&pool, "2026-04-15", "2026-04-15")
+        .await
+        .expect("reads export before void");
+    assert!(
+        before.iter().any(|row| row.id == "B-EXP"),
+        "fixture phải xuất hiện trong bản xuất trước khi xoá"
+    );
+
+    sqlx::query("UPDATE bookings SET status = 'voided' WHERE id = 'B-EXP'")
+        .execute(&pool)
+        .await
+        .expect("voids booking");
+
+    let after = audit_queries::load_booking_export_rows(&pool, "2026-04-15", "2026-04-15")
+        .await
+        .expect("reads export after void");
+    assert!(
+        !after.iter().any(|row| row.id == "B-EXP"),
+        "lượt đã xoá không được còn trong bản xuất báo cáo"
+    );
+}
