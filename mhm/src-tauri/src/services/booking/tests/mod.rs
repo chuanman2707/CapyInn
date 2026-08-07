@@ -25,7 +25,7 @@ mod prelude {
             GroupCheckoutRequest, ModifyReservationRequest, VoidBookingRequest,
         },
         money::MAX_TRANSPORT_SAFE_MONEY_VND,
-        queries::booking::{audit_queries, billing_queries, revenue_queries},
+        queries::booking::{audit_queries, billing_queries, revenue_queries, void_queries},
     };
 
     pub(crate) use crate::services::booking::{

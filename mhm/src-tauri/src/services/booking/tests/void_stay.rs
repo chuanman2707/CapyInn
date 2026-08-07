@@ -639,3 +639,227 @@ async fn voiding_twice_with_the_same_key_only_acts_once() {
 
     assert_single_outbox_event(&pool, &ctx, "booking.voided").await;
 }
+
+/// Lượt đã trả phòng: gỡ toàn bộ tiền, ngày ghi nhận là ngày trả phòng.
+#[tokio::test]
+async fn preview_reports_the_full_total_for_a_checked_out_stay() {
+    let pool = test_pool().await;
+    seed_active_booking_with_room(&pool, "B-9", "R-9")
+        .await
+        .expect("seeds booking");
+    sqlx::query(
+        "UPDATE bookings SET status = 'checked_out',
+                actual_checkout = '2026-04-16T10:00:00+07:00', total_price = 500000
+         WHERE id = 'B-9'",
+    )
+    .execute(&pool)
+    .await
+    .expect("marks checked out");
+    sqlx::query("UPDATE rooms SET status = 'cleaning' WHERE id = 'R-9'")
+        .execute(&pool)
+        .await
+        .expect("marks room cleaning");
+
+    let preview = crate::queries::booking::void_queries::load_void_preview(&pool, "B-9")
+        .await
+        .expect("loads preview");
+
+    assert_eq!(preview.previous_status, "checked_out");
+    assert_eq!(preview.revenue_impact, 500_000);
+    assert_eq!(preview.revenue_date, "2026-04-16");
+    assert!(!preview.room_was_reused);
+    assert!(!preview.is_group_booking);
+    // Ngoài phạm vi hai assert của brief: `seed_active_booking_with_room` cố
+    // định `nights = 1`, nên trả phòng xong phải ghi nhận đúng 1/1 — không
+    // test nào khác trong file này đụng tới hai trường này ở nhánh checked_out.
+    assert_eq!(preview.nights_total, 1);
+    assert_eq!(preview.nights_recognized, 1);
+}
+
+/// Phòng đã bán lại: preview phải báo trước, để hộp xác nhận nói đúng câu
+/// "trạng thái phòng giữ nguyên".
+#[tokio::test]
+async fn preview_flags_a_room_that_was_already_reused() {
+    let pool = test_pool().await;
+    seed_active_booking_with_room(&pool, "B-10", "R-10")
+        .await
+        .expect("seeds booking");
+    sqlx::query(
+        "UPDATE bookings SET status = 'checked_out',
+                actual_checkout = '2026-04-16T10:00:00+07:00' WHERE id = 'B-10'",
+    )
+    .execute(&pool)
+    .await
+    .expect("marks checked out");
+    sqlx::query("UPDATE rooms SET status = 'occupied' WHERE id = 'R-10'")
+        .execute(&pool)
+        .await
+        .expect("simulates a new guest");
+
+    let preview = crate::queries::booking::void_queries::load_void_preview(&pool, "B-10")
+        .await
+        .expect("loads preview");
+
+    assert!(preview.room_was_reused);
+}
+
+/// Đêm thứ 2 trên 3: đêm bắt đầu ngày nào tính vào ngày đó — khớp
+/// `recognized_room_revenue_amount_sql` (`revenue_queries.rs`), nơi ngày
+/// check-in đã ghi nhận 1 đêm ngay cả khi đêm đó chưa trôi qua. Vậy nên nhận
+/// phòng từ HÔM QUA (còn 3 đêm) nghĩa là đã ghi nhận 2 đêm — đêm 1 xong, đêm 2
+/// vừa bắt đầu — không phải 1. Chọn 300.000/3 đêm để một công thức thiếu "+1"
+/// (chỉ đếm số ngày đã trôi qua, không tính đêm đang bắt đầu) ra 100.000 — một
+/// con số KHÁC hẳn, không phải cùng con số làm tròn khác đi.
+#[tokio::test]
+async fn preview_reports_partial_recognition_for_an_active_stay_on_its_second_of_three_nights() {
+    let pool = test_pool().await;
+    seed_active_booking_with_room(&pool, "B-ACTIVE-2OF3", "R-ACTIVE-2OF3")
+        .await
+        .expect("seeds active booking");
+
+    let today = Local::now().date_naive();
+    let check_in_date = today - Duration::days(1);
+    let check_in_at = format!("{}T10:00:00+07:00", check_in_date.format("%Y-%m-%d"));
+    sqlx::query(
+        "UPDATE bookings SET check_in_at = ?, nights = 3, total_price = 300000
+         WHERE id = 'B-ACTIVE-2OF3'",
+    )
+    .bind(&check_in_at)
+    .execute(&pool)
+    .await
+    .expect("sets a 3-night stay checked in yesterday");
+
+    let preview = void_queries::load_void_preview(&pool, "B-ACTIVE-2OF3")
+        .await
+        .expect("loads preview");
+
+    assert_eq!(preview.previous_status, "active");
+    assert_eq!(preview.nights_total, 3);
+    assert_eq!(
+        preview.nights_recognized, 2,
+        "nhận phòng hôm qua, còn 3 đêm: đã qua đêm 1, đang ở đêm 2 — 2 đêm ghi nhận"
+    );
+    assert_eq!(preview.revenue_impact, 200_000);
+    assert_eq!(preview.revenue_date, today.format("%Y-%m-%d").to_string());
+    assert!(
+        !preview.room_was_reused,
+        "phòng đang có khách CHÍNH lượt này ở — không phải bị bán lại"
+    );
+}
+
+/// Lượt đặt trước có cọc: gỡ đúng tiền cọc, chưa đêm nào được ghi nhận vì
+/// khách chưa tới. Cũng là bài duy nhất khẳng định `booking_id`/`room_id`/
+/// `guest_name` không phải giá trị giả — hai test gốc của Task 7 không đụng
+/// tới ba trường này.
+#[tokio::test]
+async fn preview_reports_the_deposit_for_a_booked_reservation_with_a_deposit() {
+    let pool = test_pool().await;
+    seed_room(&pool, "R-BOOKED-DEP").await.expect("seeds room");
+    seed_booked_reservation(&pool, "B-BOOKED-DEP", "R-BOOKED-DEP")
+        .await
+        .expect("seeds reservation with deposit");
+
+    let preview = void_queries::load_void_preview(&pool, "B-BOOKED-DEP")
+        .await
+        .expect("loads preview");
+
+    assert_eq!(preview.booking_id, "B-BOOKED-DEP");
+    assert_eq!(preview.room_id, "R-BOOKED-DEP");
+    assert_eq!(preview.guest_name, "Reserved Guest B-BOOKED-DEP");
+    assert_eq!(preview.previous_status, "booked");
+    assert_eq!(
+        preview.revenue_impact, 50_000,
+        "đúng bằng deposit_amount đã seed"
+    );
+    assert_eq!(
+        preview.nights_recognized, 0,
+        "chưa nhận phòng thì chưa ghi nhận đêm nào"
+    );
+    assert_eq!(preview.nights_total, 2);
+    assert!(!preview.room_was_reused);
+    assert!(!preview.is_group_booking);
+}
+
+/// Lượt đặt trước không cọc (cột NULL — chưa từng thu): không gỡ đồng nào.
+/// Hai test gốc của Task 7 không seed ca "không cọc"; nếu nhánh xử lý NULL bị
+/// đổi thành hoảng loạn hoặc một mặc định khác 0, test này đỏ.
+#[tokio::test]
+async fn preview_reports_zero_for_a_booked_reservation_without_a_deposit() {
+    let pool = test_pool().await;
+    seed_room(&pool, "R-BOOKED-NODEP")
+        .await
+        .expect("seeds room");
+    seed_booked_reservation(&pool, "B-BOOKED-NODEP", "R-BOOKED-NODEP")
+        .await
+        .expect("seeds reservation");
+    sqlx::query("UPDATE bookings SET deposit_amount = NULL WHERE id = 'B-BOOKED-NODEP'")
+        .execute(&pool)
+        .await
+        .expect("clears the deposit");
+
+    let preview = void_queries::load_void_preview(&pool, "B-BOOKED-NODEP")
+        .await
+        .expect("loads preview");
+
+    assert_eq!(preview.previous_status, "booked");
+    assert_eq!(preview.revenue_impact, 0);
+}
+
+/// `is_audited` đọc thẳng từ cột, không phải hằng số: mặc định seed là 0
+/// (false), UPDATE lên 1 phải đổi kết quả sang true.
+#[tokio::test]
+async fn preview_reflects_the_is_audited_flag() {
+    let pool = test_pool().await;
+    seed_active_booking_with_room(&pool, "B-AUDITED", "R-AUDITED")
+        .await
+        .expect("seeds active booking");
+
+    let before = void_queries::load_void_preview(&pool, "B-AUDITED")
+        .await
+        .expect("loads preview before audit");
+    assert!(
+        !before.is_audited,
+        "mặc định is_audited = 0 phải đọc ra false"
+    );
+
+    sqlx::query("UPDATE bookings SET is_audited = 1 WHERE id = 'B-AUDITED'")
+        .execute(&pool)
+        .await
+        .expect("marks the booking audited");
+
+    let after = void_queries::load_void_preview(&pool, "B-AUDITED")
+        .await
+        .expect("loads preview after audit");
+    assert!(after.is_audited, "is_audited = 1 phải đọc ra true");
+}
+
+/// Lượt thuộc đoàn: `is_group_booking` phải lên true. Hai test gốc của Task 7
+/// chỉ phủ ca KHÔNG thuộc đoàn (`assert!(!is_group_booking)`); chưa gì bắt
+/// được nếu `group_id.is_some()` bị đổi ngược thành `is_none()`.
+#[tokio::test]
+async fn preview_flags_a_group_booking() {
+    let pool = test_pool().await;
+    seed_room(&pool, "R-GRP-PREVIEW").await.expect("seeds room");
+    seed_booked_reservation(&pool, "B-GRP-PREVIEW", "R-GRP-PREVIEW")
+        .await
+        .expect("seeds reservation");
+    sqlx::query(
+        "INSERT INTO booking_groups (id, group_name, master_booking_id, organizer_name,
+                                     total_rooms, status, created_at)
+         VALUES ('G-PREVIEW', 'Đoàn thử', 'B-GRP-PREVIEW', 'Trưởng đoàn', 1, 'active',
+                 '2026-04-15T10:00:00+07:00')",
+    )
+    .execute(&pool)
+    .await
+    .expect("seeds booking group");
+    sqlx::query("UPDATE bookings SET group_id = 'G-PREVIEW' WHERE id = 'B-GRP-PREVIEW'")
+        .execute(&pool)
+        .await
+        .expect("links booking to group");
+
+    let preview = void_queries::load_void_preview(&pool, "B-GRP-PREVIEW")
+        .await
+        .expect("loads preview");
+
+    assert!(preview.is_group_booking);
+}

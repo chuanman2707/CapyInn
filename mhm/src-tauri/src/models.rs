@@ -281,6 +281,29 @@ pub struct VoidBookingResponse {
     pub voided_at: String,
 }
 
+// `#[allow(dead_code)]`: chưa lệnh nào gọi tới (Task 8 nối dây) — cùng lý do
+// như `VoidBookingRequest`/`VoidBookingResponse` phía trên.
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
+#[allow(dead_code)]
+pub struct VoidBookingPreview {
+    pub booking_id: String,
+    pub guest_name: String,
+    pub room_id: String,
+    pub previous_status: String,
+    /// Số tiền sẽ biến mất khỏi doanh thu. Với lượt đã trả phòng là toàn bộ
+    /// `total_price`; với lượt đang ở chỉ là phần đã ghi nhận tới hôm nay; với
+    /// lượt đặt trước là tiền cọc (hoặc 0).
+    pub revenue_impact: MoneyVnd,
+    /// Ngày mà con số trên đang được tính vào, `YYYY-MM-DD`.
+    pub revenue_date: String,
+    pub nights_recognized: i32,
+    pub nights_total: i32,
+    pub is_audited: bool,
+    /// Phòng đã có khách khác — trạng thái phòng sẽ không bị đụng.
+    pub room_was_reused: bool,
+    pub is_group_booking: bool,
+}
+
 #[derive(Debug, Deserialize)]
 pub struct CheckoutSettlementPreviewRequest {
     pub booking_id: String,
