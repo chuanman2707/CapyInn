@@ -308,9 +308,19 @@ fn guest(full_name: &str, doc_number: &str) -> CreateGuestRequest {
     }
 }
 
-/// Giá tay đè giá engine, và đè PHẲNG — kể cả khi phòng có phụ thu thêm người.
-/// Fixture phải dùng phòng CÓ phụ thu thật: `seed_room` mặc định để phụ thu
-/// bằng 0, nên bug "override nuốt mất phụ thu" sẽ xanh mà vẫn sai.
+/// Giá tay đè giá engine, và đè PHẲNG: `total_price` luôn đúng bằng
+/// `rate × nights`, không cộng thêm dòng nào engine tính.
+///
+/// Fixture dùng phòng CÓ phụ thu thêm người thật (`seed_room_with_guest_pricing`,
+/// không phải `seed_room` mặc định phụ thu 0) — nhưng phụ thu đó không có
+/// đường nào lọt vào `total_price` để mà kiểm: `check_in_tx` gọi engine với
+/// `guests: None` ở CẢ HAI nhánh (có/không override), và nhánh phụ thu của
+/// engine trả về 0 ngay khi thấy `None`, trước khi kịp nhìn tới
+/// `extra_person_fee`. Một bug giả định "override nuốt mất phụ thu" (giá tay
+/// đáng lẽ phải cộng thêm phụ thu nhưng lại bỏ qua) sẽ xanh với bài test này
+/// dù dùng phòng phụ thu 0 hay phụ thu thật — phòng phụ thu thật ở đây chỉ để
+/// tài liệu hoá rằng lựa chọn phòng không ảnh hưởng kết quả, không phải một
+/// guard chặn bug đó.
 #[tokio::test]
 async fn manual_rate_at_check_in_overrides_the_engine_price() {
     let pool = test_pool().await;
@@ -408,6 +418,162 @@ async fn manual_rate_rejects_paying_more_than_the_total() {
         error.to_string().contains("cao hơn tổng tiền"),
         "thông báo phải nói rõ thu nhiều hơn tổng, thấy: {error}"
     );
+}
+
+/// Giá tay tràn số VÀ có `paid_amount` phải bị chặn ở guard biên, không phải
+/// lọt qua rồi vỡ ở phép nhân bên dưới: `checked_mul_money` (qua
+/// `validate_transport_money_vnd`) trả thông báo TIẾNG ANH
+/// ("total_price must be a safe integer VND value"), và thông báo đó đi thẳng
+/// ra người dùng qua command error mapper — dự án này bắt buộc tiếng Việt cho
+/// mọi thông báo tới người dùng. Phải có `paid_amount` để chạm đúng nhánh
+/// từng vỡ (không có `paid_amount` thì luôn được `check_in_tx` chặn đúng —
+/// xem `manual_rate_at_check_in_rejects_a_rate_above_the_cap`).
+#[tokio::test]
+async fn manual_rate_at_check_in_rejects_a_huge_rate_even_with_paid_amount() {
+    let pool = test_pool().await;
+    seed_room(&pool, "R-MR7").await.expect("seeds room");
+
+    let error = stay_lifecycle::check_in(
+        &pool,
+        CheckInRequest {
+            room_id: "R-MR7".to_string(),
+            guests: vec![guest("Khách gõ thừa nhiều số 0", "DOC-MR7")],
+            nights: 1,
+            source: None,
+            notes: None,
+            paid_amount: Some(100_000),
+            pricing_type: None,
+            // Vượt xa biên an toàn số nguyên (9_007_199_254_740_991) lẫn
+            // MAX_RATE_PER_NIGHT_VND (100_000_000) — mô phỏng dán nhầm/gõ
+            // thừa số 0.
+            rate_override_per_night: Some(9_500_000_000_000_000),
+        },
+        Some("admin-1".to_string()),
+    )
+    .await
+    .unwrap_err();
+
+    assert_eq!(
+        error.to_string(),
+        "Giá mỗi đêm không hợp lệ",
+        "phải là thông báo biên tiếng Việt, không phải lỗi tràn số/không an toàn từ phép nhân: {error}"
+    );
+    assert_room_status(&pool, "R-MR7", "vacant").await;
+    let booking_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM bookings")
+        .fetch_one(&pool)
+        .await
+        .expect("đếm booking");
+    assert_eq!(
+        booking_count, 0,
+        "bị từ chối thì không được ghi booking nào"
+    );
+}
+
+/// Giá âm VÀ có `paid_amount` từng lọt qua phép nhân (âm × đêm dương vẫn ra
+/// một số "hợp lệ", không tràn số) rồi vỡ ở guard thu-quá-tổng — guard đó đọc
+/// tổng ÂM ra như một mức "tổng tiền" trong câu thông báo, sai cả nội dung
+/// lẫn thủ phạm (lỗi thật là giá, không phải số tiền thu). Phải bị chặn ở
+/// guard biên trước khi tới đó.
+#[tokio::test]
+async fn manual_rate_at_check_in_rejects_a_negative_rate_even_with_paid_amount() {
+    let pool = test_pool().await;
+    seed_room(&pool, "R-MR8").await.expect("seeds room");
+
+    let error = stay_lifecycle::check_in(
+        &pool,
+        CheckInRequest {
+            room_id: "R-MR8".to_string(),
+            guests: vec![guest("Khách gõ nhầm dấu trừ", "DOC-MR8")],
+            nights: 1,
+            source: None,
+            notes: None,
+            paid_amount: Some(100_000),
+            pricing_type: None,
+            rate_override_per_night: Some(-500_000),
+        },
+        Some("admin-1".to_string()),
+    )
+    .await
+    .unwrap_err();
+
+    assert_eq!(
+        error.to_string(),
+        "Giá mỗi đêm không hợp lệ",
+        "phải là thông báo biên tiếng Việt, không phải guard thu-quá-tổng đọc tổng âm ra như một mức giá: {error}"
+    );
+    assert_room_status(&pool, "R-MR8", "vacant").await;
+    let booking_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM bookings")
+        .fetch_one(&pool)
+        .await
+        .expect("đếm booking");
+    assert_eq!(
+        booking_count, 0,
+        "bị từ chối thì không được ghi booking nào"
+    );
+}
+
+/// Đường thường (không override) cũng phải bị chặn khi thu vượt tổng — trước
+/// khi sửa, guard chỉ nằm ở `validate_check_in_request`, nơi CHỈ biết được
+/// tổng khi có giá tay; đường engine tính (không override, con đường mọi lượt
+/// check-in bình thường đi qua) lọt qua hoàn toàn, tạo đúng cái ngõ cụt guard
+/// này sinh ra để chặn. Dùng `seed_room_with_price` để tổng engine không mơ
+/// hồ: phòng không có `pricing_rules` cấu hình sẵn thì ăn theo `base_price`,
+/// và `seed_pricing_rule` khai `weekend_uplift_pct = 0` tường minh, nên tổng
+/// luôn đúng bằng `base_price × nights` bất kể ngày chạy test.
+#[tokio::test]
+async fn check_in_without_override_rejects_paying_more_than_the_engine_total() {
+    let pool = test_pool().await;
+    seed_room_with_price(&pool, "R-MR9", 500_000)
+        .await
+        .expect("seeds room with a deterministic engine price");
+
+    let error = stay_lifecycle::check_in(
+        &pool,
+        CheckInRequest {
+            room_id: "R-MR9".to_string(),
+            guests: vec![guest("Khách trả dư không giá tay", "DOC-MR9")],
+            nights: 1,
+            source: None,
+            notes: None,
+            // Engine: 1 đêm × 500.000 = 500.000 (không mơ hồ, xem comment
+            // trên). Trả 600.000 là vượt tổng.
+            paid_amount: Some(600_000),
+            pricing_type: None,
+            rate_override_per_night: None,
+        },
+        Some("admin-1".to_string()),
+    )
+    .await
+    .unwrap_err();
+
+    assert!(
+        matches!(error, BookingError::Validation(_)),
+        "phải bị từ chối vì thu vượt tổng, nhận được: {error:?}"
+    );
+    assert!(
+        error.to_string().contains("cao hơn tổng tiền"),
+        "thông báo phải nói rõ thu nhiều hơn tổng, thấy: {error}"
+    );
+
+    let booking_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM bookings")
+        .fetch_one(&pool)
+        .await
+        .expect("đếm booking");
+    assert_eq!(
+        booking_count, 0,
+        "bị từ chối thì không được ghi booking nào"
+    );
+
+    let transaction_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM transactions")
+        .fetch_one(&pool)
+        .await
+        .expect("đếm transaction");
+    assert_eq!(
+        transaction_count, 0,
+        "bị từ chối thì không được ghi dòng tiền nào"
+    );
+
+    assert_room_status(&pool, "R-MR9", "vacant").await;
 }
 
 /// Biên dưới: 0 và âm đều là gõ nhầm, không phải một mức giá thật — cùng luật
