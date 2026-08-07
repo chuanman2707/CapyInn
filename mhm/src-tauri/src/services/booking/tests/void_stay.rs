@@ -86,3 +86,63 @@ async fn voiding_an_already_voided_booking_is_rejected() {
         "thông báo phải nói rõ lượt đã bị xoá, thấy: {error}"
     );
 }
+
+/// Một booking thuộc đoàn không được xoá riêng lẻ: xoá lẻ một phòng sẽ làm sai
+/// tổng tiền và hoá đơn của cả đoàn. Guard phải chặn TRƯỚC khi ghi bất cứ gì —
+/// một guard chặn nhưng lỡ ghi trước rồi còn tệ hơn không có guard nào cả, nên
+/// bài test này siết cả hai vế: có lỗi đúng nội dung, và không có gì đổi.
+#[tokio::test]
+async fn voiding_a_booking_in_a_group_is_rejected_and_changes_nothing() {
+    let pool = test_pool().await;
+    seed_room(&pool, "R-3").await.expect("seeds room");
+    seed_booked_reservation(&pool, "B-3", "R-3")
+        .await
+        .expect("seeds reservation");
+    sqlx::query(
+        "INSERT INTO booking_groups (id, group_name, master_booking_id, organizer_name,
+                                     total_rooms, status, created_at)
+         VALUES ('G-3', 'Đoàn thử', 'B-3', 'Trưởng đoàn', 1, 'active', '2026-04-15T10:00:00+07:00')",
+    )
+    .execute(&pool)
+    .await
+    .expect("seeds booking group");
+    sqlx::query("UPDATE bookings SET group_id = 'G-3' WHERE id = 'B-3'")
+        .execute(&pool)
+        .await
+        .expect("links booking to group");
+
+    let req = VoidBookingRequest {
+        booking_id: "B-3".to_string(),
+        reason: None,
+    };
+
+    let mut tx = begin_tx(&pool).await.expect("begins tx");
+    let error = void_lifecycle::void_booking_tx(&mut tx, &req, "admin-1", Local::now(), "R-3")
+        .await
+        .expect_err("grouped booking must be rejected");
+    tx.rollback().await.expect("rolls back");
+
+    assert!(
+        error.to_string().contains("thuộc đoàn"),
+        "thông báo phải nói rõ lượt thuộc đoàn, thấy: {error}"
+    );
+
+    let status: String = sqlx::query_scalar("SELECT status FROM bookings WHERE id = 'B-3'")
+        .fetch_one(&pool)
+        .await
+        .expect("reads booking status after rejection");
+    assert_eq!(
+        status, "booked",
+        "trạng thái booking không được đổi khi lượt bị từ chối vì thuộc đoàn"
+    );
+
+    let calendar_rows: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM room_calendar WHERE booking_id = 'B-3'")
+            .fetch_one(&pool)
+            .await
+            .expect("counts calendar rows");
+    assert_eq!(
+        calendar_rows, 2,
+        "room_calendar không được xoá khi lượt bị từ chối vì thuộc đoàn"
+    );
+}
