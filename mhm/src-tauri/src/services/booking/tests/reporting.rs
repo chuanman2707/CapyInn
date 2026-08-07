@@ -652,9 +652,15 @@ async fn voided_booking_disappears_from_every_revenue_path() {
     let before = revenue_queries::load_total_revenue(&pool, "2026-04-15", "2026-04-15")
         .await
         .expect("reads revenue before void");
-    assert!(
-        before >= 200_000,
-        "fixture phải có tiền để void làm mất đi, thấy {before}"
+    // Giá trị fixture xác định tuyệt đối, không phải chặn dưới:
+    //   250,000 tiền phòng (seed_active_booking: total_price=250_000, 1 đêm,
+    //     check-in 2026-04-15 → checkout 2026-04-16, ghi nhận trọn đêm 04-15)
+    // +  120,000 dòng folio (seed_folio_line)
+    // +   80,000 phí huỷ (seed_transaction cancellation_fee)
+    // = 450,000
+    assert_eq!(
+        before, 450_000,
+        "fixture phải cộng đúng 450,000 để void làm mất đi, thấy {before}"
     );
 
     sqlx::query("UPDATE bookings SET status = 'voided' WHERE id = 'B-VOID'")
@@ -681,6 +687,15 @@ async fn voided_booking_disappears_from_every_revenue_path() {
             .sum::<i64>(),
         0,
         "doanh thu theo nguồn cũng không được đếm lượt đã xoá"
+    );
+    assert_eq!(
+        analytics
+            .top_rooms
+            .iter()
+            .map(|row| row.revenue)
+            .sum::<i64>(),
+        0,
+        "top_rooms cũng không được đếm lượt đã xoá"
     );
 }
 
