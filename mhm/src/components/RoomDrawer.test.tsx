@@ -1,19 +1,22 @@
-import { render, screen, waitFor } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import RoomDrawer from "./RoomDrawer";
+import { useAuthStore } from "@/stores/useAuthStore";
 import { fmtMoney } from "@/lib/format";
 
-// `extendStay`/`shortenStay` are hoisted (rather than declared inline in the
-// store mock factory below) so the SAME mock instance is returned on every
-// render. The factory re-runs on every call to `useHotelStore()`, so inline
-// `vi.fn()` literals would be replaced each render — making it impossible to
-// assert call counts across the re-renders a click triggers.
-const { invoke, extendStay, shortenStay } = vi.hoisted(() => ({
+// `extendStay`/`shortenStay`/`fetchRooms` are hoisted (rather than declared
+// inline in the store mock factory below) so the SAME mock instance is
+// returned on every render. The factory re-runs on every call to
+// `useHotelStore()`, so inline `vi.fn()` literals would be replaced each
+// render — making it impossible to assert call counts across the re-renders
+// a click triggers.
+const { invoke, extendStay, shortenStay, fetchRooms } = vi.hoisted(() => ({
     invoke: vi.fn(),
     extendStay: vi.fn(),
     shortenStay: vi.fn(),
+    fetchRooms: vi.fn(),
 }));
 
 let roomTypeRates: Record<string, { room_type: string; nightly_rate: number; configured: boolean }> | null =
@@ -27,6 +30,19 @@ vi.mock("@/components/CheckoutSettlementModal", () => ({
     default: ({ open }: { open: boolean }) =>
         open ? <div data-testid="checkout-settlement-modal" /> : null,
 }));
+// Bản giả tối giản, giống hệt cách BookingDetailPopup.test.tsx đã làm: bài
+// test ở đây chỉ cần xác nhận RoomDrawer NỐI DÂY đúng với VoidBookingDialog
+// (mở khi bấm "Xóa lượt này", đóng + làm mới danh sách phòng khi onVoided
+// bắn), không lặp lại hành vi bên trong VoidBookingDialog — cái đó đã có
+// VoidBookingDialog.test.tsx lo. Nền `bg-black/40` không tự stopPropagation,
+// giống hệt bản thật, để bài test "bấm ra nền" bắt đúng lỗi nổi bọt nếu có.
+vi.mock("@/components/VoidBookingDialog", () => ({
+    default: ({ onClose, onVoided }: { onClose: () => void; onVoided: () => void }) => (
+        <div className="fixed inset-0 bg-black/40" onClick={onClose}>
+            <button onClick={onVoided}>mock xác nhận xóa</button>
+        </div>
+    ),
+}));
 const setRoomChangeOpen = vi.fn();
 
 vi.mock("@/stores/useHotelStore", () => ({
@@ -37,7 +53,7 @@ vi.mock("@/stores/useHotelStore", () => ({
         getStayInfoText: vi.fn(),
         setCheckinOpen: vi.fn(),
         setRoomChangeOpen,
-        fetchRooms: vi.fn(),
+        fetchRooms,
         updateHousekeeping: vi.fn(),
         roomTypeRates,
     }),
@@ -535,5 +551,158 @@ describe("RoomDrawer nights stepper", () => {
             expect(message).not.toContain("[object Object]");
             expect(message).toContain("Có lỗi hệ thống, vui lòng thử lại");
         });
+    });
+});
+
+describe("RoomDrawer void action", () => {
+    function adminUser() {
+        return { id: "u1", name: "Chủ", role: "admin" as const, active: true, created_at: "2026-08-07T09:00:00+07:00" };
+    }
+
+    function receptionistUser() {
+        return { id: "u2", name: "Lễ tân", role: "receptionist" as const, active: true, created_at: "2026-08-07T09:00:00+07:00" };
+    }
+
+    function buildActiveBookingDetail() {
+        return {
+            room: {
+                id: "101",
+                name: "101",
+                type: "standard",
+                floor: 1,
+                has_balcony: false,
+                base_price: 500000,
+                status: "occupied",
+            },
+            booking: {
+                id: "B601",
+                room_id: "101",
+                primary_guest_id: "G1",
+                check_in_at: "2026-04-20T08:00:00+07:00",
+                expected_checkout: "2026-04-25T12:00:00+07:00",
+                nights: 5,
+                total_price: 2500000,
+                paid_amount: 0,
+                status: "active",
+                created_at: "2026-04-20T08:00:00+07:00",
+            },
+            guests: [],
+        };
+    }
+
+    // Helper dựng sẵn ngăn kéo với một lượt đang ở (status active) — tên
+    // khớp brief Task 12. Trả về cả `container` để bài test "bấm ra nền hộp
+    // xác nhận" có thể tìm nền đó bằng class, giống hệt cách
+    // BookingDetailPopup.test.tsx đã làm cho Task 11.
+    async function renderDrawerWithActiveBooking(onClose: () => void = vi.fn()) {
+        invoke.mockReset();
+        invoke.mockResolvedValueOnce(buildActiveBookingDetail()).mockResolvedValueOnce([]);
+        const user = userEvent.setup();
+        const view = render(<RoomDrawer open onClose={onClose} roomId="101" />);
+        await screen.findByRole("button", { name: /xóa lượt này/i });
+        return { user, onClose, ...view };
+    }
+
+    beforeEach(() => {
+        invoke.mockReset();
+        fetchRooms.mockReset();
+        setRoomChangeOpen.mockReset();
+    });
+
+    it("admin thấy nút xóa lượt đang ở", async () => {
+        useAuthStore.setState({ user: adminUser() });
+        await renderDrawerWithActiveBooking();
+        expect(
+            screen.getByRole("button", { name: /xóa lượt này/i }).hasAttribute("disabled"),
+        ).toBe(false);
+    });
+
+    it("lễ tân không bấm được nút xóa", async () => {
+        useAuthStore.setState({ user: receptionistUser() });
+        await renderDrawerWithActiveBooking();
+        expect(
+            screen.getByRole("button", { name: /xóa lượt này/i }).hasAttribute("disabled"),
+        ).toBe(true);
+        expect(screen.getByText(/chỉ chủ khách sạn xóa được/i)).toBeTruthy();
+    });
+
+    it("phòng trống thì không có nút xóa", async () => {
+        useAuthStore.setState({ user: adminUser() });
+        invoke.mockReset();
+        invoke
+            .mockResolvedValueOnce({
+                room: {
+                    id: "101",
+                    name: "101",
+                    type: "standard",
+                    floor: 1,
+                    has_balcony: false,
+                    base_price: 500000,
+                    status: "vacant",
+                },
+                booking: null,
+                guests: [],
+            })
+            .mockResolvedValueOnce([]);
+
+        render(<RoomDrawer open onClose={vi.fn()} roomId="101" />);
+
+        await screen.findByText(/check-in phòng này/i);
+        expect(screen.queryByRole("button", { name: /xóa lượt này/i })).toBeNull();
+    });
+
+    // `get_room_detail` (mhm/src-tauri/src/queries/booking/room_queries.rs)
+    // chỉ SELECT booking có status = 'active', nên trên thực tế backend
+    // không bao giờ trả về nhánh này — nhưng điều kiện hiển thị đọc thẳng
+    // `booking.status` của component, không dựa vào việc backend đã lọc sẵn.
+    // Test này khoá đúng yêu cầu đề bài: "phòng ... đã trả không được có nút
+    // này", phòng khi component được tái dùng ở một đường dữ liệu khác sau này.
+    it("lượt không còn active (đã trả) thì không có nút xóa", async () => {
+        useAuthStore.setState({ user: adminUser() });
+        const detail = buildActiveBookingDetail();
+        invoke.mockReset();
+        invoke
+            .mockResolvedValueOnce({
+                ...detail,
+                booking: { ...detail.booking, status: "checked_out" },
+            })
+            .mockResolvedValueOnce([]);
+
+        render(<RoomDrawer open onClose={vi.fn()} roomId="101" />);
+
+        await waitFor(() => expect(screen.getByRole("button", { name: /check-out/i })).toBeInTheDocument());
+        expect(screen.queryByRole("button", { name: /xóa lượt này/i })).toBeNull();
+    });
+
+    it("void thành công thì đóng ngăn kéo và làm mới danh sách phòng", async () => {
+        useAuthStore.setState({ user: adminUser() });
+        const onClose = vi.fn();
+        const { user } = await renderDrawerWithActiveBooking(onClose);
+
+        await user.click(screen.getByRole("button", { name: /xóa lượt này/i }));
+        await user.click(screen.getByRole("button", { name: /mock xác nhận xóa/i }));
+
+        await waitFor(() => expect(onClose).toHaveBeenCalledTimes(1));
+        expect(fetchRooms).toHaveBeenCalled();
+    });
+
+    // SlideDrawer (mhm/src/components/shared/SlideDrawer.tsx) đặt nền bấm-để-
+    // đóng trên MỘT div riêng (`absolute inset-0`), không phải trên chính div
+    // bọc ngoài cùng như BookingDetailPopup — nên VoidBookingDialog dù được
+    // chèn ở đâu trong cây của RoomDrawer cũng không phải hậu duệ của nền đó.
+    // Test này xác nhận trực tiếp: bấm ra nền của hộp xác nhận xoá (mock)
+    // không kích hoạt `onClose` của ngăn kéo phòng.
+    it("bấm ra nền của hộp xác nhận xoá không đóng theo ngăn kéo phòng", async () => {
+        useAuthStore.setState({ user: adminUser() });
+        const onClose = vi.fn();
+        const { user, container } = await renderDrawerWithActiveBooking(onClose);
+
+        await user.click(screen.getByRole("button", { name: /xóa lượt này/i }));
+
+        const voidBackdrop = container.querySelector('[class*="bg-black/40"]');
+        expect(voidBackdrop).not.toBeNull();
+        fireEvent.click(voidBackdrop!);
+
+        expect(onClose).not.toHaveBeenCalled();
     });
 });

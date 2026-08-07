@@ -13,6 +13,7 @@ import { toast } from "sonner";
 
 import InvoiceDialog from "@/components/InvoiceDialog";
 import CheckoutSettlementModal from "@/components/CheckoutSettlementModal";
+import VoidBookingDialog from "@/components/VoidBookingDialog";
 import BookingSummary from "@/components/shared/BookingSummary";
 import InfoItem from "@/components/shared/InfoItem";
 import ActionBtn from "@/components/shared/ActionBtn";
@@ -27,6 +28,7 @@ import { formatAppError } from "@/lib/appError";
 import { getRoomTypeLabel } from "@/lib/constants";
 import { fmtMoney } from "@/lib/format";
 import { nightlyRateDisplay } from "@/lib/roomTypeRate";
+import { useAuthStore } from "@/stores/useAuthStore";
 import { useHotelStore } from "@/stores/useHotelStore";
 import type { CheckoutSettlementPayload, RoomWithBooking, HousekeepingTask } from "@/types";
 
@@ -57,7 +59,13 @@ export default function RoomDrawer({ open, onClose, roomId }: RoomDrawerProps) {
     const [copied, setCopied] = useState(false);
     const [fetching, setFetching] = useState(false);
     const [nightsBusy, setNightsBusy] = useState(false);
+    const [voidOpen, setVoidOpen] = useState(false);
     const { invoiceOpen, invoiceData, invoiceLoading, openInvoice, closeInvoice } = useInvoiceDialog();
+    // Xóa (khác trả phòng bình thường): lượt check-in này lẽ ra không nên tồn
+    // tại — bấm nhầm phòng, ghi trùng khách. Chỉ chủ khách sạn được làm, và
+    // backend (void_booking_tx) tự chặn lại độc lập với UI này; trạng thái nút
+    // ở đây chỉ là gợi ý cho người dùng, không phải lớp bảo vệ.
+    const isAdmin = useAuthStore((state) => state.isAdmin());
 
     useEffect(() => {
         if (!open || !roomId) {
@@ -397,6 +405,38 @@ export default function RoomDrawer({ open, onClose, roomId }: RoomDrawerProps) {
             </button>
         ) : null;
 
+    // Chỉ hiện với một lượt ĐANG Ở thật sự — phòng trống (booking null) hay
+    // đã trả (status khác active) thì không có gì để xóa qua đường này.
+    //
+    // Khác BookingDetailPopup (Task 11): `Booking` do `get_room_detail` trả
+    // về (xem mhm/src-tauri/src/queries/booking/room_queries.rs) không có cột
+    // `group_id` như `BookingWithGuest` — nên không có dữ liệu ở đây để tự
+    // khoá trước cho lượt thuộc đoàn. An toàn vẫn đủ mà không cần việc đó:
+    // VoidBookingDialog tự phát hiện `is_group_booking` qua preview và khoá
+    // nút giữ-để-xóa kèm lý do riêng trước khi cho giữ, còn void_booking_tx
+    // từ chối đoàn vô điều kiện ở backend, độc lập với mọi trạng thái UI.
+    const voidDisabled = !isAdmin;
+    const voidHint = isAdmin ? null : "Chỉ chủ khách sạn xóa được";
+
+    const voidSection =
+        booking && booking.status === "active" ? (
+            <div className="pt-2 border-t border-slate-100 space-y-1">
+                <button
+                    type="button"
+                    disabled={voidDisabled}
+                    onClick={() => setVoidOpen(true)}
+                    className={`w-full text-sm rounded-lg h-9 border transition-colors ${
+                        voidDisabled
+                            ? "border-slate-200 text-slate-300 cursor-not-allowed"
+                            : "border-red-200 text-red-600 hover:bg-red-50 cursor-pointer"
+                    }`}
+                >
+                    Xóa lượt này
+                </button>
+                {voidHint && <p className="text-[11px] text-slate-400 text-center">{voidHint}</p>}
+            </div>
+        ) : null;
+
     const roomTitle = room.name || "Room " + room.id;
 
     return (
@@ -429,6 +469,7 @@ export default function RoomDrawer({ open, onClose, roomId }: RoomDrawerProps) {
                     {guestSection}
                     {housekeepingSection}
                     {actionsSection}
+                    {voidSection}
                 </div>
             </SlideDrawer>
 
@@ -439,6 +480,26 @@ export default function RoomDrawer({ open, onClose, roomId }: RoomDrawerProps) {
                     booking={booking}
                     onClose={() => setShowCheckout(false)}
                     onConfirm={handleCheckoutConfirm}
+                />
+            )}
+
+            {voidOpen && booking && (
+                <VoidBookingDialog
+                    bookingId={booking.id}
+                    onClose={() => setVoidOpen(false)}
+                    onVoided={async () => {
+                        setVoidOpen(false);
+                        // Ngăn kéo đóng thẳng sau khi xóa (khác popup chi tiết
+                        // booking): nó đứng trên lưới phòng, và phòng vừa xóa
+                        // đã về trạng thái trống — làm mới `rooms` để lưới
+                        // không còn treo khách đã bị xóa lượt. `voidBooking`
+                        // (gọi bên trong VoidBookingDialog) tự làm mới rồi,
+                        // gọi lại ở đây theo đúng cách handleHousekeepingUpdate
+                        // đã làm — chắc chắn hơn là ngầm dựa vào side-effect
+                        // của một action store khác.
+                        await fetchRooms();
+                        handleClose();
+                    }}
                 />
             )}
 
