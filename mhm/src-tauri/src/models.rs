@@ -753,6 +753,13 @@ pub struct GroupCheckinRequest {
     pub source: Option<String>,
     pub notes: Option<String>,
     pub paid_amount: Option<MoneyVnd>,
+    /// Giá mỗi đêm gõ tay, theo TỪNG phòng — một đoàn gần như luôn mặc cả, và
+    /// thường một giá chung cho cả đoàn nên đây là map chứ không phải một giá
+    /// đơn. Phòng không có trong map ⇒ engine tính, đúng như trước. Map rỗng ⇒
+    /// toàn bộ đoàn theo engine. `#[serde(default)]` để mọi request cũ (chưa
+    /// biết trường này) vẫn deserialize được ra map rỗng.
+    #[serde(default)]
+    pub rate_override_per_room: std::collections::HashMap<String, MoneyVnd>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -930,5 +937,36 @@ mod tests {
 
         let json = serde_json::to_value(&detail).expect("serializes RoomWithBooking");
         assert_eq!(json["group_id"], serde_json::json!("GRP-1"));
+    }
+
+    // `rate_override_per_room` là `HashMap`, không phải `Option` — serde KHÔNG
+    // tự coi một khoá vắng mặt là rỗng cho `HashMap` như nó làm với `Option`
+    // (đó là hành vi đặc cách chỉ có ở `Option`), nên `#[serde(default)]` là
+    // bắt buộc, không phải trang trí: xoá nó đi, request cũ (frontend Task
+    // 16-18 chưa build, hoặc bất cứ caller nào chưa biết trường mới) sẽ vỡ
+    // ngay lúc deserialize với lỗi "missing field" thay vì lặng lẽ ra map
+    // rỗng. Không có test nào khác trong bộ này đi qua đường JSON thật của
+    // `GroupCheckinRequest` (mọi test đoàn khác dựng struct Rust trực tiếp),
+    // nên đây là bằng chứng duy nhất cho tính tương thích ngược này.
+    #[test]
+    fn group_checkin_request_defaults_rate_override_when_key_is_absent_from_json() {
+        let payload = serde_json::json!({
+            "group_name": "Đoàn cũ",
+            "organizer_name": "Trưởng đoàn",
+            "organizer_phone": null,
+            "check_in_date": null,
+            "room_ids": ["R1", "R2"],
+            "master_room_id": "R1",
+            "guests_per_room": {},
+            "nights": 2,
+            "source": null,
+            "notes": null,
+            "paid_amount": null,
+        });
+
+        let request: crate::models::GroupCheckinRequest = serde_json::from_value(payload)
+            .expect("request without rate_override_per_room still deserializes");
+
+        assert!(request.rate_override_per_room.is_empty());
     }
 }

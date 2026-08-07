@@ -1,4 +1,281 @@
 use super::prelude::*;
+use crate::models::GroupCheckinRequest;
+
+/// Đoàn: mỗi phòng một giá riêng, phòng không có trong map thì engine tính.
+#[tokio::test]
+async fn group_checkin_applies_per_room_manual_rates() {
+    let pool = test_pool().await;
+    seed_rooms_with_price(&pool, &["G-R1", "G-R2"], 500_000)
+        .await
+        .expect("seeds rooms");
+
+    let mut rate_override_per_room = std::collections::HashMap::new();
+    rate_override_per_room.insert("G-R1".to_string(), 400_000);
+
+    let group = group_lifecycle::group_checkin(
+        &pool,
+        Some("seed-user".to_string()),
+        GroupCheckinRequest {
+            group_name: "Đoàn thử".to_string(),
+            organizer_name: "Trưởng đoàn".to_string(),
+            organizer_phone: None,
+            check_in_date: None,
+            room_ids: vec!["G-R1".to_string(), "G-R2".to_string()],
+            master_room_id: "G-R1".to_string(),
+            guests_per_room: Default::default(),
+            nights: 2,
+            source: None,
+            notes: None,
+            paid_amount: None,
+            rate_override_per_room,
+        },
+    )
+    .await
+    .expect("checks in the group");
+
+    let overridden: i64 = sqlx::query_scalar(
+        "SELECT total_price FROM bookings WHERE group_id = ? AND room_id = 'G-R1'",
+    )
+    .bind(&group.id)
+    .fetch_one(&pool)
+    .await
+    .expect("reads overridden room total");
+    assert_eq!(overridden, 800_000, "2 đêm × 400.000");
+
+    let engine_priced: i64 = sqlx::query_scalar(
+        "SELECT total_price FROM bookings WHERE group_id = ? AND room_id = 'G-R2'",
+    )
+    .bind(&group.id)
+    .fetch_one(&pool)
+    .await
+    .expect("reads engine-priced room total");
+    assert_eq!(engine_priced, 1_000_000, "2 đêm × 500.000 do engine tính");
+
+    let overridden_marked: Option<String> = sqlx::query_scalar(
+        "SELECT rate_overridden_at FROM bookings WHERE group_id = ? AND room_id = 'G-R1'",
+    )
+    .bind(&group.id)
+    .fetch_one(&pool)
+    .await
+    .expect("reads override marker for overridden room");
+    assert!(
+        overridden_marked.is_some(),
+        "phòng đã sửa giá phải được đánh dấu rate_overridden_at"
+    );
+
+    let engine_marked: Option<String> = sqlx::query_scalar(
+        "SELECT rate_overridden_at FROM bookings WHERE group_id = ? AND room_id = 'G-R2'",
+    )
+    .bind(&group.id)
+    .fetch_one(&pool)
+    .await
+    .expect("reads override marker for engine-priced room");
+    assert!(
+        engine_marked.is_none(),
+        "phòng không sửa giá thì không được đánh dấu"
+    );
+
+    // Câu hỏi "tổng đoàn liên hệ thế nào với tổng từng phòng": booking_groups
+    // không có cột tổng riêng — GroupDetailResponse.total_room_cost
+    // (queries/groups/group_queries.rs) cộng SUM(bookings.total_price), nên
+    // đây là bằng chứng trực tiếp SUM đã phản ánh đúng override, không tính
+    // lại từ engine.
+    let group_total: i64 =
+        sqlx::query_scalar("SELECT SUM(total_price) FROM bookings WHERE group_id = ?")
+            .bind(&group.id)
+            .fetch_one(&pool)
+            .await
+            .expect("reads group total");
+    assert_eq!(group_total, 800_000 + 1_000_000);
+
+    let snapshot: Option<String> = sqlx::query_scalar(
+        "SELECT pricing_snapshot FROM bookings WHERE group_id = ? AND room_id = 'G-R1'",
+    )
+    .bind(&group.id)
+    .fetch_one(&pool)
+    .await
+    .expect("reads pricing_snapshot for overridden room");
+    let snapshot: serde_json::Value =
+        serde_json::from_str(&snapshot.expect("overridden room has a snapshot"))
+            .expect("snapshot is valid JSON");
+    assert_eq!(snapshot["manual_rate"]["rate_per_night"], 400_000);
+    assert_eq!(snapshot["manual_rate"]["engine_total"], 1_000_000);
+
+    let unoverridden_snapshot: Option<String> = sqlx::query_scalar(
+        "SELECT pricing_snapshot FROM bookings WHERE group_id = ? AND room_id = 'G-R2'",
+    )
+    .bind(&group.id)
+    .fetch_one(&pool)
+    .await
+    .expect("reads pricing_snapshot for engine-priced room");
+    assert!(
+        unoverridden_snapshot.is_none(),
+        "phòng không override thì pricing_snapshot phải giữ NULL như trước"
+    );
+}
+
+/// Thu vượt tổng tiền CỦA MỘT PHÒNG phải bị chặn khi phòng đó theo giá tay —
+/// cùng lỗ hổng `check_in_tx`/`create_reservation_tx` đã vá: một booking có
+/// `paid_amount > total_price` không có lối thoát nếu sau này bị `check_out_tx`
+/// từ chối vì `already_paid > final_total`.
+#[tokio::test]
+async fn group_checkin_rejects_overpayment_on_overridden_room() {
+    let pool = test_pool().await;
+    seed_rooms_with_price(&pool, &["G-OP1", "G-OP2"], 500_000)
+        .await
+        .unwrap();
+
+    let mut rate_override_per_room = std::collections::HashMap::new();
+    // 2 đêm × 10.000 = 20.000 — thấp hơn hẳn phần chia đều của paid_amount.
+    rate_override_per_room.insert("G-OP1".to_string(), 10_000);
+
+    let error = group_lifecycle::group_checkin(
+        &pool,
+        Some("seed-user".to_string()),
+        GroupCheckinRequest {
+            group_name: "Đoàn quá tay".to_string(),
+            organizer_name: "Trưởng đoàn".to_string(),
+            organizer_phone: None,
+            check_in_date: None,
+            room_ids: vec!["G-OP1".to_string(), "G-OP2".to_string()],
+            master_room_id: "G-OP1".to_string(),
+            guests_per_room: Default::default(),
+            nights: 2,
+            source: None,
+            notes: None,
+            paid_amount: Some(100_000), // chia đều 50.000/phòng > 20.000 giá phòng G-OP1
+            rate_override_per_room,
+        },
+    )
+    .await
+    .unwrap_err();
+
+    assert!(
+        error.to_string().contains("G-OP1"),
+        "lỗi phải nêu rõ phòng thu vượt, nhận được: {error}"
+    );
+
+    let group_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM booking_groups")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(group_count, 0, "cả group phải rollback, không tạo dở dang");
+}
+
+/// Guard trên áp dụng cả cho phòng theo giá ENGINE, không chỉ phòng override —
+/// "the overpayment guard where a real total is in scope for both the
+/// override and engine paths" (task brief).
+#[tokio::test]
+async fn group_checkin_rejects_overpayment_on_engine_priced_room() {
+    let pool = test_pool().await;
+    // Giá phòng rẻ, không phòng nào override — nhưng paid_amount chia đều vượt
+    // hẳn giá 1 đêm.
+    seed_rooms_with_price(&pool, &["G-OP3", "G-OP4"], 10_000)
+        .await
+        .unwrap();
+
+    let error = group_lifecycle::group_checkin(
+        &pool,
+        Some("seed-user".to_string()),
+        GroupCheckinRequest {
+            group_name: "Đoàn quá tay engine".to_string(),
+            organizer_name: "Trưởng đoàn".to_string(),
+            organizer_phone: None,
+            check_in_date: None,
+            room_ids: vec!["G-OP3".to_string(), "G-OP4".to_string()],
+            master_room_id: "G-OP3".to_string(),
+            guests_per_room: Default::default(),
+            nights: 1,
+            source: None,
+            notes: None,
+            paid_amount: Some(100_000), // chia đều 50.000/phòng > 10.000 giá engine
+            rate_override_per_room: Default::default(),
+        },
+    )
+    .await
+    .unwrap_err();
+
+    assert!(
+        error.to_string().contains("G-OP3"),
+        "lỗi phải nêu rõ phòng thu vượt, nhận được: {error}"
+    );
+
+    let group_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM booking_groups")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(group_count, 0, "cả group phải rollback, không tạo dở dang");
+}
+
+/// `checked_mul_money`, không phải `*` trần. `validate_group_checkin_request`
+/// chỉ chặn `rate` ngoài biên và `nights <= 0` — KHÔNG có trần trên cho
+/// `nights` (giống `validate_check_in_request`, khác đặt trước có
+/// `MAX_RESERVATION_NIGHTS`) — nên một giá tay hợp lệ (đúng bằng
+/// `MAX_RATE_PER_NIGHT_VND`) nhân với một `nights` hợp lệ nhưng rất lớn vẫn có
+/// thể vượt trần an toàn truyền tải (`MAX_TRANSPORT_SAFE_MONEY_VND`, không
+/// tràn i64 thật — `rate ≤ 1e8` và `nights: i32 ≤ ~2,1 tỷ` không đủ để tràn
+/// i64).
+///
+/// Đã KIỂM CHỨNG BẰNG MUTATION: đổi `checked_mul_money` thành `*` trần khiến
+/// test này đỏ — nhưng KHÔNG phải vì phép nhân tràn số (không tràn, như trên).
+/// Nó đỏ vì thông báo đổi từ `"total_price must be a safe integer VND value"`
+/// (từ chính `checked_mul_money`, chặn NGAY sau khi tính `total`, trước khi
+/// tạo booking) sang `"transaction amount must be a safe integer VND value"`
+/// (từ `record_charge_tx` ở downstream, SAU KHI đã INSERT một dòng booking
+/// với `total_price` ngoài biên an toàn — vẫn bị rollback nên không có dữ
+/// liệu xấu tồn tại thật, nhưng muộn hơn và ghi dở nhiều hơn hẳn). Tức là có
+/// PHÒNG THỦ HAI LỚP thật ở đây (`record_charge_tx` tự kiểm biên tiền của
+/// chính nó, độc lập với `checked_mul_money`) — assert theo `"total_price"`
+/// bên dưới ghim đúng LỚP `group_checkin_tx` sở hữu (chặn sớm, trước khi ghi
+/// gì), không phải chỉ ghim "có lỗi nào đó được trả về".
+#[tokio::test]
+async fn group_checkin_rejects_overridden_total_beyond_transport_safe_ceiling() {
+    let pool = test_pool().await;
+    seed_rooms_with_price(&pool, &["G-OF1"], 500_000)
+        .await
+        .unwrap();
+
+    let mut rate_override_per_room = std::collections::HashMap::new();
+    // Đúng bằng trần, hợp lệ theo validate_group_checkin_request.
+    rate_override_per_room.insert("G-OF1".to_string(), 100_000_000);
+
+    let error = group_lifecycle::group_checkin(
+        &pool,
+        Some("seed-user".to_string()),
+        GroupCheckinRequest {
+            group_name: "Đoàn tràn biên truyền tải".to_string(),
+            organizer_name: "Trưởng đoàn".to_string(),
+            organizer_phone: None,
+            check_in_date: None,
+            room_ids: vec!["G-OF1".to_string()],
+            master_room_id: "G-OF1".to_string(),
+            guests_per_room: Default::default(),
+            // 100_000_000 × 90_100_000 = 9,01×10^15, vượt MAX_TRANSPORT_SAFE_MONEY_VND
+            // (~9,0072×10^15) nhưng không tràn i64 (~9,223×10^18) — và vẫn đủ
+            // nhỏ để `checkin_naive + Duration::days(nights)` (chạy TRƯỚC khối
+            // giá, ở đầu `group_checkin_tx`) không tự tràn NaiveDate.
+            nights: 90_100_000,
+            source: None,
+            notes: None,
+            paid_amount: None,
+            rate_override_per_room,
+        },
+    )
+    .await
+    .unwrap_err();
+
+    assert!(
+        error.to_string().contains("total_price"),
+        "phải là lỗi từ chính checked_mul_money (field 'total_price'), chặn TRƯỚC khi ghi \
+         booking nào — không phải một lớp downstream chặn muộn hơn, nhận được: {error}"
+    );
+
+    let group_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM booking_groups")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(group_count, 0, "cả group phải rollback, không tạo dở dang");
+}
 
 #[tokio::test]
 async fn group_checkin_creates_active_group_and_placeholder_guest_manifest() {
