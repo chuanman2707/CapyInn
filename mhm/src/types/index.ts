@@ -599,3 +599,23 @@ export interface DeclarationBatch {
   verified_at: string | null;
   created_at: string;
 }
+
+/** Khớp `VoidBookingPreview` (`src-tauri/src/models.rs`) — không thêm bớt field. */
+export interface VoidBookingPreview {
+  booking_id: string;
+  guest_name: string;
+  room_id: string;
+  previous_status: string;
+  /** Tiền rời khỏi báo cáo: tiền phòng đã ghi nhận + folio + phí huỷ. */
+  revenue_impact: MoneyVnd;
+  revenue_date: string;
+  /** Tiền cọc. KHÔNG nằm trong revenue_impact — cọc là khoản thanh toán,
+   *  chưa bao giờ là doanh thu, và `transactions` chỉ ghi thêm nên xoá lượt
+   *  không gỡ nó đi. Hiển thị thành dòng riêng, chữ khác. */
+  deposit_amount: MoneyVnd;
+  nights_recognized: number;
+  nights_total: number;
+  is_audited: boolean;
+  room_was_reused: boolean;
+  is_group_booking: boolean;
+}

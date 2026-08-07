@@ -63,6 +63,7 @@ interface HotelStore {
   extendStay: (bookingId: string) => Promise<void>;
   shortenStay: (bookingId: string) => Promise<void>;
   setBookingRate: (bookingId: string, ratePerNight: number) => Promise<void>;
+  voidBooking: (bookingId: string, reason: string | null) => Promise<void>;
   updateBookingNotes: (bookingId: string, notes: string) => Promise<void>;
   setRoomChangeOpen: (open: boolean, bookingId?: string | null) => void;
   fetchRoomChangeOptions: (bookingId: string) => Promise<RoomChangeOptions>;
@@ -290,6 +291,31 @@ export const useHotelStore = create<HotelStore>((set, get) => {
         get().markDashboardDataChanged();
       } catch (err) {
         console.error("set_booking_rate error:", err);
+        throw err;
+      } finally {
+        endAction();
+      }
+    },
+
+    voidBooking: async (bookingId, reason) => {
+      beginAction();
+      try {
+        const correlationId = createCorrelationId();
+        await invokeWriteCommand(
+          "void_booking",
+          { req: { booking_id: bookingId, reason } },
+          {
+            correlationId,
+            monitoringContext: {
+              operation: "void_booking",
+            },
+          },
+        );
+        await get().fetchRooms();
+        await get().fetchStats();
+        get().markDashboardDataChanged();
+      } catch (err) {
+        console.error("void_booking error:", err);
         throw err;
       } finally {
         endAction();

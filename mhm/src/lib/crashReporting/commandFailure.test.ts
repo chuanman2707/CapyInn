@@ -180,6 +180,35 @@ describe("captureCommandFailure", () => {
     );
   });
 
+  it("sends void booking failures with operation metadata", async () => {
+    vi.mocked(invoke).mockResolvedValueOnce(true);
+
+    const monitoringContext = {
+      operation: "void_booking",
+    } as const;
+
+    await captureCommandFailure({
+      command: "void_booking",
+      appError: {
+        code: "CONFLICT_INVALID_STATE_TRANSITION",
+        message: "Lượt vừa thay đổi bởi thao tác khác — vui lòng tải lại trang",
+        kind: "user",
+        support_id: null,
+      },
+      correlationId: "COR-8F3A1C7D",
+      monitoringContext,
+    });
+
+    expect(invoke).toHaveBeenCalledWith("get_crash_reporting_preference");
+    expect(submitCommandFailureEvent).toHaveBeenCalledWith(
+      expect.objectContaining({
+        command: "void_booking",
+        correlationId: "COR-8F3A1C7D",
+        monitoringContext,
+      }),
+    );
+  });
+
   it("does not report commands outside the allowlist", async () => {
     await captureCommandFailure({
       command: "login",
