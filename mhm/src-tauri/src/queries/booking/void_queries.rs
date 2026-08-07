@@ -136,22 +136,30 @@ pub async fn load_void_preview(
     };
 
     // Chỉ nhánh checked_out có chỗ `void_booking_tx` âm thầm bỏ qua UPDATE
-    // rooms khi phòng không còn ở trạng thái nó chờ (đã bán lại) — active luôn
-    // ép về trống hoặc lỗi to, booked chưa từng đụng rooms. Nên đây là nhánh
-    // duy nhất "trạng thái phòng giữ nguyên" là một cảnh báo thật.
+    // rooms khi phòng không còn ở trạng thái nó chờ (đã bán lại, đã dọn xong,
+    // hay đang giữ cho một lượt khác) — active luôn ép về trống hoặc lỗi to,
+    // booked chưa từng đụng rooms. Nên đây là nhánh duy nhất "trạng thái
+    // phòng giữ nguyên" là một cảnh báo thật.
     //
-    // Cờ này PHẢI phản chiếu đúng điều kiện `WHERE status = 'cleaning'` của
-    // câu UPDATE rooms trong nhánh checked_out (`void_booking_tx`,
-    // `void_lifecycle.rs`) — KHÔNG được đoán một trạng thái cụ thể (vd so
-    // bằng `occupied`). `rooms.status` có bốn giá trị: `vacant`, `occupied`,
-    // `cleaning`, `booked` — hễ khác `cleaning` là UPDATE đó không khớp dòng
-    // nào, phòng giữ nguyên bất kể đang là giá trị nào trong ba giá trị còn
-    // lại (kể cả `booked` — phòng đang giữ cho một lượt đặt trong tương lai).
+    // Trường `room_status_unchanged` PHẢI phản chiếu đúng điều kiện `WHERE
+    // status = 'cleaning'` của câu UPDATE rooms trong nhánh checked_out
+    // (`void_booking_tx`, `void_lifecycle.rs`) — KHÔNG được đoán một trạng
+    // thái cụ thể (vd so bằng `occupied`). `rooms.status` có bốn giá trị:
+    // `vacant`, `occupied`, `cleaning`, `booked` — hễ khác `cleaning` là
+    // UPDATE đó không khớp dòng nào, phòng giữ nguyên bất kể đang là giá trị
+    // nào trong ba giá trị còn lại. KỂ CẢ `vacant`: housekeeping có thể dọn
+    // xong trước khi lệnh xoá này chạy, không có khách nào khác cả — chỉ là
+    // phòng đã trống sẵn. Đọc tên trường mà đoán "chắc có khách khác đang ở"
+    // là sai chính xác ở ca này; tên trường và mọi câu chữ đọc trường này
+    // (hộp thoại `VoidBookingDialog.tsx`) phải nói đúng NGHĨA của cờ —
+    // "trạng thái phòng không đổi" — không nói LÝ DO, vì lý do có thể là bất
+    // kỳ giá trị nào trong ba giá trị khác `cleaning`.
+    //
     // Hai chỗ này phải đổi CÙNG NHAU: nới điều kiện UPDATE mà quên nới ở đây
     // (hay ngược lại) là hộp xác nhận lại hứa sai trạng thái phòng — đúng thứ
     // preview này tồn tại để ngăn. Đừng "đơn giản hoá" về lại một phép so
     // sánh bằng.
-    let room_was_reused = previous_status == status::booking::CHECKED_OUT
+    let room_status_unchanged = previous_status == status::booking::CHECKED_OUT
         && room_status.as_deref() != Some(status::room::CLEANING);
 
     Ok(VoidBookingPreview {
@@ -168,7 +176,7 @@ pub async fn load_void_preview(
         // một lỗi decode (NULL, hay kiểu bất ngờ) rơi về "chưa audit" thay vì
         // panic cả preview vì một cột phụ.
         is_audited: row.try_get::<i32, _>("is_audited").unwrap_or(0) == 1,
-        room_was_reused,
+        room_status_unchanged,
         is_group_booking: group_id.is_some(),
     })
 }

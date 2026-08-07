@@ -667,7 +667,7 @@ async fn preview_reports_the_full_total_for_a_checked_out_stay() {
     assert_eq!(preview.previous_status, "checked_out");
     assert_eq!(preview.revenue_impact, 500_000);
     assert_eq!(preview.revenue_date, "2026-04-16");
-    assert!(!preview.room_was_reused);
+    assert!(!preview.room_status_unchanged);
     assert!(!preview.is_group_booking);
     // Ngoài phạm vi hai assert của brief: `seed_active_booking_with_room` cố
     // định `nights = 1`, nên trả phòng xong phải ghi nhận đúng 1/1 — không
@@ -751,13 +751,13 @@ async fn preview_flags_a_room_that_was_already_reused() {
         .await
         .expect("loads preview");
 
-    assert!(preview.room_was_reused);
+    assert!(preview.room_status_unchanged);
 }
 
 /// Phòng đang giữ cho một lượt đặt trong tương lai (`booked`) — KHÔNG chỉ
 /// `occupied` mới là "đã bán lại". Gate thật trong `void_booking_tx` là
-/// `WHERE status = 'cleaning'`, không phải `WHERE status != 'occupied'`; một
-/// `room_was_reused` chỉ so bằng `occupied` sẽ báo sai "về Trống" cho ca này —
+/// `WHERE status = 'cleaning'`, không phải `WHERE status != 'occupied'`;
+/// một cờ `room_status_unchanged` chỉ so bằng `occupied` sẽ báo sai "về Trống" cho ca này —
 /// UPDATE của backend không khớp dòng nào (status không phải 'cleaning') nên
 /// phòng vẫn giữ nguyên `booked`, nhưng hộp thoại đã hứa nó về trống.
 #[tokio::test]
@@ -783,10 +783,50 @@ async fn preview_flags_a_room_that_is_now_booked_for_a_future_reservation() {
         .expect("loads preview");
 
     assert!(
-        preview.room_was_reused,
+        preview.room_status_unchanged,
         "phòng 'booked' cũng khiến UPDATE rooms của void_booking_tx không khớp dòng nào \
          (gate chỉ nhận 'cleaning') — preview phải báo true như ca 'occupied', không phải \
          chỉ so bằng occupied"
+    );
+}
+
+/// Housekeeping dọn xong TRƯỚC khi ai đó phát hiện lượt này nhập sai — phòng
+/// đã về `vacant` rồi, không hề có khách nào khác. Đây chính là ca chứng minh
+/// một cái tên ngụ ý "phòng đang có khách khác" là sai: cờ chỉ nói "UPDATE
+/// rooms sẽ không khớp dòng nào vì phòng không còn ở 'cleaning'" — nó KHÔNG
+/// nói gì về việc phòng có khách hay không. Gate thật là `WHERE status =
+/// 'cleaning'`; `vacant` cũng khác `cleaning` nên UPDATE không khớp gì, giống
+/// hệt ca `occupied`/`booked` ở trên. `room_status_unchanged` phải báo true ở
+/// đây — và phía hiển thị (`VoidBookingDialog.tsx`) không được suy đoán "có
+/// khách khác" chỉ vì cờ này bật.
+#[tokio::test]
+async fn preview_flags_room_status_unchanged_when_room_is_already_vacant() {
+    let pool = test_pool().await;
+    seed_active_booking_with_room(&pool, "B-VACANT-UNCHANGED", "R-VACANT-UNCHANGED")
+        .await
+        .expect("seeds booking");
+    sqlx::query(
+        "UPDATE bookings SET status = 'checked_out',
+                actual_checkout = '2026-04-16T10:00:00+07:00' WHERE id = 'B-VACANT-UNCHANGED'",
+    )
+    .execute(&pool)
+    .await
+    .expect("marks checked out");
+    sqlx::query("UPDATE rooms SET status = 'vacant' WHERE id = 'R-VACANT-UNCHANGED'")
+        .execute(&pool)
+        .await
+        .expect("simulates housekeeping already finished before the void");
+
+    let preview =
+        crate::queries::booking::void_queries::load_void_preview(&pool, "B-VACANT-UNCHANGED")
+            .await
+            .expect("loads preview");
+
+    assert!(
+        preview.room_status_unchanged,
+        "phòng 'vacant' cũng khiến UPDATE rooms của void_booking_tx không khớp dòng nào \
+         (gate chỉ nhận 'cleaning') — preview phải báo true như ca 'occupied'/'booked', \
+         KHÔNG phải suy luận 'phòng đã trống sẵn nên không cần cảnh báo'"
     );
 }
 
@@ -839,7 +879,7 @@ async fn preview_reports_partial_recognition_for_an_active_stay_on_its_second_of
          không phải hôm nay, nên hai trường phải mô tả cùng một ngày"
     );
     assert!(
-        !preview.room_was_reused,
+        !preview.room_status_unchanged,
         "phòng đang có khách CHÍNH lượt này ở — không phải bị bán lại"
     );
 }
@@ -953,7 +993,7 @@ async fn preview_reports_the_deposit_for_a_booked_reservation_with_a_deposit() {
         "chưa nhận phòng thì chưa ghi nhận đêm nào"
     );
     assert_eq!(preview.nights_total, 2);
-    assert!(!preview.room_was_reused);
+    assert!(!preview.room_status_unchanged);
     assert!(!preview.is_group_booking);
 }
 

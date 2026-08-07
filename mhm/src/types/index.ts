@@ -616,6 +616,9 @@ export interface VoidBookingPreview {
   nights_recognized: number;
   nights_total: number;
   is_audited: boolean;
-  room_was_reused: boolean;
+  /** True = xoá lượt này sẽ KHÔNG đổi trạng thái phòng (chỉ tính cho
+   *  previous_status "checked_out", luôn false ở nơi khác). KHÔNG suy ra có
+   *  khách khác đang ở — true cả khi phòng đã Trống. */
+  room_status_unchanged: boolean;
   is_group_booking: boolean;
 }
