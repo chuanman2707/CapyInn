@@ -156,6 +156,54 @@ async fn create_reservation_same_key_different_payload_conflicts() {
     );
 }
 
+/// `rate_override_per_night` ảnh hưởng trực tiếp tới `total_price` như mọi
+/// trường khác trong hash — thiếu nó thì đổi giá tay dưới cùng một
+/// idempotency key sẽ lặp lại kết quả CŨ (giá cũ, sai) trong im lặng thay vì
+/// bị báo `CONFLICT_IDEMPOTENCY_HASH_MISMATCH`. Đây chính là bug tiền bạc mà
+/// việc thêm trường vào hash phải chặn — xem `Task 14 brief`.
+#[tokio::test]
+async fn create_reservation_same_key_different_rate_override_conflicts() {
+    let pool = test_pool().await;
+    seed_room_with_price(&pool, "R605", 600_000)
+        .await
+        .expect("seeds room/pricing");
+    let ctx = cmd("create_reservation", "idem-reservation-rate-conflict");
+
+    reservation_lifecycle::create_reservation_idempotent(
+        &pool,
+        &ctx,
+        reservation_req("R605")
+            .guest("Rate Conflict Guest")
+            .doc("DOC605")
+            .phone(None)
+            .dates("2026-05-01", "2026-05-02")
+            .nights(1)
+            .deposit(None)
+            .build(),
+    )
+    .await
+    .expect("first reservation succeeds");
+
+    let mut changed = reservation_req("R605")
+        .guest("Rate Conflict Guest")
+        .doc("DOC605")
+        .phone(None)
+        .dates("2026-05-01", "2026-05-02")
+        .nights(1)
+        .deposit(None)
+        .build();
+    changed.rate_override_per_night = Some(350_000);
+
+    let error = reservation_lifecycle::create_reservation_idempotent(&pool, &ctx, changed)
+        .await
+        .expect_err("same key with a different rate override conflicts");
+
+    assert_eq!(
+        error.code,
+        crate::app_error::codes::CONFLICT_IDEMPOTENCY_HASH_MISMATCH
+    );
+}
+
 #[tokio::test]
 async fn reservation_command_idempotency_create_hashes_deposit_as_integer_vnd_units() {
     let pool = test_pool().await;
@@ -175,6 +223,7 @@ async fn reservation_command_idempotency_create_hashes_deposit_as_integer_vnd_un
         notes: None,
         deposit_amount: Some(500_000),
         guests: None,
+        rate_override_per_night: None,
     };
 
     reservation_lifecycle::create_reservation_idempotent(&pool, &ctx, request)
@@ -203,6 +252,7 @@ async fn reservation_command_idempotency_create_hashes_deposit_as_integer_vnd_un
         "source": "phone",
         "notes": null,
         "deposit_vnd_units": 500000,
+        "rate_override_per_night": null,
     });
     let mut cents_payload = expected_payload.clone();
     cents_payload["deposit_vnd_units"] = serde_json::json!(50000000);

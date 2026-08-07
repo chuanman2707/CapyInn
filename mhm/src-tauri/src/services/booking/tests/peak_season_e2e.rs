@@ -187,6 +187,7 @@ async fn the_owners_case_is_what_gets_written_to_the_booking() {
             source: Some("phone".to_string()),
             notes: None,
             guests: Some(4),
+            rate_override_per_night: None,
         },
     )
     .await

@@ -43,6 +43,7 @@ pub fn minimal_reservation_request(room_id: &str) -> CreateReservationRequest {
         source: Some("phone".to_string()),
         notes: Some("test reservation".to_string()),
         guests: None,
+        rate_override_per_night: None,
     }
 }
 

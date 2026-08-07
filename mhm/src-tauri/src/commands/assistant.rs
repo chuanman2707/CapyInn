@@ -719,6 +719,7 @@ mod tests {
             source: Some("phone".to_string()),
             notes: None,
             guests: None,
+            rate_override_per_night: None,
         };
         let preview = serde_json::json!({ "total": 400000 });
         let display = build_reserve_display(&payload, &preview);
