@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
+import type { KeyboardEvent, PointerEvent } from "react";
 import { Trash2 } from "lucide-react";
 
 interface HoldToDeleteButtonProps {
@@ -12,6 +13,10 @@ interface HoldToDeleteButtonProps {
 /**
  * Nút đỏ phải nhấn giữ mới kích hoạt. Nhả tay sớm thì huỷ im lặng — người dùng
  * đổi ý không đáng bị hiện một thông báo lỗi.
+ *
+ * Dùng được bằng bàn phím: giữ Enter/Space kích hoạt như giữ chuột trái, nhả
+ * phím hoặc rời focus (blur) thì huỷ. Nếu `disabled` chuyển thành true giữa
+ * lúc đang giữ, lượt giữ bị huỷ ngay lập tức.
  *
  * Component này không biết gì về booking: nó chỉ biết "giữ đủ lâu thì gọi
  * callback".
@@ -36,6 +41,23 @@ export default function HoldToDeleteButton({
     // một component đã unmount.
     useEffect(() => clearTimer, [clearTimer]);
 
+    const cancelHold = useCallback(() => {
+        clearTimer();
+        setHolding(false);
+    }, [clearTimer]);
+
+    // disabled có thể chuyển thành true giữa lúc đang giữ (Task 10 truyền
+    // disabled={busy}: một lệnh khác đang chạy thì nút này phải khoá ngay).
+    // Không huỷ ở đây thì timer vẫn đếm ngầm và callback vẫn bắn ra sau khi nút
+    // đã hiện disabled — người dùng thấy nút bị khoá nhưng hành động vẫn xảy ra.
+    // cancelHold() cũng đưa holding về false nên thanh tiến trình tắt theo,
+    // chứ không chỉ mỗi việc callback bị chặn.
+    useEffect(() => {
+        if (disabled) {
+            cancelHold();
+        }
+    }, [disabled, cancelHold]);
+
     const startHold = () => {
         if (disabled || timerRef.current !== null) return;
         setHolding(true);
@@ -46,19 +68,43 @@ export default function HoldToDeleteButton({
         }, holdMs);
     };
 
-    const cancelHold = () => {
-        clearTimer();
-        setHolding(false);
+    const handlePointerDown = (event: PointerEvent<HTMLButtonElement>) => {
+        // Chỉ tính cú nhấn chuột trái (hoặc cú chạm chính) — nhấn giữ chuột
+        // phải hay chuột giữa không phải một cú bấm cố ý, không được kích hoạt.
+        if (event.button !== 0) return;
+        startHold();
+    };
+
+    const handleKeyDown = (event: KeyboardEvent<HTMLButtonElement>) => {
+        if (event.key !== "Enter" && event.key !== " ") return;
+        if (event.key === " ") {
+            // Chặn hành vi mặc định (cuộn trang) khi giữ phím cách.
+            event.preventDefault();
+        }
+        // Giữ phím khiến hệ điều hành tự phát lại sự kiện keydown liên tục
+        // (event.repeat === true). startHold() vốn đã tự chặn gọi chồng nhờ
+        // kiểm tra timerRef, nhưng chặn sớm ở đây cho rõ ý định và để không
+        // phụ thuộc ngầm vào chốt đó.
+        if (event.repeat) return;
+        startHold();
+    };
+
+    const handleKeyUp = (event: KeyboardEvent<HTMLButtonElement>) => {
+        if (event.key !== "Enter" && event.key !== " ") return;
+        cancelHold();
     };
 
     return (
         <button
             type="button"
             disabled={disabled}
-            onPointerDown={startHold}
+            onPointerDown={handlePointerDown}
             onPointerUp={cancelHold}
             onPointerLeave={cancelHold}
             onPointerCancel={cancelHold}
+            onKeyDown={handleKeyDown}
+            onKeyUp={handleKeyUp}
+            onBlur={cancelHold}
             className={`relative w-full overflow-hidden rounded-xl h-11 font-semibold text-white
                 transition-colors select-none touch-none
                 ${disabled ? "bg-slate-300 cursor-not-allowed" : "bg-red-600 hover:bg-red-700 cursor-pointer"}`}
