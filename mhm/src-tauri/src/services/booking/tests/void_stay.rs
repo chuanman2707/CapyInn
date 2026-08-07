@@ -747,6 +747,40 @@ async fn preview_reports_partial_recognition_for_an_active_stay_on_its_second_of
     );
 }
 
+/// Nhận phòng NGAY HÔM NAY: đã ghi nhận 1 đêm dù đêm đó chưa trôi qua nửa.
+/// Biên này lộ một dạng bug KHÁC với "đêm thứ 2 trên 3" ở trên — test đó dùng
+/// elapsed = 1 ngày, test này dùng elapsed = 0. Một công thức kiểu "chỉ cộng 1
+/// khi elapsed > 0" vẫn qua được test đêm-2-trên-3 (1 + 1 = 2, đúng) nhưng sẽ
+/// báo 0 đêm ở đây thay vì 1 — hai test cùng cần thì "+1" mới thật sự bị khoá.
+#[tokio::test]
+async fn preview_recognizes_one_night_immediately_when_check_in_is_today() {
+    let pool = test_pool().await;
+    seed_active_booking_with_room(&pool, "B-ACTIVE-TODAY", "R-ACTIVE-TODAY")
+        .await
+        .expect("seeds active booking");
+
+    let today = Local::now().date_naive();
+    let check_in_at = format!("{}T10:00:00+07:00", today.format("%Y-%m-%d"));
+    sqlx::query(
+        "UPDATE bookings SET check_in_at = ?, nights = 3, total_price = 300000
+         WHERE id = 'B-ACTIVE-TODAY'",
+    )
+    .bind(&check_in_at)
+    .execute(&pool)
+    .await
+    .expect("sets a 3-night stay checked in today");
+
+    let preview = void_queries::load_void_preview(&pool, "B-ACTIVE-TODAY")
+        .await
+        .expect("loads preview");
+
+    assert_eq!(
+        preview.nights_recognized, 1,
+        "nhận phòng hôm nay: đêm 1 đã bắt đầu, phải ghi nhận ngay dù chưa qua nửa đêm"
+    );
+    assert_eq!(preview.revenue_impact, 100_000);
+}
+
 /// Lượt đặt trước có cọc: gỡ đúng tiền cọc, chưa đêm nào được ghi nhận vì
 /// khách chưa tới. Cũng là bài duy nhất khẳng định `booking_id`/`room_id`/
 /// `guest_name` không phải giá trị giả — hai test gốc của Task 7 không đụng
