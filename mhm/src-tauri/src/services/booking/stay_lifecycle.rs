@@ -359,6 +359,9 @@ async fn check_in_tx(
     // phụ thu thêm người), nên hành vi không-override giữ nguyên y hệt cũ.
     let (total_price, rate_overridden_at, pricing_snapshot) = match req.rate_override_per_night {
         Some(rate) => {
+            // `validate_check_in_request` đã chặn giá ngoài biên trước khi
+            // tới được đây; giữ nguyên bản sao này làm lưới chặn ở tầng
+            // transaction, cùng hình "belt-and-braces" với `set_booking_rate_tx`.
             if rate <= 0 || rate > MAX_RATE_PER_NIGHT_VND {
                 return Err(BookingError::validation(
                     "Giá mỗi đêm không hợp lệ".to_string(),
@@ -371,7 +374,8 @@ async fn check_in_tx(
             // Giá engine chỉ tính để LƯU LẠI trong pricing_snapshot cho chủ
             // khách sạn tra cứu sau này (đã giảm giá cho ai bao nhiêu), không
             // dùng làm tiền thật — nên lỗi ở bước này không được làm hỏng cả
-            // lượt nhận phòng.
+            // lượt nhận phòng. Lỗi thì lưu `null` (không rõ), không lưu 0 — 0
+            // sẽ đọc nhầm thành "engine định giá phòng này bằng không".
             let engine_total = calculate_stay_price_tx(
                 tx,
                 &req.room_id,
@@ -382,7 +386,7 @@ async fn check_in_tx(
             )
             .await
             .map(|pricing| pricing.total)
-            .unwrap_or(0);
+            .ok();
 
             let snapshot = merge_pricing_snapshot(
                 None,
@@ -409,6 +413,22 @@ async fn check_in_tx(
             (pricing.total, None, None)
         }
     };
+
+    // Thu vượt tổng tiền dẫn tới một booking không có lối thoát: `check_out_tx`
+    // từ chối thẳng khi `already_paid > final_total`. Đặt SAU match ở trên vì
+    // đây là chỗ ĐẦU TIÊN cả hai nhánh (giá tay lẫn giá engine) đều đã có
+    // `total_price` thật trong tay — `validate_check_in_request` trước đây chỉ
+    // chặn được nhánh giá tay (nơi nó tự tính lại `rate × nights`), bỏ lọt
+    // đường không-override, con đường mọi lượt check-in bình thường đi qua.
+    // Đặt TRƯỚC mọi ghi (kể cả `create_guest_manifest` ngay dưới đây) để
+    // không để lại việc dở dang khi bị từ chối.
+    if let Some(paid_amount) = req.paid_amount {
+        if paid_amount > total_price {
+            return Err(BookingError::validation(format!(
+                "Khách trả {paid_amount}đ, cao hơn tổng tiền {total_price}đ — sửa lại giá hoặc số tiền thu"
+            )));
+        }
+    }
 
     let booking_id = uuid::Uuid::new_v4().to_string();
     let guest_manifest = create_guest_manifest(tx, &req.guests, &check_in_at)
@@ -2135,19 +2155,25 @@ fn validate_check_in_request(req: &CheckInRequest) -> BookingResult<()> {
     }
     if let Some(paid_amount) = req.paid_amount {
         validate_non_negative_booking_money(paid_amount, "paid_amount")?;
+    }
 
-        // Chỉ kiểm được khi giá do người dùng gõ — giá engine chưa biết ở đây.
-        // `check_out_tx` từ chối thẳng booking có `already_paid > final_total`,
-        // nên không chặn ở đây là tạo ra một lượt không bao giờ trả phòng được.
-        if let Some(rate) = req.rate_override_per_night {
-            let total =
-                crate::pricing::checked_mul_money(rate, i64::from(req.nights), "total_price")
-                    .map_err(BookingError::validation)?;
-            if paid_amount > total {
-                return Err(BookingError::validation(format!(
-                    "Khách trả {paid_amount}đ, cao hơn tổng tiền {total}đ — sửa lại giá hoặc số tiền thu"
-                )));
-            }
+    // Chặn giá tay ngoài biên NGAY TẠI ĐÂY, trước khi bất cứ phép nhân nào có
+    // cơ hội chạy trên một `rate` chưa kiểm biên — nếu không, `checked_mul_money`
+    // có thể ăn một giá trị tràn số / không an toàn và trả thẳng ra người dùng
+    // một thông báo TIẾNG ANH (qua command error mapper), hoặc — với giá âm —
+    // để lọt xuống một guard khác đọc nhầm một tổng âm ra như một mức giá.
+    // Cùng thứ tự với `set_booking_rate_tx`: biên trước, phép nhân sau.
+    //
+    // Guard thu-quá-tổng đã chuyển sang `check_in_tx`, sau khi `total_price`
+    // được biết ở CẢ hai nhánh (giá tay lẫn giá engine) — ở đây (chưa mở
+    // transaction, chưa gọi engine) chỉ biết được tổng khi có giá tay, nên
+    // không thể chặn đường không-override, con đường mọi lượt check-in bình
+    // thường đi qua.
+    if let Some(rate) = req.rate_override_per_night {
+        if rate <= 0 || rate > MAX_RATE_PER_NIGHT_VND {
+            return Err(BookingError::validation(
+                "Giá mỗi đêm không hợp lệ".to_string(),
+            ));
         }
     }
 
@@ -2174,8 +2200,62 @@ async fn insert_occupied_calendar_rows(
 
 #[cfg(test)]
 mod tests {
-    use super::{ensure_locked_room_matches_booking, mark_write_db_error};
+    use super::{
+        ensure_locked_room_matches_booking, mark_write_db_error, validate_check_in_request,
+    };
     use crate::domain::booking::BookingError;
+    use crate::models::{CheckInRequest, CreateGuestRequest};
+
+    fn check_in_request_with_rate(rate: crate::money::MoneyVnd) -> CheckInRequest {
+        CheckInRequest {
+            room_id: "room-x".to_string(),
+            guests: vec![CreateGuestRequest {
+                guest_type: None,
+                full_name: "Khách".to_string(),
+                doc_number: "DOC-X".to_string(),
+                dob: None,
+                gender: None,
+                nationality: None,
+                address: None,
+                visa_expiry: None,
+                scan_path: None,
+                phone: None,
+            }],
+            nights: 1,
+            source: None,
+            notes: None,
+            paid_amount: Some(100_000),
+            pricing_type: None,
+            rate_override_per_night: Some(rate),
+        }
+    }
+
+    /// `validate_check_in_request` gọi thẳng, KHÔNG qua `check_in_tx` — vì
+    /// `check_in_tx` giữ một bản sao (cố ý, cùng thông báo) của guard biên này
+    /// làm lưới chặn tầng transaction; đi qua `check_in()`/`check_in_idempotent`
+    /// sẽ khiến một hồi quy CHỈ ở `validate_check_in_request` bị bản sao đó che
+    /// mất — cả hai đường đều trả về "Giá mỗi đêm không hợp lệ" nên bên ngoài
+    /// không phân biệt được. Gọi trực tiếp hàm này là cách duy nhất kiểm được
+    /// đúng phần vừa sửa (thứ tự biên-trước-nhân trong CHÍNH hàm này).
+    #[test]
+    fn validate_check_in_request_rejects_bad_rates_before_any_multiply() {
+        // Đủ lớn để vượt biên an toàn số nguyên (giả sử biên bị gỡ, phép nhân
+        // ở dưới sẽ ăn giá trị này và trả "total_price must be a safe integer
+        // VND value" — English) — cùng lúc đủ lớn để vượt luôn MAX_RATE_PER_NIGHT_VND.
+        let huge = 9_500_000_000_000_000_i64;
+        // Âm: nhân với đêm dương vẫn ra một số "hợp lệ" (không tràn số), nên
+        // nếu biên bị gỡ, request sẽ lọt qua phép nhân — bug thật đang chặn.
+        let negative = -500_000_i64;
+
+        for rate in [huge, negative] {
+            let error = validate_check_in_request(&check_in_request_with_rate(rate)).unwrap_err();
+            assert_eq!(
+                error,
+                BookingError::validation("Giá mỗi đêm không hợp lệ".to_string()),
+                "giá {rate} phải bị chặn bằng thông báo biên tiếng Việt, nhận được: {error:?}"
+            );
+        }
+    }
 
     #[test]
     fn mark_write_db_error_promotes_database_errors_but_preserves_missing_record() {
