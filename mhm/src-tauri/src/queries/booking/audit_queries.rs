@@ -110,6 +110,10 @@ pub async fn load_booking_export_rows(
             ELSE b.expected_checkout
         END"
     );
+    // `b.status != 'voided'` phải đứng NGOÀI dấu ngoặc bọc ba nhánh OR, không
+    // vá lẻ từng nhánh: nhánh giữa lọc theo danh sách đen (`!= 'checked_out'`)
+    // nên trạng thái mới nào cũng lọt qua, còn nhánh EXISTS không đọc
+    // `b.status` lần nào — cả hai đều không tự chặn được lượt đã xoá.
     let rows = sqlx::query(&format!(
         "SELECT b.id, b.room_id,
                 COALESCE(g.full_name, '') AS guest_name,
@@ -144,21 +148,24 @@ pub async fn load_booking_export_rows(
              FROM folio_lines
              GROUP BY booking_id
          ) folio ON folio.booking_id = b.id
-         WHERE (
-                b.status = 'checked_out'
-                AND DATE({reporting_checkout}) BETWEEN {from_date_sql} AND {to_date_sql}
-            )
-            OR (
-                b.status != 'checked_out'
-                AND {check_in_date_sql} BETWEEN {from_date_sql} AND {to_date_sql}
-            )
-            OR EXISTS (
-                SELECT 1
-                FROM transactions tx
-                WHERE tx.booking_id = b.id
-                  AND tx.type = 'cancellation_fee'
-                  AND {cancellation_created_date_sql} BETWEEN {from_date_sql} AND {to_date_sql}
-            )
+         WHERE b.status != 'voided'
+           AND (
+                (
+                    b.status = 'checked_out'
+                    AND DATE({reporting_checkout}) BETWEEN {from_date_sql} AND {to_date_sql}
+                )
+                OR (
+                    b.status != 'checked_out'
+                    AND {check_in_date_sql} BETWEEN {from_date_sql} AND {to_date_sql}
+                )
+                OR EXISTS (
+                    SELECT 1
+                    FROM transactions tx
+                    WHERE tx.booking_id = b.id
+                      AND tx.type = 'cancellation_fee'
+                      AND {cancellation_created_date_sql} BETWEEN {from_date_sql} AND {to_date_sql}
+                )
+           )
          ORDER BY b.check_in_at DESC")
     )
     .bind(from_date)
