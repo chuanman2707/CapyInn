@@ -117,7 +117,12 @@ pub async fn void_booking_tx(
             .await
             .map_err(BookingError::from)
             .map_err(mark_write_db_error)?;
-        ensure_one_row_affected(result, format!("room {room_id} is no longer occupied"))?;
+        ensure_one_row_affected(
+            result,
+            format!(
+                "Phòng {room_id} vừa đổi trạng thái bởi thao tác khác — vui lòng tải lại trang"
+            ),
+        )?;
     }
 
     Ok(VoidBookingResponse {

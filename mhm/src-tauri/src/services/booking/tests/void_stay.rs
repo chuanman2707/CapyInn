@@ -204,6 +204,82 @@ async fn voiding_an_active_stay_frees_the_room() {
     assert_eq!(calendar_rows, 0);
 }
 
+/// Xoá một lượt đang ở nhưng phòng bị một thao tác khác đổi trạng thái ngay
+/// giữa chừng (ví dụ buồng phòng đổi sang "đang dọn" trong lúc lệnh này đang
+/// chạy): guard trên UPDATE rooms phải bắt được và từ chối, không được âm
+/// thầm ghi "vacant" đè lên trạng thái mới hơn — đó là đường sinh ra phòng
+/// "phantom" (không khoá bởi booking nào nhưng cũng không đúng trạng thái
+/// thật).
+///
+/// Dùng đúng cơ chế trigger của
+/// `check_in_rolls_back_when_room_status_changes_before_guarded_room_update`
+/// (`tests/stays.rs`): một trigger SQLite nổ ngay khi câu UPDATE bookings của
+/// chính `void_booking_tx` chạy (bước ghi ngay sau lần đọc ban đầu), và đổi
+/// `rooms.status` trước khi hàm chạm tới UPDATE rooms được guard. Một
+/// transaction, không cần hai pool — không giống
+/// `checkout_fails_when_second_pool_checked_out_booking_first`, vốn cần hai
+/// pool vì `check_out_tx` đọc và chặn theo trạng thái *booking* rất sớm nên
+/// một thay đổi trước khi gọi hàm đã đủ; `void_booking_tx` không đọc trạng
+/// thái *phòng* ở đâu cả ngoài chính câu UPDATE cuối, nên trigger giữa
+/// transaction là cách duy nhất tạo đúng khoảng hở "đọc trước — ghi sau".
+///
+/// Đọc trạng thái phòng qua `&mut *tx` — trong transaction còn mở, TRƯỚC khi
+/// rollback — cùng lý do đã nêu ở
+/// `voiding_a_booking_in_a_group_is_rejected_and_changes_nothing` phía trên:
+/// đọc qua pool sau khi rollback thì ghi của trigger cũng bị cuốn theo,
+/// "guard chặn đúng lúc" và "guard đã bị xoá" sẽ trông giống hệt nhau.
+#[tokio::test]
+async fn voiding_an_active_stay_is_rejected_when_room_status_changes_before_guarded_update() {
+    let pool = test_pool().await;
+    seed_active_booking_with_room(&pool, "B-CAS-VOID", "R-CAS-VOID")
+        .await
+        .expect("seeds active booking");
+
+    sqlx::query(
+        "CREATE TRIGGER mark_room_cleaning_after_void_update
+         AFTER UPDATE ON bookings
+         WHEN NEW.id = 'B-CAS-VOID' AND NEW.status = 'voided'
+         BEGIN
+           UPDATE rooms SET status = 'cleaning' WHERE id = NEW.room_id;
+         END",
+    )
+    .execute(&pool)
+    .await
+    .expect("creates room-status race trigger");
+
+    let req = VoidBookingRequest {
+        booking_id: "B-CAS-VOID".to_string(),
+        reason: Some("Bấm nhầm".to_string()),
+    };
+
+    let mut tx = begin_tx(&pool).await.expect("begins tx");
+    let error =
+        void_lifecycle::void_booking_tx(&mut tx, &req, "admin-1", Local::now(), "R-CAS-VOID")
+            .await
+            .expect_err("guarded room update should catch the room status race");
+
+    assert!(
+        error
+            .to_string()
+            .contains(crate::app_error::codes::CONFLICT_INVALID_STATE_TRANSITION),
+        "lỗi phải là invalid-state-transition, thấy: {error}"
+    );
+
+    // Đọc qua &mut *tx — xem chú thích ở đầu test: đây là phần phân biệt
+    // "chặn trước khi ghi" khỏi "chặn sau khi ghi rồi rollback xoá dấu vết".
+    let room_status: String =
+        sqlx::query_scalar("SELECT status FROM rooms WHERE id = 'R-CAS-VOID'")
+            .fetch_one(&mut *tx)
+            .await
+            .expect("reads room status after rejection");
+    assert_eq!(
+        room_status, "cleaning",
+        "phòng phải giữ nguyên trạng thái do thao tác khác đặt — void không được ghi đè thành vacant"
+    );
+
+    tx.rollback().await.expect("rolls back");
+}
+
 /// Dòng tiền không bị đụng tới — append-only. Lượt biến mất khỏi báo cáo nhờ
 /// bộ lọc trạng thái, không nhờ việc xoá dữ liệu.
 #[tokio::test]
