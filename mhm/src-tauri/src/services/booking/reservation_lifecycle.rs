@@ -678,6 +678,16 @@ pub async fn confirm_reservation_tx(
     }
     reject_no_show_confirmation(tx, booking_id).await?;
 
+    // Đọc/kiểm giá tay TRƯỚC bất cứ ghi nào bên dưới (đầu tiên là DELETE +
+    // INSERT room_calendar) — một hàng dữ liệu không nhất quán bị chặn ở đây
+    // không để lại việc dở dang, cùng nguyên tắc "biên trước, ghi sau" của
+    // `create_reservation_tx`/`validate_reservation_rate_override`.
+    let manual_rate_per_night = resolve_manual_rate_per_night(
+        booking_id,
+        reservation.rate_overridden_at.as_deref(),
+        reservation.pricing_snapshot.as_deref(),
+    )?;
+
     let now = Local::now();
     let today = now.date_naive();
     let scheduled_checkout = parse_date(&reservation.scheduled_checkout)?;
@@ -687,17 +697,31 @@ pub async fn confirm_reservation_tx(
         scheduled_checkout
     };
     let effective_checkout = effective_checkout_date.format("%Y-%m-%d").to_string();
-    let pricing = calculate_stay_price_tx(
-        tx,
-        &reservation.room_id,
-        &today.format("%Y-%m-%d").to_string(),
-        &effective_checkout,
-        &reservation.pricing_type,
-        reservation.guests,
-    )
-    .await?;
-    let total_price = pricing.total;
+    // Số đêm THẬT của lượt xác nhận này — có thể khác số đêm lúc tạo đặt
+    // trước (khách tới trễ/sớm co giãn khoảng `today → effective_checkout`,
+    // xem `confirm_reservation_late_arrival_persists_effective_checkout`).
+    // Giá tay là giá MỖI ĐÊM đã chốt, nên phải nhân với số đêm MỚI này —
+    // mang tổng tiền CŨ đi nguyên xi mới là lỗi (tụt về đúng con số đã chốt
+    // cho một kỳ ở dài/ngắn khác).
     let actual_nights = (effective_checkout_date - today).num_days() as i32;
+    let total_price = match manual_rate_per_night {
+        Some(rate) => {
+            crate::pricing::checked_mul_money(rate, i64::from(actual_nights), "total_price")
+                .map_err(BookingError::validation)?
+        }
+        None => {
+            let pricing = calculate_stay_price_tx(
+                tx,
+                &reservation.room_id,
+                &today.format("%Y-%m-%d").to_string(),
+                &effective_checkout,
+                &reservation.pricing_type,
+                reservation.guests,
+            )
+            .await?;
+            pricing.total
+        }
+    };
     let check_in_at = now.to_rfc3339();
     // Cột `expected_checkout` của booking đang ở phải là RFC3339, giống hệt
     // đường walk-in trong `stay_lifecycle::check_in_tx`: `extend_stay` đọc cột
@@ -820,6 +844,14 @@ pub async fn modify_reservation_tx(
         )));
     }
 
+    // Đọc/kiểm giá tay TRƯỚC bất cứ ghi nào bên dưới (DELETE room_calendar là
+    // ghi đầu tiên) — cùng lý do đặt sớm trong `confirm_reservation_tx`.
+    let manual_rate_per_night = resolve_manual_rate_per_night(
+        &req.booking_id,
+        reservation.rate_overridden_at.as_deref(),
+        reservation.pricing_snapshot.as_deref(),
+    )?;
+
     sqlx::query("DELETE FROM room_calendar WHERE booking_id = ? AND status = ?")
         .bind(&req.booking_id)
         .bind(status::calendar::BOOKED)
@@ -844,16 +876,25 @@ pub async fn modify_reservation_tx(
     }
 
     let effective_guests = req.new_guests.or(reservation.guests);
-    let pricing = calculate_stay_price_tx(
-        tx,
-        &reservation.room_id,
-        &req.new_check_in_date,
-        &req.new_check_out_date,
-        &reservation.pricing_type,
-        effective_guests,
-    )
-    .await?;
-    let total_price = pricing.total;
+    // Số đêm MỚI của lần sửa này (`derived_nights`, đã kiểm ở
+    // `validate_requested_nights` phía trên) — giá tay là giá mỗi đêm đã
+    // chốt, nên áp lại lên số đêm mới, không mang tổng tiền cũ đi nguyên xi.
+    let total_price = match manual_rate_per_night {
+        Some(rate) => crate::pricing::checked_mul_money(rate, derived_nights, "total_price")
+            .map_err(BookingError::validation)?,
+        None => {
+            let pricing = calculate_stay_price_tx(
+                tx,
+                &reservation.room_id,
+                &req.new_check_in_date,
+                &req.new_check_out_date,
+                &reservation.pricing_type,
+                effective_guests,
+            )
+            .await?;
+            pricing.total
+        }
+    };
 
     let result = sqlx::query(
         "UPDATE bookings
@@ -1148,6 +1189,59 @@ fn validate_reservation_rate_override(
     Ok(())
 }
 
+/// Đọc lại giá tay đã chốt lúc `create_reservation_tx` ghi
+/// `pricing_snapshot.manual_rate.rate_per_night` (Task 14), để
+/// `confirm_reservation_tx`/`modify_reservation_tx` áp lại đúng giá đó lên số
+/// đêm MỚI của thao tác, thay vì âm thầm hỏi lại pricing engine — đó chính là
+/// lỗi đang được vá (giá tay "biến mất" ngay khi khách nhận phòng/khi đổi
+/// ngày).
+///
+/// `rate_overridden_at` là cột NGUỒN CHÂN LÝ cho "booking này có đang bị chốt
+/// giá tay hay không" — `None` nghĩa là chưa từng override, trả `Ok(None)` để
+/// gọi vào giữ nguyên đường engine như hôm nay.
+///
+/// `rate_overridden_at.is_some()` mà không đọc lại được một `rate_per_night`
+/// hợp lệ từ `pricing_snapshot` (thiếu cột, JSON hỏng, thiếu khoá
+/// `manual_rate`, `rate_per_night` không phải số nguyên, hoặc giá trị đọc lại
+/// nằm ngoài biên `MAX_RATE_PER_NIGHT_VND`) là một HÀNG DỮ LIỆU KHÔNG NHẤT
+/// QUÁN: cột đánh dấu "đã chốt giá tay" nhưng giá tay không đọc lại được an
+/// toàn. Âm thầm rơi về giá engine ở đây tái tạo NGUYÊN VĂN lỗi đang vá, nên
+/// thay vào đó hàm trả lỗi hệ thống và chặn hẳn thao tác — booking giữ nguyên
+/// trạng thái hiện tại (transaction rollback), còn hơn là âm thầm tính sai
+/// tiền khách. `MAX_RATE_PER_NIGHT_VND` có thể đổi theo thời gian, và giá trị
+/// này tới từ một cột JSON tự do, không phải input vừa được validate — nên
+/// phải kiểm lại biên, không kế thừa phép kiểm đã chạy lúc ghi.
+fn resolve_manual_rate_per_night(
+    booking_id: &str,
+    rate_overridden_at: Option<&str>,
+    pricing_snapshot: Option<&str>,
+) -> BookingResult<Option<MoneyVnd>> {
+    if rate_overridden_at.is_none() {
+        return Ok(None);
+    }
+
+    let inconsistent_row = || {
+        BookingError::database(format!(
+            "booking {booking_id} có rate_overridden_at nhưng không đọc lại được giá tay hợp lệ từ pricing_snapshot.manual_rate.rate_per_night — dữ liệu không nhất quán, từ chối tính tiền để tránh tính sai"
+        ))
+    };
+
+    let snapshot = pricing_snapshot.ok_or_else(inconsistent_row)?;
+    let parsed: serde_json::Value =
+        serde_json::from_str(snapshot).map_err(|_| inconsistent_row())?;
+    let rate = parsed
+        .get("manual_rate")
+        .and_then(|manual_rate| manual_rate.get("rate_per_night"))
+        .and_then(serde_json::Value::as_i64)
+        .ok_or_else(inconsistent_row)?;
+
+    if rate <= 0 || rate > MAX_RATE_PER_NIGHT_VND {
+        return Err(inconsistent_row());
+    }
+
+    Ok(Some(rate))
+}
+
 async fn insert_booked_calendar_rows(
     tx: &mut sqlx::Transaction<'_, Sqlite>,
     room_id: &str,
@@ -1182,7 +1276,8 @@ async fn load_booked_reservation(
     booking_id: &str,
 ) -> BookingResult<BookedReservation> {
     let row = sqlx::query(
-        "SELECT room_id, status, paid_amount, scheduled_checkout, pricing_type, guests
+        "SELECT room_id, status, paid_amount, scheduled_checkout, pricing_type, guests,
+                rate_overridden_at, pricing_snapshot
          FROM bookings
          WHERE id = ?",
     )
@@ -1213,6 +1308,8 @@ async fn load_booked_reservation(
             .get::<Option<String>, _>("pricing_type")
             .unwrap_or_else(|| "nightly".to_string()),
         guests: row.get("guests"),
+        rate_overridden_at: row.get("rate_overridden_at"),
+        pricing_snapshot: row.get("pricing_snapshot"),
     })
 }
 
@@ -1244,6 +1341,15 @@ struct BookedReservation {
     scheduled_checkout: String,
     pricing_type: String,
     guests: Option<i32>,
+    /// Xem `Booking::rate_overridden_at`. `Some` nghĩa là giá đã bị lễ tân đè
+    /// tay lúc tạo đặt trước (Task 14) — `confirm_reservation_tx` và
+    /// `modify_reservation_tx` phải áp lại giá này lên số đêm MỚI của chính
+    /// thao tác đó, không được hỏi lại pricing engine.
+    rate_overridden_at: Option<String>,
+    /// Cột JSON dùng chung của booking (`checkout_settlement`, `room_stays`,
+    /// `manual_rate`, ...). `resolve_manual_rate_per_night` chỉ đọc khoá
+    /// `manual_rate.rate_per_night` từ đây; không ghi.
+    pricing_snapshot: Option<String>,
 }
 
 fn parse_date(value: &str) -> BookingResult<NaiveDate> {
