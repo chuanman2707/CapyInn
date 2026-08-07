@@ -258,12 +258,7 @@ pub struct CheckOutResponse {
     pub final_total: MoneyVnd,
 }
 
-// `#[allow(dead_code)]`: chưa có command nào gọi tới (Task 8 nối dây). Test
-// `void_stay.rs` gọi thẳng `void_lifecycle::void_booking_tx`, nhưng đó là
-// build test — build thường (thứ clippy `--all-targets` cũng kiểm) không thấy
-// điểm gọi nào nên coi là dead code. Bỏ hai allow này khi Task 8 xong.
 #[derive(Debug, Deserialize)]
-#[allow(dead_code)]
 pub struct VoidBookingRequest {
     pub booking_id: String,
     /// Lý do chọn từ danh sách rút gọn ở giao diện. Không bắt buộc.
@@ -271,7 +266,6 @@ pub struct VoidBookingRequest {
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
-#[allow(dead_code)]
 pub struct VoidBookingResponse {
     pub ok: bool,
     pub booking_id: String,
@@ -281,10 +275,7 @@ pub struct VoidBookingResponse {
     pub voided_at: String,
 }
 
-// `#[allow(dead_code)]`: chưa lệnh nào gọi tới (Task 8 nối dây) — cùng lý do
-// như `VoidBookingRequest`/`VoidBookingResponse` phía trên.
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
-#[allow(dead_code)]
 pub struct VoidBookingPreview {
     pub booking_id: String,
     pub guest_name: String,
