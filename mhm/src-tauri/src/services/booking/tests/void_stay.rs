@@ -781,6 +781,41 @@ async fn preview_recognizes_one_night_immediately_when_check_in_is_today() {
     assert_eq!(preview.revenue_impact, 100_000);
 }
 
+/// Ở lại quá ngày trả phòng dự kiến mà chưa check-out — thực tế thường gặp
+/// (lễ tân chưa xử lý trả phòng), khác hẳn hai test elapsed nhỏ ở trên: nhận
+/// phòng cách đây 5 ngày cho một lượt 3 đêm vẫn chỉ được ghi nhận đúng 3 đêm,
+/// không phải 6 — số ghi nhận không được vượt tổng số đêm đã đặt.
+#[tokio::test]
+async fn preview_caps_recognition_at_nights_total_for_an_overstaying_active_guest() {
+    let pool = test_pool().await;
+    seed_active_booking_with_room(&pool, "B-ACTIVE-OVERSTAY", "R-ACTIVE-OVERSTAY")
+        .await
+        .expect("seeds active booking");
+
+    let today = Local::now().date_naive();
+    let check_in_date = today - Duration::days(5);
+    let check_in_at = format!("{}T10:00:00+07:00", check_in_date.format("%Y-%m-%d"));
+    sqlx::query(
+        "UPDATE bookings SET check_in_at = ?, nights = 3, total_price = 300000
+         WHERE id = 'B-ACTIVE-OVERSTAY'",
+    )
+    .bind(&check_in_at)
+    .execute(&pool)
+    .await
+    .expect("sets a 3-night stay checked in five days ago");
+
+    let preview = void_queries::load_void_preview(&pool, "B-ACTIVE-OVERSTAY")
+        .await
+        .expect("loads preview");
+
+    assert_eq!(preview.nights_total, 3);
+    assert_eq!(
+        preview.nights_recognized, 3,
+        "quá hạn 2 ngày không được ghi nhận vượt tổng số đêm đã đặt"
+    );
+    assert_eq!(preview.revenue_impact, 300_000);
+}
+
 /// Lượt đặt trước có cọc: gỡ đúng tiền cọc, chưa đêm nào được ghi nhận vì
 /// khách chưa tới. Cũng là bài duy nhất khẳng định `booking_id`/`room_id`/
 /// `guest_name` không phải giá trị giả — hai test gốc của Task 7 không đụng
