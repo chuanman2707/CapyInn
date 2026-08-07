@@ -35,6 +35,10 @@ const GROUP_BOOKED: &str = "booked";
 const GROUP_COMPLETED: &str = "completed";
 const GROUP_PARTIAL_CHECKOUT: &str = "partial_checkout";
 
+/// Cũng là cơ chế rải dư cho `allocate_paid_amount_by_room_price` bên dưới —
+/// đọc doc-comment của hàm đó để biết vì sao gọi lại đúng hàm này (không viết
+/// một vòng rải dư thứ hai) vẫn giữ đúng tính chất "tổng cộng lại đúng bằng
+/// `total`, dư rải từng 1 đồng một theo thứ tự ổn định".
 fn allocate_positive_money_evenly(total: MoneyVnd, count: usize) -> Vec<MoneyVnd> {
     if total <= 0 || count == 0 {
         return vec![0; count];
@@ -47,16 +51,90 @@ fn allocate_positive_money_evenly(total: MoneyVnd, count: usize) -> Vec<MoneyVnd
         .collect()
 }
 
-fn allocate_positive_money_evenly_by_room(
-    total: MoneyVnd,
-    room_ids: &[String],
+/// Phân bổ `paid_amount` cho các phòng trong đoàn theo TỈ LỆ tổng tiền từng
+/// phòng — khác `allocate_positive_money_evenly` (chia đều theo SỐ LƯỢNG
+/// phòng, không biết giá). Bắt buộc từ khi Task 15 cho phép giá tay khác
+/// nhau giữa các phòng cùng đoàn: chia đều theo số lượng có thể cấp cho một
+/// phòng NHIỀU HƠN chính tổng tiền phòng đó. Ví dụ thật từ báo cáo review:
+/// G-R1 override 400.000đ × 2 đêm = 800.000đ, G-R2 giá engine 500.000đ × 2
+/// đêm = 1.000.000đ, `paid_amount = 1.800.000đ` (khách trả đủ CẢ ĐOÀN) — chia
+/// đều ra 900.000đ/phòng, vượt hẳn tổng 800.000đ của G-R1, khiến guard
+/// thu-vượt bên dưới từ chối cả lượt nhận đoàn dù khách trả đúng khớp.
+///
+/// QUY TẮC LÀM TRÒN: phần nguyên `floor(paid_amount × room_total /
+/// Σ room_total)` cho từng phòng — nhân trước bằng `i128` rồi mới chia, cùng
+/// kỹ thuật `percentage_money_line` (money.rs) dùng cho tỉ lệ phần trăm, để
+/// phép nhân không tràn `i64` trước khi chia (VND thật không đủ lớn để tràn
+/// `i128`, nên không cần `checked_mul`). Phần dư — LUÔN nhỏ hơn số phòng, vì
+/// tổng phần mất mát do làm tròn XUỐNG của N số hạng luôn nhỏ hơn N — rải cho
+/// các phòng đã sắp theo `room_id` bằng chính `allocate_positive_money_evenly`
+/// (dư, số phòng): hàm đó cho ra một vector toàn 0 trừ đúng `dư` phòng ĐẦU
+/// (theo thứ tự đã sắp) nhận 1 — đúng quy tắc rải dư
+/// `allocate_positive_money_evenly_by_room` (bản trước Task 15) từng dùng,
+/// nên khi mọi phòng cùng giá, hàm này cho kết quả giống hệt bản cũ (xem
+/// `group_checkin_reservation_blocks_calendar_and_tracks_deposit` và các test
+/// khác chia tiền cọc đều trong `tests/groups.rs` — không sửa gì mà vẫn
+/// xanh).
+///
+/// AN TOÀN — "không phòng nào nhận quá tổng tiền của chính nó" khi
+/// `paid_amount <= Σ room_total` — suy ra trực tiếp từ hai điều trên:
+/// - `paid_amount < Σ room_total` NGHIÊM NGẶT: làm tròn xuống một số thực nhỏ
+///   hơn `room_total` (số nguyên) luôn cho kết quả `<= room_total - 1`, nên
+///   mọi phòng còn dư ít nhất 1 đồng "chỗ trống" trước khi rải — rải thêm 1
+///   đồng vẫn an toàn.
+/// - `paid_amount == Σ room_total` (thu ĐỦ): phép chia của mỗi phòng ra ĐÚNG
+///   số nguyên `room_total`, phần dư bằng 0 — không có gì để rải, mỗi phòng
+///   nhận đúng tổng của chính mình, không hơn không kém (đây chính là ranh
+///   giới review Task 15 chỉ ra).
+///
+/// Khi `paid_amount > Σ room_total` (thu vượt CẢ ĐOÀN — lỗi nhập liệu thật):
+/// mọi phần nguyên đều `>= room_total` (chứng minh tương tự chiều ngược lại),
+/// nên hoặc phần nguyên đã vượt tổng của chính phòng đó, hoặc phần dư (luôn
+/// dương trong trường hợp này) rải thêm sẽ đẩy ít nhất một phòng vượt — guard
+/// thu-vượt theo từng phòng ở `group_checkin_tx` (không đổi) vẫn bắt được,
+/// đúng vai trò "lưới đỡ" báo cáo review yêu cầu giữ lại.
+fn allocate_paid_amount_by_room_price(
+    total_paid: MoneyVnd,
+    room_totals: &[(String, MoneyVnd)],
 ) -> std::collections::HashMap<String, MoneyVnd> {
-    let normalized_room_ids = normalized_room_ids(room_ids);
-    allocate_positive_money_evenly(total, normalized_room_ids.len())
+    let mut ordered = room_totals.to_vec();
+    ordered.sort_by(|a, b| a.0.cmp(&b.0));
+
+    let grand_total: i128 = ordered.iter().map(|(_, total)| i128::from(*total)).sum();
+
+    if total_paid <= 0 || grand_total <= 0 {
+        return ordered
+            .into_iter()
+            .map(|(room_id, _)| (room_id, 0))
+            .collect();
+    }
+
+    let total_paid_i128 = i128::from(total_paid);
+    let bases: Vec<MoneyVnd> = ordered
+        .iter()
+        .map(|(_, room_total)| {
+            ((total_paid_i128 * i128::from(*room_total)) / grand_total) as MoneyVnd
+        })
+        .collect();
+
+    let base_sum: MoneyVnd = bases.iter().sum();
+    let leftover = total_paid - base_sum;
+    let remainder_units = allocate_positive_money_evenly(leftover, ordered.len());
+
+    let allocations: std::collections::HashMap<String, MoneyVnd> = ordered
         .into_iter()
-        .zip(normalized_room_ids)
-        .map(|(amount, room_id)| (room_id, amount))
-        .collect()
+        .zip(bases)
+        .zip(remainder_units)
+        .map(|(((room_id, _), base), extra)| (room_id, base + extra))
+        .collect();
+
+    debug_assert_eq!(
+        allocations.values().sum::<MoneyVnd>(),
+        total_paid,
+        "phân bổ theo tỉ lệ phải cộng đúng bằng paid_amount, không lệch một đồng"
+    );
+
+    allocations
 }
 
 fn map_group_checkin_command_error(error: BookingError) -> CommandError {
@@ -371,6 +449,18 @@ pub async fn group_checkin_idempotent(
         .await
 }
 
+/// Giá đã tính cho một phòng ở LƯỢT 1 của `group_checkin_tx` (giá tay hoặc
+/// engine — xem nhánh `match` trong đó). Giữ lại để LƯỢT 2 dùng khi ghi
+/// booking mà không phải gọi lại `calculate_stay_price_tx`, và để phân bổ
+/// `paid_amount` theo tỉ lệ (`allocate_paid_amount_by_room_price`) — muốn
+/// chia theo tỉ lệ thì phải biết tổng của MỌI phòng trước, nên việc TÍNH giá
+/// và việc GHI booking không còn gộp một lượt như trước Task 15's review.
+struct GroupRoomPricing {
+    total_price: MoneyVnd,
+    rate_overridden_at: Option<String>,
+    pricing_snapshot: Option<String>,
+}
+
 async fn group_checkin_tx(
     tx: &mut Transaction<'_, Sqlite>,
     user_id: Option<&str>,
@@ -422,58 +512,49 @@ async fn group_checkin_tx(
     .execute(&mut **tx)
     .await?;
 
-    let paid_allocations_by_room =
-        allocate_positive_money_evenly_by_room(req.paid_amount.unwrap_or(0), &req.room_ids);
-    let mut master_booking_id: Option<String> = None;
+    // Bốn giá trị dưới đây (trạng thái booking, mốc giờ check-in/check-out,
+    // cửa sổ ngày định giá) không phụ thuộc room_id — giống nhau cho MỌI
+    // phòng trong đoàn — nên tính một lần ở đây, dùng chung cho cả hai lượt
+    // bên dưới, thay vì tính lại mỗi vòng lặp.
+    let booking_status = if is_reservation {
+        status::booking::BOOKED
+    } else {
+        status::booking::ACTIVE
+    };
+    let booking_type = if is_reservation {
+        "reservation"
+    } else {
+        "walk-in"
+    };
+    let booking_checkin_at = if is_reservation {
+        format!("{}T14:00:00+07:00", checkin_date)
+    } else {
+        now_rfc3339.clone()
+    };
+    let booking_checkout_at = if is_reservation {
+        format!("{}T12:00:00+07:00", checkout_date)
+    } else {
+        (now + Duration::days(req.nights as i64)).to_rfc3339()
+    };
+    let pricing_start = if is_reservation {
+        checkin_date.as_str()
+    } else {
+        booking_checkin_at.as_str()
+    };
+    let pricing_end = if is_reservation {
+        checkout_date.as_str()
+    } else {
+        booking_checkout_at.as_str()
+    };
 
+    // LƯỢT 1: giá từng phòng — chỉ ĐỌC (`calculate_stay_price_tx` chỉ
+    // SELECT, không ghi gì). Bắt buộc tách khỏi LƯỢT 2 (ghi) bên dưới:
+    // `paid_amount` giờ chia THEO TỈ LỆ tổng tiền từng phòng
+    // (`allocate_paid_amount_by_room_price`, thay cho chia đều theo số lượng
+    // — xem doc-comment hàm đó) — muốn chia theo tỉ lệ thì phải biết tổng của
+    // MỌI phòng trước, không thể vừa tính vừa ghi như một vòng lặp duy nhất.
+    let mut room_pricing: Vec<GroupRoomPricing> = Vec::with_capacity(req.room_ids.len());
     for room_id in &req.room_ids {
-        let paid_for_room = paid_allocations_by_room.get(room_id).copied().unwrap_or(0);
-        let is_master = room_id == &req.master_room_id;
-        let room_guests = req
-            .guests_per_room
-            .get(room_id.as_str())
-            .map(Vec::as_slice)
-            .unwrap_or(&[]);
-        let guest_manifest = create_group_guest_manifest(
-            tx,
-            room_guests,
-            &format!("Khách đoàn {} - {}", req.group_name, room_id),
-            &now_rfc3339,
-        )
-        .await?;
-
-        let booking_id = uuid::Uuid::new_v4().to_string();
-        let booking_status = if is_reservation {
-            status::booking::BOOKED
-        } else {
-            status::booking::ACTIVE
-        };
-        let booking_type = if is_reservation {
-            "reservation"
-        } else {
-            "walk-in"
-        };
-        let booking_checkin_at = if is_reservation {
-            format!("{}T14:00:00+07:00", checkin_date)
-        } else {
-            now_rfc3339.clone()
-        };
-        let booking_checkout_at = if is_reservation {
-            format!("{}T12:00:00+07:00", checkout_date)
-        } else {
-            (now + Duration::days(req.nights as i64)).to_rfc3339()
-        };
-        let pricing_start = if is_reservation {
-            checkin_date.as_str()
-        } else {
-            booking_checkin_at.as_str()
-        };
-        let pricing_end = if is_reservation {
-            checkout_date.as_str()
-        } else {
-            booking_checkout_at.as_str()
-        };
-
         // Giá tay đè giá engine theo TỪNG phòng, và đè PHẲNG: tổng tiền là
         // `rate × nights`, không cộng thêm dòng nào engine tính — cùng luật
         // `check_in_tx` (Task 13) / `create_reservation_tx` (Task 14). Đoàn
@@ -538,6 +619,56 @@ async fn group_checkin_tx(
             }
         };
 
+        room_pricing.push(GroupRoomPricing {
+            total_price,
+            rate_overridden_at,
+            pricing_snapshot,
+        });
+    }
+
+    // `paid_amount` chia THEO TỈ LỆ tổng tiền từng phòng vừa tính ở LƯỢT 1 —
+    // xem `allocate_paid_amount_by_room_price` để biết vì sao (chia đều theo
+    // số lượng có thể cấp một phòng nhiều hơn chính tổng tiền phòng đó) và
+    // quy tắc làm tròn/rải dư.
+    let room_totals: Vec<(String, MoneyVnd)> = req
+        .room_ids
+        .iter()
+        .cloned()
+        .zip(room_pricing.iter().map(|pricing| pricing.total_price))
+        .collect();
+    let paid_allocations_by_room =
+        allocate_paid_amount_by_room_price(req.paid_amount.unwrap_or(0), &room_totals);
+
+    let mut master_booking_id: Option<String> = None;
+
+    // LƯỢT 2: ghi. `room_pricing` cùng độ dài, cùng thứ tự với `req.room_ids`
+    // (mỗi vòng lặp ở LƯỢT 1 trên đẩy đúng một phần tử, theo đúng thứ tự
+    // duyệt) nên zip theo vị trí ở đây không thể lệch phòng; dùng lại giá đã
+    // tính, không gọi lại `calculate_stay_price_tx`.
+    for (room_id, room_price) in req.room_ids.iter().zip(room_pricing) {
+        let GroupRoomPricing {
+            total_price,
+            rate_overridden_at,
+            pricing_snapshot,
+        } = room_price;
+
+        let paid_for_room = paid_allocations_by_room.get(room_id).copied().unwrap_or(0);
+        let is_master = room_id == &req.master_room_id;
+        let room_guests = req
+            .guests_per_room
+            .get(room_id.as_str())
+            .map(Vec::as_slice)
+            .unwrap_or(&[]);
+        let guest_manifest = create_group_guest_manifest(
+            tx,
+            room_guests,
+            &format!("Khách đoàn {} - {}", req.group_name, room_id),
+            &now_rfc3339,
+        )
+        .await?;
+
+        let booking_id = uuid::Uuid::new_v4().to_string();
+
         // Thu vượt tổng tiền CỦA PHÒNG NÀY dẫn tới đúng lỗ hổng `check_in_tx`/
         // `create_reservation_tx` đã vá: một booking có `paid_amount >
         // total_price` không có lối thoát nếu sau này bị `check_out_tx` từ
@@ -550,6 +681,12 @@ async fn group_checkin_tx(
         // toàn bộ `group_checkin_tx` chạy trong một transaction nên các phòng
         // đã ghi trước đó trong vòng lặp cũng được rollback theo khi hàm này
         // trả lỗi.
+        //
+        // Với `allocate_paid_amount_by_room_price` chia theo tỉ lệ, nhánh này
+        // KHÔNG THỂ còn xảy ra khi `paid_amount <= Σ total_price` (chứng minh
+        // trong doc-comment của hàm đó) — chỉ còn là LƯỚI ĐỠ cho một
+        // `paid_amount` thu vượt tổng CẢ ĐOÀN, đúng vai trò báo cáo review
+        // yêu cầu giữ lại.
         if paid_for_room > total_price {
             return Err(BookingError::validation(format!(
                 "Khách trả {paid_for_room}đ cho phòng {room_id}, cao hơn tổng tiền {total_price}đ — sửa lại giá hoặc số tiền thu"
@@ -1577,6 +1714,61 @@ mod tests {
 
         assert_eq!(allocation, vec![33_334, 33_333, 33_333]);
         assert_eq!(allocation.iter().sum::<MoneyVnd>(), 100_000);
+    }
+
+    /// Ranh giới chính review Task 15 chỉ ra: thu ĐỦ (paid_amount = tổng cả
+    /// đoàn) trên hai phòng CHÊNH giá nhau phải cấp cho mỗi phòng ĐÚNG BẰNG
+    /// tổng của chính nó — không hơn, không kém. Số liệu lấy nguyên từ ví dụ
+    /// trong báo cáo review (G-R1 override 400.000×2, G-R2 engine 500.000×2).
+    #[test]
+    fn allocate_paid_amount_by_room_price_gives_each_room_exactly_its_own_total_when_paid_in_full()
+    {
+        let room_totals = vec![
+            ("G-R1".to_string(), 800_000),
+            ("G-R2".to_string(), 1_000_000),
+        ];
+
+        let allocations = allocate_paid_amount_by_room_price(1_800_000, &room_totals);
+
+        assert_eq!(allocations.get("G-R1").copied(), Some(800_000));
+        assert_eq!(allocations.get("G-R2").copied(), Some(1_000_000));
+    }
+
+    /// Trả một phần, không chia hết theo tỉ lệ (1.000.000 × 800.000/1.800.000
+    /// = 444.444,44...) — ghim quy tắc làm tròn XUỐNG + rải dư 1 đồng theo
+    /// `room_id` đã sắp, và ghim tổng cộng lại đúng bằng `paid_amount`, không
+    /// lệch một đồng dù làm tròn.
+    #[test]
+    fn allocate_paid_amount_by_room_price_sums_exactly_when_not_evenly_divisible() {
+        let room_totals = vec![
+            ("G-R1".to_string(), 800_000),
+            ("G-R2".to_string(), 1_000_000),
+        ];
+
+        let allocations = allocate_paid_amount_by_room_price(1_000_000, &room_totals);
+
+        assert_eq!(allocations.get("G-R1").copied(), Some(444_445));
+        assert_eq!(allocations.get("G-R2").copied(), Some(555_555));
+        assert_eq!(allocations.values().sum::<MoneyVnd>(), 1_000_000);
+    }
+
+    /// Mọi phòng cùng giá phải cho kết quả giống hệt `allocate_positive_money_evenly`
+    /// — cùng số phòng, cùng `paid_amount`, cùng quy tắc rải dư theo thứ tự đã
+    /// sắp (ở đây "A" < "B" < "C" nên đã đúng thứ tự `room_ids` luôn).
+    #[test]
+    fn allocate_paid_amount_by_room_price_matches_even_split_when_prices_equal() {
+        let room_totals = vec![
+            ("A".to_string(), 500_000),
+            ("B".to_string(), 500_000),
+            ("C".to_string(), 500_000),
+        ];
+
+        let allocations = allocate_paid_amount_by_room_price(100_000, &room_totals);
+        let even_split = allocate_positive_money_evenly(100_000, 3);
+
+        assert_eq!(allocations.get("A").copied(), Some(even_split[0]));
+        assert_eq!(allocations.get("B").copied(), Some(even_split[1]));
+        assert_eq!(allocations.get("C").copied(), Some(even_split[2]));
     }
 
     #[test]
