@@ -81,6 +81,9 @@ pub async fn test_pool() -> Pool<Sqlite> {
             pricing_snapshot TEXT,
             guests INTEGER,
             rate_overridden_at TEXT,
+            voided_at TEXT,
+            voided_by TEXT,
+            void_reason TEXT,
             created_at TEXT NOT NULL
         )",
     )
