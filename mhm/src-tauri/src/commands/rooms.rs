@@ -843,6 +843,7 @@ mod tests {
             notes: Some("Late arrival".to_string()),
             paid_amount: Some(500_000),
             pricing_type: None,
+            rate_override_per_night: None,
         });
 
         assert_eq!(

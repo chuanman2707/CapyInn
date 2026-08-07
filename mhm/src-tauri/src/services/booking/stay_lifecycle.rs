@@ -154,6 +154,10 @@ fn build_check_in_hash_payload(req: &CheckInRequest) -> serde_json::Value {
         "notes": req.notes.clone(),
         "paid_amount": req.paid_amount.unwrap_or(0),
         "pricing_type": req.pricing_type.clone().unwrap_or_else(|| "nightly".to_string()),
+        // Ảnh hưởng trực tiếp tới `total_price`, giống mọi trường khác ở trên —
+        // thiếu nó thì đổi giá tay dưới cùng một idempotency key sẽ bị lặp lại
+        // kết quả CŨ trong im lặng thay vì bị báo `CONFLICT_IDEMPOTENCY_HASH_MISMATCH`.
+        "rate_override_per_night": req.rate_override_per_night,
     })
 }
 
@@ -348,16 +352,63 @@ async fn check_in_tx(
         )));
     }
 
-    let pricing = calculate_stay_price_tx(
-        tx,
-        &req.room_id,
-        &check_in_at,
-        &expected_checkout,
-        &pricing_type,
-        None,
-    )
-    .await?;
-    let total_price = pricing.total;
+    // Giá tay đè giá engine, và đè PHẲNG: tổng tiền là `rate × nights`, không
+    // cộng thêm phụ thu người thứ N hay bất cứ dòng nào engine tính — lễ tân
+    // đã mặc cả ra một con số chốt, không phải một cấu phần để engine tính
+    // tiếp. `check_in_tx` gốc cũng gọi engine với `guests: None` (không thu
+    // phụ thu thêm người), nên hành vi không-override giữ nguyên y hệt cũ.
+    let (total_price, rate_overridden_at, pricing_snapshot) = match req.rate_override_per_night {
+        Some(rate) => {
+            if rate <= 0 || rate > MAX_RATE_PER_NIGHT_VND {
+                return Err(BookingError::validation(
+                    "Giá mỗi đêm không hợp lệ".to_string(),
+                ));
+            }
+            let total =
+                crate::pricing::checked_mul_money(rate, i64::from(req.nights), "total_price")
+                    .map_err(BookingError::validation)?;
+
+            // Giá engine chỉ tính để LƯU LẠI trong pricing_snapshot cho chủ
+            // khách sạn tra cứu sau này (đã giảm giá cho ai bao nhiêu), không
+            // dùng làm tiền thật — nên lỗi ở bước này không được làm hỏng cả
+            // lượt nhận phòng.
+            let engine_total = calculate_stay_price_tx(
+                tx,
+                &req.room_id,
+                &check_in_at,
+                &expected_checkout,
+                &pricing_type,
+                None,
+            )
+            .await
+            .map(|pricing| pricing.total)
+            .unwrap_or(0);
+
+            let snapshot = merge_pricing_snapshot(
+                None,
+                "manual_rate",
+                json!({
+                    "rate_per_night": rate,
+                    "engine_total": engine_total,
+                    "set_at": check_in_at.clone(),
+                }),
+            );
+
+            (total, Some(check_in_at.clone()), Some(snapshot))
+        }
+        None => {
+            let pricing = calculate_stay_price_tx(
+                tx,
+                &req.room_id,
+                &check_in_at,
+                &expected_checkout,
+                &pricing_type,
+                None,
+            )
+            .await?;
+            (pricing.total, None, None)
+        }
+    };
 
     let booking_id = uuid::Uuid::new_v4().to_string();
     let guest_manifest = create_guest_manifest(tx, &req.guests, &check_in_at)
@@ -368,8 +419,9 @@ async fn check_in_tx(
         "INSERT INTO bookings (
             id, room_id, primary_guest_id, check_in_at, expected_checkout,
             actual_checkout, nights, total_price, paid_amount, status, source,
-            notes, created_by, booking_type, pricing_type, pricing_snapshot, created_at
-        ) VALUES (?, ?, ?, ?, ?, NULL, ?, ?, 0, ?, ?, ?, ?, 'walk-in', ?, NULL, ?)",
+            notes, created_by, booking_type, pricing_type, pricing_snapshot,
+            rate_overridden_at, created_at
+        ) VALUES (?, ?, ?, ?, ?, NULL, ?, ?, 0, ?, ?, ?, ?, 'walk-in', ?, ?, ?, ?)",
     )
     .bind(&booking_id)
     .bind(&req.room_id)
@@ -383,6 +435,8 @@ async fn check_in_tx(
     .bind(&req.notes)
     .bind(user_id)
     .bind(&pricing_type)
+    .bind(&pricing_snapshot)
+    .bind(&rate_overridden_at)
     .bind(&check_in_at)
     .execute(&mut **tx)
     .await
@@ -2081,6 +2135,20 @@ fn validate_check_in_request(req: &CheckInRequest) -> BookingResult<()> {
     }
     if let Some(paid_amount) = req.paid_amount {
         validate_non_negative_booking_money(paid_amount, "paid_amount")?;
+
+        // Chỉ kiểm được khi giá do người dùng gõ — giá engine chưa biết ở đây.
+        // `check_out_tx` từ chối thẳng booking có `already_paid > final_total`,
+        // nên không chặn ở đây là tạo ra một lượt không bao giờ trả phòng được.
+        if let Some(rate) = req.rate_override_per_night {
+            let total =
+                crate::pricing::checked_mul_money(rate, i64::from(req.nights), "total_price")
+                    .map_err(BookingError::validation)?;
+            if paid_amount > total {
+                return Err(BookingError::validation(format!(
+                    "Khách trả {paid_amount}đ, cao hơn tổng tiền {total}đ — sửa lại giá hoặc số tiền thu"
+                )));
+            }
+        }
     }
 
     Ok(())

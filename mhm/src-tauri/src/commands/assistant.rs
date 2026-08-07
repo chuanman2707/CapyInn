@@ -680,6 +680,7 @@ mod tests {
             notes: None,
             paid_amount: None,
             pricing_type: None,
+            rate_override_per_night: None,
         };
         let preview = serde_json::json!({ "total": 500000 });
         // Khoảng ngày y như đường thật: `build_check_in_draft` truyền
@@ -1165,6 +1166,7 @@ mod tests {
              - notes: —\n\
              - paid_amount: 0 ₫\n\
              - pricing_type: nightly\n\
+             - rate_override_per_night: —\n\
              - room_id: R201\n\
              - source: —\n\
              - total: 500.000 ₫\n\
