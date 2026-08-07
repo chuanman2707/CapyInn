@@ -28,7 +28,7 @@ const basePreview: VoidBookingPreview = {
   nights_recognized: 1,
   nights_total: 1,
   is_audited: false,
-  room_was_reused: false,
+  room_status_unchanged: false,
   is_group_booking: false,
 };
 
@@ -60,14 +60,24 @@ describe("VoidBookingDialog", () => {
     });
   });
 
-  it("báo phòng giữ nguyên khi phòng đã có khách mới", async () => {
-    invokeCommand.mockResolvedValueOnce({ ...basePreview, room_was_reused: true });
+  // `room_status_unchanged` chỉ nói "UPDATE rooms sẽ không khớp dòng nào" — hệt
+  // nhau dù backend tính ra true vì phòng đang `occupied`, `booked`, hay (ca
+  // dưới đây) đã `vacant` sẵn (housekeeping dọn xong trước khi ai đó phát hiện
+  // lượt này nhập sai). Dialog không phân biệt được LÝ DO đằng sau cờ này, nên
+  // câu chữ không được suy đoán ra một lý do cụ thể — nhất là không được nói
+  // "có khách khác" cho một phòng đang trống, và cũng không được nói phòng "về
+  // Trống" (nó đã trống rồi, xoá lượt không đổi gì cả).
+  it("phòng đã Trống (dọn xong trước khi xoá) vẫn báo giữ nguyên trạng thái, không suy đoán có khách khác", async () => {
+    invokeCommand.mockResolvedValueOnce({ ...basePreview, room_status_unchanged: true });
 
     render(<VoidBookingDialog bookingId="B-1" onClose={vi.fn()} onVoided={vi.fn()} />);
 
     await waitFor(() => {
-      expect(screen.getByTestId("void-room-reused-note")).toBeTruthy();
+      expect(screen.getByTestId("void-room-status-unchanged-note")).toBeTruthy();
     });
+    const noteText = screen.getByTestId("void-room-status-unchanged-note").textContent ?? "";
+    expect(noteText).not.toContain("khách khác");
+    expect(noteText).not.toContain("Trống");
   });
 
   it("không hiện dòng tiền nào khi lượt đặt trước không cọc, không doanh thu", async () => {
@@ -109,8 +119,8 @@ describe("VoidBookingDialog", () => {
   //
   // `void_booking_tx` (`services/booking/void_lifecycle.rs`) chỉ UPDATE rooms
   // cho status `active`/`checked_out`; nhánh `booked` là `_ => {}` — không đụng
-  // bảng rooms. `room_was_reused` cũng chỉ được backend tính cho `checked_out`
-  // (luôn false với `booked`), nên `!room_was_reused` một mình không đủ để
+  // bảng rooms. `room_status_unchanged` cũng chỉ được backend tính cho `checked_out`
+  // (luôn false với `booked`), nên `!room_status_unchanged` một mình không đủ để
   // quyết định có nên nói "phòng sẽ về trống" hay không.
 
   it("không báo phòng về trống cho lượt chỉ mới đặt trước — void không đụng tới bảng rooms", async () => {
@@ -119,7 +129,7 @@ describe("VoidBookingDialog", () => {
       previous_status: "booked",
       revenue_impact: 0,
       deposit_amount: 0,
-      room_was_reused: false,
+      room_status_unchanged: false,
     });
 
     render(<VoidBookingDialog bookingId="B-1" onClose={vi.fn()} onVoided={vi.fn()} />);
@@ -143,17 +153,17 @@ describe("VoidBookingDialog", () => {
     // riêng của nó khi BẬT) đều phải vắng mặt ở đây, khi TẮT.
     expect(screen.queryByTestId("void-group-booking-warning")).toBeNull();
     expect(screen.queryByTestId("void-audited-warning")).toBeNull();
-    expect(screen.queryByTestId("void-room-reused-note")).toBeNull();
+    expect(screen.queryByTestId("void-room-status-unchanged-note")).toBeNull();
     expect(screen.queryByTestId("void-deposit-note")).toBeNull();
   });
 
-  it("phòng đã có khách mới thì không nói thêm 'sẽ về trống' — hai dòng nói hai điều trái nhau", async () => {
-    invokeCommand.mockResolvedValueOnce({ ...basePreview, room_was_reused: true });
+  it("khi cờ giữ-nguyên-trạng-thái bật thì không nói thêm 'sẽ về trống' — hai dòng nói hai điều trái nhau", async () => {
+    invokeCommand.mockResolvedValueOnce({ ...basePreview, room_status_unchanged: true });
 
     render(<VoidBookingDialog bookingId="B-1" onClose={vi.fn()} onVoided={vi.fn()} />);
 
     await waitFor(() => {
-      expect(screen.getByTestId("void-room-reused-note")).toBeTruthy();
+      expect(screen.getByTestId("void-room-status-unchanged-note")).toBeTruthy();
     });
     expect(screen.queryByTestId("void-room-vacant-note")).toBeNull();
   });

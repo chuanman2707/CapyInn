@@ -68,14 +68,14 @@ export default function VoidBookingDialog({ bookingId, onClose, onVoided }: Void
 
     // `void_booking_tx` (services/booking/void_lifecycle.rs) chỉ UPDATE bảng
     // rooms cho status active/checked_out — nhánh booked là `_ => {}`, không
-    // đụng gì tới phòng. `room_was_reused` cũng chỉ được backend tính cho
+    // đụng gì tới phòng. `room_status_unchanged` cũng chỉ được backend tính cho
     // checked_out (luôn false với booked/active), nên không thể chỉ nhìn
-    // `!room_was_reused` mà kết luận phòng "sẽ về trống": với một lượt mới đặt
-    // trước, câu đó bịa ra một hiệu ứng backend không hề làm.
+    // `!room_status_unchanged` mà kết luận phòng "sẽ về trống": với một lượt mới
+    // đặt trước, câu đó bịa ra một hiệu ứng backend không hề làm.
     const roomWillBecomeVacant =
         preview !== null &&
         (preview.previous_status === "active" || preview.previous_status === "checked_out") &&
-        !preview.room_was_reused;
+        !preview.room_status_unchanged;
 
     return (
         <div className="fixed inset-0 z-[60] flex items-center justify-center bg-black/40" onClick={onClose}>
@@ -130,10 +130,10 @@ export default function VoidBookingDialog({ bookingId, onClose, onVoided }: Void
                                     {fmtDateOnly(preview.revenue_date)} sẽ thay đổi
                                 </li>
                             )}
-                            {preview.room_was_reused && (
-                                <li data-testid="void-room-reused-note" className="text-slate-500">
-                                    ℹ️ Phòng {preview.room_id} hiện đang có khách khác — trạng thái
-                                    phòng giữ nguyên
+                            {preview.room_status_unchanged && (
+                                <li data-testid="void-room-status-unchanged-note" className="text-slate-500">
+                                    ℹ️ Phòng {preview.room_id} — xóa lượt này không làm thay đổi
+                                    trạng thái phòng
                                 </li>
                             )}
                         </ul>
