@@ -158,3 +158,86 @@ async fn voiding_a_booking_in_a_group_is_rejected_and_changes_nothing() {
 
     tx.rollback().await.expect("rolls back");
 }
+
+/// Xoá một lượt đang ở: phòng phải về trống ngay, nếu không thì phòng đó bị
+/// khoá cứng — nhìn thì "đang có khách" mà thực ra không có ai.
+#[tokio::test]
+async fn voiding_an_active_stay_frees_the_room() {
+    let pool = test_pool().await;
+    seed_active_booking_with_room(&pool, "B-3", "R-3")
+        .await
+        .expect("seeds active booking");
+
+    let occupied: String = sqlx::query_scalar("SELECT status FROM rooms WHERE id = 'R-3'")
+        .fetch_one(&pool)
+        .await
+        .expect("reads room status");
+    assert_eq!(
+        occupied, "occupied",
+        "fixture phải bắt đầu từ phòng có khách"
+    );
+
+    let req = VoidBookingRequest {
+        booking_id: "B-3".to_string(),
+        reason: Some("Bấm nhầm".to_string()),
+    };
+
+    let mut tx = begin_tx(&pool).await.expect("begins tx");
+    let response = void_lifecycle::void_booking_tx(&mut tx, &req, "admin-1", Local::now(), "R-3")
+        .await
+        .expect("voids active stay");
+    tx.commit().await.expect("commits");
+
+    assert_eq!(response.previous_status, "active");
+
+    let room_status: String = sqlx::query_scalar("SELECT status FROM rooms WHERE id = 'R-3'")
+        .fetch_one(&pool)
+        .await
+        .expect("reads room status after");
+    assert_eq!(room_status, "vacant");
+
+    let calendar_rows: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM room_calendar WHERE booking_id = 'B-3'")
+            .fetch_one(&pool)
+            .await
+            .expect("counts calendar rows");
+    assert_eq!(calendar_rows, 0);
+}
+
+/// Dòng tiền không bị đụng tới — append-only. Lượt biến mất khỏi báo cáo nhờ
+/// bộ lọc trạng thái, không nhờ việc xoá dữ liệu.
+#[tokio::test]
+async fn voiding_never_deletes_money_rows() {
+    let pool = test_pool().await;
+    seed_active_booking_with_room(&pool, "B-4", "R-4")
+        .await
+        .expect("seeds active booking");
+    seed_transaction(
+        &pool,
+        "B-4",
+        250_000,
+        "charge",
+        "Tiền phòng",
+        "2026-04-15T10:00:00+07:00",
+    )
+    .await
+    .expect("seeds charge");
+
+    let req = VoidBookingRequest {
+        booking_id: "B-4".to_string(),
+        reason: None,
+    };
+
+    let mut tx = begin_tx(&pool).await.expect("begins tx");
+    void_lifecycle::void_booking_tx(&mut tx, &req, "admin-1", Local::now(), "R-4")
+        .await
+        .expect("voids stay");
+    tx.commit().await.expect("commits");
+
+    let rows: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM transactions WHERE booking_id = 'B-4'")
+            .fetch_one(&pool)
+            .await
+            .expect("counts transactions");
+    assert_eq!(rows, 1, "dòng tiền phải còn nguyên");
+}

@@ -29,13 +29,12 @@ use super::{
 #[allow(dead_code)]
 fn ensure_voidable(current_status: &str) -> BookingResult<()> {
     match current_status {
-        // Chỉ nhận `booked` — thân `void_booking_tx` hiện chỉ biết dọn cho
-        // trạng thái này (xoá room_calendar, không đụng rooms/housekeeping/
-        // invoice). Task 4 sẽ thêm `| status::booking::ACTIVE` cùng bước trả
-        // phòng, Task 5 thêm `| status::booking::CHECKED_OUT` cùng bước xử lý
-        // hoá đơn — mỗi trạng thái chỉ được nhận sau khi thân hàm biết dọn
-        // theo nó. Đừng nới nhánh này ra trước.
-        status::booking::BOOKED => Ok(()),
+        // Nhận `booked` và `active` — thân `void_booking_tx` biết dọn cho cả
+        // hai (xoá room_calendar cho cả hai, trả phòng về vacant thêm cho
+        // active). Task 5 sẽ thêm `| status::booking::CHECKED_OUT` cùng bước
+        // xử lý hoá đơn — mỗi trạng thái chỉ được nhận sau khi thân hàm biết
+        // dọn theo nó. Đừng nới nhánh này ra trước.
+        status::booking::BOOKED | status::booking::ACTIVE => Ok(()),
         status::booking::VOIDED => Err(invalid_state_transition(
             "Lượt này đã được xóa rồi — vui lòng tải lại trang",
         )),
@@ -108,6 +107,18 @@ pub async fn void_booking_tx(
         .await
         .map_err(BookingError::from)
         .map_err(mark_write_db_error)?;
+
+    if previous_status == status::booking::ACTIVE {
+        let result = sqlx::query("UPDATE rooms SET status = ? WHERE id = ? AND status = ?")
+            .bind(status::room::VACANT)
+            .bind(&room_id)
+            .bind(status::room::OCCUPIED)
+            .execute(&mut **tx)
+            .await
+            .map_err(BookingError::from)
+            .map_err(mark_write_db_error)?;
+        ensure_one_row_affected(result, format!("room {room_id} is no longer occupied"))?;
+    }
 
     Ok(VoidBookingResponse {
         ok: true,
