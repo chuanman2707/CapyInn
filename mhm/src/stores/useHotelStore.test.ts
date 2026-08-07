@@ -185,6 +185,59 @@ describe("useHotelStore monitoring context", () => {
     expect(invoke).not.toHaveBeenCalledWith("extend_stay", expect.anything());
   });
 
+  // `void_booking` (`src-tauri/src/commands/bookings.rs`) nhận `req:
+  // VoidBookingRequest` — struct đó không có `#[serde(rename_all = ...)]`, nên
+  // field JSON phải giữ snake_case (`booking_id`, `reason`), không phải
+  // camelCase như `bookingId` ở lệnh `extend_stay` phía trên. Sai hình dạng
+  // này chỉ vỡ lúc chạy thật, không vỡ lúc build — test này khoá đúng hình
+  // dạng để không cần đợi tới lúc chạy thật mới biết.
+  it("routes voidBooking through invokeWriteCommand with the req wrapper and monitoring context", async () => {
+    await useHotelStore.getState().voidBooking("booking-void-1", "Bấm nhầm");
+
+    expect(invokeWriteCommand).toHaveBeenCalledWith(
+      "void_booking",
+      { req: { booking_id: "booking-void-1", reason: "Bấm nhầm" } },
+      {
+        correlationId: "COR-1A2B3C4D",
+        monitoringContext: {
+          operation: "void_booking",
+        },
+      },
+    );
+    expect(invoke).not.toHaveBeenCalledWith("void_booking", expect.anything());
+  });
+
+  it("passes a null voidBooking reason through unchanged", async () => {
+    await useHotelStore.getState().voidBooking("booking-void-2", null);
+
+    expect(invokeWriteCommand).toHaveBeenCalledWith(
+      "void_booking",
+      { req: { booking_id: "booking-void-2", reason: null } },
+      expect.anything(),
+    );
+  });
+
+  it("refreshes rooms, stats, and the dashboard version after voidBooking succeeds", async () => {
+    await useHotelStore.getState().voidBooking("booking-void-3", null);
+
+    expect(invoke).toHaveBeenCalledWith("get_rooms");
+    expect(invoke).toHaveBeenCalledWith("get_dashboard_stats");
+    expect(useHotelStore.getState().dashboardRefreshVersion).toBe(1);
+  });
+
+  it("rethrows and leaves the dashboard version untouched when voidBooking fails", async () => {
+    invokeWriteCommand.mockRejectedValueOnce({
+      code: "CONFLICT_INVALID_STATE_TRANSITION",
+      message: "Lượt vừa thay đổi bởi thao tác khác — vui lòng tải lại trang",
+      kind: "user",
+      support_id: null,
+    });
+
+    await expect(useHotelStore.getState().voidBooking("booking-void-4", null)).rejects.toBeTruthy();
+
+    expect(useHotelStore.getState().dashboardRefreshVersion).toBe(0);
+  });
+
   it("passes an idempotency key for groupCheckIn", async () => {
     const req = {
       group_name: "Retry Group",
