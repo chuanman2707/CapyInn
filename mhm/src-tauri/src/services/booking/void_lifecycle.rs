@@ -29,7 +29,13 @@ use super::{
 #[allow(dead_code)]
 fn ensure_voidable(current_status: &str) -> BookingResult<()> {
     match current_status {
-        status::booking::BOOKED | status::booking::ACTIVE | status::booking::CHECKED_OUT => Ok(()),
+        // Chỉ nhận `booked` — thân `void_booking_tx` hiện chỉ biết dọn cho
+        // trạng thái này (xoá room_calendar, không đụng rooms/housekeeping/
+        // invoice). Task 4 sẽ thêm `| status::booking::ACTIVE` cùng bước trả
+        // phòng, Task 5 thêm `| status::booking::CHECKED_OUT` cùng bước xử lý
+        // hoá đơn — mỗi trạng thái chỉ được nhận sau khi thân hàm biết dọn
+        // theo nó. Đừng nới nhánh này ra trước.
+        status::booking::BOOKED => Ok(()),
         status::booking::VOIDED => Err(invalid_state_transition(
             "Lượt này đã được xóa rồi — vui lòng tải lại trang",
         )),
@@ -69,7 +75,7 @@ pub async fn void_booking_tx(
 
     if locked_room_id != room_id {
         return Err(invalid_state_transition(format!(
-            "booking {} changed rooms before void",
+            "booking {} đã đổi phòng trước khi xóa — vui lòng tải lại trang",
             req.booking_id
         )));
     }
