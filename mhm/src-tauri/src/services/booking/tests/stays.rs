@@ -313,6 +313,7 @@ async fn check_in_idempotent_duplicate_in_flight_returns_conflict() {
         "notes": "test check-in",
         "paid_amount": 0,
         "pricing_type": "nightly",
+        "rate_override_per_night": null,
     });
     seed_live_in_progress_command(&pool, &ctx.command_name, &ctx.idempotency_key, &payload).await;
 

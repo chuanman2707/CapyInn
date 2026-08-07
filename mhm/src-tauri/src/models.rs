@@ -205,6 +205,10 @@ pub struct CheckInRequest {
     pub notes: Option<String>,
     pub paid_amount: Option<MoneyVnd>,
     pub pricing_type: Option<String>,
+    /// Giá mỗi đêm do lễ tân gõ tay, đè giá engine. `None` ⇒ engine tính như cũ.
+    /// Kiểu `Option` để mọi nơi dựng `CheckInRequest` hôm nay chỉ cần thêm
+    /// `None` là biên dịch lại được, không phải đổi hành vi.
+    pub rate_override_per_night: Option<MoneyVnd>,
 }
 
 /// Ghi bù một lượt khách đã ở nhưng chưa được nhập máy.

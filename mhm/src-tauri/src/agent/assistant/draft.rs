@@ -314,6 +314,16 @@ pub fn build_check_in_display(
             .clone()
             .unwrap_or_else(|| "nightly".to_string()),
     );
+    // Trợ lý luôn gửi `None` ở trường này (xem `build_check_in_draft`), nên
+    // "—" mới là giá trị thật sẽ hiện ra. Không dùng "0 ₫" như `paid_amount`:
+    // `None` ở đây nghĩa là "không đè giá", không phải "đè giá bằng 0".
+    display.insert(
+        "rate_override_per_night".to_string(),
+        payload
+            .rate_override_per_night
+            .map(format_vnd)
+            .unwrap_or_else(|| "—".to_string()),
+    );
     display.insert(
         "total".to_string(),
         preview
@@ -668,6 +678,10 @@ pub async fn build_check_in_draft(
             .map(str::to_string),
         paid_amount,
         pricing_type: Some(pricing_type),
+        // Trợ lý không tự đặt giá tay: đó là việc lễ tân làm ở quầy khi mặc cả
+        // với khách, không phải việc một mô hình ngôn ngữ quyết định thay. Thẻ
+        // này vẫn đi qua đường engine như cũ.
+        rate_override_per_night: None,
     };
 
     let warnings =
@@ -1702,6 +1716,9 @@ mod tests {
             notes: Some("khách quen".to_string()),
             paid_amount: Some(500_000),
             pricing_type: Some("nightly".to_string()),
+            // Trợ lý không bao giờ tự đặt giá tay (xem `build_check_in_draft`),
+            // nên `None` ở đây mới đúng hình dạng payload thật đi qua đường này.
+            rate_override_per_night: None,
         }
     }
 
