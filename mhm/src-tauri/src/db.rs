@@ -184,7 +184,17 @@ async fn ensure_setting_default(
 /// ngay trước khi merge. Lúc chốt số vẫn còn nhánh anh em đang sống cũng ở 26,
 /// nên hoàn toàn có thể một nhánh khác chiếm mất 27 trước, và va chạm đó im
 /// lặng: canary chạy trên DB rỗng nên vẫn xanh, chỉ máy khách sạn mới chết.
-pub(crate) const LATEST_SCHEMA_VERSION: i32 = 27;
+///
+/// 28 là `migrate_v28_booking_void` (nhánh `feat/void-booking-and-manual-rate`,
+/// task 1 — dấu vết xoá một lượt nhập sai trên booking). Khảo sát lúc chốt số
+/// ngày 2026-08-07: mọi ref đều ở 27 và DB thật của khách sạn cũng 27. Đó là
+/// ảnh chụp tại thời điểm đó, KHÔNG phải giấy thông hành — người merge nhánh
+/// này PHẢI chạy lại khảo sát ngay trước khi merge. Lúc chốt số vẫn còn nhánh
+/// anh em đang sống cũng ở 27 (ví dụ `feat/assistant-rail`,
+/// `feat/assistant-stay-dates`), nên hoàn toàn có thể một nhánh khác chiếm mất
+/// 28 trước, và va chạm đó im lặng: canary chạy trên DB rỗng nên vẫn xanh, chỉ
+/// máy khách sạn mới chết.
+pub(crate) const LATEST_SCHEMA_VERSION: i32 = 28;
 
 async fn get_schema_version(pool: &Pool<Sqlite>) -> Result<i32, sqlx::Error> {
     sqlx::query(
@@ -380,6 +390,13 @@ pub(crate) async fn run_migrations(pool: &Pool<Sqlite>) -> Result<(), sqlx::Erro
     // mình, nên chạy 27 trước 26 sẽ kéo phiên bản tụt lại về 26.
     if current < 27 {
         core_extensions::migrate_v27_assistant_conversations(pool).await?;
+    }
+
+    // -- V28: dấu vết xoá lượt nhập sai trên booking --
+    // Phải đứng SAU gate V27: mỗi migration tự `set_schema_version` số của
+    // mình, nên chạy 28 trước 27 sẽ kéo phiên bản tụt lại về 27.
+    if current < 28 {
+        core_extensions::migrate_v28_booking_void(pool).await?;
     }
     Ok(())
 }
@@ -940,7 +957,7 @@ mod tests {
             .await
             .expect("reads final schema version");
 
-        assert_eq!(version, 27);
+        assert_eq!(version, 28);
 
         assert_table_group_exists(&pool, "PMS core", PMS_CORE_TABLES).await;
         assert_table_group_exists(&pool, "command safety", COMMAND_SAFETY_TABLES).await;
@@ -961,7 +978,7 @@ mod tests {
             .expect("reads version")
             .get("version");
 
-        assert_eq!(version, 27);
+        assert_eq!(version, 28);
         assert_money_columns_are_integer(&pool).await;
     }
 
@@ -1249,7 +1266,7 @@ mod tests {
             .expect("reads final schema version")
             .get("version");
 
-        assert_eq!(version, 27);
+        assert_eq!(version, 28);
     }
 
     #[tokio::test]
@@ -1316,7 +1333,7 @@ mod tests {
             .expect("reads final schema version")
             .get("version");
 
-        assert_eq!(version, 27);
+        assert_eq!(version, 28);
     }
 
     #[tokio::test]
@@ -1396,7 +1413,7 @@ mod tests {
         );
 
         let version = get_schema_version(&pool).await.expect("schema version");
-        assert_eq!(version, 27);
+        assert_eq!(version, 28);
     }
 
     #[tokio::test]
@@ -1436,7 +1453,7 @@ mod tests {
 
         assert_outbox_shape(&pool).await;
         let version = get_schema_version(&pool).await.expect("schema version");
-        assert_eq!(version, 27);
+        assert_eq!(version, 28);
     }
 
     #[tokio::test]
@@ -1454,7 +1471,7 @@ mod tests {
 
         assert_outbox_shape(&pool).await;
         let version = get_schema_version(&pool).await.expect("schema version");
-        assert_eq!(version, 27);
+        assert_eq!(version, 28);
     }
 
     #[tokio::test]
@@ -1484,7 +1501,7 @@ mod tests {
             1
         );
         let version = get_schema_version(&pool).await.expect("schema version");
-        assert_eq!(version, 27);
+        assert_eq!(version, 28);
     }
 
     #[tokio::test]
@@ -1497,7 +1514,7 @@ mod tests {
 
         assert_agent_safety_shape(&pool).await;
         let version = get_schema_version(&pool).await.expect("schema version");
-        assert_eq!(version, 27);
+        assert_eq!(version, 28);
     }
 
     #[tokio::test]
@@ -1569,7 +1586,7 @@ mod tests {
         assert_eq!(invoices_settlement_note_column_count(&pool).await, 1);
 
         let version = get_schema_version(&pool).await.expect("schema version");
-        assert_eq!(version, 27);
+        assert_eq!(version, 28);
     }
 
     /// A database still sitting at kbtt's 23 — the version the hotel's machine
@@ -1597,7 +1614,7 @@ mod tests {
 
         assert_eq!(invoices_settlement_note_column_count(&pool).await, 1);
         let version = get_schema_version(&pool).await.expect("schema version");
-        assert_eq!(version, 27);
+        assert_eq!(version, 28);
     }
 
     async fn invoices_settlement_note_column_count(pool: &SqlitePool) -> i64 {
@@ -1631,7 +1648,7 @@ mod tests {
 
         assert_agent_digest_runs_shape(&pool).await;
         let version = get_schema_version(&pool).await.expect("schema version");
-        assert_eq!(version, 27);
+        assert_eq!(version, 28);
     }
 
     #[tokio::test]
@@ -1655,7 +1672,7 @@ mod tests {
 
         assert_agent_safety_shape(&pool).await;
         let version = get_schema_version(&pool).await.expect("schema version");
-        assert_eq!(version, 27);
+        assert_eq!(version, 28);
     }
 
     #[tokio::test]
@@ -1716,7 +1733,7 @@ mod tests {
         );
 
         let version = get_schema_version(&pool).await.expect("schema version");
-        assert_eq!(version, 27);
+        assert_eq!(version, 28);
     }
 
     /// Migration test trên hoạt động bằng cách rewind `schema_version` SAU KHI
@@ -1807,7 +1824,7 @@ mod tests {
         );
 
         let version = get_schema_version(&pool).await.expect("schema version");
-        assert_eq!(version, 27);
+        assert_eq!(version, 28);
     }
 
     #[tokio::test]
@@ -2022,6 +2039,52 @@ mod tests {
                  bảng này chỉ được giữ CHỮ. Muốn thêm cột thì đọc lại spec dòng \
                  246-252 trước, rồi mới sửa danh sách này"
             );
+        }
+    }
+
+    /// Cùng lý do với test v26 phía trên: rewind `schema_version` mà cột vẫn
+    /// còn thì `execute_compat_alter` nuốt lỗi duplicate-column và không bao
+    /// giờ đi qua nhánh ALTER thật. DROP COLUMN trước để buộc nó phải chạy.
+    #[tokio::test]
+    async fn migration_v28_alter_actually_runs_on_a_genuinely_pre_v28_database() {
+        let pool = SqlitePool::connect("sqlite::memory:")
+            .await
+            .expect("connects in-memory sqlite");
+
+        run_migrations(&pool)
+            .await
+            .expect("runs migrations to latest");
+
+        for column in ["voided_at", "voided_by", "void_reason"] {
+            sqlx::query(&format!("ALTER TABLE bookings DROP COLUMN {column}"))
+                .execute(&pool)
+                .await
+                .unwrap_or_else(|error| panic!("drops {column}: {error}"));
+        }
+
+        sqlx::query("UPDATE schema_version SET version = 27")
+            .execute(&pool)
+            .await
+            .expect("rewinds schema_version to 27");
+
+        run_migrations(&pool)
+            .await
+            .expect("re-runs migrations from a genuinely pre-v28 database");
+
+        let version = get_schema_version(&pool)
+            .await
+            .expect("reads schema version");
+        assert_eq!(version, super::LATEST_SCHEMA_VERSION);
+
+        for column in ["voided_at", "voided_by", "void_reason"] {
+            let exists: i64 = sqlx::query_scalar(
+                "SELECT COUNT(*) FROM pragma_table_info('bookings') WHERE name = ?",
+            )
+            .bind(column)
+            .fetch_one(&pool)
+            .await
+            .unwrap_or_else(|error| panic!("reads pragma for {column}: {error}"));
+            assert_eq!(exists, 1, "migration v28 must create column {column}");
         }
     }
 }
