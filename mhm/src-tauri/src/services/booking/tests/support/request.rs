@@ -97,6 +97,7 @@ pub fn minimal_group_checkin_request(room_ids: &[&str]) -> GroupCheckinRequest {
         source: Some("walk-in".to_string()),
         notes: Some("group test".to_string()),
         paid_amount: Some(100_000),
+        rate_override_per_room: Default::default(),
     }
 }
 
@@ -139,6 +140,7 @@ pub fn rich_group_checkin_request(
         source: Some("walk-in".to_string()),
         notes: Some("group checkin idempotent".to_string()),
         paid_amount,
+        rate_override_per_room: Default::default(),
     }
 }
 

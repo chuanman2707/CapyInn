@@ -805,6 +805,77 @@ async fn group_checkin_idempotent_same_key_changed_guest_name_conflicts() {
     );
 }
 
+/// `rate_override_per_room` ảnh hưởng trực tiếp tới `total_price` của từng
+/// phòng như mọi trường khác trong hash — thiếu nó thì hai lượt nhận đoàn
+/// dưới cùng idempotency key nhưng GIÁ khác nhau sẽ lặp lại kết quả CŨ (giá
+/// cũ, sai) trong im lặng thay vì bị báo `CONFLICT_IDEMPOTENCY_HASH_MISMATCH`
+/// — một bug tiền bạc, cùng lý do
+/// `create_reservation_same_key_different_rate_override_conflicts`
+/// (reservation_idempotency.rs, Task 14) pin cho reservation.
+#[tokio::test]
+async fn group_checkin_same_key_different_rate_override_conflicts() {
+    let pool = test_pool().await;
+    seed_rooms_with_price(&pool, &["GI692", "GI693"], 250_000)
+        .await
+        .unwrap();
+    let ctx = cmd("group_checkin", "idem-group-checkin-rate-conflict");
+
+    seed_user_group_checkin_idempotent(
+        &pool,
+        &ctx,
+        rich_group_checkin_request(&["GI692", "GI693"], "GI692", None),
+    )
+    .await
+    .expect("first group checkin succeeds");
+
+    let mut changed = rich_group_checkin_request(&["GI692", "GI693"], "GI692", None);
+    changed
+        .rate_override_per_room
+        .insert("GI692".to_string(), 350_000);
+
+    let error = seed_user_group_checkin_idempotent(&pool, &ctx, changed)
+        .await
+        .expect_err("same key with a different rate override conflicts");
+
+    assert_eq!(
+        error.code,
+        crate::app_error::codes::CONFLICT_IDEMPOTENCY_HASH_MISMATCH
+    );
+}
+
+/// Kiểm biên giá tay phải chạy TRƯỚC khi `group_checkin_idempotent` ghi bất cứ
+/// gì — không chỉ qua wrapper test-only `group_checkin` (đã pin bởi
+/// `group_checkin_rejects_duplicate_room_ids` cho validation khác của cùng
+/// hàm), mà qua đúng đường lệnh thật production gọi
+/// (`commands::groups::group_checkin` → `group_checkin_idempotent`).
+#[tokio::test]
+async fn group_checkin_idempotent_rejects_out_of_bounds_rate_override() {
+    let pool = test_pool().await;
+    seed_rooms_with_price(&pool, &["GI694", "GI695"], 250_000)
+        .await
+        .unwrap();
+    let ctx = cmd("group_checkin", "idem-group-checkin-bad-rate");
+
+    let mut req = rich_group_checkin_request(&["GI694", "GI695"], "GI694", None);
+    req.rate_override_per_room
+        .insert("GI694".to_string(), -500_000);
+
+    let error = seed_user_group_checkin_idempotent(&pool, &ctx, req)
+        .await
+        .expect_err("out-of-bounds rate override is rejected before any write");
+
+    assert_eq!(error.code, crate::app_error::codes::BOOKING_INVALID_STATE);
+
+    let group_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM booking_groups")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(
+        group_count, 0,
+        "request rejected before any group is created"
+    );
+}
+
 #[tokio::test]
 async fn group_checkout_idempotent_reads_rooms_after_taking_the_group_lock() {
     let pool = test_pool().await;
