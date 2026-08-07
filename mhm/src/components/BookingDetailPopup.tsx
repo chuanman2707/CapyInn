@@ -1,7 +1,10 @@
+import { useState } from "react";
 import { CheckCircle2, XCircle, Pencil, FileText, ArrowRightLeft } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
+import VoidBookingDialog from "@/components/VoidBookingDialog";
 import { fmtDate, fmtDateShort, fmtNumber } from "@/lib/format";
+import { useAuthStore } from "@/stores/useAuthStore";
 import type { BookingWithGuest } from "@/types";
 
 interface BookingDetailPopupProps {
@@ -70,6 +73,40 @@ export default function BookingDetailPopup({
         ? booking.actual_checkout || booking.scheduled_checkout || booking.expected_checkout
         : booking.scheduled_checkout || booking.expected_checkout;
 
+    // Xóa (khác Hủy): lượt này lẽ ra không nên tồn tại — không phí, không cọc,
+    // biến mất khỏi mọi báo cáo. Chỉ chủ khách sạn được làm, và backend tự
+    // chặn lại độc lập với UI này; trạng thái nút ở đây chỉ là gợi ý cho người
+    // dùng, không phải lớp bảo vệ. Nút nằm ở cả hai chế độ vì cả booking chưa
+    // nhận phòng lẫn lượt đã trả đều có thể là một lần bấm nhầm cần xóa hẳn.
+    const isAdmin = useAuthStore((state) => state.isAdmin());
+    const [voidOpen, setVoidOpen] = useState(false);
+
+    const isGroupBooking = Boolean(booking.group_id);
+    const voidDisabled = !isAdmin || isGroupBooking;
+    const voidHint = isGroupBooking
+        ? "Lượt này thuộc đoàn — chưa hỗ trợ xóa"
+        : !isAdmin
+          ? "Chỉ chủ khách sạn xóa được"
+          : null;
+
+    const voidSection = (
+        <div className="pt-2 border-t border-slate-100 space-y-1">
+            <button
+                type="button"
+                disabled={voidDisabled}
+                onClick={() => setVoidOpen(true)}
+                className={`w-full text-sm rounded-lg h-9 border transition-colors ${
+                    voidDisabled
+                        ? "border-slate-200 text-slate-300 cursor-not-allowed"
+                        : "border-red-200 text-red-600 hover:bg-red-50 cursor-pointer"
+                }`}
+            >
+                Xóa lượt này
+            </button>
+            {voidHint && <p className="text-[11px] text-slate-400 text-center">{voidHint}</p>}
+        </div>
+    );
+
     return (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/30" onClick={onClose}>
             <div className="bg-white rounded-2xl shadow-2xl p-6 w-[380px] space-y-4" onClick={(e) => e.stopPropagation()}>
@@ -100,22 +137,25 @@ export default function BookingDetailPopup({
                 </div>
 
                 {isReadonly ? (
-                    <div className="flex gap-2 pt-2">
-                        <Button
-                            className="flex-1 bg-slate-700 hover:bg-slate-800 text-white rounded-xl h-10 gap-1.5 cursor-pointer"
-                            onClick={() => onViewInvoice?.(booking.id)}
-                            disabled={invoiceLoading}
-                        >
-                            <FileText size={14} /> {invoiceLoading ? "Đang tạo..." : "Xem hóa đơn"}
-                        </Button>
-                        <Button
-                            variant="outline"
-                            className="flex-1 border-slate-200 text-slate-600 hover:bg-slate-50 rounded-xl h-10 cursor-pointer"
-                            onClick={onClose}
-                        >
-                            Đóng
-                        </Button>
-                    </div>
+                    <>
+                        <div className="flex gap-2 pt-2">
+                            <Button
+                                className="flex-1 bg-slate-700 hover:bg-slate-800 text-white rounded-xl h-10 gap-1.5 cursor-pointer"
+                                onClick={() => onViewInvoice?.(booking.id)}
+                                disabled={invoiceLoading}
+                            >
+                                <FileText size={14} /> {invoiceLoading ? "Đang tạo..." : "Xem hóa đơn"}
+                            </Button>
+                            <Button
+                                variant="outline"
+                                className="flex-1 border-slate-200 text-slate-600 hover:bg-slate-50 rounded-xl h-10 cursor-pointer"
+                                onClick={onClose}
+                            >
+                                Đóng
+                            </Button>
+                        </div>
+                        {voidSection}
+                    </>
                 ) : (
                     <div className="space-y-2 pt-2">
                         <div className="flex gap-2">
@@ -150,9 +190,29 @@ export default function BookingDetailPopup({
                                 <ArrowRightLeft size={14} /> Chuyển phòng
                             </Button>
                         )}
+                        {voidSection}
                     </div>
                 )}
             </div>
+
+            {voidOpen && (
+                // Bọc riêng để chặn click nền của VoidBookingDialog nổi bọt lên
+                // nền của popup này. VoidBookingDialog không tự stopPropagation ở
+                // nền của chính nó (chỉ hộp trắng bên trong nó mới có) — không có
+                // div chặn này, bấm ra ngoài hộp xác nhận xoá để hủy MỖI việc xoá
+                // sẽ đóng nhầm luôn cả popup chi tiết bên dưới, vì cả hai nền đều
+                // là `fixed inset-0` lồng trong cùng một cây DOM.
+                <div onClick={(event) => event.stopPropagation()}>
+                    <VoidBookingDialog
+                        bookingId={booking.id}
+                        onClose={() => setVoidOpen(false)}
+                        onVoided={() => {
+                            setVoidOpen(false);
+                            onClose();
+                        }}
+                    />
+                </div>
+            )}
         </div>
     );
 }
