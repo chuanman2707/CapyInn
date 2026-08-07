@@ -2,7 +2,7 @@ use crate::app_error::{codes, CommandError, CommandResult};
 use crate::models::*;
 use sqlx::{Pool, Sqlite};
 use std::sync::{Arc, Mutex};
-use tauri::{Emitter, State};
+use tauri::Emitter;
 
 pub struct AppState {
     pub db: Pool<Sqlite>,
@@ -10,12 +10,21 @@ pub struct AppState {
 }
 
 // ─── Auth Helpers ───
-
-pub(crate) fn get_user(state: &State<'_, AppState>) -> Option<User> {
+//
+// Nhận `&AppState`, không phải `&State<'_, AppState>`: `State` là tuple
+// struct riêng của tauri (trường private, không constructor công khai), nên
+// không dựng được trong unit test. `AppState` thì `pub` với hai trường `pub`,
+// dựng thẳng được — đây là điều kiện để `commands::bookings` viết test
+// executable cho hàng rào phân quyền của `void_booking`/`preview_void_booking`
+// (xem `commands/bookings.rs`). Mọi call site hiện tại vẫn nguyên vẹn: chúng
+// gọi `require_admin(&state)` với `state: State<'_, AppState>`, và `State`
+// deref tới `AppState`, nên `&state` tự ép kiểu xuống `&AppState` tại vị trí
+// gọi hàm — không cần sửa gì ở phía gọi.
+pub(crate) fn get_user(state: &AppState) -> Option<User> {
     state.current_user.lock().ok()?.clone()
 }
 
-pub(crate) fn get_user_id(state: &State<'_, AppState>) -> Option<String> {
+pub(crate) fn get_user_id(state: &AppState) -> Option<String> {
     get_user(state).map(|u| u.id)
 }
 
@@ -31,7 +40,7 @@ pub(crate) fn require_admin_user(user: Option<User>) -> CommandResult<User> {
     Ok(user)
 }
 
-pub(crate) fn require_admin(state: &State<'_, AppState>) -> CommandResult<User> {
+pub(crate) fn require_admin(state: &AppState) -> CommandResult<User> {
     require_admin_user(get_user(state))
 }
 
