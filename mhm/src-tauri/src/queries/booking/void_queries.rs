@@ -35,7 +35,11 @@ pub async fn load_void_preview(
         "SELECT b.id, b.room_id, b.status, b.check_in_at,
                 b.actual_checkout, b.nights, b.total_price, b.deposit_amount,
                 b.is_audited, b.group_id, r.status AS room_status,
-                COALESCE(g.full_name, '') AS guest_name
+                COALESCE(g.full_name, '') AS guest_name,
+                (SELECT COALESCE(SUM(amount), 0) FROM folio_lines
+                  WHERE booking_id = b.id) AS folio_total,
+                (SELECT COALESCE(SUM(amount), 0) FROM transactions
+                  WHERE booking_id = b.id AND type = 'cancellation_fee') AS cancellation_fee_total
          FROM bookings b
          LEFT JOIN rooms r ON r.id = b.room_id
          LEFT JOIN guests g ON g.id = b.primary_guest_id
@@ -49,6 +53,8 @@ pub async fn load_void_preview(
     let nights_total: i32 = row.get("nights");
     let total_price = get_money_vnd(&row, "total_price");
     let deposit_amount = get_optional_money_vnd(&row, "deposit_amount").unwrap_or(0);
+    let folio_total = get_money_vnd(&row, "folio_total");
+    let cancellation_fee_total = get_money_vnd(&row, "cancellation_fee_total");
     let room_status: Option<String> = row.get("room_status");
     let group_id: Option<String> = row.get("group_id");
     let check_in_at: String = row.get("check_in_at");
@@ -80,20 +86,48 @@ pub async fn load_void_preview(
     // được làm tròn lên. Chấp nhận được — đây là con số cho hộp xác nhận đọc
     // trước khi xoá, không phải bút toán sổ sách; và làm tròn lên sẽ có ngày
     // gỡ NHIỀU hơn số tiền lượt đó thực sự còn đóng góp.
-    let revenue_impact = match previous_status.as_str() {
+    //
+    // `booked` không còn nhánh riêng: `recognized_room_revenue_filter_sql`
+    // (`revenue_queries.rs`) đòi `status IN ('active', 'checked_out')`, nên một
+    // lượt `booked` chưa từng được tính vào doanh thu phòng — rơi về `_ => 0`
+    // như mọi trạng thái khác là đúng, không phải thiếu sót.
+    let room_revenue = match previous_status.as_str() {
         status::booking::CHECKED_OUT => total_price,
         status::booking::ACTIVE if nights_total > 0 => {
             total_price * i64::from(nights_recognized) / i64::from(nights_total)
         }
-        status::booking::BOOKED => deposit_amount,
         _ => 0,
     };
 
+    // Số tiền THẬT SỰ biến mất khỏi báo cáo khi voided: tiền phòng ở trên
+    // CỘNG toàn bộ `folio_lines` và các `transactions` loại `cancellation_fee`
+    // của đúng booking này. Cả ba đều bị `status != 'voided'` lọc khỏi báo cáo
+    // (`load_folio_revenue`, `load_cancellation_fee_revenue`, và hai nhánh
+    // folio/transaction trong `load_analytics` — `revenue_queries.rs`), nên
+    // voided gỡ cả ba, không chỉ tiền phòng. Không lọc theo ngày — khác với
+    // các hàm `load_*_revenue` (vốn tổng hợp theo kỳ báo cáo) — vì việc voided
+    // gỡ MỌI dòng của booking này, bất kể dòng đó phát sinh ngày nào.
+    //
+    // KHÔNG cộng `deposit_amount` vào đây — xem chú thích ở field đó trong
+    // `VoidBookingPreview` (`models.rs`).
+    let revenue_impact = room_revenue + folio_total + cancellation_fee_total;
+
     // Ngày mà con số trên đang được tính vào: lượt đã trả phòng gắn với đúng
-    // ngày trả phòng; lượt đang ở gắn với HÔM NAY — ngày mà phần "đã ghi nhận"
-    // còn đúng, sẽ trôi tiếp nếu không xoá hôm nay; lượt đặt trước (không có
-    // ngày ghi nhận thật cho tiền cọc) và mọi trạng thái khác rơi về ngày nhận
-    // phòng dự kiến — cột không NULL được nên vẫn cần một giá trị hợp lệ.
+    // ngày trả phòng; lượt đang ở, lượt đặt trước (không có ngày ghi nhận thật
+    // cho tiền cọc), và mọi trạng thái khác đều rơi về ngày nhận phòng — cột
+    // không NULL được nên vẫn cần một giá trị hợp lệ.
+    //
+    // KHÔNG đổi nhánh `active` sang hôm nay dù muốn câu thoại đọc xuôi hơn
+    // ("...tính tới hôm nay..."): `is_audited` (`mark_bookings_audited_tx`,
+    // `night_audit_repository.rs`) chỉ bật cho lượt có ngày check-in <= ngày
+    // ĐÃ CHẠY audit — audit luôn chốt một ngày ĐÃ QUA, không bao giờ chốt hôm
+    // nay. Hộp thoại ghép is_audited và revenue_date vào cùng một câu ("Ngày
+    // này đã chốt kiểm toán đêm — số liệu ngày {revenue_date} sẽ thay đổi").
+    // Một khách nhận phòng vài ngày trước, còn đang ở, có is_audited = 1 (vì
+    // audit đã chạy cho các ngày trước đó) — nếu revenue_date là hôm nay thì
+    // câu trên báo "hôm nay đã chốt kiểm toán", sai với hầu hết khách đang ở
+    // vì audit chưa từng chốt hôm nay. revenue_date phải là ngày mà is_audited
+    // thật sự mô tả: ngày check-in.
     let fallback_date = check_in_at.get(0..10).unwrap_or("").to_string();
     let revenue_date = match previous_status.as_str() {
         status::booking::CHECKED_OUT => actual_checkout
@@ -101,7 +135,6 @@ pub async fn load_void_preview(
             .and_then(|value| value.get(0..10))
             .map(str::to_string)
             .unwrap_or_else(|| fallback_date.clone()),
-        status::booking::ACTIVE => today.format("%Y-%m-%d").to_string(),
         _ => fallback_date,
     };
 
@@ -119,9 +152,13 @@ pub async fn load_void_preview(
         previous_status,
         revenue_impact,
         revenue_date,
+        deposit_amount,
         nights_recognized,
         nights_total,
-        is_audited: row.get::<i32, _>("is_audited") == 1,
+        // Cột `INTEGER DEFAULT 0` và nullable — `try_get` + `unwrap_or(0)` để
+        // một lỗi decode (NULL, hay kiểu bất ngờ) rơi về "chưa audit" thay vì
+        // panic cả preview vì một cột phụ.
+        is_audited: row.try_get::<i32, _>("is_audited").unwrap_or(0) == 1,
         room_was_reused,
         is_group_booking: group_id.is_some(),
     })
