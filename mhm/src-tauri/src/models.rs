@@ -333,6 +333,13 @@ pub struct RoomWithBooking {
     pub room: Room,
     pub booking: Option<Booking>,
     pub guests: Vec<Guest>,
+    /// `group_id` của lượt đang ở (nếu có), lấy trực tiếp từ `bookings.group_id`.
+    /// Cố tình KHÔNG thêm vào `Booking` dùng chung — struct đó xuất hiện ở rất
+    /// nhiều nơi không cần trường này. Đây là dữ liệu duy nhất để `RoomDrawer`
+    /// (Task 12) tự khoá nút xóa lượt thuộc đoàn TRƯỚC khi bấm, giống hệt
+    /// `BookingWithGuest.group_id` đã cho `BookingDetailPopup` làm ở Task 11 —
+    /// xem `queries/booking/room_queries.rs::load_room_detail`.
+    pub group_id: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -859,7 +866,7 @@ pub struct RoomChangeOptions {
 
 #[cfg(test)]
 mod tests {
-    use super::Booking;
+    use super::{Booking, Guest, Room, RoomWithBooking};
     use crate::money::MoneyVnd;
 
     fn assert_money_vnd(_: MoneyVnd) {}
@@ -885,5 +892,35 @@ mod tests {
 
         assert_money_vnd(booking.total_price);
         assert_money_vnd(booking.paid_amount);
+    }
+
+    // Ranh giới Rust/TypeScript: tên field serde chính là khoá JSON cả hai
+    // phía đọc (frontend: `mhm/src/types/index.ts`, `RoomWithBooking.group_id`).
+    // Lệch tên (đổi field Rust, thêm `#[serde(rename = ...)]`, hay gõ nhầm bên
+    // TS) chỉ vỡ lúc CHẠY — payload thiếu field, `roomDetail.group_id` luôn ra
+    // `undefined` — không vỡ lúc build ở bên nào cả. Ghim trực tiếp bằng cách
+    // serialize thật và soi đúng khoá, thay vì chỉ tin xuông convention giữ
+    // nguyên.
+    #[test]
+    fn room_with_booking_serializes_group_id_under_its_own_json_key() {
+        let detail = RoomWithBooking {
+            room: Room {
+                id: "101".to_string(),
+                name: "101".to_string(),
+                room_type: "standard".to_string(),
+                floor: 1,
+                has_balcony: false,
+                base_price: 500_000,
+                max_guests: 2,
+                extra_person_fee: 100_000,
+                status: "occupied".to_string(),
+            },
+            booking: None,
+            guests: Vec::<Guest>::new(),
+            group_id: Some("GRP-1".to_string()),
+        };
+
+        let json = serde_json::to_value(&detail).expect("serializes RoomWithBooking");
+        assert_eq!(json["group_id"], serde_json::json!("GRP-1"));
     }
 }

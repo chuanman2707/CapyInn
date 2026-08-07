@@ -563,7 +563,11 @@ describe("RoomDrawer void action", () => {
         return { id: "u2", name: "Lễ tân", role: "receptionist" as const, active: true, created_at: "2026-08-07T09:00:00+07:00" };
     }
 
-    function buildActiveBookingDetail() {
+    // `group_id` mặc định null — khớp hình dạng thật `get_room_detail` luôn trả
+    // (mhm/src-tauri/src/queries/booking/room_queries.rs): trường luôn có mặt,
+    // không thuộc đoàn thì là null chứ không phải vắng mặt. Override cho phép
+    // bài test đoàn (bên dưới) dựng đúng ca `group_id` khác null.
+    function buildActiveBookingDetail(overrides: Partial<{ group_id: string | null }> = {}) {
         return {
             room: {
                 id: "101",
@@ -587,6 +591,8 @@ describe("RoomDrawer void action", () => {
                 created_at: "2026-04-20T08:00:00+07:00",
             },
             guests: [],
+            group_id: null,
+            ...overrides,
         };
     }
 
@@ -594,9 +600,12 @@ describe("RoomDrawer void action", () => {
     // khớp brief Task 12. Trả về cả `container` để bài test "bấm ra nền hộp
     // xác nhận" có thể tìm nền đó bằng class, giống hệt cách
     // BookingDetailPopup.test.tsx đã làm cho Task 11.
-    async function renderDrawerWithActiveBooking(onClose: () => void = vi.fn()) {
+    async function renderDrawerWithActiveBooking(
+        onClose: () => void = vi.fn(),
+        overrides: Partial<{ group_id: string | null }> = {},
+    ) {
         invoke.mockReset();
-        invoke.mockResolvedValueOnce(buildActiveBookingDetail()).mockResolvedValueOnce([]);
+        invoke.mockResolvedValueOnce(buildActiveBookingDetail(overrides)).mockResolvedValueOnce([]);
         const user = userEvent.setup();
         const view = render(<RoomDrawer open onClose={onClose} roomId="101" />);
         await screen.findByRole("button", { name: /xóa lượt này/i });
@@ -609,12 +618,15 @@ describe("RoomDrawer void action", () => {
         setRoomChangeOpen.mockReset();
     });
 
-    it("admin thấy nút xóa lượt đang ở", async () => {
+    it("admin thấy nút xóa lượt đang ở, không kèm gợi ý nào", async () => {
         useAuthStore.setState({ user: adminUser() });
         await renderDrawerWithActiveBooking();
-        expect(
-            screen.getByRole("button", { name: /xóa lượt này/i }).hasAttribute("disabled"),
-        ).toBe(false);
+        const button = screen.getByRole("button", { name: /xóa lượt này/i });
+        expect(button.hasAttribute("disabled")).toBe(false);
+        // Ghim luôn việc KHÔNG có gợi ý nào đi kèm — thiếu dòng này, một bản
+        // sửa lỡ render một gợi ý mồ côi dưới nút đã bật (mất đồng bộ với
+        // voidDisabled) vẫn xanh, vì trước giờ chỉ mỗi ca lễ tân kiểm tra hint.
+        expect(button.parentElement?.querySelector("p")).toBeNull();
     });
 
     it("lễ tân không bấm được nút xóa", async () => {
@@ -624,6 +636,22 @@ describe("RoomDrawer void action", () => {
             screen.getByRole("button", { name: /xóa lượt này/i }).hasAttribute("disabled"),
         ).toBe(true);
         expect(screen.getByText(/chỉ chủ khách sạn xóa được/i)).toBeTruthy();
+    });
+
+    // Task 11 (BookingDetailPopup) đã khoá trước cho lượt thuộc đoàn nhờ
+    // `BookingWithGuest.group_id`. Trước bản sửa này, RoomDrawer không có dữ
+    // liệu đó (`Booking` từ `get_room_detail` không mang group_id) nên admin
+    // thấy nút bật, bấm, đợi preview tải xong mới biết bị chặn — hai lối vào
+    // của cùng một hành động phá hoại nhưng cư xử khác nhau. Giờ
+    // `RoomWithBooking.group_id` (mhm/src-tauri/src/queries/booking/room_queries.rs)
+    // mang dữ liệu đó lên tới đây — kể cả admin cũng phải bị khoá TRƯỚC khi bấm.
+    it("lượt thuộc đoàn thì nút xóa bị khoá với lý do riêng, kể cả với admin", async () => {
+        useAuthStore.setState({ user: adminUser() });
+        await renderDrawerWithActiveBooking(undefined, { group_id: "GRP-1" });
+
+        const button = screen.getByRole("button", { name: /xóa lượt này/i });
+        expect(button.hasAttribute("disabled")).toBe(true);
+        expect(screen.getByText(/thuộc đoàn/i)).toBeTruthy();
     });
 
     it("phòng trống thì không có nút xóa", async () => {
@@ -649,6 +677,27 @@ describe("RoomDrawer void action", () => {
 
         await screen.findByText(/check-in phòng này/i);
         expect(screen.queryByRole("button", { name: /xóa lượt này/i })).toBeNull();
+    });
+
+    // Ý đồ thiết kế: nút xóa đứng CUỐI CÙNG trong nội dung ngăn kéo — sau giá,
+    // ghi chú (bookingSection) lẫn hàng nút chính (actionsSection: copy lưu
+    // trú, đêm, chuyển phòng, Check-out) — không được lẫn vào giữa các hành
+    // động chính. Trước bài test này không gì ghim vị trí đó cả; một sửa đổi
+    // lỡ dời voidSection lên trước actionsSection trong RoomDrawer.tsx vẫn sẽ
+    // xanh ở mọi test khác. Neo vào nút Check-out — nút cuối cùng, luôn có
+    // mặt, của actionsSection — làm mốc ổn định để so vị trí.
+    it("nút xóa nằm sau nút Check-out, không lẫn vào hàng nút chính", async () => {
+        useAuthStore.setState({ user: adminUser() });
+        await renderDrawerWithActiveBooking();
+
+        const checkoutButton = screen.getByRole("button", { name: /check-out/i });
+        const voidButton = screen.getByRole("button", { name: /xóa lượt này/i });
+
+        // Node.DOCUMENT_POSITION_FOLLOWING trên compareDocumentPosition gọi từ
+        // checkoutButton nghĩa là voidButton đứng SAU nó trong cây DOM.
+        expect(
+            checkoutButton.compareDocumentPosition(voidButton) & Node.DOCUMENT_POSITION_FOLLOWING,
+        ).toBeTruthy();
     });
 
     // `get_room_detail` (mhm/src-tauri/src/queries/booking/room_queries.rs)
