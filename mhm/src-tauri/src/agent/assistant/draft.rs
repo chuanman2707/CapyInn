@@ -401,6 +401,17 @@ pub fn build_reserve_display(
             Some(count) => format!("{count} người"),
         },
     );
+    // Trợ lý luôn gửi `None` ở trường này (xem `build_reserve_draft`), nên
+    // "—" mới là giá trị thật sẽ hiện ra. Không dùng "0 ₫" như `deposit_amount`:
+    // `None` ở đây nghĩa là "không đè giá", không phải "đè giá bằng 0". Cùng
+    // luật `build_check_in_display`.
+    display.insert(
+        "rate_override_per_night".to_string(),
+        payload
+            .rate_override_per_night
+            .map(format_vnd)
+            .unwrap_or_else(|| "—".to_string()),
+    );
     display.insert(
         "total".to_string(),
         preview
@@ -1204,6 +1215,11 @@ pub async fn build_reserve_draft(
         notes: trimmed_arg(args, "notes").map(str::to_string),
         // LUÔN `None`. Xem ghi chú ở lời gọi preview ngay trên.
         guests: None,
+        // Trợ lý không tự đặt giá tay: đó là việc lễ tân làm ở quầy khi mặc
+        // cả với khách qua điện thoại, không phải việc một mô hình ngôn ngữ
+        // quyết định thay. Thẻ này vẫn đi qua đường engine như cũ. Cùng luật
+        // `build_check_in_draft`.
+        rate_override_per_night: None,
     };
 
     let warnings = build_reserve_warnings(pool, &payload).await?;
@@ -2743,6 +2759,7 @@ mod tests {
             source: Some("phone".to_string()),
             notes: Some("khách quen".to_string()),
             guests: None,
+            rate_override_per_night: None,
         };
         let preview = serde_json::json!({ "total": 400_000 });
 
@@ -2780,6 +2797,10 @@ mod tests {
             ("source", "phone"),
             ("notes", "khách quen"),
             ("guests", "Không ghi (không thu phụ thu thêm người)"),
+            // Trợ lý luôn gửi `None` (xem `build_reserve_draft`), nên "—" mới
+            // là giá trị thật — cùng luật `rate_override_per_night` trên thẻ
+            // nhận phòng.
+            ("rate_override_per_night", "—"),
             ("total", "400.000 ₫"),
         ];
         for (key, value) in &expected {
@@ -2837,6 +2858,13 @@ mod tests {
         keys.sort_unstable();
         // Đúng bộ trường `CreateReservationRequest` — cùng bộ mà `ReservePayload`
         // khai bên `types/assistant.ts` và `ReservationSheet.tsx` gửi khi làm tay.
+        //
+        // `rate_override_per_night` (Task 14) CHƯA có trong `ReservePayload` —
+        // đó là khoảng cách đã có sẵn từ Task 13 (`CheckInPayload` cũng chưa
+        // biết `rate_override_per_night`), để dành cho UI task (16-18). Assert
+        // ở đây theo dõi hình dạng thật của `CreateReservationRequest`, không
+        // phải hình dạng TS; JSON thiếu key này (form cũ chưa gửi) vẫn
+        // deserialize ra `None` — serde tự đặc cách cho trường `Option<T>`.
         assert_eq!(
             keys,
             [
@@ -2849,6 +2877,7 @@ mod tests {
                 "guests",
                 "nights",
                 "notes",
+                "rate_override_per_night",
                 "room_id",
                 "source",
             ]

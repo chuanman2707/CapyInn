@@ -1323,6 +1323,11 @@ impl HotelTools {
             source: input.source.or(Some("ai-agent".to_string())),
             notes: input.notes,
             guests: None,
+            // Công cụ MCP không cho model tự đặt giá tay: đó là việc lễ tân
+            // làm ở quầy khi mặc cả với khách qua điện thoại, không phải việc
+            // một mô hình ngôn ngữ quyết định thay. `CreateReservationInput`
+            // (schema công cụ) không có trường này, nên luôn `None`.
+            rate_override_per_night: None,
         };
 
         match commands::do_create_reservation(&self.pool, self.app_handle.as_ref(), &ctx, req).await

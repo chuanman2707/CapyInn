@@ -609,6 +609,10 @@ pub struct CreateReservationRequest {
     /// Số khách ở thực tế. `None` ⇒ không phụ thu, giá giữ nguyên như cũ.
     /// Kiểu `Option` để gateway và agent không phải sửa theo.
     pub guests: Option<i32>,
+    /// Giá mỗi đêm do lễ tân gõ tay khi chốt qua điện thoại, đè giá engine.
+    /// `None` ⇒ engine tính như cũ. Không có đường sửa sau: `set_booking_rate`
+    /// chặn thẳng khi `status != 'active'`, nên giá phải đúng ngay lúc tạo.
+    pub rate_override_per_night: Option<MoneyVnd>,
 }
 
 #[derive(Debug, Deserialize)]
