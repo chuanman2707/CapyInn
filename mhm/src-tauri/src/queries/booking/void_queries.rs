@@ -139,8 +139,20 @@ pub async fn load_void_preview(
     // rooms khi phòng không còn ở trạng thái nó chờ (đã bán lại) — active luôn
     // ép về trống hoặc lỗi to, booked chưa từng đụng rooms. Nên đây là nhánh
     // duy nhất "trạng thái phòng giữ nguyên" là một cảnh báo thật.
+    //
+    // Cờ này PHẢI phản chiếu đúng điều kiện `WHERE status = 'cleaning'` của
+    // câu UPDATE rooms trong nhánh checked_out (`void_booking_tx`,
+    // `void_lifecycle.rs`) — KHÔNG được đoán một trạng thái cụ thể (vd so
+    // bằng `occupied`). `rooms.status` có bốn giá trị: `vacant`, `occupied`,
+    // `cleaning`, `booked` — hễ khác `cleaning` là UPDATE đó không khớp dòng
+    // nào, phòng giữ nguyên bất kể đang là giá trị nào trong ba giá trị còn
+    // lại (kể cả `booked` — phòng đang giữ cho một lượt đặt trong tương lai).
+    // Hai chỗ này phải đổi CÙNG NHAU: nới điều kiện UPDATE mà quên nới ở đây
+    // (hay ngược lại) là hộp xác nhận lại hứa sai trạng thái phòng — đúng thứ
+    // preview này tồn tại để ngăn. Đừng "đơn giản hoá" về lại một phép so
+    // sánh bằng.
     let room_was_reused = previous_status == status::booking::CHECKED_OUT
-        && room_status.as_deref() == Some(status::room::OCCUPIED);
+        && room_status.as_deref() != Some(status::room::CLEANING);
 
     Ok(VoidBookingPreview {
         booking_id: row.get("id"),

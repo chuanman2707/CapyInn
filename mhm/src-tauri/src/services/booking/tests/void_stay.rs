@@ -754,6 +754,42 @@ async fn preview_flags_a_room_that_was_already_reused() {
     assert!(preview.room_was_reused);
 }
 
+/// Phòng đang giữ cho một lượt đặt trong tương lai (`booked`) — KHÔNG chỉ
+/// `occupied` mới là "đã bán lại". Gate thật trong `void_booking_tx` là
+/// `WHERE status = 'cleaning'`, không phải `WHERE status != 'occupied'`; một
+/// `room_was_reused` chỉ so bằng `occupied` sẽ báo sai "về Trống" cho ca này —
+/// UPDATE của backend không khớp dòng nào (status không phải 'cleaning') nên
+/// phòng vẫn giữ nguyên `booked`, nhưng hộp thoại đã hứa nó về trống.
+#[tokio::test]
+async fn preview_flags_a_room_that_is_now_booked_for_a_future_reservation() {
+    let pool = test_pool().await;
+    seed_active_booking_with_room(&pool, "B-BOOKED-REUSE", "R-BOOKED-REUSE")
+        .await
+        .expect("seeds booking");
+    sqlx::query(
+        "UPDATE bookings SET status = 'checked_out',
+                actual_checkout = '2026-04-16T10:00:00+07:00' WHERE id = 'B-BOOKED-REUSE'",
+    )
+    .execute(&pool)
+    .await
+    .expect("marks checked out");
+    sqlx::query("UPDATE rooms SET status = 'booked' WHERE id = 'R-BOOKED-REUSE'")
+        .execute(&pool)
+        .await
+        .expect("simulates the room held for a future reservation");
+
+    let preview = crate::queries::booking::void_queries::load_void_preview(&pool, "B-BOOKED-REUSE")
+        .await
+        .expect("loads preview");
+
+    assert!(
+        preview.room_was_reused,
+        "phòng 'booked' cũng khiến UPDATE rooms của void_booking_tx không khớp dòng nào \
+         (gate chỉ nhận 'cleaning') — preview phải báo true như ca 'occupied', không phải \
+         chỉ so bằng occupied"
+    );
+}
+
 /// Đêm thứ 2 trên 3: đêm bắt đầu ngày nào tính vào ngày đó — khớp
 /// `recognized_room_revenue_amount_sql` (`revenue_queries.rs`), nơi ngày
 /// check-in đã ghi nhận 1 đêm ngay cả khi đêm đó chưa trôi qua. Vậy nên nhận
