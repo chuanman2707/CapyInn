@@ -290,6 +290,7 @@ describe("useHotelStore monitoring context", () => {
       nights: 1,
       source: "walk-in",
       paid_amount: 100000,
+      rate_override_per_room: {},
     };
 
     await useHotelStore.getState().groupCheckIn(req);
@@ -457,6 +458,7 @@ describe("useHotelStore monitoring context", () => {
         guests_per_room: {},
         nights: 1,
         paid_amount: 100000.5,
+        rate_override_per_room: {},
       }),
     ).rejects.toThrow(/paid_amount/);
 
@@ -480,6 +482,26 @@ describe("useHotelStore monitoring context", () => {
     );
     expect(invokeWriteCommand).not.toHaveBeenCalledWith(
       "group_checkout",
+      expect.anything(),
+      expect.anything(),
+    );
+  });
+
+  it("rejects a negative rate_override_per_room entry before invoking backend", async () => {
+    await expect(
+      useHotelStore.getState().groupCheckIn({
+        group_name: "Retry Group",
+        organizer_name: "Organizer",
+        room_ids: ["101", "102"],
+        master_room_id: "101",
+        guests_per_room: {},
+        nights: 1,
+        rate_override_per_room: { "101": -1 },
+      }),
+    ).rejects.toThrow(/rate_override_per_room/);
+
+    expect(invokeWriteCommand).not.toHaveBeenCalledWith(
+      "group_checkin",
       expect.anything(),
       expect.anything(),
     );

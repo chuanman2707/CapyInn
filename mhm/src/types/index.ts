@@ -439,6 +439,13 @@ export interface GroupCheckinRequest {
   source?: string;
   notes?: string;
   paid_amount?: MoneyVnd;
+  /**
+   * Giá mỗi đêm gõ tay theo TỪNG phòng. Khoá là room_id. Phòng không có
+   * trong map ⇒ engine tính. `group_checkin_tx` từ chối cả giao dịch nếu map
+   * chứa một khoá không nằm trong `room_ids` — luôn gửi map, kể cả rỗng,
+   * không gửi `undefined`.
+   */
+  rate_override_per_room: Record<string, MoneyVnd>;
 }
 
 export interface GroupCheckoutRequest {

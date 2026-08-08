@@ -409,6 +409,12 @@ export const useHotelStore = create<HotelStore>((set, get) => {
         const guardedReq: GroupCheckinRequest = {
           ...req,
           paid_amount: optionalMoneyVnd(req.paid_amount, "paid_amount"),
+          rate_override_per_room: Object.fromEntries(
+            Object.entries(req.rate_override_per_room).map(([roomId, rate]) => [
+              roomId,
+              assertNonNegativeMoneyVnd(rate, `rate_override_per_room.${roomId}`),
+            ]),
+          ),
         };
         await invokeWriteCommand("group_checkin", { req: guardedReq }, { correlationId });
         await get().fetchRooms();
