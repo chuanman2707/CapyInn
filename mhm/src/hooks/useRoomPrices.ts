@@ -122,3 +122,33 @@ export function sumRoomPrices(
     }
     return total;
 }
+
+/**
+ * Same contract as {@link sumRoomPrices}, plus manual per-room override
+ * prices — the group check-in "click the price, type a new one" flow.
+ *
+ * A room with an override never needs its engine quote: `override × nights`
+ * stands in for it. A room WITHOUT an override still needs `byRoomId` to have
+ * priced it, and if it has not, the whole total is `null` — same refusal as
+ * `sumRoomPrices`. A `reduce` with `?? 0` here would silently count a still-
+ * unpriced room as 0₫, which is the exact bug this function exists to avoid.
+ */
+export function sumRoomPricesWithOverrides(
+    roomIds: string[],
+    byRoomId: Record<string, PricingResult>,
+    overridePerRoom: Record<string, number>,
+    nights: number,
+): number | null {
+    let total = 0;
+    for (const roomId of roomIds) {
+        const override = overridePerRoom[roomId];
+        if (override != null) {
+            total += override * nights;
+            continue;
+        }
+        const price = byRoomId[roomId];
+        if (!price) return null;
+        total += price.total;
+    }
+    return total;
+}

@@ -4,7 +4,7 @@ import { beforeEach, describe, expect, it } from "vitest";
 import { clearMockResponses, invoke, setMockResponse } from "@test-mocks/tauri-core";
 import type { PricingResult } from "@/types";
 
-import { sumRoomPrices, useRoomPrices } from "./useRoomPrices";
+import { sumRoomPrices, sumRoomPricesWithOverrides, useRoomPrices } from "./useRoomPrices";
 
 function pricingResult(total: number): PricingResult {
   return {
@@ -135,5 +135,38 @@ describe("sumRoomPrices", () => {
 
   it("totals an empty selection as zero, not null", () => {
     expect(sumRoomPrices([], {})).toBe(0);
+  });
+});
+
+describe("sumRoomPricesWithOverrides", () => {
+  /// A group check-in fixture template from the plan used `reduce` with
+  /// `?? 0`: a room with neither an override nor an engine price silently
+  /// counted as 0₫, which is exactly the "quiet wrong total" `sumRoomPrices`
+  /// exists to refuse. This pins that a manually-priced room still leaves the
+  /// *other*, unpriced room able to force the whole total to `null`.
+  it("still refuses to total when a non-overridden room has no engine price", () => {
+    // B is overridden and needs no engine quote; A has neither an override
+    // nor an engine price, so the whole total must stay `null`.
+    expect(sumRoomPricesWithOverrides(["A", "B"], {}, { B: 999 }, 2)).toBeNull();
+  });
+
+  it("adds override × nights for an overridden room and the engine quote for the rest", () => {
+    expect(
+      sumRoomPricesWithOverrides(
+        ["A", "B"],
+        { A: pricingResult(100), B: pricingResult(250) },
+        { A: 40 },
+        3,
+      ),
+      // A: 40/night × 3 nights = 120 (not the engine's 100). B: untouched, 250.
+    ).toBe(370);
+  });
+
+  it("prices a fully-overridden group without needing any engine quote", () => {
+    expect(sumRoomPricesWithOverrides(["A", "B"], {}, { A: 100, B: 200 }, 1)).toBe(300);
+  });
+
+  it("totals an empty selection as zero, not null", () => {
+    expect(sumRoomPricesWithOverrides([], {}, {}, 1)).toBe(0);
   });
 });

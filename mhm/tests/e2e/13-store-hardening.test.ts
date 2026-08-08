@@ -128,6 +128,7 @@ describe("13 — Store Hardening", () => {
             guests_per_room: {},
             nights: 1,
             source: "walk-in",
+            rate_override_per_room: {},
         };
 
         setMockResponse("group_checkin", () => {
@@ -228,6 +229,7 @@ describe("13 — Store Hardening", () => {
                     guests_per_room: {},
                     nights: 1,
                     source: "walk-in",
+                    rate_override_per_room: {},
                 }),
         ],
         [
