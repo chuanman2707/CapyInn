@@ -39,15 +39,24 @@ export default function RateOverrideField({
         value != null && engineTotal != null && overrideTotal !== engineTotal;
 
     if (value == null && !editing) {
+        // M-1 (review Task 17): chưa có engineTotal (đang tải, hoặc preview
+        // vừa lỗi) thì không có gì để prefill — trước đây bấm vào lúc này
+        // gọi prefillRate(null, nights) = 0 và âm thầm gửi giá 0₫/đêm lên
+        // backend (backend từ chối bằng một toast khó hiểu thay vì một cảnh
+        // báo rõ ràng ngay tại chỗ). Khoá nút lại thay vì để nó trông bấm được.
+        const disabled = engineTotal == null;
         return (
             <button
                 type="button"
                 data-testid="rate-display"
+                disabled={disabled}
                 onClick={() => {
+                    if (disabled) return;
                     setEditing(true);
                     onChange(prefillRate(engineTotal, nights));
                 }}
-                className="text-base font-bold text-emerald-600 tabular-nums underline decoration-dotted underline-offset-4 cursor-pointer"
+                className={`text-base font-bold text-emerald-600 tabular-nums underline decoration-dotted underline-offset-4 ${disabled ? "cursor-not-allowed opacity-60" : "cursor-pointer"
+                    }`}
             >
                 {engineTotal == null ? "…" : fmtMoney(engineTotal)}
             </button>

@@ -524,7 +524,14 @@ export default function CheckinSheet({ preSelectedRoomId, preSelectedNights }: {
                                 <span className="text-xs text-brand-muted font-medium">
                                     Tổng tiền ({nights} đêm)
                                 </span>
-                                {priceFailed ? (
+                                {priceFailed && rateOverride == null ? (
+                                    // I-2 (review Task 17): chỉ báo lỗi trơn khi CHƯA có giá
+                                    // tay nào đang gõ — không có gì để prefill từ một engine
+                                    // đang lỗi. Nếu đã có giá tay đang bật (nhánh dưới), phải
+                                    // vẫn hiện được ô sửa/nút "Về giá gốc"; ẩn nó đi là giam
+                                    // một con số lễ tân đã gõ nhưng không còn thấy, không sửa,
+                                    // không huỷ được — trong khi Hoàn tất Check-in vẫn gửi
+                                    // đúng con số đó.
                                     <span
                                         data-testid="stay-price-error"
                                         className="text-xs font-semibold text-amber-600"
@@ -550,6 +557,11 @@ export default function CheckinSheet({ preSelectedRoomId, preSelectedNights }: {
                                     </div>
                                 )}
                             </div>
+                            {priceFailed && rateOverride != null && (
+                                <p className="text-[11px] text-amber-600">
+                                    Không tính được giá hệ thống để đối chiếu — giá tay vẫn được giữ nguyên.
+                                </p>
+                            )}
                             {/* Bảng chi tiết từng đêm mô tả giá engine — ẩn khi có giá
                                 tay đè lên, vì lúc đó nó không còn khớp con số đang thu. */}
                             {rateOverride == null &&
