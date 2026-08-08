@@ -6,6 +6,7 @@ import { UserPlus, Trash2, Scan, CheckCircle2, AlertTriangle } from "lucide-reac
 import { Sheet, SheetContent, SheetHeader, SheetTitle } from "@/components/ui/sheet";
 import { Button } from "@/components/ui/button";
 import { FormField, FormFieldSelect } from "@/components/shared/FormField";
+import RateOverrideField from "@/components/shared/RateOverrideField";
 import { useAvailability } from "@/hooks/useAvailability";
 import { formatAppError } from "@/lib/appError";
 import { getRoomTypeLabel } from "@/lib/constants";
@@ -32,6 +33,8 @@ export default function CheckinSheet({ preSelectedRoomId, preSelectedNights }: {
 
     const [guests, setGuests] = useState<GuestInput[]>([emptyGuest()]);
     const [selectedRoom, setSelectedRoom] = useState("");
+    // Giá tay lễ tân gõ đè, đơn vị mỗi đêm. `null` = đang dùng giá engine.
+    const [rateOverride, setRateOverride] = useState<number | null>(null);
     const [nights, setNights] = useState(1);
     const [paidAmount, setPaidAmount] = useState(0);
     const [source, setSource] = useState("walk-in");
@@ -148,6 +151,15 @@ export default function CheckinSheet({ preSelectedRoomId, preSelectedNights }: {
         }
     }, [rooms, selectedRoom, vacantRooms]);
 
+    // Quyết định mục 4: đổi phòng thì bỏ giá tay đã gõ, không mang sang phòng
+    // mới. Giá thương lượng gắn với một phòng cụ thể (101, 400k/đêm) — mang
+    // nguyên số đó sang phòng suite vừa đổi tới là im lặng thu sai giá của
+    // phòng mới. Đổi SỐ ĐÊM không rơi vào effect này (không depend `nights`):
+    // đơn vị override là giá/đêm nên tổng tự tính lại đúng, không có gì để bỏ.
+    useEffect(() => {
+        setRateOverride(null);
+    }, [selectedRoom]);
+
     const selectedRoomData = rooms.find((r) => r.id === selectedRoom);
     const localDay = useLocalDay();
 
@@ -224,7 +236,9 @@ export default function CheckinSheet({ preSelectedRoomId, preSelectedNights }: {
         if (!selectedRoom || !guests[0]?.full_name || !hasIdentifier) return;
         setSubmitting(true);
         try {
-            await checkIn(selectedRoom, guests, nights, paidAmount, source, notes);
+            await checkIn(selectedRoom, guests, nights, paidAmount, source, notes, {
+                rateOverridePerNight: rateOverride,
+            });
             closeAll();
             toast.success("Check-in thành công!");
         } catch (err) {
@@ -236,6 +250,7 @@ export default function CheckinSheet({ preSelectedRoomId, preSelectedNights }: {
     const closeAll = () => {
         setGuests([emptyGuest()]);
         setSelectedRoom("");
+        setRateOverride(null);
         setNights(1);
         setPaidAmount(0);
         setSource("walk-in");
@@ -505,7 +520,7 @@ export default function CheckinSheet({ preSelectedRoomId, preSelectedNights }: {
                     {/* Total price — con số do engine tính, không phải phép nhân ở đây */}
                     {selectedRoomData && (
                         <div className="bg-slate-50 rounded-xl p-3 space-y-1">
-                            <div className="flex justify-between items-center">
+                            <div className="flex justify-between items-start">
                                 <span className="text-xs text-brand-muted font-medium">
                                     Tổng tiền ({nights} đêm)
                                 </span>
@@ -517,27 +532,44 @@ export default function CheckinSheet({ preSelectedRoomId, preSelectedNights }: {
                                         Chưa tính được giá
                                     </span>
                                 ) : (
-                                    <span
-                                        data-testid="stay-price-total"
-                                        className="text-base font-bold text-emerald-600 tabular-nums"
-                                    >
-                                        {priceLoading || !stayPrice ? "…" : fmtMoney(stayPrice.total)}
-                                    </span>
+                                    <div data-testid="stay-price-total">
+                                        <RateOverrideField
+                                            // `key` ép remount khi đổi phòng: state "đang sửa" của
+                                            // ô này là nội bộ component, effect reset rateOverride
+                                            // (data) không chạm tới được — không key, đổi phòng vẫn
+                                            // giữ ô nhập mở với prefill của giá engine phòng MỚI,
+                                            // trông như còn đang gõ dở giá phòng cũ.
+                                            key={selectedRoom}
+                                            engineTotal={
+                                                priceLoading || !stayPrice ? null : stayPrice.total
+                                            }
+                                            nights={nights}
+                                            value={rateOverride}
+                                            onChange={setRateOverride}
+                                        />
+                                    </div>
                                 )}
                             </div>
-                            {!priceFailed && stayPrice && stayPrice.breakdown.length > 1 && (
-                                <ul data-testid="stay-price-breakdown" className="space-y-0.5">
-                                    {stayPrice.breakdown.map((line, index) => (
-                                        <li
-                                            key={`${line.label}-${index}`}
-                                            className="flex justify-between text-[11px] text-brand-muted"
-                                        >
-                                            <span>{line.label}</span>
-                                            <span className="tabular-nums">{fmtMoney(line.amount)}</span>
-                                        </li>
-                                    ))}
-                                </ul>
-                            )}
+                            {/* Bảng chi tiết từng đêm mô tả giá engine — ẩn khi có giá
+                                tay đè lên, vì lúc đó nó không còn khớp con số đang thu. */}
+                            {rateOverride == null &&
+                                !priceFailed &&
+                                stayPrice &&
+                                stayPrice.breakdown.length > 1 && (
+                                    <ul data-testid="stay-price-breakdown" className="space-y-0.5">
+                                        {stayPrice.breakdown.map((line, index) => (
+                                            <li
+                                                key={`${line.label}-${index}`}
+                                                className="flex justify-between text-[11px] text-brand-muted"
+                                            >
+                                                <span>{line.label}</span>
+                                                <span className="tabular-nums">
+                                                    {fmtMoney(line.amount)}
+                                                </span>
+                                            </li>
+                                        ))}
+                                    </ul>
+                                )}
                         </div>
                     )}
 
