@@ -2,7 +2,7 @@ import type { AppError } from "./appError";
 
 export type MoneyVnd = number;
 
-function moneyValidationError(message: string): Error & AppError {
+export function moneyValidationError(message: string): Error & AppError {
   return Object.assign(new Error(message), {
     code: "VALIDATION_INVALID_INPUT",
     message,

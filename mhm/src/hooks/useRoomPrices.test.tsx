@@ -169,4 +169,29 @@ describe("sumRoomPricesWithOverrides", () => {
   it("totals an empty selection as zero, not null", () => {
     expect(sumRoomPricesWithOverrides([], {}, {}, 1)).toBe(0);
   });
+
+  /// I1 (review Task 18): a cleared price field sends `Number("") === 0`, and
+  /// `0` is not a valid rate — the backend rejects `rate <= 0`
+  /// (`group_lifecycle.rs`). Counting `0 != null` as a real override would
+  /// silently price the room at 0₫ instead of falling back to its engine
+  /// quote — the same "quiet wrong total" class of bug `sumRoomPrices` exists
+  /// to refuse.
+  it("does not count a zero override as a real price — falls back to the engine quote", () => {
+    expect(
+      sumRoomPricesWithOverrides(
+        ["A", "B"],
+        { A: pricingResult(632_500), B: pricingResult(1_012_000) },
+        { A: 0 },
+        2,
+      ),
+      // A: override is 0, ignored — falls back to its own engine quote,
+      // 632.500. B: untouched, 1.012.000. Not 0 + 1.012.000 = 1.012.000.
+    ).toBe(1_644_500);
+  });
+
+  it("still refuses to total when a zero-overridden room also lacks an engine price", () => {
+    expect(
+      sumRoomPricesWithOverrides(["A", "B"], { B: pricingResult(999) }, { A: 0 }, 2),
+    ).toBeNull();
+  });
 });

@@ -74,12 +74,6 @@ export default function GroupCheckinSheet() {
     // thứ hai sau khi đã mở (không gõ) phòng thứ nhất sẽ áp nhầm giá của
     // phòng thứ nhất.
     const [lastEditedRoomId, setLastEditedRoomId] = useState<string | null>(null);
-    // Tăng lên mỗi lần sheet đóng (xem effect `[isGroupCheckinOpen]` bên
-    // dưới) để ép remount `RateOverrideField` — reset `rateOverrides` (data)
-    // không đủ, vì trạng thái "đang sửa" nằm nội bộ component con (Task 16,
-    // không sửa lại) và chỉ mất đi khi remount. Cùng cách CheckinSheet.tsx /
-    // ReservationSheet.tsx đã làm ở Task 17 (commit fc76e43).
-    const [priceFormSession, setPriceFormSession] = useState(0);
 
     const vacantRooms = rooms.filter((r) => r.status === "vacant");
 
@@ -105,9 +99,18 @@ export default function GroupCheckinSheet() {
             setNotes("");
             // Giá tay của đoàn trước không được rò sang đoàn kế tiếp (bài học
             // Task 17: sheet không unmount, chỉ đổi prop `open`).
+            //
+            // M1 (review Task 18): không cần ép remount `RateOverrideField`
+            // bằng key kiểu `${id}:${session}` như CheckinSheet/
+            // ReservationSheet đã làm ở Task 17. Ở SHEET NÀY, `RateOverrideField`
+            // chỉ được render qua `selectedRooms.map(...)` (bước Xác nhận) —
+            // đặt `selectedRooms = []` ngay dưới đây đã kéo số phần tử map về
+            // 0, tức MỌI `RateOverrideField` đang mount đều unmount thật sự
+            // trong chính lần đóng này, không phải chỉ đổi prop. Reset dữ liệu
+            // (`rateOverrides`) là đủ; không còn trạng thái "đang sửa" nào của
+            // component con sống sót qua lần đóng để cần ép remount thêm.
             setRateOverrides({});
             setLastEditedRoomId(null);
-            setPriceFormSession((s) => s + 1);
         }
     }, [isGroupCheckinOpen]);
 
@@ -147,13 +150,17 @@ export default function GroupCheckinSheet() {
             // `group_checkin_tx` từ chối cả giao dịch nếu map override còn
             // khoá không nằm trong `room_ids` — dọn ngay tại đường bỏ chọn,
             // đừng đợi tới lúc submit mới phát hiện.
+            //
+            // M3 (review Task 18): không cần tự tay null `lastEditedRoomId`
+            // ở đây — xoá `id` khỏi `rateOverrides` ngay phía trên đã đủ để
+            // `overrideSourceRoomId` (kiểm `rateOverrides[lastEditedRoomId]
+            // != null`) tự rơi về nhánh fallback nếu `id` từng là nguồn.
             setRateOverrides((current) => {
                 if (!(id in current)) return current;
                 const next = { ...current };
                 delete next[id];
                 return next;
             });
-            setLastEditedRoomId((current) => (current === id ? null : current));
         }
     };
 
@@ -170,7 +177,16 @@ export default function GroupCheckinSheet() {
         // Ghi nhận "vừa sửa" cả khi bấm mở ô giá (prefill) lẫn khi thật sự gõ
         // số mới — cả hai đều là một lượt tương tác với ô giá của phòng này,
         // và đúng là cái "Áp cho tất cả phòng" nên coi là nguồn.
-        setLastEditedRoomId(rate == null ? null : roomId);
+        //
+        // C1 (review Task 18): khi `rate == null` ("Về giá gốc"), CHỈ xoá
+        // `lastEditedRoomId` nếu `roomId` chính là phòng đang giữ vị trí đó.
+        // Xoá vô điều kiện làm "Về giá gốc" một phòng KHÔNG LIÊN QUAN (chạm
+        // nhầm) xoá mất dấu vết của phòng vừa sửa THẬT — "Áp cho tất cả
+        // phòng" khi đó rơi về phòng đầu tiên còn override trong
+        // `selectedRooms`, không phải phòng lễ tân vừa gõ giá thương lượng.
+        setLastEditedRoomId((current) =>
+            rate == null ? (current === roomId ? null : current) : roomId,
+        );
     };
 
     // Đoàn hầu như luôn chốt một giá chung; không có nút này thì đoàn 8 phòng
@@ -510,11 +526,17 @@ export default function GroupCheckinSheet() {
                                         <div key={id} className="flex justify-between items-start gap-3 text-sm">
                                             <span className="pt-1.5">{room?.name || id}</span>
                                             <RateOverrideField
-                                                // Ghép `priceFormSession`: `rateOverrides` (data) reset
-                                                // ở effect đóng sheet không đủ để RateOverrideField quay
-                                                // lại nút hiển thị — trạng thái "đang sửa" nằm nội bộ
-                                                // component con, chỉ mất đi khi remount (Task 17).
-                                                key={`${id}:${priceFormSession}`}
+                                                // M1 (review Task 18): `key={id}` là đủ ở đây — không cần
+                                                // ghép thêm một "session" để ép remount. Sheet đóng thì
+                                                // `selectedRooms` bị đặt về `[]` (effect ở trên), tức
+                                                // `.map()` này rỗng đi, tức MỌI RateOverrideField unmount
+                                                // thật sự ngay trong lần đóng đó. Khác với CheckinSheet.tsx
+                                                // / ReservationSheet.tsx (Task 17, commit fc76e43): ở hai
+                                                // sheet đó field luôn có mặt trong cây (không rơi vào một
+                                                // `.map()` cạn về rỗng khi đóng), nên đổi `open` KHÔNG tự
+                                                // unmount và cần ép remount bằng key — điều đó không đúng
+                                                // ở sheet này.
+                                                key={id}
                                                 engineTotal={priceByRoom[id]?.total ?? null}
                                                 nights={nights}
                                                 value={rateOverrides[id] ?? null}

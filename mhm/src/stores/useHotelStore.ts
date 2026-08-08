@@ -2,7 +2,12 @@ import { create } from "zustand";
 import { invoke } from "@tauri-apps/api/core";
 import { createCorrelationId } from "@/lib/correlationId";
 import { invokeCommand, invokeWriteCommand } from "@/lib/invokeCommand";
-import { assertNonNegativeMoneyVnd, optionalMoneyVnd, type MoneyVnd } from "@/lib/money";
+import {
+  assertNonNegativeMoneyVnd,
+  moneyValidationError,
+  optionalMoneyVnd,
+  type MoneyVnd,
+} from "@/lib/money";
 import type {
   CheckInGuestInput,
   DashboardStats,
@@ -410,10 +415,20 @@ export const useHotelStore = create<HotelStore>((set, get) => {
           ...req,
           paid_amount: optionalMoneyVnd(req.paid_amount, "paid_amount"),
           rate_override_per_room: Object.fromEntries(
-            Object.entries(req.rate_override_per_room).map(([roomId, rate]) => [
-              roomId,
-              assertNonNegativeMoneyVnd(rate, `rate_override_per_room.${roomId}`),
-            ]),
+            Object.entries(req.rate_override_per_room).map(([roomId, rate]) => {
+              const checked = assertNonNegativeMoneyVnd(rate, `rate_override_per_room.${roomId}`);
+              // I1 (review Task 18): gate backend là `rate <= 0 ||
+              // rate > MAX_RATE_PER_NIGHT_VND` (group_lifecycle.rs:1524).
+              // `assertNonNegativeMoneyVnd` (>= 0) cho 0 đi lọt — ô giá bị
+              // xoá trắng gửi đúng `Number("") === 0`. Chặn tại đây, nêu
+              // đúng phòng, để lễ tân biết ngay phòng nào đang gõ sai thay
+              // vì một lỗi chung từ chối cả đoàn.
+              if (checked <= 0) {
+                const roomLabel = get().rooms.find((r) => r.id === roomId)?.name ?? roomId;
+                throw moneyValidationError(`Giá phòng ${roomLabel} không hợp lệ — phải lớn hơn 0₫`);
+              }
+              return [roomId, checked];
+            }),
           ),
         };
         await invokeWriteCommand("group_checkin", { req: guardedReq }, { correlationId });

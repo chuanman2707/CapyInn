@@ -132,6 +132,14 @@ export function sumRoomPrices(
  * priced it, and if it has not, the whole total is `null` — same refusal as
  * `sumRoomPrices`. A `reduce` with `?? 0` here would silently count a still-
  * unpriced room as 0₫, which is the exact bug this function exists to avoid.
+ *
+ * I1 (review Task 18): an override of `0` is not a real price — the backend
+ * rejects `rate <= 0` (`group_lifecycle.rs`), and a cleared price field sends
+ * exactly `0` (`Number("") === 0`). Treating `0` as a valid override here
+ * would silently count that room as 0₫ instead of refusing or falling back,
+ * which is the same "quiet wrong total" this function exists to avoid — so
+ * `0` (and any other non-positive value) is treated as "not overridden" and
+ * falls back to the engine quote, same as a room nobody has touched.
  */
 export function sumRoomPricesWithOverrides(
     roomIds: string[],
@@ -142,7 +150,7 @@ export function sumRoomPricesWithOverrides(
     let total = 0;
     for (const roomId of roomIds) {
         const override = overridePerRoom[roomId];
-        if (override != null) {
+        if (override != null && override > 0) {
             total += override * nights;
             continue;
         }
