@@ -507,6 +507,47 @@ describe("useHotelStore monitoring context", () => {
     );
   });
 
+  /// I1 (review Task 18): xoá trắng ô giá gửi `Number("") === 0`.
+  /// `assertNonNegativeMoneyVnd` (>= 0) cho 0 đi lọt, trong khi backend từ
+  /// chối `rate <= 0` (`group_lifecycle.rs:1524`) — hàng rào ở đây phải khớp
+  /// đúng gate backend, và thông báo phải nêu đúng phòng để lễ tân biết ngay
+  /// phòng nào đang gõ sai, thay vì một lỗi chung từ chối cả đoàn.
+  it("rejects a zero rate_override_per_room entry and names the room", async () => {
+    useHotelStore.setState({
+      rooms: [
+        {
+          id: "101",
+          name: "Phòng 101",
+          type: "Standard Room",
+          floor: 1,
+          has_balcony: false,
+          base_price: 500000,
+          max_guests: 2,
+          extra_person_fee: 0,
+          status: "vacant",
+        },
+      ],
+    });
+
+    await expect(
+      useHotelStore.getState().groupCheckIn({
+        group_name: "Retry Group",
+        organizer_name: "Organizer",
+        room_ids: ["101", "102"],
+        master_room_id: "101",
+        guests_per_room: {},
+        nights: 1,
+        rate_override_per_room: { "101": 0 },
+      }),
+    ).rejects.toThrow(/Phòng 101/);
+
+    expect(invokeWriteCommand).not.toHaveBeenCalledWith(
+      "group_checkin",
+      expect.anything(),
+      expect.anything(),
+    );
+  });
+
   it("rejects fractional group service unit_price before invoking backend", async () => {
     await expect(
       useHotelStore.getState().addGroupService({

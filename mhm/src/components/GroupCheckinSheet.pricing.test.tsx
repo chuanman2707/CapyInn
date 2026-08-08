@@ -44,6 +44,18 @@ const ROOMS = [
     extra_person_fee: 0,
     status: "vacant",
   },
+  {
+    id: "R303",
+    name: "R303",
+    type: "Suite",
+    room_type: "Suite",
+    floor: 3,
+    has_balcony: true,
+    base_price: 1200000,
+    max_guests: 3,
+    extra_person_fee: 0,
+    status: "vacant",
+  },
 ];
 
 vi.mock("@/stores/useHotelStore", () => ({
@@ -85,7 +97,7 @@ vi.mock("sonner", () => ({ toast: { error: vi.fn(), success: vi.fn() } }));
 import GroupCheckinSheet from "./GroupCheckinSheet";
 
 /** Two rooms, quoted individually — not 500.000 + 800.000. */
-const QUOTES: Record<string, number> = { R101: 632_500, R202: 1_012_000 };
+const QUOTES: Record<string, number> = { R101: 632_500, R202: 1_012_000, R303: 900_000 };
 
 function pricingResult(total: number) {
   return {
@@ -132,6 +144,28 @@ async function pickBothRooms() {
 
   // The wizard will not advance without a master room, and the master picker
   // renders below the grid with the same room names — take the later one.
+  const masterCandidates = screen.getAllByRole("button", { name: /R101/ });
+  await user.click(masterCandidates[masterCandidates.length - 1]);
+
+  return user;
+}
+
+/** Same as {@link pickBothRooms}, plus a third room — for the C1 pin, which
+ * needs a room that is neither the one edited last nor the one whose key
+ * happens to sort first in the override map. */
+async function pickThreeRooms() {
+  const user = userEvent.setup();
+  render(<GroupCheckinSheet />);
+
+  const textboxes = screen.getAllByRole("textbox");
+  await user.type(textboxes[0], "Đoàn Hà Nội");
+  await user.type(textboxes[1], "Trần Văn B");
+  await user.click(screen.getByRole("button", { name: /Tiếp theo/i }));
+  await user.click(screen.getByRole("button", { name: /Chọn tay/i }));
+  await user.click(screen.getByRole("button", { name: /R101/ }));
+  await user.click(screen.getByRole("button", { name: /R202/ }));
+  await user.click(screen.getByRole("button", { name: /R303/ }));
+
   const masterCandidates = screen.getAllByRole("button", { name: /R101/ });
   await user.click(masterCandidates[masterCandidates.length - 1]);
 
@@ -556,5 +590,135 @@ describe("GroupCheckinSheet manual rate override", () => {
     expect(total).toHaveTextContent("1.644.500");
     expect(screen.queryByTestId("rate-override-total")).not.toBeInTheDocument();
     expect(screen.getAllByTestId("rate-display")).toHaveLength(2);
+  });
+
+  /// C1 (review Task 18): "Về giá gốc" cho một phòng KHÔNG PHẢI phòng vừa sửa
+  /// xoá `lastEditedRoomId` VÔ ĐIỀU KIỆN — "Áp cho tất cả phòng" khi đó rơi về
+  /// phòng ĐẦU TIÊN còn override trong `selectedRooms`, không phải phòng vừa
+  /// sửa thật sự gần nhất. Kịch bản: xem giá cả 3 phòng, sửa R202 rồi R303
+  /// (R303 là lượt sửa SAU CÙNG — giá thương lượng thật), bấm "Về giá gốc" cho
+  /// R101 (chạm nhầm, không liên quan) rồi bấm "Áp cho tất cả phòng" — kỳ vọng
+  /// giá của R303 (500.000), không phải R202 (700.000, khoá còn lại đứng
+  /// trước trong `selectedRooms` sau khi R101 bị xoá khỏi map).
+  it("Về giá gốc một phòng không liên quan không đổi nguồn của 'Áp cho tất cả phòng'", async () => {
+    const user = await pickThreeRooms();
+    await advanceToSummary(user);
+    await screen.findByTestId("group-price-total");
+
+    // Bấm xem giá cả 3 phòng (chỉ mở, chưa gõ số mới).
+    const displays1 = await screen.findAllByTestId("rate-display");
+    expect(displays1).toHaveLength(3);
+    fireEvent.click(displays1[0]); // R101
+    fireEvent.click(screen.getAllByTestId("rate-display")[0]); // R202
+    fireEvent.click(screen.getAllByTestId("rate-display")[0]); // R303
+
+    // Gõ giá thật cho R202 rồi R303 — R303 là lượt sửa SAU CÙNG.
+    const inputs = screen.getAllByTestId("rate-input"); // [R101, R202, R303]
+    fireEvent.change(inputs[1], { target: { value: "700000" } });
+    fireEvent.change(inputs[2], { target: { value: "500000" } });
+
+    // Bấm "Về giá gốc" cho R101 — phòng chạm nhầm, không liên quan tới hai
+    // lượt sửa vừa rồi.
+    const resetButtons = screen.getAllByRole("button", { name: /Về giá gốc/i });
+    fireEvent.click(resetButtons[0]);
+
+    await user.click(screen.getByRole("button", { name: /áp cho tất cả phòng/i }));
+
+    const afterApply = screen.getAllByTestId("rate-input");
+    expect(afterApply).toHaveLength(3);
+    expect((afterApply[0] as HTMLInputElement).value).toBe("500000"); // R101
+    expect((afterApply[1] as HTMLInputElement).value).toBe("500000"); // R202
+    expect((afterApply[2] as HTMLInputElement).value).toBe("500000"); // R303
+
+    fireEvent.click(screen.getByRole("button", { name: /Hoàn tất Group Check-in/i }));
+
+    await waitFor(() => expect(groupCheckIn).toHaveBeenCalledTimes(1));
+    const req = groupCheckIn.mock.calls[0][0];
+    expect(req.rate_override_per_room).toEqual({
+      R101: 500000,
+      R202: 500000,
+      R303: 500000,
+    });
+  });
+
+  /// I2 (review Task 18): test nút "Áp cho tất cả phòng" trước đó luôn mở giá
+  /// CẢ HAI phòng trước khi bấm, nên cả hai đều đã có mặt trong
+  /// `rateOverrides` — không chứng minh được nút thực sự VỚI TỚI một phòng
+  /// CHƯA HỀ bị chạm, lý do chính nút này tồn tại (đoàn 8 phòng không phải gõ
+  /// 8 lần). Ở đây chỉ chạm R101; R202 chưa từng được bấm vào.
+  it("Áp cho tất cả phòng cũng gán giá cho phòng chưa hề bị chạm", async () => {
+    const user = await pickBothRooms();
+    await advanceToSummary(user);
+    await screen.findByTestId("group-price-total");
+
+    fireEvent.click((await screen.findAllByTestId("rate-display"))[0]); // R101
+    fireEvent.change(screen.getAllByTestId("rate-input")[0], {
+      target: { value: "650000" },
+    });
+
+    // R202 vẫn ở dạng hiển thị — chưa từng vào `rateOverrides`.
+    expect(screen.getAllByTestId("rate-display")).toHaveLength(1);
+
+    await user.click(screen.getByRole("button", { name: /áp cho tất cả phòng/i }));
+
+    const inputs = screen.getAllByTestId("rate-input");
+    expect(inputs).toHaveLength(2);
+    expect((inputs[0] as HTMLInputElement).value).toBe("650000");
+    expect((inputs[1] as HTMLInputElement).value).toBe("650000");
+
+    fireEvent.click(screen.getByRole("button", { name: /Hoàn tất Group Check-in/i }));
+
+    await waitFor(() => expect(groupCheckIn).toHaveBeenCalledTimes(1));
+    const req = groupCheckIn.mock.calls[0][0];
+    expect(req.rate_override_per_room).toEqual({ R101: 650000, R202: 650000 });
+  });
+
+  /// M3 (review Task 18): nút chỉ có nghĩa khi đoàn có NHIỀU HƠN MỘT phòng —
+  /// đoàn một phòng "áp cho tất cả" chính là phòng đó, không cần nút.
+  it("không hiện nút 'Áp cho tất cả phòng' khi đoàn chỉ có một phòng", async () => {
+    const user = userEvent.setup();
+    render(<GroupCheckinSheet />);
+
+    const textboxes = screen.getAllByRole("textbox");
+    await user.type(textboxes[0], "Đoàn Hà Nội");
+    await user.type(textboxes[1], "Trần Văn B");
+    await user.click(screen.getByRole("button", { name: /Tiếp theo/i }));
+    await user.click(screen.getByRole("button", { name: /Chọn tay/i }));
+    await user.click(screen.getByRole("button", { name: /R101/ }));
+    const masterCandidates = screen.getAllByRole("button", { name: /R101/ });
+    await user.click(masterCandidates[masterCandidates.length - 1]);
+
+    await advanceToSummary(user);
+    await screen.findByTestId("group-price-total");
+
+    fireEvent.click((await screen.findAllByTestId("rate-display"))[0]);
+    fireEvent.change(screen.getAllByTestId("rate-input")[0], {
+      target: { value: "400000" },
+    });
+
+    expect(
+      screen.queryByRole("button", { name: /áp cho tất cả phòng/i }),
+    ).not.toBeInTheDocument();
+  });
+
+  /// I1 (review Task 18): xoá trắng ô giá gửi `Number("") === 0` xuống
+  /// `onChange`. 0 không phải một mức giá hợp lệ — `group_lifecycle.rs` từ
+  /// chối `rate <= 0`. Tổng đoàn không được âm thầm cộng 0₫ vào chỗ đó; phải
+  /// rơi về giá engine của chính phòng như thể phòng đó chưa hề override.
+  it("xoá trắng ô giá không âm thầm biến phòng đó thành 0₫ trong tổng đoàn", async () => {
+    const user = await pickBothRooms();
+    await advanceToSummary(user);
+    await screen.findByTestId("group-price-total");
+
+    fireEvent.click((await screen.findAllByTestId("rate-display"))[0]); // mở R101
+    fireEvent.change(screen.getAllByTestId("rate-input")[0], {
+      target: { value: "" },
+    });
+
+    // Giá engine của cả hai phòng: 632.500 (R101) + 1.012.000 (R202) — không
+    // phải 0 + 1.012.000 = 1.012.000 như khi 0₫ bị coi là override hợp lệ.
+    await waitFor(() =>
+      expect(screen.getByTestId("group-price-total")).toHaveTextContent("1.644.500"),
+    );
   });
 });
