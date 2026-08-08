@@ -54,7 +54,19 @@ interface HotelStore {
   markDashboardDataChanged: () => void;
   setTab: (tab: HotelTab) => void;
   setCheckinOpen: (open: boolean, roomId?: string | null, nights?: number | null) => void;
-  checkIn: (roomId: string, guests: CheckInGuestInput[], nights: number, paidAmount?: MoneyVnd, source?: string, notes?: string) => Promise<void>;
+  checkIn: (
+    roomId: string,
+    guests: CheckInGuestInput[],
+    nights: number,
+    paidAmount?: MoneyVnd,
+    source?: string,
+    notes?: string,
+    // Object thay vì tham số vị trí thứ 7: hàm này đã có 6 tham số cùng kiểu
+    // dữ liệu mập mờ (string | number | undefined) đứng cạnh nhau — thêm một
+    // `number | null` nữa vào cuối là chỗ dễ đọc nhầm thứ tự nhất. Gói riêng
+    // buộc mọi call site phải gõ tên trường ra, đọc là hiểu ngay.
+    options?: { rateOverridePerNight?: number | null },
+  ) => Promise<void>;
   checkOut: (
     bookingId: string,
     settlementMode: CheckoutSettlementMode,
@@ -150,10 +162,11 @@ export const useHotelStore = create<HotelStore>((set, get) => {
         checkinNights: open ? nights : null,
       }),
 
-    checkIn: async (roomId, guests, nights, paidAmount, source, notes) => {
+    checkIn: async (roomId, guests, nights, paidAmount, source, notes, options) => {
       beginAction();
       try {
         const correlationId = createCorrelationId();
+        const rateOverridePerNight = options?.rateOverridePerNight ?? null;
         await invokeWriteCommand(
           "check_in",
           {
@@ -164,6 +177,13 @@ export const useHotelStore = create<HotelStore>((set, get) => {
               source,
               notes,
               paid_amount: optionalMoneyVnd(paidAmount, "paid_amount"),
+              // Khoá tường minh, kể cả khi không sửa giá: `null` đọc log ra
+              // thấy được là "đã hỏi và giữ giá hệ thống", còn thiếu khoá thì
+              // không phân biệt được với "phiên bản cũ chưa biết trường này".
+              rate_override_per_night:
+                rateOverridePerNight != null
+                  ? assertNonNegativeMoneyVnd(rateOverridePerNight, "rateOverridePerNight")
+                  : null,
             },
           },
           {

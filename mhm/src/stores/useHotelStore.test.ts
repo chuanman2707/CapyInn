@@ -100,6 +100,7 @@ describe("useHotelStore monitoring context", () => {
           source: "walk-in",
           notes: "Late arrival",
           paid_amount: 500000,
+          rate_override_per_night: null,
         },
       },
       {
@@ -134,6 +135,7 @@ describe("useHotelStore monitoring context", () => {
           source: undefined,
           notes: "",
           paid_amount: 250000,
+          rate_override_per_night: null,
         },
       },
       {
@@ -145,6 +147,46 @@ describe("useHotelStore monitoring context", () => {
           notes_present: false,
         },
       },
+    );
+  });
+
+  it("gửi rate_override_per_night tường minh khi options.rateOverridePerNight có giá trị", async () => {
+    await useHotelStore.getState().checkIn(
+      "101",
+      [{ full_name: "Nguyen Van A", doc_number: "012345678901" }],
+      1,
+      undefined,
+      undefined,
+      undefined,
+      { rateOverridePerNight: 400000 },
+    );
+
+    expect(invokeWriteCommand).toHaveBeenCalledWith(
+      "check_in",
+      expect.objectContaining({
+        req: expect.objectContaining({ rate_override_per_night: 400000 }),
+      }),
+      expect.anything(),
+    );
+  });
+
+  it("từ chối rate_override_per_night âm trước khi gọi backend", async () => {
+    await expect(
+      useHotelStore.getState().checkIn(
+        "101",
+        [{ full_name: "Nguyen Van A", doc_number: "012345678901" }],
+        1,
+        undefined,
+        undefined,
+        undefined,
+        { rateOverridePerNight: -1000 },
+      ),
+    ).rejects.toThrow(/rateOverridePerNight/);
+
+    expect(invokeWriteCommand).not.toHaveBeenCalledWith(
+      "check_in",
+      expect.anything(),
+      expect.anything(),
     );
   });
 
