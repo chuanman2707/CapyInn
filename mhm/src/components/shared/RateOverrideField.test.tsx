@@ -86,4 +86,21 @@ describe("RateOverrideField", () => {
     fireEvent.change(screen.getByTestId("rate-input"), { target: { value: "-500" } });
     expect(onChange).toHaveBeenCalledWith(-500);
   });
+
+  // M-1 (review Task 17): engineTotal null nghĩa là chưa có gì để prefill
+  // (đang tải, hoặc preview vừa lỗi). Trước bản vá, bấm vào lúc này gọi
+  // prefillRate(null, nights) = 0 và âm thầm gửi giá 0₫/đêm.
+  it("không cho bấm khi chưa có giá engine để prefill (đang tải hoặc lỗi)", () => {
+    const onChange = vi.fn();
+    render(
+      <RateOverrideField engineTotal={null} nights={3} value={null} onChange={onChange} />,
+    );
+    const button = screen.getByTestId("rate-display");
+    expect(button).toBeDisabled();
+
+    fireEvent.click(button);
+
+    expect(onChange).not.toHaveBeenCalled();
+    expect(screen.queryByTestId("rate-input")).toBeNull();
+  });
 });

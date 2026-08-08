@@ -282,6 +282,57 @@ describe("CheckinSheet rate override", () => {
 
     expect(screen.queryByTestId("stay-price-breakdown")).not.toBeInTheDocument();
   });
+
+  // I-2 (review Task 17): 632.500/3 đêm rồi đổi thành 4 đêm, preview bắn lại
+  // và lỗi. Trước bản vá, ô giá tay (kể cả nút "Về giá gốc") biến mất hoàn
+  // toàn, thay bằng "Chưa tính được giá" — lễ tân không còn thấy con số đã
+  // gõ, không sửa được, không huỷ được, nhưng Hoàn tất Check-in vẫn âm thầm
+  // gửi đúng con số đó (4 đêm × 400.000 = 1.600.000₫, chưa từng hiện lên).
+  it("giá tay vẫn hiện và sửa được khi preview lỗi ngay sau khi đang gõ (I-2)", async () => {
+    let calls = 0;
+    setMockResponse("calculate_room_price_preview", () => {
+      calls += 1;
+      if (calls === 1) return pricingResult(BACKEND_TOTAL);
+      throw new Error("IPC lỗi giả lập");
+    });
+
+    render(<CheckinSheet preSelectedRoomId="R101" preSelectedNights={3} />);
+    fillRequiredGuestFields();
+
+    fireEvent.click(await screen.findByTestId("rate-display"));
+    fireEvent.change(screen.getByTestId("rate-input"), { target: { value: "400000" } });
+
+    // Đổi số đêm: preview bắn lại, lần này lỗi.
+    fireEvent.change(fieldInput("Số đêm"), { target: { value: "4" } });
+    await waitFor(() => expect(calls).toBeGreaterThanOrEqual(2));
+
+    // Ô giá tay vẫn còn đó — không rơi về "Chưa tính được giá" trong khi lễ
+    // tân đang gõ dở, và vẫn bấm "Về giá gốc" được.
+    expect(screen.getByTestId("rate-input")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /về giá gốc/i })).toBeInTheDocument();
+    expect(screen.queryByTestId("stay-price-error")).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: /hoàn tất check-in/i }));
+
+    await waitFor(() => expect(checkInArgs().length).toBeGreaterThan(0));
+    // Đúng số lễ tân đã gõ (đơn vị mỗi đêm) — không phải 0, không phải giá
+    // engine, không phải giá trị bịa ra vì preview lỗi.
+    expect(checkInArgs()[0].req.rate_override_per_night).toBe(400000);
+  });
+
+  // Nhánh còn lại: KHÔNG có giá tay nào đang gõ khi preview lỗi thì vẫn báo
+  // lỗi trơn như trước — không có gì để prefill từ một engine đang lỗi.
+  it("không hiện ô giá tay khi preview lỗi mà chưa từng gõ giá nào", async () => {
+    setMockResponse("calculate_room_price_preview", () => {
+      throw new Error("IPC lỗi giả lập");
+    });
+
+    render(<CheckinSheet preSelectedRoomId="R101" preSelectedNights={3} />);
+
+    await waitFor(() => expect(screen.getByTestId("stay-price-error")).toBeInTheDocument());
+    expect(screen.queryByTestId("rate-input")).not.toBeInTheDocument();
+    expect(screen.queryByTestId("stay-price-total")).not.toBeInTheDocument();
+  });
 });
 
 describe("CheckinSheet and the local day", () => {

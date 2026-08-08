@@ -51,6 +51,13 @@ export default function ReservationSheet({ open, onOpenChange, preSelectedRoomId
     // Giá tay lễ tân gõ đè, đơn vị mỗi đêm. Chỉ có tác dụng ở nhánh tạo mới —
     // `ModifyReservationRequest` phía Rust không có trường này (xem handleSubmit).
     const [rateOverride, setRateOverride] = useState<number | null>(null);
+    // I-1 (review Task 17): tăng lên mỗi lần sheet mở. Chỉ đặt `rateOverride`
+    // về null (data) là chưa đủ để RateOverrideField quay lại nút hiển thị —
+    // trạng thái "đang sửa" của nó nằm nội bộ component con (Task 16, không
+    // sửa lại), chỉ mất đi khi remount. `key` của RateOverrideField ghép số
+    // này với roomId nên remount xảy ra cả khi đổi phòng LẪN khi mở lại một
+    // phiên mới (kể cả cùng phòng) — xem chú thích ở JSX render bên dưới.
+    const [formSession, setFormSession] = useState(0);
     const [deposit, setDeposit] = useState("");
     const [source, setSource] = useState("phone");
     const [notes, setNotes] = useState("");
@@ -81,6 +88,17 @@ export default function ReservationSheet({ open, onOpenChange, preSelectedRoomId
     useEffect(() => {
         if (open) {
             fetchRooms();
+            // I-1 (review Task 17): giá tay của khách trước không được rò
+            // sang lần mở sheet kế tiếp. Effect `[roomId]` bên dưới không cứu
+            // được khi mở lại ĐÚNG phòng cũ (roomId không đổi thì effect đó
+            // không chạy) — sheet không unmount giữa hai lần đóng/mở
+            // (Reservations.tsx chỉ đổi prop `open`), nên state cũ vẫn còn
+            // nguyên. Đặt reset ở đây vì effect này (phụ thuộc `open`) đảm
+            // bảo chạy trên MỌI lần đóng→mở, giống cách `closeAll()` của
+            // CheckinSheet chạy trên mọi đường đóng — không cần sửa
+            // Reservations.tsx (checkout dùng chung, tránh đụng khi không cần).
+            setRateOverride(null);
+            setFormSession((s) => s + 1);
             if (editBooking) {
                 // Pre-fill form with existing booking data
                 setRoomId(editBooking.room_id);
@@ -535,8 +553,10 @@ export default function ReservationSheet({ open, onOpenChange, preSelectedRoomId
                                                 // Xem chú thích tương tự ở CheckinSheet.tsx: `key` ép
                                                 // remount khi đổi phòng, vì trạng thái "đang sửa" của
                                                 // ô này nằm trong component con, effect reset
-                                                // rateOverride (data) không chạm tới được.
-                                                key={roomId}
+                                                // rateOverride (data) không chạm tới được. Ghép thêm
+                                                // formSession (I-1) để remount CẢ khi mở lại sheet
+                                                // (kể cả cùng phòng), không chỉ khi đổi phòng.
+                                                key={`${roomId}:${formSession}`}
                                                 engineTotal={preview.total}
                                                 nights={nights}
                                                 value={rateOverride}
