@@ -20,12 +20,22 @@ mod prelude {
         commands::reservations,
         domain::booking::{BookingError, OriginSideEffect},
         models::{
-            AddGroupServiceRequest, BackfillStayRequest, CheckOutRequest, CheckoutSettlementMode,
-            CheckoutSettlementPreviewRequest, CreateGuestRequest, CreateReservationRequest,
-            GroupCheckoutRequest, ModifyReservationRequest, VoidBookingRequest,
+            AddGroupServiceRequest, BackfillStayRequest, BookingFilter, CheckOutRequest,
+            CheckoutSettlementMode, CheckoutSettlementPreviewRequest, CreateGuestRequest,
+            CreateReservationRequest, GroupCheckoutRequest, ModifyReservationRequest,
+            VoidBookingRequest,
         },
         money::MAX_TRANSPORT_SAFE_MONEY_VND,
-        queries::booking::{audit_queries, billing_queries, revenue_queries, void_queries},
+        queries::{
+            booking::{
+                activity_queries, audit_queries, billing_queries, booking_list_queries,
+                revenue_queries, void_queries,
+            },
+            export_queries,
+            groups::group_queries,
+            guests::guest_queries,
+            rooms::assistant_queries,
+        },
     };
 
     pub(crate) use crate::services::booking::{

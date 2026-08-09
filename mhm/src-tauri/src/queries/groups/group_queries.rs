@@ -9,6 +9,14 @@ use sqlx::{Pool, Row, Sqlite};
 use crate::db::row::{get_money_vnd, get_optional_money_vnd};
 use crate::models::{BookingGroup, BookingWithGuest, GroupDetailResponse, GroupService};
 
+// `b.status != 'voided'`: `void_booking_tx` (`void_lifecycle.rs`) hiện chặn
+// xóa một booking có `group_id` ở tầng service ("Lượt này thuộc đoàn — chưa hỗ
+// trợ xóa từng phòng"), nên hôm nay không đường ghi nào tạo ra được một hàng
+// vừa `voided` vừa thuộc đoàn. Bộ lọc ở tầng đọc không được phép dựa vào đó:
+// nó phải đứng vững bất kể `voided` sinh ra bằng đường nào — kể cả một sửa DB
+// tay, hay một tính năng "xoá từng phòng trong đoàn" sau này — không chỉ
+// đường duy nhất mà service hôm nay cho phép. Thiếu dòng này thì tổng tiền
+// đoàn (`total_group_detail`) sẽ cộng nhầm ngay khi guard kia được nới.
 const GROUP_BOOKINGS_SQL: &str =
     "SELECT b.id, b.room_id, r.name as room_name, g.full_name as guest_name,
             b.check_in_at, b.expected_checkout, b.actual_checkout, b.nights,
@@ -18,7 +26,7 @@ const GROUP_BOOKINGS_SQL: &str =
      FROM bookings b
      JOIN rooms r ON r.id = b.room_id
      JOIN guests g ON g.id = b.primary_guest_id
-     WHERE b.group_id = ?
+     WHERE b.group_id = ? AND b.status != 'voided'
      ORDER BY r.floor, r.id";
 
 pub async fn load_group(pool: &Pool<Sqlite>, group_id: &str) -> Result<BookingGroup, sqlx::Error> {
