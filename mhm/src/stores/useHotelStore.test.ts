@@ -35,10 +35,6 @@ describe("useHotelStore monitoring context", () => {
         return [];
       }
 
-      if (command === "get_housekeeping_tasks") {
-        return [];
-      }
-
       if (command === "get_dashboard_stats") {
         return {
           total_rooms: 10,
@@ -61,7 +57,6 @@ describe("useHotelStore monitoring context", () => {
       dashboardRefreshVersion: 0,
       roomDetail: null,
       activeTab: "dashboard",
-      housekeepingTasks: [],
       loading: false,
       isCheckinOpen: false,
       checkinRoomId: null,
@@ -381,20 +376,6 @@ describe("useHotelStore monitoring context", () => {
     );
   });
 
-  it("routes updateHousekeeping through invokeWriteCommand", async () => {
-    await useHotelStore.getState().updateHousekeeping("task-1", "cleaning", "Started");
-
-    expect(invokeWriteCommand).toHaveBeenCalledWith("update_housekeeping", {
-      taskId: "task-1",
-      newStatus: "cleaning",
-      note: "Started",
-    });
-    expect(invoke).not.toHaveBeenCalledWith(
-      "update_housekeeping",
-      expect.anything(),
-    );
-  });
-
   it("rejects fractional checkIn paid_amount before invoking backend", async () => {
     await expect(
       useHotelStore.getState().checkIn(
@@ -577,7 +558,6 @@ describe("useHotelStore navigation side effects", () => {
     invokeWriteCommand.mockResolvedValue(undefined);
     invoke.mockImplementation(async (command: string) => {
       if (command === "get_rooms") return [];
-      if (command === "get_housekeeping_tasks") return [];
       if (command === "get_dashboard_stats") {
         return { total_rooms: 10, occupied: 2, vacant: 8, cleaning: 0, revenue_today: 0 };
       }

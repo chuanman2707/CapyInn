@@ -9,10 +9,7 @@ use crate::{
     money::validate_non_negative_money_vnd,
     queries::booking::{expense_queries, revenue_queries, room_queries, stay_info_queries},
     repositories::booking::expense_repository,
-    services::{
-        booking::{backfill, room_change, stay_lifecycle},
-        housekeeping::housekeeping_service,
-    },
+    services::booking::{backfill, room_change, stay_lifecycle},
 };
 use serde_json::{json, Value};
 use sqlx::{Pool, Sqlite};
@@ -621,32 +618,6 @@ pub async fn update_booking_notes(
     emit_db_update(&app, "rooms");
 
     Ok(booking)
-}
-
-// ─── Housekeeping Commands ───
-
-#[tauri::command]
-pub async fn get_housekeeping_tasks(
-    state: State<'_, AppState>,
-) -> Result<Vec<HousekeepingTask>, String> {
-    housekeeping_service::list_open_tasks(&state.db).await
-}
-
-#[tauri::command]
-pub async fn update_housekeeping(
-    state: State<'_, AppState>,
-    app: tauri::AppHandle,
-    task_id: String,
-    new_status: String,
-    note: Option<String>,
-) -> Result<(), String> {
-    housekeeping_service::update_status(&state.db, &task_id, &new_status, note.as_deref())
-        .await
-        .map_err(|error| format!("{}: {}", error.code, error.message))?;
-
-    emit_db_update(&app, "housekeeping");
-
-    Ok(())
 }
 
 // ─── Expense Commands ───

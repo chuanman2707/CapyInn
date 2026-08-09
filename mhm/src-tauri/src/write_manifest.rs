@@ -5,7 +5,6 @@ pub enum LockDeriverId {
     GroupCheckinRooms,
     GroupCheckoutBookingsAndRooms,
     ReservationBookingAndRoom,
-    HousekeepingTaskRoom,
     FolioBooking,
     PaymentBooking,
 }
@@ -18,7 +17,6 @@ impl LockDeriverId {
             Self::GroupCheckinRooms => "group_checkin_rooms",
             Self::GroupCheckoutBookingsAndRooms => "group_checkout_bookings_and_rooms",
             Self::ReservationBookingAndRoom => "reservation_booking_and_room",
-            Self::HousekeepingTaskRoom => "housekeeping_task_room",
             Self::FolioBooking => "folio_booking",
             Self::PaymentBooking => "payment_booking",
         }
@@ -91,11 +89,6 @@ pub const WRITE_COMMAND_MANIFEST: &[WriteCommandMeta] = &[
         enforced_in_foundation: true,
     },
     WriteCommandMeta {
-        command_name: "update_housekeeping",
-        lock_deriver: LockDeriverId::HousekeepingTaskRoom,
-        enforced_in_foundation: true,
-    },
-    WriteCommandMeta {
         command_name: "create_reservation",
         lock_deriver: LockDeriverId::RoomFromRequest,
         enforced_in_foundation: false,
@@ -141,7 +134,6 @@ mod tests {
             "confirm_reservation",
             "cancel_reservation",
             "modify_reservation",
-            "update_housekeeping",
             "create_reservation",
             "add_folio_line",
             "record_payment",

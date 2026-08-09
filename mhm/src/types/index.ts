@@ -127,16 +127,6 @@ export interface DashboardStats {
   revenue_today: MoneyVnd;
 }
 
-export interface HousekeepingTask {
-  id: string;
-  room_id: string;
-  status: string;
-  note?: string;
-  triggered_at: string;
-  cleaned_at?: string;
-  created_at: string;
-}
-
 export interface Expense {
   id: string;
   category: string;
@@ -159,7 +149,6 @@ export type HotelTab =
   | "reservations"
   | "guests"
   | "groups"
-  | "housekeeping"
   | "analytics"
   | "settings"
   | "declaration"

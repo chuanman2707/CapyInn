@@ -12,7 +12,6 @@ import type {
   CheckInGuestInput,
   DashboardStats,
   HotelTab,
-  HousekeepingTask,
   Room,
   RoomWithBooking,
   BookingGroup,
@@ -42,7 +41,6 @@ interface HotelStore {
   dashboardRefreshVersion: number;
   roomDetail: RoomWithBooking | null;
   activeTab: HotelTab;
-  housekeepingTasks: HousekeepingTask[];
   loading: boolean;
   isCheckinOpen: boolean;
   checkinRoomId: string | null;
@@ -85,8 +83,6 @@ interface HotelStore {
   setRoomChangeOpen: (open: boolean, bookingId?: string | null) => void;
   fetchRoomChangeOptions: (bookingId: string) => Promise<RoomChangeOptions>;
   changeRoom: (bookingId: string, newRoomId: string, keepPrice: boolean, reason?: string) => Promise<void>;
-  fetchHousekeeping: () => Promise<void>;
-  updateHousekeeping: (taskId: string, status: string, note?: string) => Promise<void>;
   getStayInfoText: (bookingId: string) => Promise<string>;
   setGroupCheckinOpen: (open: boolean) => void;
   groupCheckIn: (req: GroupCheckinRequest) => Promise<void>;
@@ -119,7 +115,6 @@ export const useHotelStore = create<HotelStore>((set, get) => {
     dashboardRefreshVersion: 0,
     roomDetail: null,
     activeTab: "dashboard",
-    housekeepingTasks: [],
     loading: false,
     isCheckinOpen: false,
     checkinRoomId: null,
@@ -386,17 +381,6 @@ export const useHotelStore = create<HotelStore>((set, get) => {
       } finally {
         endAction();
       }
-    },
-
-    fetchHousekeeping: async () => {
-      const tasks = await invoke<HousekeepingTask[]>("get_housekeeping_tasks");
-      set({ housekeepingTasks: tasks });
-    },
-
-    updateHousekeeping: async (taskId, status, note) => {
-      await invokeWriteCommand("update_housekeeping", { taskId, newStatus: status, note });
-      await get().fetchHousekeeping();
-      await get().fetchRooms();
     },
 
     getStayInfoText: async (bookingId: string) => {

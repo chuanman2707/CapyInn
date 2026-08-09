@@ -2,7 +2,7 @@
  * Mock data factories for tests.
  * Creates realistic test data matching Rust backend interfaces.
  */
-import type { Booking, DashboardStats, Guest, HousekeepingTask, Room, RoomWithBooking } from "@/types";
+import type { Booking, DashboardStats, Guest, Room, RoomWithBooking } from "@/types";
 
 let idCounter = 0;
 const nextId = () => `test-${++idCounter}`;
@@ -99,18 +99,6 @@ export function createRoomWithBooking(overrides: { room?: Partial<Room>; booking
     const guests = overrides.guests ?? [createGuest()];
 
     return { room, booking, guests };
-}
-
-// --- Housekeeping ---
-export function createHousekeepingTask(overrides: Partial<HousekeepingTask> = {}): HousekeepingTask {
-    return {
-        id: nextId(),
-        room_id: "3A",
-        status: "needs_cleaning",
-        triggered_at: new Date().toISOString(),
-        created_at: new Date().toISOString(),
-        ...overrides,
-    };
 }
 
 // --- User (Auth) ---

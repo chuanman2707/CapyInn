@@ -54,7 +54,6 @@ vi.mock("@/stores/useHotelStore", () => ({
         setCheckinOpen: vi.fn(),
         setRoomChangeOpen,
         fetchRooms,
-        updateHousekeeping: vi.fn(),
         roomTypeRates,
     }),
 }));
@@ -310,9 +309,6 @@ describe("RoomDrawer nights stepper", () => {
             if (cmd === "get_room_detail") {
                 const next = queue.length > 1 ? queue.shift()! : queue[0];
                 return Promise.resolve(next);
-            }
-            if (cmd === "get_housekeeping_tasks") {
-                return Promise.resolve([]);
             }
             return Promise.reject(new Error(`Unexpected invoke call: ${cmd}`));
         });

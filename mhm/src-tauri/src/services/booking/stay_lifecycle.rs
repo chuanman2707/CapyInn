@@ -1540,8 +1540,8 @@ pub async fn set_booking_rate_idempotent(
             // hàng với check_out / extend_stay / shorten_stay / change_room —
             // cả bốn đều lấy `booking:` ở pha 1 kể từ #206 — nên khoá phòng ở
             // đây không bảo vệ thêm bất cứ bất biến nào, mà chỉ chặn oan những
-            // lệnh thật sự thuộc về phòng (ví dụ `update_housekeeping`) và bắt
-            // ta đọc thêm một vòng `room_id` không ai dùng.
+            // lệnh thật sự thuộc về phòng (ví dụ `check_in`) và bắt ta đọc
+            // thêm một vòng `room_id` không ai dùng.
             //
             // Bỏ bớt khoá không tạo nguy cơ kẹt: thứ tự toàn cục là theo HẠNG
             // (group < booking < folio < room), và cầm một tập con của một thứ

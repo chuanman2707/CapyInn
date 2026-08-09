@@ -332,8 +332,6 @@ pub fn run() {
             commands::rooms::update_booking_notes,
             commands::rooms::change_room,
             commands::rooms::get_room_change_options,
-            commands::rooms::get_housekeeping_tasks,
-            commands::rooms::update_housekeeping,
             commands::rooms::create_expense,
             commands::rooms::get_expenses,
             commands::rooms::get_revenue_stats,

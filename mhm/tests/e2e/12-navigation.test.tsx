@@ -24,7 +24,6 @@ function setupAuthenticatedState() {
         rooms: [],
         stats: null,
         roomDetail: null,
-        housekeepingTasks: [],
         loading: false,
         isCheckinOpen: false,
     });
@@ -76,7 +75,7 @@ describe("12 — Navigation & Layout", () => {
         expect(screen.getAllByText("Reservations").length).toBeGreaterThanOrEqual(1);
         expect(screen.getAllByText("Rooms").length).toBeGreaterThanOrEqual(1);
         expect(screen.getAllByText("Guests").length).toBeGreaterThanOrEqual(1);
-        expect(screen.getAllByText("Housekeeping").length).toBeGreaterThanOrEqual(1);
+        expect(screen.queryByText("Housekeeping")).toBeNull();
         expect(screen.getAllByText("Analytics").length).toBeGreaterThanOrEqual(1);
         expect(screen.getAllByText("Night Audit").length).toBeGreaterThanOrEqual(1);
         expect(screen.getAllByText("Settings").length).toBeGreaterThanOrEqual(1);

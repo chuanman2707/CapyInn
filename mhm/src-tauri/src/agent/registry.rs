@@ -15,7 +15,7 @@ pub const CEO_PHASE_A_TOOLS: &[AgentToolMeta] = &[
     },
     AgentToolMeta {
         name: "list_room_status",
-        description: "Read room occupancy, availability, and housekeeping status for CEO review.",
+        description: "Read room occupancy and availability for CEO review.",
         mutation_risk: MutationRisk::ReadOnly,
         data_sensitivity: DataSensitivity::CeoSensitive,
         allowed_roles: CEO_ONLY,

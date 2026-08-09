@@ -1,14 +1,6 @@
 import { useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import {
-    ArrowRightLeft,
-    Check,
-    CheckCircle2,
-    Clipboard,
-    LogOut,
-    Play,
-    Sparkles,
-} from "lucide-react";
+import { ArrowRightLeft, Check, Clipboard, LogOut } from "lucide-react";
 import { toast } from "sonner";
 
 import InvoiceDialog from "@/components/InvoiceDialog";
@@ -19,10 +11,8 @@ import InfoItem from "@/components/shared/InfoItem";
 import ActionBtn from "@/components/shared/ActionBtn";
 import NightsStepper from "@/components/shared/NightsStepper";
 import RoomGuestsSection from "@/components/shared/RoomGuestsSection";
-import Section from "@/components/shared/Section";
 import StatusBadge from "@/components/shared/StatusBadge";
 import SlideDrawer from "@/components/shared/SlideDrawer";
-import { Button } from "@/components/ui/button";
 import { useInvoiceDialog } from "@/hooks/useInvoiceDialog";
 import { formatAppError } from "@/lib/appError";
 import { getRoomTypeLabel } from "@/lib/constants";
@@ -30,7 +20,7 @@ import { fmtMoney } from "@/lib/format";
 import { nightlyRateDisplay } from "@/lib/roomTypeRate";
 import { useAuthStore } from "@/stores/useAuthStore";
 import { useHotelStore } from "@/stores/useHotelStore";
-import type { CheckoutSettlementPayload, RoomWithBooking, HousekeepingTask } from "@/types";
+import type { CheckoutSettlementPayload, RoomWithBooking } from "@/types";
 
 interface RoomDrawerProps {
     open: boolean;
@@ -47,14 +37,12 @@ export default function RoomDrawer({ open, onClose, roomId }: RoomDrawerProps) {
         setCheckinOpen,
         setRoomChangeOpen,
         fetchRooms,
-        updateHousekeeping,
         roomTypeRates,
         setBookingRate,
         updateBookingNotes,
     } = useHotelStore();
 
     const [roomDetail, setRoomDetail] = useState<RoomWithBooking | null>(null);
-    const [housekeepingTask, setHousekeepingTask] = useState<HousekeepingTask | null>(null);
     const [showCheckout, setShowCheckout] = useState(false);
     const [copied, setCopied] = useState(false);
     const [fetching, setFetching] = useState(false);
@@ -70,21 +58,12 @@ export default function RoomDrawer({ open, onClose, roomId }: RoomDrawerProps) {
     useEffect(() => {
         if (!open || !roomId) {
             setRoomDetail(null);
-            setHousekeepingTask(null);
             return;
         }
 
         setFetching(true);
-        Promise.all([
-            invoke<RoomWithBooking>("get_room_detail", { roomId }),
-            invoke<HousekeepingTask[]>("get_housekeeping_tasks").then(
-                (tasks) => tasks.find((t) => t.room_id === roomId && t.status !== "clean") ?? null
-            ),
-        ])
-            .then(([detail, task]) => {
-                setRoomDetail(detail);
-                setHousekeepingTask(task);
-            })
+        invoke<RoomWithBooking>("get_room_detail", { roomId })
+            .then(setRoomDetail)
             .catch(console.error)
             .finally(() => setFetching(false));
     }, [open, roomId]);
@@ -244,36 +223,6 @@ export default function RoomDrawer({ open, onClose, roomId }: RoomDrawerProps) {
         }
     };
 
-    const handleHousekeepingUpdate = async (newStatus: string) => {
-        if (!housekeepingTask) return;
-        try {
-            await updateHousekeeping(housekeepingTask.id, newStatus);
-            toast.success(newStatus === "cleaning" ? "Đang dọn phòng..." : "Dọn phòng hoàn tất! ✨");
-            const [detail, tasks] = await Promise.all([
-                invoke<RoomWithBooking>("get_room_detail", { roomId: room.id }),
-                invoke<HousekeepingTask[]>("get_housekeeping_tasks"),
-            ]);
-            setRoomDetail(detail);
-            setHousekeepingTask(tasks.find((t) => t.room_id === room.id && t.status !== "clean") ?? null);
-            await fetchRooms();
-        } catch (err) {
-            toast.error("Lỗi cập nhật: " + err);
-        }
-    };
-
-    const fmtTime = (iso: string) => {
-        try {
-            return new Date(iso).toLocaleString("vi-VN", {
-                hour: "2-digit",
-                minute: "2-digit",
-                day: "2-digit",
-                month: "2-digit",
-            });
-        } catch {
-            return iso;
-        }
-    };
-
     // ── Content Sections ───────────────────────────────
 
     const guestSection = <RoomGuestsSection guests={guests} mode="sheet" />;
@@ -287,60 +236,6 @@ export default function RoomDrawer({ open, onClose, roomId }: RoomDrawerProps) {
             onSaveNotes={handleSaveNotes}
         />
     ) : null;
-
-    const getHkBadgeClass = () => {
-        if (!housekeepingTask) return "";
-        if (housekeepingTask.status === "needs_cleaning") return "text-amber-600 bg-amber-100";
-        if (housekeepingTask.status === "cleaning") return "text-blue-600 bg-blue-100";
-        return "text-emerald-600 bg-emerald-100";
-    };
-
-    const getHkLabel = () => {
-        if (!housekeepingTask) return "";
-        if (housekeepingTask.status === "needs_cleaning") return "Cần dọn";
-        if (housekeepingTask.status === "cleaning") return "Đang dọn";
-        return "Sạch";
-    };
-
-    const housekeepingSection =
-        room.status === "cleaning" || housekeepingTask ? (
-            <Section icon={Sparkles} title="Dọn phòng" className="bg-amber-50/50 rounded-2xl p-5 space-y-3">
-                {housekeepingTask ? (
-                    <>
-                        <div className="flex items-center justify-between">
-                            <span className="text-sm font-medium text-slate-600">Trạng thái</span>
-                            <span className={"inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-[11px] font-semibold " + getHkBadgeClass()}>
-                                {getHkLabel()}
-                            </span>
-                        </div>
-                        <div className="flex items-center justify-between text-xs text-slate-500">
-                            <span>Thời gian tạo</span>
-                            <span>{fmtTime(housekeepingTask.triggered_at)}</span>
-                        </div>
-                        <div className="flex gap-2 pt-1">
-                            {housekeepingTask.status === "needs_cleaning" && (
-                                <Button
-                                    className="flex-1 bg-blue-500 hover:bg-blue-600 text-white rounded-xl gap-1.5 cursor-pointer"
-                                    onClick={() => handleHousekeepingUpdate("cleaning")}
-                                >
-                                    <Play size={14} /> Bắt đầu dọn
-                                </Button>
-                            )}
-                            {housekeepingTask.status === "cleaning" && (
-                                <Button
-                                    className="flex-1 bg-emerald-500 hover:bg-emerald-600 text-white rounded-xl gap-1.5 cursor-pointer"
-                                    onClick={() => handleHousekeepingUpdate("clean")}
-                                >
-                                    <CheckCircle2 size={14} /> Dọn xong
-                                </Button>
-                            )}
-                        </div>
-                    </>
-                ) : (
-                    <p className="text-sm text-amber-600">Phòng cần dọn</p>
-                )}
-            </Section>
-        ) : null;
 
     const actionsSection = booking ? (
         <div className="space-y-2">
@@ -477,7 +372,6 @@ export default function RoomDrawer({ open, onClose, roomId }: RoomDrawerProps) {
                     {vacantSection}
                     {bookingSection}
                     {guestSection}
-                    {housekeepingSection}
                     {actionsSection}
                     {voidSection}
                 </div>
@@ -504,9 +398,8 @@ export default function RoomDrawer({ open, onClose, roomId }: RoomDrawerProps) {
                         // đã về trạng thái trống — làm mới `rooms` để lưới
                         // không còn treo khách đã bị xóa lượt. `voidBooking`
                         // (gọi bên trong VoidBookingDialog) tự làm mới rồi,
-                        // gọi lại ở đây theo đúng cách handleHousekeepingUpdate
-                        // đã làm — chắc chắn hơn là ngầm dựa vào side-effect
-                        // của một action store khác.
+                        // gọi lại ở đây cho chắc — hơn là ngầm dựa vào
+                        // side-effect của một action store khác.
                         await fetchRooms();
                         handleClose();
                     }}
