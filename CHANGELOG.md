@@ -50,6 +50,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Reservation timeline columns now stretch to fill the window instead of sitting at a
+  fixed 80px, so the same sixteen days use the whole width on a wide screen
 - Room cards show the room type's configured rate instead of `rooms.base_price`,
   which the pricing model does not honour as a price
 - The reservation sheet takes a checkout date from a calendar instead of a nights box
@@ -58,8 +60,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - public repository cleanup for internal agent files and docs layout
 - README restructuring for public contributors and onboarding-based setup
 
+### Removed
+
+- Housekeeping. A room is vacant the moment it checks out, with no cleaning step in
+  between and no cleaning ticket to close. The hotel handles cleaning internally, so the
+  software no longer models it. Existing housekeeping history stays in the database and
+  is not deleted
+
 ### Fixed
 
+- Clicking the narrow strip above or below a guest's bar on the reservation timeline
+  opened a new-booking form for a night that was already taken. The whole row height now
+  belongs to the bar and opens that guest's details
 - Peak-season uplift is charged per night inside the season, not once per check-in day
 - Vietnamese room type names no longer lose their configured price: room types are
   matched case-insensitively with the same folding on both sides of the comparison

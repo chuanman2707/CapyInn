@@ -19,7 +19,7 @@ read:   UI → command → query → SQLite
 
 ## Core PMS vs experimental runtime
 
-- **Core PMS**: rooms, stays, reservations, guests, housekeeping, billing/folios/invoices, groups, night audit, settings, auth, schema/migrations.
+- **Core PMS**: rooms, stays, reservations, guests, billing/folios/invoices, groups, night audit, settings, auth, schema/migrations.
 - **Experimental runtime**: gateway, MCP, agent runtime, observer streams, digest, Telegram, CEO, OpenAI.
 
 Normal PMS operation must never require experimental runtime to be configured. `docs/architecture/core-pms-boundaries.md` is the canonical guardrail.
