@@ -614,7 +614,7 @@ async fn the_schema_version_is_the_one_this_branch_deliberately_claimed() {
         .expect("đọc schema_version");
 
     assert_eq!(
-        version, 28,
+        version, 29,
         "một migration mới vừa xuất hiện — quét mọi ref và đọc DB thật để chắc \
          số hiệu chưa bị nhánh nào chiếm, rồi mới nâng con số này"
     );
