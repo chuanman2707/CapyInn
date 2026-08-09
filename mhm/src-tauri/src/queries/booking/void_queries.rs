@@ -31,14 +31,13 @@ pub async fn load_void_preview(
     let row = sqlx::query(
         "SELECT b.id, b.room_id, b.status, b.check_in_at,
                 b.actual_checkout, b.nights, b.total_price, b.deposit_amount,
-                b.is_audited, b.group_id, r.status AS room_status,
+                b.is_audited, b.group_id,
                 COALESCE(g.full_name, '') AS guest_name,
                 (SELECT COALESCE(SUM(amount), 0) FROM folio_lines
                   WHERE booking_id = b.id) AS folio_total,
                 (SELECT COALESCE(SUM(amount), 0) FROM transactions
                   WHERE booking_id = b.id AND type = 'cancellation_fee') AS cancellation_fee_total
          FROM bookings b
-         LEFT JOIN rooms r ON r.id = b.room_id
          LEFT JOIN guests g ON g.id = b.primary_guest_id
          WHERE b.id = ?",
     )
@@ -52,7 +51,6 @@ pub async fn load_void_preview(
     let deposit_amount = get_optional_money_vnd(&row, "deposit_amount").unwrap_or(0);
     let folio_total = get_money_vnd(&row, "folio_total");
     let cancellation_fee_total = get_money_vnd(&row, "cancellation_fee_total");
-    let room_status: Option<String> = row.get("room_status");
     let group_id: Option<String> = row.get("group_id");
     let check_in_at: String = row.get("check_in_at");
     let actual_checkout: Option<String> = row.get("actual_checkout");
@@ -135,32 +133,16 @@ pub async fn load_void_preview(
         _ => fallback_date,
     };
 
-    // Chỉ nhánh checked_out có chỗ `void_booking_tx` âm thầm bỏ qua UPDATE
-    // rooms khi phòng không còn ở trạng thái nó chờ (đã bán lại, đã dọn xong,
-    // hay đang giữ cho một lượt khác) — active luôn ép về trống hoặc lỗi to,
-    // booked chưa từng đụng rooms. Nên đây là nhánh duy nhất "trạng thái
-    // phòng giữ nguyên" là một cảnh báo thật.
+    // Từ 09/08/2026 nhánh checked_out của `void_booking_tx` không còn câu
+    // UPDATE rooms nào (`void_lifecycle.rs`), nên xoá một lượt đã trả KHÔNG
+    // BAO GIỜ đổi trạng thái phòng — cờ này luôn bật cho nhánh đó. Các nhánh
+    // khác vẫn đụng phòng: active ép về trống hoặc lỗi to, booked chưa từng
+    // chạm `rooms`.
     //
-    // Trường `room_status_unchanged` PHẢI phản chiếu đúng điều kiện `WHERE
-    // status = 'cleaning'` của câu UPDATE rooms trong nhánh checked_out
-    // (`void_booking_tx`, `void_lifecycle.rs`) — KHÔNG được đoán một trạng
-    // thái cụ thể (vd so bằng `occupied`). `rooms.status` có bốn giá trị:
-    // `vacant`, `occupied`, `cleaning`, `booked` — hễ khác `cleaning` là
-    // UPDATE đó không khớp dòng nào, phòng giữ nguyên bất kể đang là giá trị
-    // nào trong ba giá trị còn lại. KỂ CẢ `vacant`: housekeeping có thể dọn
-    // xong trước khi lệnh xoá này chạy, không có khách nào khác cả — chỉ là
-    // phòng đã trống sẵn. Đọc tên trường mà đoán "chắc có khách khác đang ở"
-    // là sai chính xác ở ca này; tên trường và mọi câu chữ đọc trường này
-    // (hộp thoại `VoidBookingDialog.tsx`) phải nói đúng NGHĨA của cờ —
-    // "trạng thái phòng không đổi" — không nói LÝ DO, vì lý do có thể là bất
-    // kỳ giá trị nào trong ba giá trị khác `cleaning`.
-    //
-    // Hai chỗ này phải đổi CÙNG NHAU: nới điều kiện UPDATE mà quên nới ở đây
-    // (hay ngược lại) là hộp xác nhận lại hứa sai trạng thái phòng — đúng thứ
-    // preview này tồn tại để ngăn. Đừng "đơn giản hoá" về lại một phép so
-    // sánh bằng.
-    let room_status_unchanged = previous_status == status::booking::CHECKED_OUT
-        && room_status.as_deref() != Some(status::room::CLEANING);
+    // Cờ nói NGHĨA — "trạng thái phòng không đổi" — không nói LÝ DO. Phòng có
+    // thể đang trống, đang có khách khác, hay đang giữ cho một lượt sắp tới;
+    // câu chữ đọc cờ này (`VoidBookingDialog.tsx`) không được đoán ca nào.
+    let room_status_unchanged = previous_status == status::booking::CHECKED_OUT;
 
     Ok(VoidBookingPreview {
         booking_id: row.get("id"),

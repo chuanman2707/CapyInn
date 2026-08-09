@@ -1073,7 +1073,7 @@ async fn check_out_tx(
     )?;
 
     let result = sqlx::query("UPDATE rooms SET status = ? WHERE id = ? AND status = ?")
-        .bind(status::room::CLEANING)
+        .bind(status::room::VACANT)
         .bind(&settlement.room_id)
         .bind(status::room::OCCUPIED)
         .execute(&mut **tx)
@@ -1084,19 +1084,6 @@ async fn check_out_tx(
         result,
         format!("room {} is no longer occupied", settlement.room_id),
     )?;
-
-    sqlx::query(
-        "INSERT INTO housekeeping (id, room_id, status, triggered_at, created_at)
-         VALUES (?, ?, 'needs_cleaning', ?, ?)",
-    )
-    .bind(uuid::Uuid::new_v4().to_string())
-    .bind(&settlement.room_id)
-    .bind(&actual_checkout)
-    .bind(&actual_checkout)
-    .execute(&mut **tx)
-    .await
-    .map_err(BookingError::from)
-    .map_err(mark_write_db_error)?;
 
     sqlx::query("DELETE FROM room_calendar WHERE booking_id = ?")
         .bind(&req.booking_id)

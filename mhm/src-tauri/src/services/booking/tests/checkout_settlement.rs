@@ -712,5 +712,5 @@ async fn check_out_idempotent_reads_the_room_after_taking_the_booking_lock() {
         .expect("check out phải thành công trên phòng mới");
 
     assert_eq!(result.response["room_id"], "R912");
-    assert_room_status(&pool, "R912", "cleaning").await;
+    assert_room_status(&pool, "R912", "vacant").await;
 }

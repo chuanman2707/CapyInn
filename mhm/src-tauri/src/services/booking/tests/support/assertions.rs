@@ -117,22 +117,6 @@ pub async fn assert_calendar_rows(
     assert_eq!(count, expected_count);
 }
 
-pub async fn assert_housekeeping_rows(
-    pool: &Pool<Sqlite>,
-    room_id: &str,
-    status: &str,
-    expected_count: i64,
-) {
-    let count: i64 =
-        sqlx::query_scalar("SELECT COUNT(*) FROM housekeeping WHERE room_id = ? AND status = ?")
-            .bind(room_id)
-            .bind(status)
-            .fetch_one(pool)
-            .await
-            .expect("count housekeeping rows");
-    assert_eq!(count, expected_count);
-}
-
 pub async fn assert_transaction_origin(
     pool: &Pool<Sqlite>,
     origin_key: &str,

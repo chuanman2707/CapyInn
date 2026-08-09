@@ -61,7 +61,10 @@ async fn group_checkout_idempotent_retry_replays_without_duplicate_effects() {
     .fetch_one(&pool)
     .await
     .unwrap();
-    assert_eq!(housekeeping_count, 1);
+    assert_eq!(
+        housekeeping_count, 0,
+        "trả phòng đoàn không được sinh phiếu dọn nào nữa"
+    );
 }
 
 #[tokio::test]
@@ -952,7 +955,7 @@ async fn group_checkout_idempotent_reads_rooms_after_taking_the_group_lock() {
         .expect("task joins")
         .expect("group checkout phải thành công trên phòng mới");
 
-    assert_room_status(&pool, "R932", "cleaning").await;
+    assert_room_status(&pool, "R932", "vacant").await;
 }
 
 #[tokio::test]
@@ -1033,5 +1036,5 @@ async fn group_checkout_idempotent_reads_rooms_after_taking_the_booking_locks() 
         .expect("task joins")
         .expect("group checkout phải thành công trên phòng mới");
 
-    assert_room_status(&pool, "R942", "cleaning").await;
+    assert_room_status(&pool, "R942", "vacant").await;
 }

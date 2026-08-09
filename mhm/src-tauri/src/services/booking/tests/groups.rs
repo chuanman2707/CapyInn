@@ -834,7 +834,10 @@ async fn group_checkout_reassigns_master_and_updates_group_payment() {
             .fetch_one(&pool)
             .await
             .unwrap();
-    assert_eq!(housekeeping_count.0, 1);
+    assert_eq!(
+        housekeeping_count.0, 0,
+        "trả phòng đoàn không được sinh phiếu dọn nào nữa"
+    );
 
     let remaining_paid: (i64,) = sqlx::query_as(
         "SELECT paid_amount FROM bookings WHERE group_id = ? AND status = 'active' LIMIT 1",
@@ -998,25 +1001,28 @@ async fn group_booking_lifecycle_smoke_covers_partial_and_final_checkout() {
     );
     assert_eq!(remaining_master.get::<i64, _>("is_master_room"), 1);
 
-    let first_room_cleaning_count: (i64,) = sqlx::query_as(
+    let first_room_vacant_count: (i64,) = sqlx::query_as(
         "SELECT COUNT(*)
          FROM rooms
-         WHERE id = 'G-SMOKE-1' AND status = 'cleaning'",
+         WHERE id = 'G-SMOKE-1' AND status = 'vacant'",
     )
     .fetch_one(&pool)
     .await
     .unwrap();
-    assert_eq!(first_room_cleaning_count.0, 1);
+    assert_eq!(first_room_vacant_count.0, 1);
 
     let first_housekeeping_count: (i64,) = sqlx::query_as(
         "SELECT COUNT(*)
          FROM housekeeping
-         WHERE room_id = 'G-SMOKE-1' AND status = 'needs_cleaning'",
+         WHERE room_id = 'G-SMOKE-1'",
     )
     .fetch_one(&pool)
     .await
     .unwrap();
-    assert_eq!(first_housekeeping_count.0, 1);
+    assert_eq!(
+        first_housekeeping_count.0, 0,
+        "trả phòng đoàn không được sinh phiếu dọn nào nữa"
+    );
 
     group_lifecycle::group_checkout(
         &pool,
@@ -1070,27 +1076,29 @@ async fn group_booking_lifecycle_smoke_covers_partial_and_final_checkout() {
     .unwrap();
     assert_eq!(remaining_occupied_rooms.0, 0);
 
-    let cleaning_room_count: (i64,) = sqlx::query_as(
+    let vacant_room_count: (i64,) = sqlx::query_as(
         "SELECT COUNT(*)
          FROM rooms
          WHERE id IN ('G-SMOKE-1', 'G-SMOKE-2')
-           AND status = 'cleaning'",
+           AND status = 'vacant'",
     )
     .fetch_one(&pool)
     .await
     .unwrap();
-    assert_eq!(cleaning_room_count.0, 2);
+    assert_eq!(vacant_room_count.0, 2);
 
     let housekeeping_count: (i64,) = sqlx::query_as(
         "SELECT COUNT(*)
          FROM housekeeping
-         WHERE room_id IN ('G-SMOKE-1', 'G-SMOKE-2')
-           AND status = 'needs_cleaning'",
+         WHERE room_id IN ('G-SMOKE-1', 'G-SMOKE-2')",
     )
     .fetch_one(&pool)
     .await
     .unwrap();
-    assert_eq!(housekeeping_count.0, 2);
+    assert_eq!(
+        housekeeping_count.0, 0,
+        "trả phòng đoàn không được sinh phiếu dọn nào nữa"
+    );
 }
 
 #[tokio::test]
