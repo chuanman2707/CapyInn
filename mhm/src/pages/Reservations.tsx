@@ -1,4 +1,4 @@
-import { useState, useEffect, useMemo, useRef, type MouseEvent as ReactMouseEvent } from "react";
+import { useState, useEffect, useLayoutEffect, useMemo, useRef, type MouseEvent as ReactMouseEvent } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { Search, ChevronLeft, ChevronRight, Plus } from "lucide-react";
 import { Input } from "@/components/ui/input";
@@ -33,7 +33,11 @@ type BookingBar = BookingWithGuest & {
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 const VISIBLE_DAYS = 16;
-const COL_WIDTH = 80;
+/** Bề rộng cột hẹp nhất — đúng giá trị cố định dùng trước 09/08/2026, nên cửa
+ *  sổ hẹp giữ nguyên hành vi cũ và cuộn ngang. */
+const MIN_COL_WIDTH = 80;
+/** Cột tên phòng, cố định và dính bên trái. */
+const ROOM_LABEL_WIDTH = 140;
 /** Nhận phòng buổi chiều, trả phòng buổi sáng: bar lệch nửa ô ở cả hai đầu. */
 const HALF_DAY = 0.5;
 /** Khách nhận và trả cùng ngày vẫn phải nhìn thấy được. */
@@ -188,6 +192,30 @@ export default function Reservations() {
     const DAYS = useMemo(() => getDateRange(dateOffset), [dateOffset]);
     const rangeLabel = formatRangeLabel(DAYS);
 
+    const timelineRef = useRef<HTMLDivElement | null>(null);
+    const [colWidth, setColWidth] = useState(MIN_COL_WIDTH);
+
+    // Đo một lần khi vẽ (`useLayoutEffect`, trước khi trình duyệt sơn) rồi theo
+    // dõi tiếp bằng ResizeObserver. Phép đo đầu tiên KHÔNG được phó mặc cho
+    // observer: trong ứng dụng thật nó khiến lịch hiện cột 80px rồi mới nhảy,
+    // và trong test `ResizeObserver` là một lớp rỗng ở `tests/setup.ts` không
+    // bao giờ gọi callback — nhánh tính toán sẽ không bao giờ chạy.
+    useLayoutEffect(() => {
+        const node = timelineRef.current;
+        if (!node) return;
+
+        const measure = () => {
+            const available = node.getBoundingClientRect().width - ROOM_LABEL_WIDTH;
+            const next = Math.floor(available / VISIBLE_DAYS);
+            setColWidth(Number.isFinite(next) && next > MIN_COL_WIDTH ? next : MIN_COL_WIDTH);
+        };
+
+        measure();
+        const observer = new ResizeObserver(measure);
+        observer.observe(node);
+        return () => observer.disconnect();
+    }, []);
+
     useEffect(() => { fetchRooms(); }, []);
 
     // Lỗi đọc booking phải hiện ra, không được nuốt. Bản trước làm
@@ -273,7 +301,7 @@ export default function Reservations() {
     // hiện diện trên lịch (có bar), không phải toàn bộ lịch sử đã từng tạo.
     const totalCount = visibleBookings.filter(b => VISIBLE_BOOKING_STATUSES.includes(b.status)).length;
 
-    function getBookingBars(roomId: string): BookingBar[] {
+    function getBookingBars(roomId: string, columnWidth: number): BookingBar[] {
         return visibleBookings
             .filter(b => b.room_id === roomId && VISIBLE_BOOKING_STATUSES.includes(b.status))
             .flatMap((b): BookingBar[] => {
@@ -300,8 +328,8 @@ export default function Reservations() {
 
                 return [{
                     ...b,
-                    left: visStart * COL_WIDTH,
-                    width: (visEnd - visStart) * COL_WIDTH,
+                    left: visStart * columnWidth,
+                    width: (visEnd - visStart) * columnWidth,
                     clippedLeft: rawStart < 0,
                     clippedRight: rawEnd > VISIBLE_DAYS,
                     color: getBookingBarColor(b.status),
@@ -361,7 +389,7 @@ export default function Reservations() {
         const onMouseMove = (event: MouseEvent) => {
             const grid = dragGridRef.current;
             if (!grid) return;
-            const col = Math.floor((event.clientX - grid.getBoundingClientRect().left) / COL_WIDTH);
+            const col = Math.floor((event.clientX - grid.getBoundingClientRect().left) / colWidth);
             const clamped = Math.max(0, Math.min(DAYS.length - 1, col));
             setDragSel((prev) => (prev && prev.endIndex !== clamped ? { ...prev, endIndex: clamped } : prev));
         };
@@ -396,7 +424,7 @@ export default function Reservations() {
             window.removeEventListener("keydown", onKeyDown);
             window.removeEventListener("blur", onBlur);
         };
-    }, [dragSel, DAYS]);
+    }, [dragSel, DAYS, colWidth]);
 
     return (
         <div className="flex flex-col h-full bg-white rounded-3xl shadow-soft overflow-hidden">
@@ -471,7 +499,7 @@ export default function Reservations() {
             </div>
 
             {/* Timeline Grid */}
-            <div className="flex-1 flex flex-col min-h-0 overflow-hidden relative">
+            <div ref={timelineRef} className="flex-1 flex flex-col min-h-0 overflow-hidden relative">
 
                 {/* Day Headers */}
                 <div className="flex border-b border-slate-100 bg-white sticky top-0 z-10 w-max min-w-full">
@@ -480,7 +508,7 @@ export default function Reservations() {
                     </div>
 
                     {DAYS.map((d, i) => (
-                        <div key={i} className={`w-[80px] shrink-0 border-r border-slate-200 flex flex-col items-center justify-center py-2.5 ${d.isToday ? "bg-blue-50/40" : ""}`}>
+                        <div key={i} style={{ width: colWidth }} className={`shrink-0 border-r border-slate-200 flex flex-col items-center justify-center py-2.5 ${d.isToday ? "bg-blue-50/40" : ""}`}>
                             <span className={`text-[10px] font-semibold uppercase ${d.isToday ? "text-brand-primary" : "text-slate-400"}`}>{d.day}</span>
                             <span className={`text-sm font-bold ${d.isToday ? "text-brand-primary" : "text-slate-700"}`}>{d.date}</span>
                         </div>
@@ -497,13 +525,13 @@ export default function Reservations() {
                                 </div>
                                 <div className="flex">
                                     {DAYS.map((d, i) => (
-                                        <div key={i} className={`w-[80px] shrink-0 border-r border-slate-200 ${d.isToday ? "bg-blue-50/20" : ""}`} />
+                                        <div key={i} style={{ width: colWidth }} className={`shrink-0 border-r border-slate-200 ${d.isToday ? "bg-blue-50/20" : ""}`} />
                                     ))}
                                 </div>
                             </div>
 
                             {group.rooms.map((room) => {
-                                const bars = getBookingBars(room.id);
+                                const bars = getBookingBars(room.id, colWidth);
                                 return (
                                     <div key={room.id} className="flex group border-b border-slate-100 h-[64px]">
                                         <div className="w-[140px] shrink-0 border-r border-slate-100 bg-white shadow-[2px_0_10px_rgba(0,0,0,0.02)] sticky left-0 z-10 flex items-center px-4 group-hover:bg-slate-50/50 transition-colors">
@@ -521,13 +549,14 @@ export default function Reservations() {
                                                         key={colIndex}
                                                         data-testid={`cell-${room.id}-${colIndex}`}
                                                         onMouseDown={(event) => handleCellMouseDown(room.id, colIndex, event)}
+                                                        style={{ width: colWidth }}
                                                         // Ô đang chọn KHÔNG mang lớp hover: `group-hover:` có
                                                         // độ ưu tiên CSS cao hơn `bg-blue-100/70` nên nó đè mất
                                                         // màu vùng chọn. Mà kéo thì con trỏ luôn nằm trên chính
                                                         // hàng đang kéo, nên trước đây vùng chọn vô hình suốt cú
                                                         // kéo và chỉ lộ ra khi con trỏ rời sang hàng khác — đo
                                                         // trong trình duyệt thật: nền ô đã chọn ra slate-50/30.
-                                                        className={`w-[80px] shrink-0 border-r border-slate-200 select-none cursor-pointer transition-colors ${inSelection
+                                                        className={`shrink-0 border-r border-slate-200 select-none cursor-pointer transition-colors ${inSelection
                                                             ? "bg-blue-100/70"
                                                             : `${d.isToday ? "bg-blue-50/10" : ""} group-hover:bg-slate-50/30`
                                                             }`}
@@ -536,7 +565,7 @@ export default function Reservations() {
                                             })}
 
                                             {DAYS.some(d => d.isToday) && (
-                                                <div data-testid="timeline-today-marker" className="absolute top-0 bottom-0 w-[2px] bg-brand-primary/60 z-20 pointer-events-none" style={{ left: `${DAYS.findIndex(d => d.isToday) * COL_WIDTH + COL_WIDTH / 2}px` }} />
+                                                <div data-testid="timeline-today-marker" className="absolute top-0 bottom-0 w-[2px] bg-brand-primary/60 z-20 pointer-events-none" style={{ left: `${DAYS.findIndex(d => d.isToday) * colWidth + colWidth / 2}px` }} />
                                             )}
 
                                             {bars.map((bar) => (

@@ -625,3 +625,73 @@ describe("Reservations load errors", () => {
     expect(screen.queryByText(/database is locked/i)).toBeNull();
   });
 });
+
+describe("Reservations column width", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    createCorrelationId.mockReturnValue("COR-5E6F7A8B");
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it("stretches day columns to fill the measured timeline width", async () => {
+    // 1780 - 140 (cột tên phòng) = 1640, chia 16 ngày = 102.5 -> 102 sau khi
+    // làm tròn xuống. Phần dư 8px chấp nhận được; làm tròn lên sẽ tràn ra
+    // ngoài và đẻ ra thanh cuộn ngang không cần thiết.
+    vi.spyOn(HTMLElement.prototype, "getBoundingClientRect").mockReturnValue({
+      width: 1780,
+      height: 600,
+      top: 0,
+      left: 0,
+      right: 1780,
+      bottom: 600,
+      x: 0,
+      y: 0,
+      toJSON: () => ({}),
+    } as DOMRect);
+
+    invoke.mockImplementation(async (command: string) => {
+      if (command === "get_all_bookings") {
+        return [
+          bookingAt({
+            id: "B-WIDE",
+            scheduled_checkin: dateOffsetFromToday(-1),
+            scheduled_checkout: dateOffsetFromToday(3),
+          }),
+        ];
+      }
+      return undefined;
+    });
+
+    render(<Reservations />);
+
+    const bar = await screen.findByTestId("booking-bar-B-WIDE");
+    // rawStart = (-1 - -3) + 0.5 = 2.5 -> left = 2.5 * 102 = 255px
+    expect(bar.style.left).toBe("255px");
+    // rawEnd = (3 - -3) + 0.5 = 6.5 -> width = 4 * 102 = 408px
+    expect(bar.style.width).toBe("408px");
+  });
+
+  it("falls back to the 80px minimum when the timeline has no measurable width", async () => {
+    invoke.mockImplementation(async (command: string) => {
+      if (command === "get_all_bookings") {
+        return [
+          bookingAt({
+            id: "B-NARROW",
+            scheduled_checkin: dateOffsetFromToday(-1),
+            scheduled_checkout: dateOffsetFromToday(3),
+          }),
+        ];
+      }
+      return undefined;
+    });
+
+    render(<Reservations />);
+
+    const bar = await screen.findByTestId("booking-bar-B-NARROW");
+    expect(bar.style.left).toBe("200px");
+    expect(bar.style.width).toBe("320px");
+  });
+});
