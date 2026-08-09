@@ -35,6 +35,7 @@ pub async fn load_recent_check_ins(
     let rows = sqlx::query(
         "SELECT b.room_id, g.full_name, b.check_in_at
          FROM bookings b JOIN guests g ON g.id = b.primary_guest_id
+         WHERE b.status != 'voided'
          ORDER BY b.check_in_at DESC LIMIT ?",
     )
     .bind(limit.max(0))
@@ -58,7 +59,7 @@ pub async fn load_recent_check_outs(
     let rows = sqlx::query(
         "SELECT b.room_id, g.full_name, b.actual_checkout
          FROM bookings b JOIN guests g ON g.id = b.primary_guest_id
-         WHERE b.actual_checkout IS NOT NULL
+         WHERE b.actual_checkout IS NOT NULL AND b.status != 'voided'
          ORDER BY b.actual_checkout DESC LIMIT ?",
     )
     .bind(limit.max(0))

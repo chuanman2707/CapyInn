@@ -121,6 +121,12 @@ pub async fn load_stay_charges(
     pool: &Pool<Sqlite>,
     booking_id: &str,
 ) -> Result<Option<AssistantStayCharges>, sqlx::Error> {
+    // `b.status != 'voided'`: trợ lý nhận `booking_id` thẳng từ người dùng qua
+    // khung chat, không qua một danh sách đã lọc — một mã còn nằm trong lịch
+    // sử hội thoại từ TRƯỚC khi lượt đó bị xoá là đủ để hỏi lại. Không có bộ
+    // lọc này thì trợ lý là đường DUY NHẤT còn đọc được tiền của một lượt đã
+    // xoá qua booking_id trực tiếp, khác mọi màn hình khác (đã biến mất khỏi
+    // list nên không còn cách bấm tới).
     sqlx::query_as::<_, AssistantStayCharges>(
         "SELECT b.id                       AS booking_id,
                 g.full_name                AS guest_name,
@@ -130,7 +136,7 @@ pub async fn load_stay_charges(
            FROM bookings b
            JOIN guests g ON g.id = b.primary_guest_id
            JOIN rooms  r ON r.id = b.room_id
-          WHERE b.id = ?",
+          WHERE b.id = ? AND b.status != 'voided'",
     )
     .bind(booking_id)
     .fetch_optional(pool)
