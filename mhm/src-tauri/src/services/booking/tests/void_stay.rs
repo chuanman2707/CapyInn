@@ -205,11 +205,11 @@ async fn voiding_an_active_stay_frees_the_room() {
 }
 
 /// Xoá một lượt đang ở nhưng phòng bị một thao tác khác đổi trạng thái ngay
-/// giữa chừng (ví dụ buồng phòng đổi sang "đang dọn" trong lúc lệnh này đang
-/// chạy): guard trên UPDATE rooms phải bắt được và từ chối, không được âm
-/// thầm ghi "vacant" đè lên trạng thái mới hơn — đó là đường sinh ra phòng
-/// "phantom" (không khoá bởi booking nào nhưng cũng không đúng trạng thái
-/// thật).
+/// giữa chừng (ví dụ một lượt đặt trước khác giữ phòng này cho tuần sau,
+/// đổi trạng thái sang "booked", trong lúc lệnh này đang chạy): guard trên
+/// UPDATE rooms phải bắt được và từ chối, không được âm thầm ghi "vacant" đè
+/// lên trạng thái mới hơn — đó là đường sinh ra phòng "phantom" (không khoá
+/// bởi booking nào nhưng cũng không đúng trạng thái thật).
 ///
 /// Dùng đúng cơ chế trigger của
 /// `check_in_rolls_back_when_room_status_changes_before_guarded_room_update`

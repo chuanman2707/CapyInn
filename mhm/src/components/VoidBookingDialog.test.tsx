@@ -60,13 +60,15 @@ describe("VoidBookingDialog", () => {
     });
   });
 
-  // `room_status_unchanged` chỉ nói "UPDATE rooms sẽ không khớp dòng nào" — hệt
-  // nhau dù backend tính ra true vì phòng đang `occupied`, `booked`, hay (ca
-  // dưới đây) đã `vacant` sẵn (housekeeping dọn xong trước khi ai đó phát hiện
-  // lượt này nhập sai). Dialog không phân biệt được LÝ DO đằng sau cờ này, nên
-  // câu chữ không được suy đoán ra một lý do cụ thể — nhất là không được nói
-  // "có khách khác" cho một phòng đang trống, và cũng không được nói phòng "về
-  // Trống" (nó đã trống rồi, xoá lượt không đổi gì cả).
+  // `room_status_unchanged` chỉ nói "UPDATE rooms sẽ không khớp dòng nào" —
+  // đúng với MỌI lượt đã checked-out, bất kể phòng lúc này đang `occupied`,
+  // `booked`, hay (ca dưới đây) đã `vacant` sẵn (housekeeping dọn xong trước
+  // khi ai đó phát hiện lượt này nhập sai): cờ chỉ phụ thuộc previous_status
+  // === "checked_out", không đọc trạng thái phòng. Dialog không phân biệt
+  // được LÝ DO đằng sau cờ này, nên câu chữ không được suy đoán ra một lý do
+  // cụ thể — nhất là không được nói "có khách khác" cho một phòng đang trống,
+  // và cũng không được nói phòng "về Trống" (nó đã trống rồi, xoá lượt không
+  // đổi gì cả).
   it("phòng đã Trống (dọn xong trước khi xoá) vẫn báo giữ nguyên trạng thái, không suy đoán có khách khác", async () => {
     invokeCommand.mockResolvedValueOnce({ ...basePreview, room_status_unchanged: true });
 
