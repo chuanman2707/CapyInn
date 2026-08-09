@@ -16,7 +16,6 @@ interface ActivityDetailDrawerProps {
 const KIND_LABELS: Record<NonNullable<ActivityItem["kind"]>, string> = {
     check_in: "Check-in",
     check_out: "Check-out",
-    housekeeping: "Housekeeping",
 };
 
 function getKindLabel(kind?: ActivityItem["kind"]) {

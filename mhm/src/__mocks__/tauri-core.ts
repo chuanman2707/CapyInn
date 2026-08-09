@@ -102,7 +102,7 @@ export const invoke = vi.fn(async (command: string, args?: Record<string, unknow
             },
         },
         get_rooms: [],
-        get_dashboard_stats: { total_rooms: 10, occupied: 0, vacant: 10, cleaning: 0, revenue_today: 0 },
+        get_dashboard_stats: { total_rooms: 10, occupied: 0, vacant: 10, revenue_today: 0 },
         get_settings: null,
         get_current_user: null,
         gateway_get_status: { running: false, port: null, has_api_keys: false },

@@ -674,7 +674,7 @@ mod tests {
         seed_digest_business_room(&pool).await;
         let before = business_table_snapshots(&pool).await;
 
-        sqlx::query("UPDATE rooms SET status = 'cleaning' WHERE id = 'DIGEST-SNAPSHOT-ROOM'")
+        sqlx::query("UPDATE rooms SET status = 'booked' WHERE id = 'DIGEST-SNAPSHOT-ROOM'")
             .execute(&pool)
             .await
             .expect("mutate seeded room");

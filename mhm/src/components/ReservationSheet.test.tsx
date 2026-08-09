@@ -1153,7 +1153,7 @@ describe("ReservationSheet", () => {
   // khác hẳn. Cửa chặn đúng chiều thời gian là check_availability (theo
   // khoảng ngày) và chốt chặn trong transaction ở create_reservation_tx —
   // danh sách phòng không được đoán thay chúng.
-  it.each(["occupied", "cleaning"])(
+  it.each(["occupied"])(
     "vẫn liệt kê phòng đang %s để đặt trước cho ngày phòng đó đã trống",
     async (status) => {
       rooms = [ORIGINAL_ROOMS[0], { ...ORIGINAL_ROOMS[1], status }];

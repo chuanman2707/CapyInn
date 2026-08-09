@@ -186,7 +186,7 @@ export default function ReservationSheet({ open, onOpenChange, preSelectedRoomId
     }, [isEditMode, editBooking, rooms, guestsTouched]);
 
     // Mọi phòng đều liệt kê được. Trạng thái phòng (`vacant`/`occupied`/
-    // `cleaning`/`booked`) mô tả HÔM NAY, còn đặt phòng trước hỏi về một
+    // `booked`) mô tả HÔM NAY, còn đặt phòng trước hỏi về một
     // khoảng ngày khác hẳn — lọc theo nó là trả lời sai câu hỏi. Một phòng
     // đang có khách trả phòng ngày 3/8 vẫn trống nguyên từ 12/8, nhưng vẫn
     // biến mất khỏi ô chọn, và chủ khách sạn không có cách nào đặt cho nó.

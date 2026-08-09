@@ -19,7 +19,6 @@ pub mod status {
     pub mod room {
         pub const VACANT: &str = "vacant";
         pub const OCCUPIED: &str = "occupied";
-        pub const CLEANING: &str = "cleaning";
         pub const BOOKED: &str = "booked";
     }
     pub mod calendar {
@@ -347,7 +346,6 @@ pub struct DashboardStats {
     pub total_rooms: i32,
     pub occupied: i32,
     pub vacant: i32,
-    pub cleaning: i32,
     pub revenue_today: MoneyVnd,
 }
 

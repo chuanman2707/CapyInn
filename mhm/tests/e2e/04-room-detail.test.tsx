@@ -77,7 +77,7 @@ describe("04 — Room Detail", () => {
 
     it("refreshes rooms and stats after extending stay", async () => {
         const refreshedRooms = [vacantRoomDetail.room];
-        const refreshedStats = { total_rooms: 10, occupied: 1, vacant: 9, cleaning: 0, revenue_today: 800000 };
+        const refreshedStats = { total_rooms: 10, occupied: 1, vacant: 9, revenue_today: 800000 };
 
         setMockResponse("extend_stay", () => createBooking({ id: "b1", nights: 2 }));
         setMockResponse("get_rooms", () => refreshedRooms);

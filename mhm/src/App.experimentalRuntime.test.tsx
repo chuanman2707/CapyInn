@@ -92,7 +92,6 @@ function setupAuthenticatedShell(
       total_rooms: 10,
       occupied: 0,
       vacant: 10,
-      cleaning: 0,
       revenue_today: 0,
     }),
   });

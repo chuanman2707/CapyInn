@@ -2,7 +2,7 @@ import { useState, useEffect, useRef, type ReactNode } from "react";
 import { useHotelStore } from "@/stores/useHotelStore";
 import UnifiedRoomCard from "@/components/UnifiedRoomCard";
 import RoomDrawer from "@/components/RoomDrawer";
-import { BedDouble, Users, Sparkles, AlertTriangle } from "lucide-react";
+import { BedDouble, Users, AlertTriangle } from "lucide-react";
 
 export default function Rooms() {
     const { rooms, fetchRooms } = useHotelStore();
@@ -26,7 +26,6 @@ export default function Rooms() {
     const stats = {
         vacant: rooms.filter((r) => r.status === "vacant").length,
         occupied: rooms.filter((r) => r.status === "occupied").length,
-        cleaning: rooms.filter((r) => r.status === "cleaning").length,
         booked: rooms.filter((r) => r.status === "booked").length,
     };
 
@@ -54,7 +53,6 @@ export default function Rooms() {
             <div className="flex items-center gap-4 bg-white rounded-2xl p-4 shadow-soft border border-slate-100">
                 <StatPill icon={<BedDouble size={14} />} label="Trống" count={stats.vacant} color="text-emerald-600 bg-emerald-50" />
                 <StatPill icon={<Users size={14} />} label="Có khách" count={stats.occupied} color="text-blue-600 bg-blue-50" />
-                <StatPill icon={<Sparkles size={14} />} label="Cần dọn" count={stats.cleaning} color="text-amber-600 bg-amber-50" />
                 <StatPill icon={<AlertTriangle size={14} />} label="Đặt trước" count={stats.booked} color="text-purple-600 bg-purple-50" />
                 <div className="ml-auto text-sm text-brand-muted font-medium">
                     Tổng: <span className="font-bold text-brand-text">{rooms.length}</span> phòng

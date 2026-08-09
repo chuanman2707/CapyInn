@@ -1,6 +1,6 @@
 import type { MoneyVnd } from "@/lib/money";
 
-export type RoomStatus = "vacant" | "occupied" | "cleaning" | "booked";
+export type RoomStatus = "vacant" | "occupied" | "booked";
 export type BookingStatus =
   | "active"
   | "checked_out"
@@ -123,7 +123,6 @@ export interface DashboardStats {
   total_rooms: number;
   occupied: number;
   vacant: number;
-  cleaning: number;
   revenue_today: MoneyVnd;
 }
 
@@ -337,7 +336,7 @@ export interface ActivityItem {
   text: string;
   time: string;
   color: string;
-  kind?: "check_in" | "check_out" | "housekeeping";
+  kind?: "check_in" | "check_out";
   room_id?: string | null;
   guest_name?: string | null;
   occurred_at?: string;

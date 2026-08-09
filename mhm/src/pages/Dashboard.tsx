@@ -8,7 +8,7 @@ import EmptyState from "@/components/shared/EmptyState";
 import { Area, AreaChart, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { Badge } from "@/components/ui/badge";
-import { Users, DoorOpen, Paintbrush, TrendingUp, ShieldCheck } from "lucide-react";
+import { Users, DoorOpen, TrendingUp, ShieldCheck } from "lucide-react";
 import { isFullySettled } from "@/lib/bookingBalance";
 import { invokeCommand } from "@/lib/invokeCommand";
 import { invoke } from "@tauri-apps/api/core";
@@ -89,10 +89,9 @@ export default function Dashboard() {
 
       {/* 4.0 Stats Summary Row */}
       {stats && (
-        <div className="grid grid-cols-5 gap-6">
+        <div className="grid grid-cols-4 gap-6">
           <StatCard icon={Users} label="Occupied" value={stats.occupied} sub={`/ ${stats.total_rooms}`} color="text-brand-primary" bgColor="bg-brand-primary/10" />
           <StatCard icon={DoorOpen} label="Vacant" value={stats.vacant} sub={`/ ${stats.total_rooms}`} color="text-status-vacant-text" bgColor="bg-status-vacant-bg" />
-          <StatCard icon={Paintbrush} label="Need Cleaning" value={stats.cleaning} sub={`/ ${stats.total_rooms}`} color="text-status-unpaid-text" bgColor="bg-status-unpaid-bg" />
           <StatCard icon={TrendingUp} label="Revenue Today" value={fmtNumber(stats.revenue_today)} sub="VNĐ" color="text-status-partPaid-text" bgColor="bg-status-partPaid-bg" />
           <StatCard icon={ShieldCheck} label="Chưa khai báo tạm trú" value={undeclared} sub="trong 48h" color="text-status-unpaid-text" bgColor="bg-status-unpaid-bg" />
         </div>
