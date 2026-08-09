@@ -194,7 +194,10 @@ async fn ensure_setting_default(
 /// `feat/assistant-stay-dates`), nên hoàn toàn có thể một nhánh khác chiếm mất
 /// 28 trước, và va chạm đó im lặng: canary chạy trên DB rỗng nên vẫn xanh, chỉ
 /// máy khách sạn mới chết.
-pub(crate) const LATEST_SCHEMA_VERSION: i32 = 28;
+///
+/// 29 là `migrate_v29_drop_cleaning_room_status` (nhánh `feat/bo-housekeeping-va-timeline-ux`,
+/// task 1 — đưa phòng `cleaning` về `vacant` khi housekeeping được gỡ).
+pub(crate) const LATEST_SCHEMA_VERSION: i32 = 29;
 
 async fn get_schema_version(pool: &Pool<Sqlite>) -> Result<i32, sqlx::Error> {
     sqlx::query(
@@ -397,6 +400,13 @@ pub(crate) async fn run_migrations(pool: &Pool<Sqlite>) -> Result<(), sqlx::Erro
     // mình, nên chạy 28 trước 27 sẽ kéo phiên bản tụt lại về 27.
     if current < 28 {
         core_extensions::migrate_v28_booking_void(pool).await?;
+    }
+
+    // -- V29: bỏ trạng thái phòng `cleaning` --
+    // Phải đứng SAU gate V28: mỗi migration tự `set_schema_version` số của
+    // mình, nên chạy 29 trước 28 sẽ kéo phiên bản tụt lại về 28.
+    if current < 29 {
+        core_extensions::migrate_v29_drop_cleaning_room_status(pool).await?;
     }
     Ok(())
 }
@@ -2086,5 +2096,36 @@ mod tests {
             .unwrap_or_else(|error| panic!("reads pragma for {column}: {error}"));
             assert_eq!(exists, 1, "migration v28 must create column {column}");
         }
+    }
+
+    #[tokio::test]
+    async fn v29_moves_rooms_left_at_cleaning_to_vacant() {
+        let pool = connect_configured_sqlite_pool("sqlite::memory:")
+            .await
+            .expect("connects configured in-memory sqlite pool");
+        run_migrations(&pool).await.expect("runs migrations");
+
+        // Một bản cũ đã để phòng này ở `cleaning` trước khi housekeeping bị gỡ.
+        sqlx::query(
+            "INSERT INTO rooms (id, name, type, floor, has_balcony, base_price, status)
+             VALUES ('V29-DIRTY', 'V29-DIRTY', 'standard', 1, 0, 300000, 'cleaning')",
+        )
+        .execute(&pool)
+        .await
+        .expect("seeds a room left at cleaning");
+
+        super::core_extensions::migrate_v29_drop_cleaning_room_status(&pool)
+            .await
+            .expect("v29 runs");
+
+        let status: String = sqlx::query_scalar("SELECT status FROM rooms WHERE id = 'V29-DIRTY'")
+            .fetch_one(&pool)
+            .await
+            .expect("reads room status");
+        assert_eq!(status, "vacant");
+        assert_eq!(
+            get_schema_version(&pool).await.expect("reads version"),
+            29
+        );
     }
 }

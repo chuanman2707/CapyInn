@@ -277,3 +277,29 @@ pub(super) async fn migrate_v28_booking_void(pool: &Pool<Sqlite>) -> Result<(), 
     tx.commit().await?;
     Ok(())
 }
+
+/// V29: bỏ trạng thái phòng `cleaning`.
+///
+/// Housekeeping được gỡ khỏi sản phẩm ngày 09/08/2026: trả phòng xong là phòng
+/// trống ngay, không còn màn hình nào đưa phòng ra khỏi `cleaning` nữa. Một cơ
+/// sở dữ liệu đang chạy có thể có phòng vừa trả nằm ở đúng trạng thái đó —
+/// không có migration này thì phòng ấy kẹt vĩnh viễn ở một giá trị mà cả
+/// `check_in_tx` lẫn giao diện đều không xử lý được.
+///
+/// Chuỗi SQL viết trần, KHÔNG dùng `status::room::CLEANING`: hằng đó bị xoá
+/// cùng đợt này, và một migration đã chạy phải biên dịch được mãi mãi về sau.
+///
+/// Bảng `housekeeping` giữ nguyên. Nó là lịch sử, không phải trạng thái.
+pub(super) async fn migrate_v29_drop_cleaning_room_status(
+    pool: &Pool<Sqlite>,
+) -> Result<(), sqlx::Error> {
+    let mut tx = pool.begin().await?;
+
+    sqlx::query("UPDATE rooms SET status = 'vacant' WHERE status = 'cleaning'")
+        .execute(&mut *tx)
+        .await?;
+
+    set_schema_version(&mut tx, 29).await?;
+    tx.commit().await?;
+    Ok(())
+}
