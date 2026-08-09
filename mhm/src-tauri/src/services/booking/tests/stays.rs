@@ -381,7 +381,7 @@ async fn check_in_fails_when_second_pool_blocks_room_calendar_first() {
 }
 
 #[tokio::test]
-async fn check_out_idempotent_retry_replays_without_duplicate_money_or_housekeeping() {
+async fn check_out_idempotent_retry_replays_without_duplicate_money_and_creates_no_housekeeping() {
     let pool = test_pool().await;
     seed_room(&pool, "R-CHECKOUT-IDEM").await.unwrap();
     seed_active_booking(&pool, "B-CHECKOUT-IDEM", "R-CHECKOUT-IDEM")

@@ -360,8 +360,11 @@ async fn voiding_a_checked_out_stay_leaves_the_vacant_room_alone() {
     assert_eq!(room_status, "vacant");
 }
 
-/// Phòng đã bán lại cho khách khác: KHÔNG được đụng vào `rooms.status`. Đây là
-/// chỗ duy nhất trong lệnh này mà 0 dòng ảnh hưởng là hợp lệ.
+/// Phòng đã bán lại cho khách khác: KHÔNG được đụng vào `rooms.status`. Từ
+/// 09/08/2026 nhánh `checked_out` của `void_booking_tx` không còn câu UPDATE
+/// rooms nào cả (`void_lifecycle.rs`) — phòng đã bán lại an toàn theo cấu
+/// trúc (không có câu lệnh nào để đụng vào nó), không phải nhờ một guard
+/// chấp nhận 0 dòng ảnh hưởng như nhánh `active` (`ensure_one_row_affected`).
 #[tokio::test]
 async fn voiding_does_not_touch_a_room_that_was_already_reused() {
     let pool = test_pool().await;
@@ -596,8 +599,16 @@ async fn preview_reports_room_revenue_plus_folio_plus_cancellation_fee_for_a_che
     );
 }
 
-/// Phòng đã bán lại: preview phải báo trước, để hộp xác nhận nói đúng câu
-/// "trạng thái phòng giữ nguyên".
+/// Phòng đã bán lại cho khách khác (`occupied`) — ca đầu trong ba ca đại diện
+/// cùng khoá một điều: từ 09/08/2026 nhánh `checked_out` của `void_booking_tx`
+/// không còn câu UPDATE rooms nào (`void_lifecycle.rs`), nên
+/// `room_status_unchanged` không còn so bằng bất kỳ giá trị cụ thể nào của
+/// `rooms.status` — nó luôn true cho một lượt đã trả phòng, bất kể phòng đang
+/// `occupied`, `booked`, hay `vacant`. Ba test này (ca `occupied` ở đây, cộng
+/// hai ca `booked`/`vacant` ngay bên dưới) tồn tại song song dù không còn thể
+/// bất đồng với nhau: bỏ ca `vacant` đi rồi thu hẹp cờ lại thành `&&
+/// room_status != VACANT` sẽ vẫn lọt qua hai test còn lại mà không ai hay —
+/// giữ đủ ba là cách duy nhất để bắt kiểu tái thu hẹp đó.
 #[tokio::test]
 async fn preview_flags_a_room_that_was_already_reused() {
     let pool = test_pool().await;
@@ -620,7 +631,11 @@ async fn preview_flags_a_room_that_was_already_reused() {
         .await
         .expect("loads preview");
 
-    assert!(preview.room_status_unchanged);
+    assert!(
+        preview.room_status_unchanged,
+        "lượt đã trả phòng luôn có room_status_unchanged = true — nhánh checked_out không \
+         còn UPDATE rooms nào để so sánh trạng thái phòng, giống hệt ca 'booked'/'vacant'"
+    );
 }
 
 /// Phòng đang giữ cho một lượt đặt trong tương lai (`booked`) — KHÔNG chỉ
