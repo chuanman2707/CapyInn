@@ -29,11 +29,39 @@ describe("RateOverrideField", () => {
     expect(screen.getByTestId("rate-override-total").textContent).toContain("1.200.000");
   });
 
-  it("cảnh báo khi kỳ ở có đêm giá khác nhau", () => {
+  // Đổi tên từ "cảnh báo khi kỳ ở có đêm giá khác nhau" (rà cuối trước
+  // merge, M-a): fixture của test này CHƯA BAO GIỜ thử một kỳ có đêm giá
+  // khác nhau — nó chỉ là một khoản giảm giá thường (400.000 thay vì
+  // 433.333/đêm). Cái tên cũ khẳng định một nguyên nhân mà chính test không
+  // hề kiểm — đúng lớp lỗi component thật đang mắc.
+  it("cảnh báo trung tính khi tổng giá tay khác tổng engine, không suy đoán nguyên nhân", () => {
     render(
       <RateOverrideField engineTotal={1300000} nights={3} value={400000} onChange={vi.fn()} />,
     );
-    expect(screen.getByTestId("rate-uneven-warning").textContent).toContain("1.300.000");
+    const text = screen.getByTestId("rate-uneven-warning").textContent ?? "";
+    expect(text).toContain("1.300.000");
+    // Component không biết các đêm có đều giá hay không — nó chỉ có tổng.
+    // Không được khẳng định nguyên nhân "cuối tuần/lễ" hay "đêm giá khác nhau".
+    expect(text).not.toContain("cuối tuần");
+    expect(text).not.toContain("lễ");
+    expect(text).not.toContain("khác nhau");
+  });
+
+  // Ca thật reviewer chạy: kỳ giá PHẲNG (1.200.000/3 đêm = 400.000 đều nhau),
+  // lễ tân CHỦ Ý giảm còn 350.000/đêm. Bản cũ vẫn hiện "Kỳ này có đêm giá
+  // khác nhau (cuối tuần/lễ)" — sai sự thật, vì các đêm giá đều hệt nhau.
+  // Frontend không có dữ liệu để phân biệt "kỳ phẳng bị giảm giá" với "kỳ
+  // lệch giá đặt một mức", nên câu chữ phải trung tính cho cả hai.
+  it("kỳ giá phẳng bị giảm giá cố ý vẫn cảnh báo trung tính, không bịa ra lý do cuối tuần/lễ", () => {
+    render(
+      <RateOverrideField engineTotal={1200000} nights={3} value={350000} onChange={vi.fn()} />,
+    );
+    const text = screen.getByTestId("rate-uneven-warning").textContent ?? "";
+    expect(text).toContain("1.200.000");
+    expect(text).toContain("1.050.000");
+    expect(text).not.toContain("cuối tuần");
+    expect(text).not.toContain("lễ");
+    expect(text).not.toContain("khác nhau");
   });
 
   it("không cảnh báo khi giá các đêm đều nhau", () => {
@@ -85,6 +113,18 @@ describe("RateOverrideField", () => {
     );
     fireEvent.change(screen.getByTestId("rate-input"), { target: { value: "-500" } });
     expect(onChange).toHaveBeenCalledWith(-500);
+  });
+
+  // M-d (rà cuối trước merge): input chỉ có data-testid, không có tên khả
+  // truy cập nào — trình đọc màn hình không nói được đây là ô gì.
+  it("ô nhập giá và nút hiện giá có aria-label tiếng Việt", () => {
+    render(
+      <RateOverrideField engineTotal={1300000} nights={3} value={null} onChange={vi.fn()} />,
+    );
+    expect(screen.getByTestId("rate-display").getAttribute("aria-label")).toBeTruthy();
+
+    fireEvent.click(screen.getByTestId("rate-display"));
+    expect(screen.getByTestId("rate-input").getAttribute("aria-label")).toBeTruthy();
   });
 
   // M-1 (review Task 17): engineTotal null nghĩa là chưa có gì để prefill

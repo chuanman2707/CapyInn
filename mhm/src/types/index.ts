@@ -6,7 +6,8 @@ export type BookingStatus =
   | "checked_out"
   | "booked"
   | "cancelled"
-  | "no_show";
+  | "no_show"
+  | "voided";
 export type BookingSource =
   | "walk-in"
   | "phone"

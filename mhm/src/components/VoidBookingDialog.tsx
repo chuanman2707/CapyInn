@@ -52,6 +52,25 @@ export default function VoidBookingDialog({ bookingId, onClose, onVoided }: Void
         };
     }, [bookingId]);
 
+    // Hộp thoại này KHÔNG hoàn tác được — bấm Escape trước nó không được phép
+    // đóng luôn cả ngăn kéo bên dưới (SlideDrawer của RoomDrawer, ANH EM
+    // trong DOM chứ không phải cha, tự gắn listener Escape ở cấp document và
+    // vẫn sống trong lúc hộp này mở). Đăng ký ở PHA BẮT (capture: true) và
+    // gọi stopPropagation: capture chạy trước bubble với mọi listener khác
+    // trên cùng document, kể cả những listener đã đăng ký trước đó (SlideDrawer
+    // luôn mount trước vì RoomDrawer mở trước khi người dùng bấm "Xóa lượt
+    // này") — nên đây là cách duy nhất chặn được, `stopPropagation` gọi ở pha
+    // bubble không có tác dụng với listener khác đã đăng ký trên CÙNG target.
+    useEffect(() => {
+        const handleKeyDown = (event: KeyboardEvent) => {
+            if (event.key !== "Escape") return;
+            event.stopPropagation();
+            onClose();
+        };
+        document.addEventListener("keydown", handleKeyDown, { capture: true });
+        return () => document.removeEventListener("keydown", handleKeyDown, { capture: true });
+    }, [onClose]);
+
     const handleVoid = async () => {
         if (busy) return;
         setBusy(true);
@@ -84,7 +103,25 @@ export default function VoidBookingDialog({ bookingId, onClose, onVoided }: Void
                 onClick={(event) => event.stopPropagation()}
             >
                 {loadError ? (
-                    <p className="text-sm text-red-600">{loadError}</p>
+                    // Nhánh lỗi vốn chỉ có một câu đỏ cụt — không tiêu đề,
+                    // không nút, không gợi ý. Component không tự bắt Escape ở
+                    // đây (chỉ đóng bằng bấm ra nền hoặc nút này), nên người
+                    // dùng bàn phím vẫn thoát được nhờ nút "Đóng" tường minh
+                    // luôn nhận được focus.
+                    <div className="space-y-3">
+                        <h3 className="font-bold text-lg text-slate-800">Không tải được xem trước</h3>
+                        <p className="text-sm text-red-600">{loadError}</p>
+                        <p className="text-xs text-slate-500">
+                            Đóng hộp thoại này rồi thử lại — chưa có gì bị xóa.
+                        </p>
+                        <Button
+                            variant="outline"
+                            className="w-full rounded-xl h-10 cursor-pointer"
+                            onClick={onClose}
+                        >
+                            Đóng
+                        </Button>
+                    </div>
                 ) : !preview ? (
                     <p className="text-sm text-slate-500">Đang tải…</p>
                 ) : (
@@ -136,6 +173,21 @@ export default function VoidBookingDialog({ bookingId, onClose, onVoided }: Void
                                     trạng thái phòng
                                 </li>
                             )}
+                            {/* Lượt `booked` chưa cọc: không doanh thu, không cọc, không
+                                đổi trạng thái phòng — mọi điều kiện trên đều tắt và <ul>
+                                trống trơn, để lễ tân đối diện tiêu đề + ô lý do + nút đỏ
+                                mà không dòng nào nói chuyện gì sẽ xảy ra. Nói rõ ra thay
+                                vì im lặng. */}
+                            {!preview.is_group_booking &&
+                                !roomWillBecomeVacant &&
+                                preview.revenue_impact <= 0 &&
+                                preview.deposit_amount <= 0 &&
+                                !preview.is_audited &&
+                                !preview.room_status_unchanged && (
+                                    <li data-testid="void-no-consequence-note" className="text-slate-500">
+                                        Lượt này chưa phát sinh tiền — xóa không ảnh hưởng báo cáo
+                                    </li>
+                                )}
                         </ul>
 
                         <label className="block text-sm text-slate-600">
@@ -168,6 +220,7 @@ export default function VoidBookingDialog({ bookingId, onClose, onVoided }: Void
                             <Button
                                 variant="outline"
                                 className="w-full rounded-xl h-10 cursor-pointer"
+                                disabled={busy}
                                 onClick={onClose}
                             >
                                 Thôi

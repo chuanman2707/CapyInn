@@ -121,6 +121,12 @@ export default function HoldToDeleteButton({
             <span className="relative flex items-center justify-center gap-1.5">
                 <Trash2 size={16} /> {label}
             </span>
+            {/* Thanh tiến trình phía trên chỉ là hình ảnh (aria-hidden) —
+                trình đọc màn hình không thấy gì báo đang trong lúc giữ.
+                Vùng aria-live này nói thay, chỉ khi đang giữ. */}
+            <span role="status" aria-live="polite" className="sr-only">
+                {holding ? "Đang giữ…" : ""}
+            </span>
         </button>
     );
 }

@@ -33,8 +33,11 @@ export default function RateOverrideField({
     const [editing, setEditing] = useState(false);
 
     const overrideTotal = value != null ? value * nights : null;
-    // Kỳ có ngày lễ/cuối tuần thì các đêm giá khác nhau; đặt một mức cho cả kỳ
-    // sẽ làm mất phần phụ thu. Nói thẳng ra thay vì để lễ tân tự phát hiện.
+    // M-a (rà cuối trước merge): điều kiện này CHỈ nói được "tổng của bạn
+    // khác tổng engine" — tức MỌI lần giảm giá cố ý cũng bật cờ này y hệt
+    // một kỳ có đêm giá khác nhau thật. Component chỉ có `engineTotal` (một
+    // con số tổng), không có giá từng đêm, nên KHÔNG được suy ra nguyên nhân
+    // "cuối tuần/lễ" — câu chữ ở dưới phải trung tính, chỉ nêu hai con số.
     const uneven =
         value != null && engineTotal != null && overrideTotal !== engineTotal;
 
@@ -49,6 +52,7 @@ export default function RateOverrideField({
             <button
                 type="button"
                 data-testid="rate-display"
+                aria-label="Giá phòng — bấm để sửa giá tay"
                 disabled={disabled}
                 onClick={() => {
                     if (disabled) return;
@@ -68,6 +72,7 @@ export default function RateOverrideField({
             <div className="flex items-center justify-end gap-1">
                 <input
                     data-testid="rate-input"
+                    aria-label="Giá tay mỗi đêm, đơn vị đồng"
                     type="number"
                     inputMode="numeric"
                     min={0}
@@ -87,8 +92,8 @@ export default function RateOverrideField({
 
             {uneven && (
                 <p data-testid="rate-uneven-warning" className="text-[11px] text-amber-600">
-                    Kỳ này có đêm giá khác nhau (cuối tuần/lễ). Đặt giá tay sẽ áp một mức cho cả{" "}
-                    {nights} đêm: {fmtMoney(overrideTotal ?? 0)} thay vì {fmtMoney(engineTotal ?? 0)}.
+                    Giá tay cho {nights} đêm là {fmtMoney(overrideTotal ?? 0)}, khác giá engine{" "}
+                    {fmtMoney(engineTotal ?? 0)}.
                 </p>
             )}
 
