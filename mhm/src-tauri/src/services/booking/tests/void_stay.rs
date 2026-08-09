@@ -362,9 +362,11 @@ async fn voiding_a_checked_out_stay_leaves_the_vacant_room_alone() {
 
 /// Phòng đã bán lại cho khách khác: KHÔNG được đụng vào `rooms.status`. Từ
 /// 09/08/2026 nhánh `checked_out` của `void_booking_tx` không còn câu UPDATE
-/// rooms nào cả (`void_lifecycle.rs`) — phòng đã bán lại an toàn theo cấu
-/// trúc (không có câu lệnh nào để đụng vào nó), không phải nhờ một guard
-/// chấp nhận 0 dòng ảnh hưởng như nhánh `active` (`ensure_one_row_affected`).
+/// rooms nào cả (`void_lifecycle.rs:133`) — phòng đã bán lại an toàn theo cấu
+/// trúc: không có câu lệnh nào để đụng vào nó. Đây không phải chuyện nới lỏng
+/// một guard; nhánh `active` ngay bên trên vẫn ghi `rooms` và vẫn bắt buộc
+/// đúng một dòng (`ensure_one_row_affected`, `void_lifecycle.rs:126`) — nhánh
+/// này đơn giản là không còn gì để guard.
 #[tokio::test]
 async fn voiding_does_not_touch_a_room_that_was_already_reused() {
     let pool = test_pool().await;
