@@ -131,15 +131,15 @@ mod tests {
     #[test]
     fn the_two_sources_interleave_newest_first() {
         let feed = build_activity_feed(
-            vec![check_in("101", "An", "2026-04-10T14:00:00+07:00")],
-            vec![check_out("102", "Binh", "2026-04-10T12:00:00+07:00")],
+            vec![check_in("101", "An", "2026-04-10T12:00:00+07:00")],
+            vec![check_out("102", "Binh", "2026-04-10T14:00:00+07:00")],
             10,
         );
 
         let kinds: Vec<&str> = feed.iter().map(|item| item.kind.as_str()).collect();
         assert_eq!(
             kinds,
-            vec!["check_in", "check_out"],
+            vec!["check_out", "check_in"],
             "the feed is ordered by the full timestamp, not by source"
         );
     }

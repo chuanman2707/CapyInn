@@ -133,8 +133,6 @@ pub async fn load_options(
     let guests = guest_count(pool, booking_id).await?;
 
     // Phòng trống suốt dải đêm còn lại. Dòng của chính booking này không tính là vướng.
-    // Phòng đang dọn chỉ bị loại khi khách vào ngay tối nay. Với đặt trước tuần
-    // sau, tình trạng dọn dẹp hôm nay không nói lên điều gì về tuần sau.
     //
     // Nhưng một booking đang ACTIVE thì luôn bắt buộc phòng mới phải `vacant`,
     // bất kể đêm chuyển đầu tiên có phải tối nay hay không — `change_room_tx`
