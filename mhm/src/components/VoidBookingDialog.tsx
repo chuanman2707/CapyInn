@@ -91,11 +91,12 @@ export default function VoidBookingDialog({ bookingId, onClose, onVoided }: Void
     };
 
     // `void_booking_tx` (services/booking/void_lifecycle.rs) chỉ UPDATE bảng
-    // rooms cho status active/checked_out — nhánh booked là `_ => {}`, không
-    // đụng gì tới phòng. `room_status_unchanged` cũng chỉ được backend tính cho
-    // checked_out (luôn false với booked/active), nên không thể chỉ nhìn
-    // `!room_status_unchanged` mà kết luận phòng "sẽ về trống": với một lượt mới
-    // đặt trước, câu đó bịa ra một hiệu ứng backend không hề làm.
+    // rooms ở nhánh active — nhánh checked_out không đụng tới phòng (trả phòng
+    // đã đặt nó về trống), nhánh booked là `_ => {}`. `room_status_unchanged`
+    // chỉ được backend tính cho checked_out, và ở đó luôn true; với
+    // active/booked luôn false. Nên không thể chỉ nhìn `!room_status_unchanged`
+    // mà kết luận phòng "sẽ về trống": với một lượt mới đặt trước, câu đó bịa
+    // ra một hiệu ứng backend không hề làm.
     const roomWillBecomeVacant =
         preview !== null &&
         (preview.previous_status === "active" || preview.previous_status === "checked_out") &&

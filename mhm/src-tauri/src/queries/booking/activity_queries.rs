@@ -1,12 +1,12 @@
 //! Reads behind the dashboard activity feed.
 //!
-//! Three independent "most recent N" queries. They are not unioned in SQL
+//! Two independent "most recent N" queries. They are not unioned in SQL
 //! because each one carries different columns; the command merges and sorts
 //! them, which it can do as a pure function once the rows are in hand.
 //!
 //! Every loader clamps its limit at zero first. SQLite reads a negative
 //! `LIMIT` as *unbounded*, so without the clamp a nonsense limit turned into
-//! three full-table scans whose rows the caller then threw away.
+//! two full-table scans whose rows the caller then threw away.
 
 use sqlx::{Pool, Row, Sqlite};
 
@@ -20,12 +20,6 @@ pub struct RecentCheckOut {
     pub room_id: String,
     pub guest_name: String,
     pub actual_checkout: String,
-}
-
-pub struct RecentHousekeeping {
-    pub room_id: String,
-    pub status: String,
-    pub triggered_at: String,
 }
 
 pub async fn load_recent_check_ins(
@@ -72,28 +66,6 @@ pub async fn load_recent_check_outs(
             room_id: row.get("room_id"),
             guest_name: row.get("full_name"),
             actual_checkout: row.get("actual_checkout"),
-        })
-        .collect())
-}
-
-pub async fn load_recent_housekeeping(
-    pool: &Pool<Sqlite>,
-    limit: i32,
-) -> Result<Vec<RecentHousekeeping>, sqlx::Error> {
-    let rows = sqlx::query(
-        "SELECT room_id, status, triggered_at FROM housekeeping
-         ORDER BY triggered_at DESC LIMIT ?",
-    )
-    .bind(limit.max(0))
-    .fetch_all(pool)
-    .await?;
-
-    Ok(rows
-        .iter()
-        .map(|row| RecentHousekeeping {
-            room_id: row.get("room_id"),
-            status: row.get("status"),
-            triggered_at: row.get("triggered_at"),
         })
         .collect())
 }

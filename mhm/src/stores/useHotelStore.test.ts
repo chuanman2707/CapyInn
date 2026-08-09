@@ -40,7 +40,6 @@ describe("useHotelStore monitoring context", () => {
           total_rooms: 10,
           occupied: 2,
           vacant: 8,
-          cleaning: 0,
           revenue_today: 0,
         };
       }
@@ -559,7 +558,7 @@ describe("useHotelStore navigation side effects", () => {
     invoke.mockImplementation(async (command: string) => {
       if (command === "get_rooms") return [];
       if (command === "get_dashboard_stats") {
-        return { total_rooms: 10, occupied: 2, vacant: 8, cleaning: 0, revenue_today: 0 };
+        return { total_rooms: 10, occupied: 2, vacant: 8, revenue_today: 0 };
       }
       throw new Error(`Unhandled invoke ${command}`);
     });
@@ -656,7 +655,7 @@ describe("useHotelStore room change", () => {
     invoke.mockImplementation(async (command: string) => {
       if (command === "get_rooms") return [];
       if (command === "get_dashboard_stats") {
-        return { total_rooms: 10, occupied: 2, vacant: 8, cleaning: 0, revenue_today: 0 };
+        return { total_rooms: 10, occupied: 2, vacant: 8, revenue_today: 0 };
       }
       throw new Error(`Unhandled invoke ${command}`);
     });

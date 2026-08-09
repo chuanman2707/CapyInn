@@ -1144,7 +1144,7 @@ impl HotelTools {
     }
 
     #[tool(
-        description = "Get list of all rooms with their current status (vacant, occupied, cleaning, booked)."
+        description = "Get list of all rooms with their current status (vacant, occupied, booked)."
     )]
     async fn get_rooms(&self) -> String {
         match commands::do_get_rooms(&self.pool).await {
@@ -1172,7 +1172,7 @@ impl HotelTools {
     }
 
     #[tool(
-        description = "Get hotel dashboard statistics: total rooms, occupied, vacant, cleaning, revenue today."
+        description = "Get hotel dashboard statistics: total rooms, occupied, vacant, revenue today."
     )]
     async fn get_dashboard_stats(&self) -> String {
         match commands::do_get_dashboard_stats(&self.pool).await {

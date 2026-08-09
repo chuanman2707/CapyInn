@@ -236,11 +236,11 @@ async fn voiding_an_active_stay_is_rejected_when_room_status_changes_before_guar
         .expect("seeds active booking");
 
     sqlx::query(
-        "CREATE TRIGGER mark_room_cleaning_after_void_update
+        "CREATE TRIGGER mark_room_booked_after_void_update
          AFTER UPDATE ON bookings
          WHEN NEW.id = 'B-CAS-VOID' AND NEW.status = 'voided'
          BEGIN
-           UPDATE rooms SET status = 'cleaning' WHERE id = NEW.room_id;
+           UPDATE rooms SET status = 'booked' WHERE id = NEW.room_id;
          END",
     )
     .execute(&pool)
@@ -273,7 +273,7 @@ async fn voiding_an_active_stay_is_rejected_when_room_status_changes_before_guar
             .await
             .expect("reads room status after rejection");
     assert_eq!(
-        room_status, "cleaning",
+        room_status, "booked",
         "phòng phải giữ nguyên trạng thái do thao tác khác đặt — void không được ghi đè thành vacant"
     );
 

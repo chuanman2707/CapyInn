@@ -24,15 +24,11 @@ pub async fn load_dashboard_stats_for_date(
     let vacant: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM rooms WHERE status = 'vacant'")
         .fetch_one(pool)
         .await?;
-    let cleaning: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM rooms WHERE status = 'cleaning'")
-        .fetch_one(pool)
-        .await?;
 
     Ok(DashboardStats {
         total_rooms: total.0 as i32,
         occupied: occupied.0 as i32,
         vacant: vacant.0 as i32,
-        cleaning: cleaning.0 as i32,
         revenue_today: load_total_revenue(pool, date, date).await?,
     })
 }

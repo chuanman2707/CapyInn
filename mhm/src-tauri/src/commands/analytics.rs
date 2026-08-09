@@ -1,7 +1,5 @@
 use super::AppState;
-use crate::queries::booking::activity_queries::{
-    self, RecentCheckIn, RecentCheckOut, RecentHousekeeping,
-};
+use crate::queries::booking::activity_queries::{self, RecentCheckIn, RecentCheckOut};
 use crate::{models::*, queries::booking::revenue_queries};
 use tauri::State;
 
@@ -41,19 +39,11 @@ pub async fn get_recent_activity(
     let check_outs = activity_queries::load_recent_check_outs(&state.db, limit)
         .await
         .map_err(|e| e.to_string())?;
-    let housekeeping = activity_queries::load_recent_housekeeping(&state.db, limit)
-        .await
-        .map_err(|e| e.to_string())?;
 
-    Ok(build_activity_feed(
-        check_ins,
-        check_outs,
-        housekeeping,
-        limit,
-    ))
+    Ok(build_activity_feed(check_ins, check_outs, limit))
 }
 
-/// Turns the three activity reads into the dashboard feed.
+/// Turns the two activity reads into the dashboard feed.
 ///
 /// Pure on purpose: everything below here is presentation — the icon, the
 /// Tailwind class, and the Vietnamese status label the dashboard renders — so
@@ -61,7 +51,6 @@ pub async fn get_recent_activity(
 fn build_activity_feed(
     check_ins: Vec<RecentCheckIn>,
     check_outs: Vec<RecentCheckOut>,
-    housekeeping: Vec<RecentHousekeeping>,
     limit: i32,
 ) -> Vec<ActivityItem> {
     let mut activities: Vec<ActivityItem> = Vec::new();
@@ -94,25 +83,6 @@ fn build_activity_feed(
         });
     }
 
-    for row in housekeeping {
-        let label = if row.status == "clean" {
-            "Cleaned"
-        } else {
-            "Needs cleaning"
-        };
-        activities.push(ActivityItem {
-            icon: "🧹".to_string(),
-            text: format!("{} — Room {}", label, row.room_id),
-            time: extract_time(&row.triggered_at),
-            color: "bg-amber-50".to_string(),
-            kind: "housekeeping".to_string(),
-            room_id: Some(row.room_id),
-            guest_name: None,
-            occurred_at: row.triggered_at,
-            status_label: label.to_string(),
-        });
-    }
-
     // Sort by full timestamp descending to keep cross-day ordering stable.
     activities.sort_by(|a, b| b.occurred_at.cmp(&a.occurred_at));
     activities.truncate(limit.max(0) as usize);
@@ -140,9 +110,7 @@ fn extract_time(datetime_str: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::{build_activity_feed, extract_time};
-    use crate::queries::booking::activity_queries::{
-        RecentCheckIn, RecentCheckOut, RecentHousekeeping,
-    };
+    use crate::queries::booking::activity_queries::{RecentCheckIn, RecentCheckOut};
 
     fn check_in(room_id: &str, guest: &str, at: &str) -> RecentCheckIn {
         RecentCheckIn {
@@ -160,27 +128,18 @@ mod tests {
         }
     }
 
-    fn housekeeping(room_id: &str, status: &str, at: &str) -> RecentHousekeeping {
-        RecentHousekeeping {
-            room_id: room_id.to_string(),
-            status: status.to_string(),
-            triggered_at: at.to_string(),
-        }
-    }
-
     #[test]
-    fn the_three_sources_interleave_newest_first() {
+    fn the_two_sources_interleave_newest_first() {
         let feed = build_activity_feed(
             vec![check_in("101", "An", "2026-04-10T14:00:00+07:00")],
             vec![check_out("102", "Binh", "2026-04-10T12:00:00+07:00")],
-            vec![housekeeping("103", "clean", "2026-04-10T16:00:00+07:00")],
             10,
         );
 
         let kinds: Vec<&str> = feed.iter().map(|item| item.kind.as_str()).collect();
         assert_eq!(
             kinds,
-            vec!["housekeeping", "check_in", "check_out"],
+            vec!["check_in", "check_out"],
             "the feed is ordered by the full timestamp, not by source"
         );
     }
@@ -193,20 +152,18 @@ mod tests {
                 check_in("102", "Binh", "2026-04-10T08:00:00+07:00"),
             ],
             vec![check_out("103", "Cuong", "2026-04-10T10:00:00+07:00")],
-            vec![housekeeping("104", "dirty", "2026-04-10T11:00:00+07:00")],
             2,
         );
 
         assert_eq!(feed.len(), 2);
-        assert_eq!(feed[0].room_id.as_deref(), Some("104"));
-        assert_eq!(feed[1].room_id.as_deref(), Some("103"));
+        assert_eq!(feed[0].room_id.as_deref(), Some("103"));
+        assert_eq!(feed[1].room_id.as_deref(), Some("101"));
     }
 
     #[test]
     fn a_check_in_carries_its_presentation() {
         let feed = build_activity_feed(
             vec![check_in("101", "An", "2026-04-10T14:30:00+07:00")],
-            vec![],
             vec![],
             10,
         );
@@ -225,7 +182,6 @@ mod tests {
         let feed = build_activity_feed(
             vec![],
             vec![check_out("102", "Binh", "2026-04-10T11:05:00+07:00")],
-            vec![],
             10,
         );
 
@@ -238,48 +194,23 @@ mod tests {
     }
 
     #[test]
-    fn housekeeping_reads_clean_against_everything_else() {
-        let feed = build_activity_feed(
-            vec![],
-            vec![],
-            vec![
-                housekeeping("103", "clean", "2026-04-10T16:00:00+07:00"),
-                housekeeping("104", "dirty", "2026-04-10T15:00:00+07:00"),
-                housekeeping("105", "cleaning", "2026-04-10T14:00:00+07:00"),
-            ],
-            10,
-        );
-
-        let labels: Vec<&str> = feed.iter().map(|i| i.status_label.as_str()).collect();
-        assert_eq!(
-            labels,
-            vec!["Cleaned", "Needs cleaning", "Needs cleaning"],
-            "only the literal 'clean' status reads as done"
-        );
-        assert!(feed.iter().all(|i| i.guest_name.is_none()));
-        assert_eq!(feed[0].text, "Cleaned — Room 103");
-    }
-
-    #[test]
-    fn ties_keep_check_in_before_check_out_before_housekeeping() {
+    fn ties_keep_check_in_before_check_out() {
         let same = "2026-04-10T10:00:00+07:00";
         let feed = build_activity_feed(
             vec![check_in("101", "An", same)],
             vec![check_out("102", "Binh", same)],
-            vec![housekeeping("103", "clean", same)],
             10,
         );
 
         let kinds: Vec<&str> = feed.iter().map(|item| item.kind.as_str()).collect();
-        assert_eq!(kinds, vec!["check_in", "check_out", "housekeeping"]);
+        assert_eq!(kinds, vec!["check_in", "check_out"]);
     }
 
     #[test]
     fn an_empty_feed_survives_a_zero_or_negative_limit() {
-        assert!(build_activity_feed(vec![], vec![], vec![], 0).is_empty());
+        assert!(build_activity_feed(vec![], vec![], 0).is_empty());
         assert!(build_activity_feed(
             vec![check_in("101", "An", "2026-04-10T10:00:00+07:00")],
-            vec![],
             vec![],
             -1,
         )
