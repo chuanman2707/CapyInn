@@ -901,6 +901,14 @@ mod tests {
             .await
             .expect("creates legacy bookings table");
 
+        // Same reason, for v29's migration: a real database sitting at v10+ went
+        // through v1, so it already has `rooms`. This fixture jumps straight past
+        // v1, so it has to stand the table up itself.
+        sqlx::query("CREATE TABLE rooms (id TEXT PRIMARY KEY, status TEXT)")
+            .execute(pool)
+            .await
+            .expect("creates legacy rooms table");
+
         // Same reason, for v23's ALTER: a real database sitting at v10 or v11
         // went through v8, so it already has `invoices`. This fixture jumps
         // straight past v8, so it has to stand the table up itself.
@@ -2123,9 +2131,6 @@ mod tests {
             .await
             .expect("reads room status");
         assert_eq!(status, "vacant");
-        assert_eq!(
-            get_schema_version(&pool).await.expect("reads version"),
-            29
-        );
+        assert_eq!(get_schema_version(&pool).await.expect("reads version"), 29);
     }
 }
