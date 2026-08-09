@@ -30,7 +30,7 @@
 
 ![CapyInn dashboard hero](Public/dashboard.png)
 
-> Built for mini hotels that need one local app for room status, guest intake, nightly billing, housekeeping, and end-of-day reconciliation.
+> Built for mini hotels that need one local app for room status, guest intake, nightly billing, and end-of-day reconciliation.
 
 <p align="center">
   <img src="https://img.shields.io/badge/Offline--first-0F172A?style=flat-square" alt="Offline-first">
@@ -39,7 +39,7 @@
   <img src="https://img.shields.io/badge/Storage-Local%20SQLite-1D4ED8?style=flat-square" alt="Local SQLite">
 </p>
 
-CapyInn is a desktop app for mini hotels and guesthouses that need a local-first operating tool without relying on a remote backend. The project focuses on real front-desk workflows: room layout setup, faster guest intake, Vietnamese ID OCR, nightly pricing, housekeeping, revenue reporting, and end-of-day reconciliation.
+CapyInn is a desktop app for mini hotels and guesthouses that need a local-first operating tool without relying on a remote backend. The project focuses on real front-desk workflows: room layout setup, faster guest intake, Vietnamese ID OCR, nightly pricing, revenue reporting, and end-of-day reconciliation.
 
 > Note: `CapyInn` is a clean-slate rename from `MHM`. Current builds use the new runtime root at `~/CapyInn` and do not auto-migrate legacy local data from `~/MHM`.
 
@@ -141,10 +141,8 @@ CapyInn is built for a narrow but practical use case: small hotels that need a s
 - Charge, payment, deposit, and balance tracking
 - Revenue analytics, expense tracking, and CSV export
 
-### Housekeeping and night audit
+### Night audit
 
-- Post-checkout housekeeping state tracking
-- Maintenance notes per room
 - Night-audit flow for daily reconciliation
 
 ### Temporary residence declaration (Khai báo tạm trú)

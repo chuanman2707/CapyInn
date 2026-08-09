@@ -70,7 +70,7 @@ npm run verify:full
 
 ## PMS Architecture Guardrails
 
-- Core PMS includes rooms, stays, reservations, guests, housekeeping, billing, invoices, groups, night audit, settings, and auth.
+- Core PMS includes rooms, stays, reservations, guests, billing, invoices, groups, night audit, settings, and auth.
 - Experimental runtime includes gateway, MCP, agent runtime, observer streams, digest, Telegram, CEO, and OpenAI surfaces.
 - Experimental disabled means normal PMS operation has no experimental background tasks, no required external API keys, no Telegram/OpenAI/MCP/gateway config, no agent direct PMS table mutation, and no experimental UI in the normal profile.
 - Business writes must enter through Tauri commands and continue through service/lifecycle modules.
