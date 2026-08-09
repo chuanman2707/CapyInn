@@ -493,6 +493,62 @@ async fn group_checkin_rejects_overpayment_on_engine_priced_room() {
     assert_eq!(group_count, 0, "cả group phải rollback, không tạo dở dang");
 }
 
+/// Σ giá phòng của cả đoàn bằng 0 (mọi phòng `base_price` mặc định của schema
+/// — cột có `DEFAULT 0`, không phòng nào có `pricing_rules`) mà khách vẫn trả
+/// tiền: `allocate_paid_amount_by_room_price` trả toàn 0 khi `grand_total <=
+/// 0`, guard thu-vượt từng phòng (`paid_for_room > total_price`) hoá thành
+/// `0 > 0` = false nên lọt qua, rồi nhánh ghi payment (`if paid_for_room > 0`)
+/// không chạy vì chính con số đó đã bị chia thành 0 — tiền khách đưa biến mất
+/// KHÔNG MỘT TIẾNG ĐỘNG, không lỗi, không log. Bản TRƯỚC Task 15
+/// (`allocate_positive_money_evenly`) chia đều ra số DƯƠNG nên guard nổ và
+/// báo lỗi to đúng ca này — nhánh chia-theo-giá đổi lỗi-ồn thành mất-tiền-im,
+/// một hồi quy do chính nó gây ra.
+#[tokio::test]
+async fn group_checkin_rejects_payment_when_the_groups_total_room_price_is_zero() {
+    let pool = test_pool().await;
+    seed_room_with_guest_pricing(&pool, "G-ZERO1", 0, 2, 0)
+        .await
+        .unwrap();
+    seed_room_with_guest_pricing(&pool, "G-ZERO2", 0, 2, 0)
+        .await
+        .unwrap();
+
+    let error = group_lifecycle::group_checkin(
+        &pool,
+        Some("seed-user".to_string()),
+        GroupCheckinRequest {
+            group_name: "Đoàn giá 0".to_string(),
+            organizer_name: "Trưởng đoàn".to_string(),
+            organizer_phone: None,
+            check_in_date: None,
+            room_ids: vec!["G-ZERO1".to_string(), "G-ZERO2".to_string()],
+            master_room_id: "G-ZERO1".to_string(),
+            guests_per_room: Default::default(),
+            nights: 2,
+            source: None,
+            notes: None,
+            paid_amount: Some(500_000),
+            rate_override_per_room: Default::default(),
+        },
+    )
+    .await
+    .unwrap_err();
+
+    assert_eq!(
+        error,
+        BookingError::validation(
+            "Tổng tiền phòng của đoàn đang bằng 0đ nhưng khách đã trả 500000đ — không thể phân bổ khoản này cho phòng nào, kiểm tra lại giá phòng trước khi ghi nhận thanh toán".to_string()
+        ),
+        "phải từ chối rõ ràng bằng tiếng Việt, không được âm thầm bỏ qua khoản khách đã trả"
+    );
+
+    let group_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM booking_groups")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(group_count, 0, "cả group phải rollback, không tạo dở dang");
+}
+
 /// `checked_mul_money`, không phải `*` trần. `validate_group_checkin_request`
 /// chỉ chặn `rate` ngoài biên và `nights <= 0` — KHÔNG có trần trên cho
 /// `nights` (giống `validate_check_in_request`, khác đặt trước có
