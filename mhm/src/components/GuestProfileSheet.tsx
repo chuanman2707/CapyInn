@@ -21,6 +21,32 @@ interface GuestHistoryResponse {
     bookings: BookingWithRoom[];
 }
 
+// Nhãn tiếng Việt cho từng status lượt lưu trú. Bản trước chỉ có hai giá trị
+// nhị phân, tiếng Anh, suy từ `status === "active"`: mọi status khác (kể cả
+// "booked" chưa hề diễn ra, hay "cancelled" đã hủy) đều bị gộp vào
+// "Completed" — vừa sai ngôn ngữ vừa sai sự thật. Backend đã lọc "voided"
+// khỏi lịch sử khách (8 đường đọc SQL), nhưng hàm này vẫn nhận diện nó tường
+// minh thay vì rơi vào default — cùng lý do phòng thủ theo chiều sâu như
+// Reservations.tsx.
+function guestBookingStatusLabel(status: string): string {
+    switch (status) {
+        case "active":
+            return "Đang ở";
+        case "checked_out":
+            return "Đã trả phòng";
+        case "booked":
+            return "Đặt trước";
+        case "cancelled":
+            return "Đã hủy";
+        case "no_show":
+            return "Không đến";
+        case "voided":
+            return "Đã xóa";
+        default:
+            return status;
+    }
+}
+
 export default function GuestProfileSheet({ guestId, onClose }: { guestId: string; onClose: () => void }) {
     const [data, setData] = useState<GuestHistoryResponse | null>(null);
 
@@ -103,7 +129,7 @@ export default function GuestProfileSheet({ guestId, onClose }: { guestId: strin
                                         <div className="flex items-center justify-between">
                                             <span className="font-semibold text-sm">Room {b.room_id}</span>
                                             <Badge className={`text-[10px] px-2 py-0 rounded-md border-0 ${isActive ? "bg-blue-50 text-blue-700" : "bg-slate-100 text-slate-500"}`}>
-                                                {isActive ? "Active" : "Completed"}
+                                                {guestBookingStatusLabel(b.status)}
                                             </Badge>
                                         </div>
                                         <p className="text-xs text-brand-muted mt-1">

@@ -457,6 +457,55 @@ describe("Reservations checked-out bookings", () => {
 // đổ lỗi "no such column: b.guests". `.catch(() => setBookings([]))` nuốt trọn
 // nó và trang hiện "Chưa có booking nào" — chủ đọc ra là mất sạch dữ liệu, đi
 // tìm bản backup, trong khi 25 booking vẫn nằm nguyên trong database.
+// C1 (rà cuối trước merge): backend đã bịt 8 đường đọc SQL còn sót lượt đã
+// xoá, nhưng frontend lọc bar bằng danh sách ĐEN (`status !== "cancelled"`) —
+// đúng lớp lỗi "quên rà nhánh status" đã cắn ba lần trên nhánh này. Một lượt
+// "voided" lọt qua tầng SQL (index cũ, cache, hay chính bug đang sửa) vẫn phải
+// biến mất khỏi lịch ở tầng này — phòng thủ theo chiều sâu.
+describe("Reservations voided bookings", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    resetEventMocks();
+    invokeWriteCommand.mockResolvedValue(undefined);
+    createCorrelationId.mockReturnValue("COR-5E6F7A8B");
+  });
+
+  it("không vẽ thanh cho lượt đã xóa (voided), dù nó lọt qua tới tận đây", async () => {
+    invoke.mockImplementation(async (command: string) => {
+      if (command === "get_all_bookings") {
+        return [bookingAt({ id: "B-VOIDED", status: "voided" })];
+      }
+      return undefined;
+    });
+
+    render(<Reservations />);
+
+    await waitFor(() => {
+      expect(screen.getByText("Room R101")).toBeTruthy();
+    });
+    expect(screen.queryByTestId("booking-bar-B-VOIDED")).toBeNull();
+  });
+
+  it("không đếm lượt đã xóa vào tổng số booking hiển thị", async () => {
+    invoke.mockImplementation(async (command: string) => {
+      if (command === "get_all_bookings") {
+        return [
+          bookingAt({ id: "B-VOIDED", status: "voided" }),
+          bookingAt({ id: "B-OK", status: "booked" }),
+        ];
+      }
+      return undefined;
+    });
+
+    render(<Reservations />);
+
+    await waitFor(() => {
+      expect(screen.getByTestId("booking-bar-B-OK")).toBeTruthy();
+    });
+    expect(screen.getByTestId("total-booking-count").textContent).toBe("1");
+  });
+});
+
 describe("Reservations load errors", () => {
   beforeEach(() => {
     vi.clearAllMocks();

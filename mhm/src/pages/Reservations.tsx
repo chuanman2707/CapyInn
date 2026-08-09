@@ -97,19 +97,64 @@ function parseDate(s: string): Date {
     return Number.isNaN(parsed.getTime()) ? parsed : startOfLocalDay(parsed);
 }
 
+// Chỉ những status này mới có bar trên lịch. DANH SÁCH TRẮNG — cố ý, không
+// phải danh sách đen (`status !== "cancelled"` cũ). Một status mới thêm vào
+// BookingStatus mà không có mặt ở đây thì KHÔNG vẽ bar, thay vì lọt qua mặc
+// định như đường đen — đúng chiều an toàn khi status là dữ liệu người dùng
+// không kiểm soát được (đọc từ backend, có thể là bug tầng SQL sót lại).
+const VISIBLE_BOOKING_STATUSES: readonly BookingStatus[] = [
+    "active",
+    "booked",
+    "checked_out",
+    "no_show",
+];
+
+/** Không bao giờ được gọi nếu switch bên dưới xét đủ mọi nhánh của BookingStatus. */
+function assertUnreachableStatus(status: never): never {
+    throw new Error(`Thiếu nhánh xử lý cho status: ${String(status)}`);
+}
+
+// switch cạn kiệt (exhaustive) thay vì chuỗi if/else: thêm một status mới vào
+// BookingStatus mà quên xử lý ở đây là LỖI BIÊN DỊCH, không phải một bar màu
+// cam âm thầm hiện ra. Đây chính là rào chắn C1 yêu cầu — trước đây if/else
+// với nhánh mặc định (`return status`) không ép tsc bắt lỗi thiếu nhánh.
 function getBookingBarColor(status: BookingStatus): string {
-    if (status === "booked") return "bg-blue-100 text-blue-700 border-blue-300";
-    if (status === "active") return "bg-emerald-100 text-emerald-700 border-emerald-300";
-    if (status === "checked_out") return "bg-slate-100 text-slate-500 border-slate-200";
-    return "bg-orange-100 text-orange-700 border-orange-200";
+    switch (status) {
+        case "booked":
+            return "bg-blue-100 text-blue-700 border-blue-300";
+        case "active":
+            return "bg-emerald-100 text-emerald-700 border-emerald-300";
+        case "checked_out":
+            return "bg-slate-100 text-slate-500 border-slate-200";
+        case "no_show":
+            return "bg-orange-100 text-orange-700 border-orange-200";
+        // cancelled/voided không bao giờ tới đây (đã lọc ở VISIBLE_BOOKING_STATUSES)
+        // — màu xám trung tính, không phải cam (cam đang là màu "đến hạn/chú ý").
+        case "cancelled":
+        case "voided":
+            return "bg-slate-100 text-slate-400 border-slate-200";
+        default:
+            return assertUnreachableStatus(status);
+    }
 }
 
 function getStatusLabel(status: BookingStatus): string {
-    if (status === "booked") return "Đặt trước";
-    if (status === "active") return "Đang ở";
-    if (status === "checked_out") return "Đã trả";
-    if (status === "no_show") return "Không đến";
-    return status;
+    switch (status) {
+        case "booked":
+            return "Đặt trước";
+        case "active":
+            return "Đang ở";
+        case "checked_out":
+            return "Đã trả";
+        case "no_show":
+            return "Không đến";
+        case "cancelled":
+            return "Đã hủy";
+        case "voided":
+            return "Đã xóa";
+        default:
+            return assertUnreachableStatus(status);
+    }
 }
 
 // `get_all_bookings` là lệnh ĐỌC: chữ ký của nó là `Result<_, String>`, nên
@@ -220,11 +265,14 @@ export default function Reservations() {
     const activeCount = visibleBookings.filter(b => b.status === "active").length;
     const bookedCount = visibleBookings.filter(b => b.status === "booked").length;
     const checkedOutCount = visibleBookings.filter(b => b.status === "checked_out").length;
-    const totalCount = visibleBookings.length;
+    // Lượt đã xóa không phải một booking đang tồn tại — không được góp vào
+    // "Tổng". Bản trước đếm nguyên visibleBookings.length, cộng cả những
+    // lượt đã voided nếu chúng lọt qua tới đây.
+    const totalCount = visibleBookings.filter(b => b.status !== "voided").length;
 
     function getBookingBars(roomId: string): BookingBar[] {
         return visibleBookings
-            .filter(b => b.room_id === roomId && b.status !== "cancelled")
+            .filter(b => b.room_id === roomId && VISIBLE_BOOKING_STATUSES.includes(b.status))
             .flatMap((b): BookingBar[] => {
                 const checkIn = parseDate(b.scheduled_checkin || b.check_in_at);
                 // Booking đã trả: bar dừng đúng lúc trả phòng thực tế, kể cả khi trước đó lỡ extend.
@@ -363,7 +411,7 @@ export default function Reservations() {
                         Đã trả <span className="ml-1 bg-slate-200 text-slate-600 rounded px-1.5 py-0.5 text-[10px]">{checkedOutCount}</span>
                     </Badge>
                     <Badge className="bg-orange-50 text-orange-600 border border-orange-200 rounded-lg px-3 py-1 text-xs font-bold">
-                        Tổng <span className="ml-1 bg-orange-200 text-orange-700 rounded px-1.5 py-0.5 text-[10px]">{totalCount}</span>
+                        Tổng <span data-testid="total-booking-count" className="ml-1 bg-orange-200 text-orange-700 rounded px-1.5 py-0.5 text-[10px]">{totalCount}</span>
                     </Badge>
                 </div>
 

@@ -121,6 +121,22 @@ describe("HoldToDeleteButton", () => {
     expect(onHoldComplete).not.toHaveBeenCalled();
   });
 
+  // M-d (rà cuối trước merge): thanh tiến trình đã aria-hidden sẵn, nhưng
+  // không có gì báo cho trình đọc màn hình biết đang trong lúc giữ — chỉ có
+  // nhãn tĩnh của nút. Thêm vùng aria-live báo "Đang giữ…" trong lúc giữ.
+  it("báo 'Đang giữ…' qua vùng aria-live khi đang giữ, tắt khi nhả tay", () => {
+    render(<HoldToDeleteButton label="Giữ để xóa" onHoldComplete={vi.fn()} />);
+
+    const button = screen.getByRole("button", { name: /giữ để xóa/i });
+    expect(screen.getByRole("status")).toHaveTextContent("");
+
+    fireEvent.pointerDown(button);
+    expect(screen.getByRole("status")).toHaveTextContent(/đang giữ/i);
+
+    fireEvent.pointerUp(button);
+    expect(screen.getByRole("status")).toHaveTextContent("");
+  });
+
   describe("bàn phím", () => {
     it("giữ đủ Enter thì kích hoạt", () => {
       const onHoldComplete = vi.fn();

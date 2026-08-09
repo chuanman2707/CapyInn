@@ -238,6 +238,105 @@ describe("VoidBookingDialog", () => {
     });
   });
 
+  // M-b (rà cuối trước merge): nhánh lỗi cũ chỉ có một thẻ <p> đỏ — không
+  // tiêu đề, không nút, không gợi ý. Component không có handler Escape và
+  // nhánh này không có gì focus được, nên người chỉ dùng bàn phím kẹt lại,
+  // chỉ còn cách bấm chuột ra nền. Phải có nút "Đóng" tường minh và câu nói
+  // rõ phải làm gì tiếp.
+  it("nhánh lỗi tải xem trước có nút Đóng và gợi ý bước tiếp theo, không chỉ một câu đỏ cụt", async () => {
+    invokeCommand.mockRejectedValueOnce({
+      code: "BOOKING_NOT_FOUND",
+      message: "Không tìm thấy lượt này — vui lòng tải lại trang",
+      kind: "user",
+      support_id: null,
+    });
+
+    const onClose = vi.fn();
+    render(<VoidBookingDialog bookingId="B-1" onClose={onClose} onVoided={vi.fn()} />);
+
+    const closeButton = await screen.findByRole("button", { name: /đóng/i });
+    fireEvent.click(closeButton);
+    expect(onClose).toHaveBeenCalledTimes(1);
+  });
+
+  // ─── Phím Escape ───
+  //
+  // `SlideDrawer` (mở RoomDrawer bên dưới) gắn listener Escape ở cấp
+  // `document` và vẫn sống khi VoidBookingDialog đang mở — hai component là
+  // ANH EM trong DOM, không phải cha-con. Nếu VoidBookingDialog không tự xử
+  // lý Escape và chặn nó lan xuống, bấm Escape trước một hộp xác nhận không
+  // hoàn tác được sẽ đóng sập cả ngăn kéo phòng bên dưới.
+
+  it("Escape đóng chính hộp thoại này, không lan xuống listener Escape đăng ký trước (mô phỏng SlideDrawer)", async () => {
+    invokeCommand.mockResolvedValueOnce(basePreview);
+
+    const outerEscapeHandler = vi.fn();
+    const outerListener = (event: KeyboardEvent) => {
+      if (event.key === "Escape") outerEscapeHandler();
+    };
+    // SlideDrawer mount trước VoidBookingDialog trong đời thật (RoomDrawer mở
+    // trước, VoidBookingDialog chỉ mở khi bấm "Xóa lượt này") — đăng ký
+    // listener trước ở đây mô phỏng đúng thứ tự đó.
+    document.addEventListener("keydown", outerListener);
+
+    try {
+      const onClose = vi.fn();
+      render(<VoidBookingDialog bookingId="B-1" onClose={onClose} onVoided={vi.fn()} />);
+
+      await waitFor(() => {
+        expect(screen.getByTestId("void-revenue-impact")).toBeTruthy();
+      });
+
+      fireEvent.keyDown(document, { key: "Escape" });
+
+      expect(onClose).toHaveBeenCalledTimes(1);
+      expect(outerEscapeHandler).not.toHaveBeenCalled();
+    } finally {
+      document.removeEventListener("keydown", outerListener);
+    }
+  });
+
+  // ─── Nút "Thôi" trong lúc đang xóa ───
+
+  it("khóa nút Thôi trong lúc đang xóa, giống hệt nút giữ ngay trên nó", async () => {
+    invokeCommand.mockResolvedValueOnce(basePreview);
+    invokeCommand.mockImplementationOnce(() => new Promise(() => {}));
+
+    render(<VoidBookingDialog bookingId="B-1" onClose={vi.fn()} onVoided={vi.fn()} />);
+
+    await waitFor(() => {
+      expect(screen.getByTestId("void-revenue-impact")).toBeTruthy();
+    });
+
+    fireEvent.pointerDown(screen.getByRole("button", { name: /Giữ 2 giây để xóa/ }));
+
+    await waitFor(
+      () => {
+        expect(screen.getByRole("button", { name: /Đang xóa/ })).toBeDisabled();
+      },
+      { timeout: 3000 },
+    );
+    expect(screen.getByRole("button", { name: /^thôi$/i })).toBeDisabled();
+  });
+
+  // ─── Lượt đặt trước, không cọc: <ul> hậu quả rỗng ───
+
+  it("lượt đặt trước không cọc: nói rõ xóa không ảnh hưởng báo cáo thay vì để danh sách hậu quả trống trơn", async () => {
+    invokeCommand.mockResolvedValueOnce({
+      ...basePreview,
+      previous_status: "booked",
+      revenue_impact: 0,
+      deposit_amount: 0,
+    });
+
+    render(<VoidBookingDialog bookingId="B-1" onClose={vi.fn()} onVoided={vi.fn()} />);
+
+    await waitFor(() => {
+      expect(screen.getByText(/Christian Höfer/)).toBeTruthy();
+    });
+    expect(screen.getByTestId("void-no-consequence-note")).toBeTruthy();
+  });
+
   // ─── Giữ nút tới khi hoàn tất ───
   //
   // Thời gian giữ thật (2s) của HoldToDeleteButton đã có bộ test riêng (Task
