@@ -294,6 +294,27 @@ describe("Reservations timeline geometry", () => {
     expect(bar.style.width).toBe("440px");
     expect(bar.querySelector(".rounded-l-none")).not.toBeNull();
   });
+
+  it("stretches the booking bar hit area over the full row height", async () => {
+    // Hàng cao 64px, thanh cao 42px. Nếu khung bọc chỉ cao bằng thanh thì còn
+    // 11px hở trên và 11px hở dưới, và chuột rơi xuống ô ngày bên dưới — bấm
+    // vào đó mở biểu mẫu đặt phòng cho một ngày đã có khách.
+    mockBookings([
+      bookingAt({
+        id: "B-HITAREA",
+        status: "active",
+        scheduled_checkin: dateOffsetFromToday(-1),
+        scheduled_checkout: dateOffsetFromToday(3),
+      }),
+    ]);
+
+    render(<Reservations />);
+
+    const bar = await screen.findByTestId("booking-bar-B-HITAREA");
+    expect(bar.className).toContain("inset-y-0");
+    expect(bar.className).not.toContain("top-1/2");
+    expect(bar.querySelector(".h-\\[42px\\]")).not.toBeNull();
+  });
 });
 
 describe("Reservations date navigation", () => {
