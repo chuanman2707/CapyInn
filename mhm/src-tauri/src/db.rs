@@ -195,8 +195,16 @@ async fn ensure_setting_default(
 /// 28 trước, và va chạm đó im lặng: canary chạy trên DB rỗng nên vẫn xanh, chỉ
 /// máy khách sạn mới chết.
 ///
-/// 29 là `migrate_v29_drop_cleaning_room_status` (nhánh `feat/bo-housekeeping-va-timeline-ux`,
-/// task 1 — đưa phòng `cleaning` về `vacant` khi housekeeping được gỡ).
+/// 29 là `migrate_v29_drop_cleaning_room_status` (nhánh
+/// `feat/bo-housekeeping-va-timeline-ux`, task 1 — đưa phòng `cleaning` về
+/// `vacant` khi housekeeping được gỡ). Khảo sát lúc chốt số ngày 2026-08-09:
+/// gốc của nhánh này ở 28, DB thật của khách sạn cũng 28; `origin/main` lúc
+/// đó còn tụt lại ở 27. Chọn theo số cao nhất trong ba — 28 — nên 29 là số
+/// đúng. Đó là ảnh chụp tại thời điểm đó, KHÔNG phải giấy thông hành — người
+/// merge nhánh này PHẢI chạy lại khảo sát ngay trước khi merge:
+/// `git grep -n set_schema_version` trên mọi ref để xác nhận chưa nhánh anh
+/// em nào chiếm mất 29 trước. Va chạm đó im lặng — canary chạy trên DB rỗng
+/// nên vẫn xanh, chỉ máy khách sạn mới chết.
 pub(crate) const LATEST_SCHEMA_VERSION: i32 = 29;
 
 async fn get_schema_version(pool: &Pool<Sqlite>) -> Result<i32, sqlx::Error> {
@@ -2131,6 +2139,54 @@ mod tests {
             .await
             .expect("reads room status");
         assert_eq!(status, "vacant");
+        assert_eq!(get_schema_version(&pool).await.expect("reads version"), 29);
+    }
+
+    /// Test ở trên gọi thẳng `migrate_v29_drop_cleaning_room_status`, bỏ qua
+    /// cổng `if current < 29` trong `run_migrations`. Nó không ghim được giá
+    /// trị `29` viết trong cổng đó — nếu ai đó lỡ đổi thành `if current < 28`,
+    /// test kia vẫn xanh vì nó xuất phát từ `current = 0` (mọi migration đều
+    /// chạy). Trên DB thật của khách sạn đang đứng ở 28, `28 < 28` là false,
+    /// v29 không bao giờ chạy, và phòng kẹt vĩnh viễn ở `cleaning`. Test này
+    /// đi QUA CỔNG thật, từ một database đứng đúng ở 28 — giống hệt máy khách
+    /// sạn — để cổng đó phải tự chứng minh nó đúng, không phải bị bỏ qua.
+    #[tokio::test]
+    async fn v29_room_stuck_at_cleaning_is_vacated_through_the_run_migrations_gate() {
+        let pool = SqlitePool::connect("sqlite::memory:")
+            .await
+            .expect("connects in-memory sqlite");
+        run_migrations(&pool)
+            .await
+            .expect("runs migrations to latest");
+
+        // Một bản cũ đã để phòng này ở `cleaning` trước khi housekeeping bị
+        // gỡ, và cơ sở dữ liệu khi đó đứng ở 28 — chưa từng chạy qua v29.
+        sqlx::query(
+            "INSERT INTO rooms (id, name, type, floor, has_balcony, base_price, status)
+             VALUES ('V29-GATE', 'V29-GATE', 'standard', 1, 0, 300000, 'cleaning')",
+        )
+        .execute(&pool)
+        .await
+        .expect("seeds a room left at cleaning");
+
+        sqlx::query("UPDATE schema_version SET version = 28")
+            .execute(&pool)
+            .await
+            .expect("rewinds schema_version to a genuinely pre-v29 state");
+
+        run_migrations(&pool)
+            .await
+            .expect("run_migrations gate must fire v29 from a real v28 database");
+
+        let status: String = sqlx::query_scalar("SELECT status FROM rooms WHERE id = 'V29-GATE'")
+            .fetch_one(&pool)
+            .await
+            .expect("reads room status");
+        assert_eq!(
+            status, "vacant",
+            "cổng `if current < 29` phải tự nổ trên DB đứng ở 28, không chỉ \
+             khi gọi migration trực tiếp"
+        );
         assert_eq!(get_schema_version(&pool).await.expect("reads version"), 29);
     }
 }
