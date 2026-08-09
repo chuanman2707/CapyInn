@@ -967,7 +967,7 @@ mod tests {
             .await
             .expect("reads final schema version");
 
-        assert_eq!(version, 28);
+        assert_eq!(version, 29);
 
         assert_table_group_exists(&pool, "PMS core", PMS_CORE_TABLES).await;
         assert_table_group_exists(&pool, "command safety", COMMAND_SAFETY_TABLES).await;
@@ -988,7 +988,7 @@ mod tests {
             .expect("reads version")
             .get("version");
 
-        assert_eq!(version, 28);
+        assert_eq!(version, 29);
         assert_money_columns_are_integer(&pool).await;
     }
 
@@ -1276,7 +1276,7 @@ mod tests {
             .expect("reads final schema version")
             .get("version");
 
-        assert_eq!(version, 28);
+        assert_eq!(version, 29);
     }
 
     #[tokio::test]
@@ -1343,7 +1343,7 @@ mod tests {
             .expect("reads final schema version")
             .get("version");
 
-        assert_eq!(version, 28);
+        assert_eq!(version, 29);
     }
 
     #[tokio::test]
@@ -1423,7 +1423,7 @@ mod tests {
         );
 
         let version = get_schema_version(&pool).await.expect("schema version");
-        assert_eq!(version, 28);
+        assert_eq!(version, 29);
     }
 
     #[tokio::test]
@@ -1463,7 +1463,7 @@ mod tests {
 
         assert_outbox_shape(&pool).await;
         let version = get_schema_version(&pool).await.expect("schema version");
-        assert_eq!(version, 28);
+        assert_eq!(version, 29);
     }
 
     #[tokio::test]
@@ -1481,7 +1481,7 @@ mod tests {
 
         assert_outbox_shape(&pool).await;
         let version = get_schema_version(&pool).await.expect("schema version");
-        assert_eq!(version, 28);
+        assert_eq!(version, 29);
     }
 
     #[tokio::test]
@@ -1511,7 +1511,7 @@ mod tests {
             1
         );
         let version = get_schema_version(&pool).await.expect("schema version");
-        assert_eq!(version, 28);
+        assert_eq!(version, 29);
     }
 
     #[tokio::test]
@@ -1524,7 +1524,7 @@ mod tests {
 
         assert_agent_safety_shape(&pool).await;
         let version = get_schema_version(&pool).await.expect("schema version");
-        assert_eq!(version, 28);
+        assert_eq!(version, 29);
     }
 
     #[tokio::test]
@@ -1596,7 +1596,7 @@ mod tests {
         assert_eq!(invoices_settlement_note_column_count(&pool).await, 1);
 
         let version = get_schema_version(&pool).await.expect("schema version");
-        assert_eq!(version, 28);
+        assert_eq!(version, 29);
     }
 
     /// A database still sitting at kbtt's 23 — the version the hotel's machine
@@ -1624,7 +1624,7 @@ mod tests {
 
         assert_eq!(invoices_settlement_note_column_count(&pool).await, 1);
         let version = get_schema_version(&pool).await.expect("schema version");
-        assert_eq!(version, 28);
+        assert_eq!(version, 29);
     }
 
     async fn invoices_settlement_note_column_count(pool: &SqlitePool) -> i64 {
@@ -1658,7 +1658,7 @@ mod tests {
 
         assert_agent_digest_runs_shape(&pool).await;
         let version = get_schema_version(&pool).await.expect("schema version");
-        assert_eq!(version, 28);
+        assert_eq!(version, 29);
     }
 
     #[tokio::test]
@@ -1682,7 +1682,7 @@ mod tests {
 
         assert_agent_safety_shape(&pool).await;
         let version = get_schema_version(&pool).await.expect("schema version");
-        assert_eq!(version, 28);
+        assert_eq!(version, 29);
     }
 
     #[tokio::test]
@@ -1743,7 +1743,7 @@ mod tests {
         );
 
         let version = get_schema_version(&pool).await.expect("schema version");
-        assert_eq!(version, 28);
+        assert_eq!(version, 29);
     }
 
     /// Migration test trên hoạt động bằng cách rewind `schema_version` SAU KHI
@@ -1834,7 +1834,7 @@ mod tests {
         );
 
         let version = get_schema_version(&pool).await.expect("schema version");
-        assert_eq!(version, 28);
+        assert_eq!(version, 29);
     }
 
     #[tokio::test]
