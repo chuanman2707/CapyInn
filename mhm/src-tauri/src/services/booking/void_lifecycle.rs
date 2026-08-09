@@ -186,6 +186,7 @@ pub async fn void_booking_tx(
 
 fn build_void_hash_payload(req: &VoidBookingRequest) -> serde_json::Value {
     json!({
+        "schema": "stay.void.v1",
         "booking_id": req.booking_id,
         "reason_present": req.reason.is_some(),
     })
@@ -268,4 +269,32 @@ pub async fn void_booking_idempotent(
             },
         )
         .await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 13/13 hàng xóm (`stay.check_in.v1`, `group.checkin.v1`, …) đều mang
+    /// khoá `"schema"` trong payload băm — void thì có ở ledger intent
+    /// (`"stay.void.v1"`, phía trên trong `void_booking_idempotent`) nhưng
+    /// quên ở payload băm. Rủi ro hôm nay bằng 0 (chưa có claim row void nào
+    /// ngoài production), nhưng thiếu khoá này nghĩa là NẾU sau này hình dạng
+    /// request đổi (thêm trường), không có gì đánh dấu "đây là phiên bản
+    /// nào" để một thay đổi không tương thích được nhận ra thay vì âm thầm
+    /// đổi ý nghĩa hash của các claim cũ.
+    #[test]
+    fn void_hash_payload_carries_a_schema_key_like_every_sibling() {
+        let req = VoidBookingRequest {
+            booking_id: "B1".to_string(),
+            reason: Some("nhập sai phòng".to_string()),
+        };
+
+        let payload = build_void_hash_payload(&req);
+
+        assert_eq!(
+            payload["schema"], "stay.void.v1",
+            "payload băm của void thiếu khoá schema, nhận được: {payload:?}"
+        );
+    }
 }
