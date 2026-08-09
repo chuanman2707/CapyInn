@@ -636,8 +636,27 @@ async fn group_checkin_tx(
         .cloned()
         .zip(room_pricing.iter().map(|pricing| pricing.total_price))
         .collect();
-    let paid_allocations_by_room =
-        allocate_paid_amount_by_room_price(req.paid_amount.unwrap_or(0), &room_totals);
+    let paid_amount = req.paid_amount.unwrap_or(0);
+
+    // `allocate_paid_amount_by_room_price` trả toàn 0 khi Σ giá phòng <= 0 —
+    // đúng và cần thiết cho `paid_amount <= 0` (không có gì để chia), nhưng
+    // SAI khi `paid_amount > 0`: khách đã trả tiền thật mà không phòng nào
+    // còn giá để chia tỉ lệ vào, nên khoản đó biến mất khỏi mọi booking sắp
+    // ghi mà không một lỗi nào báo — xem doc-comment của hàm đó để biết vì
+    // sao guard thu-vượt từng phòng ngay dưới không tự bắt được ca này (nó
+    // hoá thành `0 > 0` = false). Chặn ở đây, TRƯỚC khi gọi hàm chia, để lỗi
+    // nêu đúng nguyên nhân (giá phòng bằng 0) thay vì một guard thu-vượt lạc
+    // đề bắt được nó tình cờ.
+    let grand_total: MoneyVnd = room_totals.iter().map(|(_, total)| *total).sum();
+    if grand_total <= 0 && paid_amount > 0 {
+        return Err(BookingError::validation(format!(
+            "Tổng tiền phòng của đoàn đang bằng 0đ nhưng khách đã trả {paid_amount}đ — \
+             không thể phân bổ khoản này cho phòng nào, kiểm tra lại giá phòng trước khi \
+             ghi nhận thanh toán"
+        )));
+    }
+
+    let paid_allocations_by_room = allocate_paid_amount_by_room_price(paid_amount, &room_totals);
 
     let mut master_booking_id: Option<String> = None;
 
