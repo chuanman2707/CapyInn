@@ -295,6 +295,12 @@ describe("Reservations timeline geometry", () => {
     expect(bar.querySelector(".rounded-l-none")).not.toBeNull();
   });
 
+  // GIỚI HẠN: test này ghim CƠ CHẾ (tên lớp CSS), không ghim HÀNH VI. jsdom không
+  // dựng layout và ResizeObserver của nó là mock không bao giờ bắn, nên không thể
+  // kiểm một cú bấm thật rơi trúng đâu. Nó bắt được việc gỡ `inset-y-0`, gỡ
+  // `flex items-center`, hay đổi chiều cao thanh; nó KHÔNG bắt được lỗi hit-test
+  // thật trên trình duyệt, cũng không bắt được việc dời `relative` sang một thẻ
+  // cha có chiều cao khác. Kiểm bằng tay trên ứng dụng thật vẫn là bắt buộc.
   it("stretches the booking bar hit area over the full row height", async () => {
     // Hàng cao 64px, thanh cao 42px. Nếu khung bọc chỉ cao bằng thanh thì còn
     // 11px hở trên và 11px hở dưới, và chuột rơi xuống ô ngày bên dưới — bấm
@@ -313,6 +319,11 @@ describe("Reservations timeline geometry", () => {
     const bar = await screen.findByTestId("booking-bar-B-HITAREA");
     expect(bar.className).toContain("inset-y-0");
     expect(bar.className).not.toContain("top-1/2");
+    // Khung bọc cao trọn hàng rồi thì việc căn giữa thanh 42px CHỈ còn dựa vào
+    // `flex items-center`. Bỏ hai lớp này mà giữ `inset-y-0` thì vùng bấm vẫn
+    // đúng nhưng thanh dán lên mép trên hàng — phải ghim cả hai.
+    expect(bar.className).toContain("flex");
+    expect(bar.className).toContain("items-center");
     expect(bar.querySelector(".h-\\[42px\\]")).not.toBeNull();
   });
 });
