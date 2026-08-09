@@ -11,7 +11,6 @@ import {
   Moon,
   Settings as SettingsIcon,
   ShieldCheck,
-  Sparkles,
   Users,
   UsersRound,
 } from "lucide-react";
@@ -39,7 +38,6 @@ import Dashboard from "@/pages/Dashboard";
 import Declaration from "@/pages/Declaration";
 import GroupManagement from "@/pages/GroupManagement";
 import Guests from "@/pages/Guests";
-import Housekeeping from "@/pages/Housekeeping";
 import NightAudit from "@/pages/NightAudit";
 import Reservations from "@/pages/Reservations";
 import Rooms from "@/pages/Rooms";
@@ -57,7 +55,6 @@ const NAV_MAIN = [
 ];
 
 const NAV_MANAGEMENT = [
-  { key: "housekeeping" as const, label: "Housekeeping", icon: Sparkles },
   { key: "analytics" as const, label: "Analytics", icon: BarChart3 },
   { key: "audit" as const, label: "Night Audit", icon: Moon },
   { key: "declaration" as const, label: "Khai báo tạm trú", icon: ShieldCheck },
@@ -71,7 +68,6 @@ const PAGE_TITLES: Record<string, string> = {
   rooms: "Rooms",
   guests: "Guests",
   groups: "Group Booking",
-  housekeeping: "Housekeeping",
   analytics: "Analytics",
   settings: "Settings",
   audit: "Night Audit",
@@ -259,14 +255,9 @@ export function MainShell() {
               // bấm tiếp sẽ làm gì — cùng lối Airtable đổi thành "Close Omni".
               title={assistantOpen ? "Đóng trợ lý quầy" : "Mở trợ lý quầy"}
             >
-              {/* `Bot`, KHÔNG phải `Sparkles`. `Sparkles` là icon của mục
-                  *Housekeeping* ngay bên dưới (dòng 59), và ở thanh này lúc thu
-                  gọn thì icon là thứ DUY NHẤT còn lại — hai mục cùng hình cách
-                  nhau bốn dòng là không phân biệt được. Bản cũ dùng `Sparkles`
-                  vô hại vì nút đứng tận header, xa nhóm điều hướng.
-                  `Bot` cũng chính là icon của mục *Trợ lý quầy* trong Cài đặt
-                  (`pages/settings/index.tsx`), nên hai chỗ nói về cùng một thứ
-                  nay trông giống nhau. */}
+              {/* `Bot`, KHÔNG phải `Sparkles`. `Bot` cũng chính là icon của mục
+                  *Trợ lý quầy* trong Cài đặt (`pages/settings/index.tsx`), nên
+                  hai chỗ nói về cùng một thứ trông giống nhau. */}
               <Bot className={collapsed ? "" : "mr-3"} size={20} />
               {!collapsed && "Trợ lý"}
             </Button>
@@ -435,7 +426,6 @@ export function MainShell() {
             {activeTab === "reservations" && <Reservations />}
             {activeTab === "guests" && <Guests />}
             {activeTab === "groups" && <GroupManagement />}
-            {activeTab === "housekeeping" && <Housekeeping />}
             {activeTab === "analytics" && <Analytics />}
             {activeTab === "audit" && <NightAudit />}
             {activeTab === "declaration" && <Declaration />}

@@ -169,17 +169,6 @@ pub struct Expense {
     pub created_at: String,
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone)]
-pub struct HousekeepingTask {
-    pub id: String,
-    pub room_id: String,
-    pub status: String,
-    pub note: Option<String>,
-    pub triggered_at: String,
-    pub cleaned_at: Option<String>,
-    pub created_at: String,
-}
-
 // --- Request/Response DTOs ---
 
 #[derive(Debug, Serialize, Deserialize, Clone)]

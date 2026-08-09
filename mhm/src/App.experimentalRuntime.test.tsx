@@ -14,7 +14,6 @@ vi.mock("./pages/Dashboard", () => ({ default: () => <div>Dashboard page</div> }
 vi.mock("./pages/Rooms", () => ({ default: () => <div>Rooms page</div> }));
 vi.mock("./pages/Reservations", () => ({ default: () => <div>Reservations page</div> }));
 vi.mock("./pages/Guests", () => ({ default: () => <div>Guests page</div> }));
-vi.mock("./pages/Housekeeping", () => ({ default: () => <div>Housekeeping page</div> }));
 vi.mock("./pages/Analytics", () => ({ default: () => <div>Analytics page</div> }));
 vi.mock("./pages/settings", () => ({ default: () => <div>Settings page</div> }));
 vi.mock("./pages/NightAudit", () => ({ default: () => <div>Night Audit page</div> }));
@@ -75,7 +74,6 @@ function setupAuthenticatedShell(
     stats: null,
     roomDetail: null,
     activeTab: "dashboard",
-    housekeepingTasks: [],
     loading: false,
     isCheckinOpen: false,
     checkinRoomId: null,

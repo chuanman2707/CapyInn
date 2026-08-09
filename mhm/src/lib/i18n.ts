@@ -6,7 +6,6 @@ const translations: Record<string, Record<Locale, string>> = {
     "nav.reservations": { vi: "Đặt phòng", en: "Reservations" },
     "nav.rooms": { vi: "Phòng", en: "Rooms" },
     "nav.guests": { vi: "Khách hàng", en: "Guests" },
-    "nav.housekeeping": { vi: "Dọn phòng", en: "Housekeeping" },
     "nav.analytics": { vi: "Thống kê", en: "Analytics" },
     "nav.settings": { vi: "Cài đặt", en: "Settings" },
 

@@ -106,7 +106,6 @@ export const invoke = vi.fn(async (command: string, args?: Record<string, unknow
         get_settings: null,
         get_current_user: null,
         gateway_get_status: { running: false, port: null, has_api_keys: false },
-        get_housekeeping_tasks: [],
         get_all_bookings: [],
         get_all_guests: [],
         get_analytics: { period: "today", total_revenue: 0, total_expenses: 0, net_profit: 0, occupancy_rate: 0, rooms_sold: 0, avg_rate: 0, revenue_by_day: [], top_rooms: [], source_breakdown: [], daily_revenue: [] },

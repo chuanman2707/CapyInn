@@ -20,7 +20,6 @@ describe("02 — Dashboard", () => {
             dashboardRefreshVersion: 0,
             activeTab: "dashboard",
             roomDetail: null,
-            housekeepingTasks: [],
             loading: false,
             isCheckinOpen: false,
         });

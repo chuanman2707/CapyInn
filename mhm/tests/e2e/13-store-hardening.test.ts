@@ -25,7 +25,6 @@ describe("13 — Store Hardening", () => {
             stats: null,
             roomDetail: null,
             activeTab: "dashboard",
-            housekeepingTasks: [],
             loading: false,
             isCheckinOpen: false,
             checkinRoomId: null,

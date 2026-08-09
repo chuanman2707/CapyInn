@@ -52,7 +52,6 @@ vi.mock("@/pages/Dashboard", () => ({ default: () => <div>Dashboard page</div> }
 vi.mock("@/pages/Declaration", () => ({ default: () => <div>Declaration page</div> }));
 vi.mock("@/pages/GroupManagement", () => ({ default: () => <div>Group page</div> }));
 vi.mock("@/pages/Guests", () => ({ default: () => <div>Guests page</div> }));
-vi.mock("@/pages/Housekeeping", () => ({ default: () => <div>Housekeeping page</div> }));
 vi.mock("@/pages/NightAudit", () => ({ default: () => <div>Night Audit page</div> }));
 vi.mock("@/pages/Reservations", () => ({ default: () => <div>Reservations page</div> }));
 vi.mock("@/pages/Rooms", () => ({ default: () => <div>Rooms page</div> }));
@@ -238,27 +237,6 @@ describe("MainShell — bố cục ba cột", () => {
 
       await waitFor(() => expect(landmarks(container).panel).toBeNull());
       expect(find()).toHaveAttribute("aria-pressed", "false");
-    });
-
-    it("không dùng chung icon với mục Housekeeping ngay bên dưới", async () => {
-      const { container } = render(<MainShell />);
-      await waitFor(() => expect(screen.getByText("Dashboard page")).toBeInTheDocument());
-
-      const nav = landmarks(container).nav as HTMLElement;
-      const iconOf = (name: RegExp) =>
-        within(nav).getByRole("button", { name }).querySelector("svg")?.getAttribute("class") ?? "";
-
-      const assistant = iconOf(/trợ lý/i);
-      const housekeeping = iconOf(/housekeeping/i);
-
-      // Chặn trước: cả hai phải đọc ra được. Không có dòng này thì lucide đổi
-      // cách đặt class sẽ biến phép so thành `"" !== ""` — sai, nhưng theo
-      // hướng nào thì cũng không còn đo gì nữa.
-      expect(assistant).not.toBe("");
-      expect(housekeeping).not.toBe("");
-      // Lúc thanh thu về icon (mở trợ lý là nó tự thu), icon là thứ DUY NHẤT
-      // còn lại để phân biệt hai mục cách nhau bốn dòng.
-      expect(assistant).not.toBe(housekeeping);
     });
 
     it("chưa bật trợ lý thì không có cả nút lẫn vạch kẻ thừa", async () => {
