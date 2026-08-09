@@ -503,7 +503,7 @@ export default function Reservations() {
 
                 {/* Day Headers */}
                 <div className="flex border-b border-slate-100 bg-white sticky top-0 z-10 w-max min-w-full">
-                    <div className="w-[140px] shrink-0 border-r border-slate-100 bg-white shadow-[2px_0_10px_rgba(0,0,0,0.02)] sticky left-0 z-20 flex items-center px-4">
+                    <div style={{ width: ROOM_LABEL_WIDTH }} className="shrink-0 border-r border-slate-100 bg-white shadow-[2px_0_10px_rgba(0,0,0,0.02)] sticky left-0 z-20 flex items-center px-4">
                         <span className="text-xs font-semibold text-slate-500">Rooms</span>
                     </div>
 
@@ -520,7 +520,7 @@ export default function Reservations() {
                     {roomGroups.map((group) => (
                         <div key={group.name}>
                             <div className="flex h-[36px] bg-slate-50/80 border-b border-slate-100">
-                                <div className="w-[140px] shrink-0 border-r border-slate-100 bg-slate-50 sticky left-0 z-10 flex items-center px-4">
+                                <div style={{ width: ROOM_LABEL_WIDTH }} className="shrink-0 border-r border-slate-100 bg-slate-50 sticky left-0 z-10 flex items-center px-4">
                                     <span className="text-xs font-bold text-slate-500 uppercase tracking-wider">{group.name}</span>
                                 </div>
                                 <div className="flex">
@@ -534,7 +534,7 @@ export default function Reservations() {
                                 const bars = getBookingBars(room.id, colWidth);
                                 return (
                                     <div key={room.id} className="flex group border-b border-slate-100 h-[64px]">
-                                        <div className="w-[140px] shrink-0 border-r border-slate-100 bg-white shadow-[2px_0_10px_rgba(0,0,0,0.02)] sticky left-0 z-10 flex items-center px-4 group-hover:bg-slate-50/50 transition-colors">
+                                        <div style={{ width: ROOM_LABEL_WIDTH }} className="shrink-0 border-r border-slate-100 bg-white shadow-[2px_0_10px_rgba(0,0,0,0.02)] sticky left-0 z-10 flex items-center px-4 group-hover:bg-slate-50/50 transition-colors">
                                             <span className="font-bold text-sm text-slate-700">Room {room.id}</span>
                                         </div>
 
