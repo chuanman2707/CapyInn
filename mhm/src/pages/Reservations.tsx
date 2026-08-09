@@ -543,7 +543,16 @@ export default function Reservations() {
                                                 <div
                                                     key={bar.id}
                                                     data-testid={`booking-bar-${bar.id}`}
-                                                    className="absolute top-1/2 -translate-y-1/2 px-0.5 z-10 cursor-pointer"
+                                                    // `inset-y-0`, KHÔNG phải `top-1/2
+                                                    // -translate-y-1/2`: khung bọc cao bằng thanh
+                                                    // 42px sẽ chừa 11px hở trên và 11px hở dưới
+                                                    // trong hàng 64px, và `mousedown` ở dải đó rơi
+                                                    // xuống ô ngày bên dưới. Bấm trúng dải ấy trên
+                                                    // một phòng đang có khách mở biểu mẫu đặt phòng
+                                                    // cho đúng ngày khách đang ở — cảnh báo đỏ, nút
+                                                    // bấm chết. Cả chiều cao hàng thuộc về khách
+                                                    // đang chiếm ngày đó.
+                                                    className="absolute inset-y-0 px-0.5 z-10 cursor-pointer flex items-center"
                                                     style={{ left: `${bar.left}px`, width: `${bar.width}px` }}
                                                     onClick={() => {
                                                         if (bar.status === "active") setDrawerRoomId(bar.room_id);
