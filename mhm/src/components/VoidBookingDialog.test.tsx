@@ -319,6 +319,38 @@ describe("VoidBookingDialog", () => {
     expect(screen.getByRole("button", { name: /^thôi$/i })).toBeDisabled();
   });
 
+  // I1 (rà cuối trước merge): nút "Thôi" đã khóa (`disabled={busy}`, test ngay
+  // trên) trong lúc lệnh xóa đang bay, nhưng handler Escape ở cấp document
+  // KHÔNG kiểm `busy` — nó gọi `onClose()` vô điều kiện. Giữ đủ 2 giây rồi
+  // bấm Escape trong lúc `void_booking` còn đang chờ backend trả lời sẽ đóng
+  // sập hộp thoại (unmount) trong khi lệnh xóa không hoàn tác được vẫn tiếp
+  // tục chạy ngầm — `onVoided()` sau đó bắn vào một component đã biến mất.
+  // Escape phải bị khóa giống hệt nút "Thôi" nó thay thế.
+  it("Escape KHÔNG đóng hộp thoại trong lúc đang xóa (busy) — phải khóa giống hệt nút Thôi", async () => {
+    invokeCommand.mockResolvedValueOnce(basePreview);
+    invokeCommand.mockImplementationOnce(() => new Promise(() => {}));
+
+    const onClose = vi.fn();
+    render(<VoidBookingDialog bookingId="B-1" onClose={onClose} onVoided={vi.fn()} />);
+
+    await waitFor(() => {
+      expect(screen.getByTestId("void-revenue-impact")).toBeTruthy();
+    });
+
+    fireEvent.pointerDown(screen.getByRole("button", { name: /Giữ 2 giây để xóa/ }));
+
+    await waitFor(
+      () => {
+        expect(screen.getByRole("button", { name: /Đang xóa/ })).toBeDisabled();
+      },
+      { timeout: 3000 },
+    );
+
+    fireEvent.keyDown(document, { key: "Escape" });
+
+    expect(onClose).not.toHaveBeenCalled();
+  });
+
   // ─── Lượt đặt trước, không cọc: <ul> hậu quả rỗng ───
 
   it("lượt đặt trước không cọc: nói rõ xóa không ảnh hưởng báo cáo thay vì để danh sách hậu quả trống trơn", async () => {

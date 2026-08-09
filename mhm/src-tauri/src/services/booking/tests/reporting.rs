@@ -632,9 +632,9 @@ async fn billing_and_export_queries_preserve_canonical_revenue_columns() {
 /// này ("...every_revenue_path") từng bị đọc nhầm thành "mọi đường đọc
 /// bookings" — vòng review cuối chỉ ra đó là một lời hứa sai: thân hàm chưa
 /// từng gọi `booking_list_queries`, `guest_queries`, `activity_queries`,
-/// `group_queries`, hay `assistant_queries`. Bài kiểm phủ ĐỦ các đường đó nằm ở
-/// `voided_booking_disappears_from_every_booking_read_path` bên dưới; hàm này
-/// giữ nguyên phạm vi hẹp và đổi tên cho khớp.
+/// `group_queries`, hay `assistant_queries`. Bài kiểm phủ tám đường đọc đó nằm
+/// ở `voided_booking_disappears_from_the_eight_audited_booking_read_paths`
+/// bên dưới; hàm này giữ nguyên phạm vi hẹp và đổi tên cho khớp.
 #[tokio::test]
 async fn voided_booking_disappears_from_the_recognized_revenue_totals() {
     let pool = test_pool().await;
@@ -764,9 +764,16 @@ async fn voided_booking_disappears_from_the_booking_export() {
 /// đến vòng rà cuối trước khi merge (2026-08-09). Đây là hàng rào chống hồi
 /// quy cho CẢ LỚP bug, không phải một hàm đơn lẻ — ba vòng review độc lập đã
 /// tìm ra sáu đường rò khác nhau qua ba lần, đúng vì mỗi lần chỉ có một test
-/// hẹp canh đúng một hàm. Ai thêm một đường đọc `bookings` mới (hay sửa một
-/// đường cũ) mà quên lọc `voided` PHẢI làm một khối assert ở đây đỏ — nếu
-/// không, tên hàm "every" lại thành lời hứa sai y như lần trước.
+/// hẹp canh đúng một hàm.
+///
+/// PHẠM VI THẬT, KHÔNG HƠN: tên hàm liệt kê đúng TÁM đường đọc dưới đây, đã
+/// đích thân kiểm chứng bằng test. Đây không phải toàn bộ các câu SQL từng
+/// đọc `bookings` trong repo — chỉ là tám đường mà ba vòng review đã lần lượt
+/// tìm ra và vá. Ai thêm một đường đọc `bookings` mới (hay sửa một đường cũ)
+/// mà quên lọc `voided` PHẢI làm một khối assert ở đây đỏ, và nếu đường đó
+/// không nằm trong tám đường bên dưới thì phải thêm một mục mới vào danh sách
+/// — nếu không, cái tên "tám đường đã kiểm" lại thành lời hứa sai, đúng lỗi đã
+/// khiến tên hàm cũ (hứa "mọi đường đọc bookings") bị đổi ở vòng rà này.
 ///
 /// Danh sách (khớp đúng comment sửa ở từng file `queries/`):
 ///  1. `booking_list_queries::load_bookings_with_guest` — mọi giá trị filter,
@@ -775,6 +782,9 @@ async fn voided_booking_disappears_from_the_booking_export() {
 ///     KHÔNG PHẢI `audit_queries::load_booking_export_rows` (đã vá ở Task 2,
 ///     hai hàm trùng tên khác file).
 ///  3. `guest_queries::load_guest_summaries` — total_stays/total_spent/last_visit.
+///     Cùng file, `guest_queries::search_guest_summaries_by_phone` dùng chung
+///     hằng SQL `GUEST_SUMMARY_SELECT` với hàm này nên cũng đã được vá theo —
+///     không có test riêng ở đây vì không có gì để canh khác với mục này.
 ///  4. `guest_queries::load_guest_bookings` — lịch sử ở của một khách.
 ///  5. `activity_queries::load_recent_check_ins` — feed Dashboard.
 ///  6. `activity_queries::load_recent_check_outs` — feed Dashboard.
@@ -788,7 +798,7 @@ async fn voided_booking_disappears_from_the_booking_export() {
 ///     booking_id trực tiếp; không có gì chặn model hỏi lại một mã đã xoá nếu
 ///     mã đó còn nằm trong lịch sử hội thoại từ trước khi bị xoá.
 #[tokio::test]
-async fn voided_booking_disappears_from_every_booking_read_path() {
+async fn voided_booking_disappears_from_the_eight_audited_booking_read_paths() {
     let pool = test_pool().await;
 
     seed_room(&pool, "R-ALL").await.expect("seeds room");

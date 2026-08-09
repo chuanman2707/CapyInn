@@ -4,7 +4,7 @@ import { describe, expect, it, vi } from "vitest";
 const invoke = vi.hoisted(() => vi.fn());
 vi.mock("@tauri-apps/api/core", () => ({ invoke }));
 
-import GuestProfileSheet from "./GuestProfileSheet";
+import GuestProfileSheet, { guestBookingStatusLabel } from "./GuestProfileSheet";
 
 function historyWith(bookings: Array<Record<string, unknown>>) {
   return {
@@ -79,5 +79,18 @@ describe("GuestProfileSheet — nhãn trạng thái lượt lưu trú", () => {
       expect(screen.getByText("Đã hủy")).toBeTruthy();
     });
     expect(screen.queryByText("Completed")).toBeNull();
+  });
+
+  // M2 (rà cuối trước merge): tham số cũ nhận `string`, nên thêm một status
+  // thứ 7 vào union `BookingStatus` không hề đỏ ở đây — chỉ đỏ ở
+  // Reservations.tsx (đo thật bằng `npx tsc --noEmit` sau khi thêm tạm một
+  // status giả vào union). Status lạ rơi vào `default: return status`, hiện
+  // nguyên chuỗi DB thô ("mystery_status") cho khách thay vì bị chặn ở biên
+  // dịch. Sau khi siết tham số về `BookingStatus` + switch cạn kiệt (giống
+  // hệt `assertUnreachableStatus` của Reservations.tsx), một giá trị status
+  // không nằm trong union (chỉ có thể lọt vào bằng ép kiểu — chính là mô
+  // phỏng "status lạ" ở đây) phải NÉM LỖI thay vì âm thầm hiện chuỗi thô.
+  it("status lạ không nằm trong BookingStatus: ném lỗi thay vì hiện chuỗi DB thô", () => {
+    expect(() => guestBookingStatusLabel("mystery_status" as never)).toThrow();
   });
 });

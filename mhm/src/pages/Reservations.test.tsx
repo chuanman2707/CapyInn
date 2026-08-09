@@ -504,6 +504,32 @@ describe("Reservations voided bookings", () => {
     });
     expect(screen.getByTestId("total-booking-count").textContent).toBe("1");
   });
+
+  // M6 (rà cuối trước merge): `totalCount` lọc bằng danh sách ĐEN
+  // (`status !== "voided"`), trong khi bar trên lịch lọc bằng danh sách
+  // TRẮNG `VISIBLE_BOOKING_STATUSES` (không có "cancelled") — lệch nhau
+  // trong cùng một commit. Lượt đã hủy không có bar nào trên lịch (không
+  // nằm trong VISIBLE_BOOKING_STATUSES) nên không được góp vào "Tổng" —
+  // "Tổng" ở đây mô tả các lượt còn đang hiện diện trên lịch, không phải
+  // toàn bộ lịch sử booking đã từng tạo ra.
+  it("không đếm lượt đã hủy (cancelled) vào tổng số booking hiển thị, giống hệt lượt đã xóa", async () => {
+    invoke.mockImplementation(async (command: string) => {
+      if (command === "get_all_bookings") {
+        return [
+          bookingAt({ id: "B-CANCELLED", status: "cancelled" }),
+          bookingAt({ id: "B-OK", status: "booked" }),
+        ];
+      }
+      return undefined;
+    });
+
+    render(<Reservations />);
+
+    await waitFor(() => {
+      expect(screen.getByTestId("booking-bar-B-OK")).toBeTruthy();
+    });
+    expect(screen.getByTestId("total-booking-count").textContent).toBe("1");
+  });
 });
 
 describe("Reservations load errors", () => {

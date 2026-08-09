@@ -65,11 +65,16 @@ export default function VoidBookingDialog({ bookingId, onClose, onVoided }: Void
         const handleKeyDown = (event: KeyboardEvent) => {
             if (event.key !== "Escape") return;
             event.stopPropagation();
+            // I1 (rà cuối trước merge): lệnh xóa đang bay (busy) thì Escape phải
+            // bị khóa giống hệt nút "Thôi" (`disabled={busy}`) mà nó đang thay
+            // thế — không thì đóng sập hộp thoại trong lúc void_booking vẫn
+            // chạy ngầm, `onVoided()` sau đó bắn vào một component đã unmount.
+            if (busy) return;
             onClose();
         };
         document.addEventListener("keydown", handleKeyDown, { capture: true });
         return () => document.removeEventListener("keydown", handleKeyDown, { capture: true });
-    }, [onClose]);
+    }, [onClose, busy]);
 
     const handleVoid = async () => {
         if (busy) return;
@@ -104,10 +109,11 @@ export default function VoidBookingDialog({ bookingId, onClose, onVoided }: Void
             >
                 {loadError ? (
                     // Nhánh lỗi vốn chỉ có một câu đỏ cụt — không tiêu đề,
-                    // không nút, không gợi ý. Component không tự bắt Escape ở
-                    // đây (chỉ đóng bằng bấm ra nền hoặc nút này), nên người
-                    // dùng bàn phím vẫn thoát được nhờ nút "Đóng" tường minh
-                    // luôn nhận được focus.
+                    // không nút, không gợi ý. `useEffect` bắt Escape ở trên
+                    // ĐĂNG KÝ VÔ ĐIỀU KIỆN (không phân biệt nhánh loadError
+                    // hay preview) nên Escape vẫn đóng được ở đây; nút "Đóng"
+                    // tường minh bên dưới chỉ là lối thoát thứ hai cho người
+                    // dùng bàn phím, không phải lối thoát duy nhất.
                     <div className="space-y-3">
                         <h3 className="font-bold text-lg text-slate-800">Không tải được xem trước</h3>
                         <p className="text-sm text-red-600">{loadError}</p>
