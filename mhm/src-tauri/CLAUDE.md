@@ -29,6 +29,7 @@ Cross-cutting files at `src/` root: `money.rs`, `money_migration.rs`, `outbox.rs
 - Percentages take `f64` (`percentage_money_line`), the resulting amount does not.
 - `npm run verify:money` (from `mhm/`) scans this tree for decimal literals on money-named fields. It matches by **field name** — a new money column whose name contains no money keyword slips through the net. When you add one, register it in `money_migration.rs` and in `scripts/verify/no-float-money.mjs`.
 - `bookings.guests` is a headcount, not money. Do not register it anywhere as a money column.
+- A manual rate is a **rate per night** (`bookings.rate_overridden_at` + `pricing_snapshot.manual_rate`), never a stored total. Anything that recomputes `total_price` for an overridden booking must multiply the stored rate by *that operation's* nights and re-validate `MAX_RATE_PER_NIGHT_VND` on the way out of the JSON column — the value comes from a free-form column, not from freshly validated input. Falling back to the engine when the snapshot is unreadable recreates the bug the column exists to prevent.
 
 ## Command safety
 
