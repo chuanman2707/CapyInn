@@ -120,6 +120,7 @@ CapyInn is built for a narrow but practical use case: small hotels that need a s
 - Reservation calendar timeline: click or drag across empty cells to open a check-in or a reservation with those dates already filled in
 - Backfill sheet for recording a stay that already happened, opened from the same calendar
 - Read-only detail popup for a booking that has already checked out, including its issued invoice
+- Void a booking entered by mistake: admin-only, behind a two-second hold, with a confirmation box that states the money and room impact before the action
 - Support for multiple guests on the same booking
 - Fast copy flow for guest registration details
 
@@ -135,7 +136,8 @@ CapyInn is built for a narrow but practical use case: small hotels that need a s
 - Weekend uplift, peak-season uplift, and early check-in / late check-out surcharges
 - Peak seasons are declared in Settings as date ranges; the uplift is charged only for the nights that fall inside one
 - Extra-person surcharge per guest per night above the room's included headcount — reservations carry a guest count and are quoted with it
-- Prices shown before a stay come from the backend preview that will charge it, never from arithmetic in the UI
+- Manual nightly rate: the front desk can override the engine price per night at check-in, on a reservation, and per room on a group check-in; the override survives confirm and modify because it is stored as a rate per night, not a total
+- Prices shown before a stay come from the backend preview that will charge it, never from arithmetic in the UI — the one exception is a manually entered rate, where the sheet shows `rate × nights` and the backend recomputes and validates the same product before it charges
 - Charge, payment, deposit, and balance tracking
 - Revenue analytics, expense tracking, and CSV export
 
@@ -282,6 +284,7 @@ CapyInn/
 - Check-in OCR is optimized for Vietnamese national ID cards; the passport MRZ reader currently lives in the temporary residence declaration workspace rather than the check-in scan flow
 - macOS Apple Silicon is the primary target; Windows and Linux bundles are published by CI but are not verified as thoroughly
 - The project is designed for mini-hotel scale, not large chain operations
+- Voiding a booking is per booking: a room inside a group booking cannot be voided on its own yet
 
 ## Additional docs
 

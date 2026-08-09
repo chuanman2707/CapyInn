@@ -35,6 +35,11 @@ Each of these has an automated guard. Name the guard when you claim compliance.
 | PMS writes go through the `invokeCommand` wrapper, not raw `invoke` | `mhm/tests/frontend-invoke-wrapper-guardrails.test.ts` |
 | Agent memory is not PMS truth; gateway stays loopback-only | `mhm/tests/agentic-guardrails.test.ts` |
 
+`bookings.status = 'voided'` means the stay never happened. Every read that sums or
+lists money must exclude it, and the guard is a status filter, not deleted rows —
+`transactions` and `folio_lines` stay append-only. This has already been missed in
+eight separate read paths in one change; when you add a money read, filter it.
+
 Beyond the guarded rules: every PMS business write goes through a command boundary with actor, command name, idempotency key, payload hash, and timestamp; validate before mutate and fail closed; serialize high-risk writes by stable lock keys; keep ledger and folio rows append-only; emit external effects via the outbox in the same transaction. The `pms-command-safety` skill has the full set — it loads on demand when you touch `commands/`, `services/`, or `repositories/`.
 
 ## Commands
@@ -66,6 +71,7 @@ CI (`.github/workflows/ci.yml`) runs `npm test`, `npm run build`, then the four 
 - **Never trust a GUI check without identifying the build first.** Two CapyInn builds share bundle id `io.capyinn.app`, and a reinstall silently does nothing if the old process is still up. Both traps have burned a full QA cycle. The `verifying-a-build` skill has the checks — use it before believing anything on screen.
 - **`rooms.type` stores the display name, not a slug.** Live values include `"Standard Room"` and `"Deluxe Balcony"` — they contain spaces. Never use a character delimiter for a list of room types; serialize with `JSON.stringify`. An unknown room type silently falls back to the house default instead of erroring, so corruption passes tests. Use real multi-word names as fixtures.
 - **The main checkout at `/Users/binhan/HotelManager` is shared with other sessions and changes branch mid-session.** For multi-step work, create a worktree off `main` first: `git worktree add .worktrees/<name> -b <branch> main`. Verify any path you read in the main checkout still exists on the branch you will actually build on.
+- **`voided` is not `cancelled`.** `cancelled` is a real business event (the guest cancelled; a fee or a forfeited deposit may be correct). `voided` means the row was created by a mis-click and must vanish from the reports — no fee, no deposit, no revenue. Reusing either filter for the other silently books or unbooks real money.
 
 ## Working approach
 

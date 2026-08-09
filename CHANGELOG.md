@@ -9,6 +9,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Void a booking that was entered by mistake: an admin holds a red button for two
+  seconds to remove a reservation, an in-house stay, or a checked-out stay from the
+  reports, after a confirmation box that reads the money impact from the backend.
+  Money rows are never deleted — the amounts leave the reports through a status
+  filter, and an issued invoice keeps its number and is marked voided. Per-room
+  voiding inside a group booking is not supported yet
+- Manual nightly rate: click the quoted price on the check-in, reservation, or group
+  check-in sheet and type a negotiated rate per night. The rate is stored per night,
+  so confirming or modifying a reservation re-applies it to that operation's number
+  of nights instead of silently reverting to the engine price
 - Front-desk AI assistant: a chat panel beside the PMS that reads the live data to
   answer questions and drafts a check-in the receptionist confirms on a card, with
   the confirmation running the ordinary `check_in` command. An admin configures the

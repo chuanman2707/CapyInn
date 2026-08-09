@@ -1524,9 +1524,10 @@ fn validate_group_checkin_request(req: &GroupCheckinRequest) -> BookingResult<()
     // (số đêm, phòng đại diện, phòng trùng ở trên) cũng chỉ kiểm một lần, một
     // chỗ — `group_checkin_tx` chỉ có đúng một lối vào, và cả hai người gọi nó
     // (`group_checkin` lẫn `group_checkin_idempotent`) đều bắt buộc gọi hàm
-    // này trước. Thêm một bản sao thứ hai sẽ không có test nào khiến nó đỏ nếu
-    // xoá đi (xem báo cáo self-review) — khác `check_in_tx`, nơi bản sao có lý
-    // do phòng thủ chiều sâu vì hàm đó lịch sử được gọi từ nhiều chỗ hơn.
+    // này trước. Chính vì chỉ một lối vào đó, thêm một bản sao thứ hai bên
+    // trong `group_checkin_tx` sẽ không có test nào khiến nó đỏ nếu xoá đi —
+    // khác `check_in_tx`, nơi bản sao có lý do phòng thủ chiều sâu vì hàm đó
+    // lịch sử được gọi từ nhiều chỗ hơn.
     //
     // Cũng kiểm luôn khoá của map phải nằm trong `room_ids`: một khoá lạ (gõ
     // sai `room_id`, hoặc phòng đã bị bỏ khỏi đoàn nhưng bảng giá tay chưa cập

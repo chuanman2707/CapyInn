@@ -598,7 +598,7 @@ async fn the_migrated_special_dates_table_matches_what_the_code_assumes() {
 /// một nhánh khác chiếm mất 28 trước — và va chạm đó im lặng: test này chạy
 /// trên DB rỗng nên vẫn xanh, chỉ máy khách sạn mới chết.
 ///
-/// Viết trùng ý với doc-comment của `LATEST_SCHEMA_VERSION` (`db.rs:180-186`) là
+/// Viết trùng ý với doc-comment của `LATEST_SCHEMA_VERSION` (`db.rs:145-196`) là
 /// cố ý. Bản cũ ở đây viết thì quá khứ hoàn thành, không ngày tháng, không đòi
 /// chạy lại — tức nó **miễn** cho người merge đúng cái bước mà 25 dòng ngay phía
 /// trên tồn tại để bắt buộc, và miễn ngay bên trong con canary sinh ra để ép làm
