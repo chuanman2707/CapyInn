@@ -307,13 +307,12 @@ pub struct VoidBookingPreview {
     pub nights_recognized: i32,
     pub nights_total: i32,
     pub is_audited: bool,
-    /// True nghĩa là xoá lượt này sẽ KHÔNG đổi trạng thái phòng: gate `WHERE
-    /// status = 'cleaning'` của UPDATE rooms trong nhánh checked_out
-    /// (`void_booking_tx`, `void_lifecycle.rs`) không khớp dòng nào. Chỉ được
-    /// tính cho `previous_status == checked_out` (`void_queries.rs`) — luôn
-    /// false với mọi trạng thái khác, kể cả khi ở đó phòng thật sự cũng không
-    /// bị đụng (booked). KHÔNG suy ra có khách khác đang ở: true cả khi phòng
-    /// đã Trống (housekeeping dọn xong trước khi lệnh xoá này chạy).
+    /// True nghĩa là xoá lượt này sẽ KHÔNG đổi trạng thái phòng. Từ 09/08/2026
+    /// nhánh checked_out của `void_booking_tx` (`void_lifecycle.rs`) không
+    /// còn câu UPDATE rooms nào, nên cờ này luôn true khi `previous_status ==
+    /// checked_out` (`void_queries.rs`) — luôn false với mọi trạng thái khác,
+    /// kể cả khi ở đó phòng thật sự cũng không bị đụng (booked). KHÔNG suy ra
+    /// có khách khác đang ở: true cả khi phòng đã Trống.
     pub room_status_unchanged: bool,
     pub is_group_booking: bool,
 }

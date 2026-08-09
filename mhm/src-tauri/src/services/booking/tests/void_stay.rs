@@ -319,10 +319,11 @@ async fn voiding_never_deletes_money_rows() {
 }
 
 /// Trả phòng xong rồi mới phát hiện nhập sai (ca trong ảnh: check-in và
-/// check-out cách nhau 0 phút). Phòng đang `cleaning` vì lượt đó, task dọn
-/// phòng cũng do lượt đó sinh ra — cả hai phải được gỡ.
+/// check-out cách nhau 0 phút). Từ 09/08/2026 `check_out_tx` đặt phòng
+/// `vacant` ngay và không còn sinh phiếu dọn nào — xoá lượt này không có gì
+/// để hoàn tác trên `rooms`, phòng phải giữ nguyên `vacant`.
 #[tokio::test]
-async fn voiding_a_checked_out_stay_undoes_cleaning_and_housekeeping() {
+async fn voiding_a_checked_out_stay_leaves_the_vacant_room_alone() {
     let pool = test_pool().await;
     seed_active_booking_with_room(&pool, "B-5", "R-5")
         .await
@@ -334,19 +335,10 @@ async fn voiding_a_checked_out_stay_undoes_cleaning_and_housekeeping() {
         .execute(&pool)
         .await
         .expect("marks booking checked out");
-    sqlx::query("UPDATE rooms SET status = 'cleaning' WHERE id = 'R-5'")
+    sqlx::query("UPDATE rooms SET status = 'vacant' WHERE id = 'R-5'")
         .execute(&pool)
         .await
-        .expect("marks room cleaning");
-    sqlx::query(
-        "INSERT INTO housekeeping (id, room_id, status, triggered_at, created_at)
-         VALUES ('HK-5', 'R-5', 'needs_cleaning', ?, ?)",
-    )
-    .bind(actual_checkout)
-    .bind(actual_checkout)
-    .execute(&pool)
-    .await
-    .expect("seeds housekeeping task");
+        .expect("marks room vacant, matching a real checkout");
 
     let req = VoidBookingRequest {
         booking_id: "B-5".to_string(),
@@ -366,15 +358,6 @@ async fn voiding_a_checked_out_stay_undoes_cleaning_and_housekeeping() {
         .await
         .expect("reads room status");
     assert_eq!(room_status, "vacant");
-
-    let tasks: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM housekeeping WHERE id = 'HK-5'")
-        .fetch_one(&pool)
-        .await
-        .expect("counts housekeeping tasks");
-    assert_eq!(
-        tasks, 0,
-        "task dọn phòng do lượt nhập sai sinh ra phải bị gỡ"
-    );
 }
 
 /// Phòng đã bán lại cho khách khác: KHÔNG được đụng vào `rooms.status`. Đây là
@@ -416,53 +399,6 @@ async fn voiding_does_not_touch_a_room_that_was_already_reused() {
     assert_eq!(room_status, "occupied", "khách mới không được bị đá ra");
 }
 
-/// Task dọn phòng đã dọn xong thì giữ nguyên — việc dọn đã xảy ra thật.
-#[tokio::test]
-async fn voiding_keeps_a_housekeeping_task_that_was_already_cleaned() {
-    let pool = test_pool().await;
-    seed_active_booking_with_room(&pool, "B-7", "R-7")
-        .await
-        .expect("seeds active booking");
-
-    let actual_checkout = "2026-04-15T18:08:00+07:00";
-    sqlx::query("UPDATE bookings SET status = 'checked_out', actual_checkout = ? WHERE id = 'B-7'")
-        .bind(actual_checkout)
-        .execute(&pool)
-        .await
-        .expect("marks booking checked out");
-    sqlx::query("UPDATE rooms SET status = 'cleaning' WHERE id = 'R-7'")
-        .execute(&pool)
-        .await
-        .expect("marks room cleaning");
-    sqlx::query(
-        "INSERT INTO housekeeping (id, room_id, status, triggered_at, cleaned_at, created_at)
-         VALUES ('HK-7', 'R-7', 'clean', ?, ?, ?)",
-    )
-    .bind(actual_checkout)
-    .bind("2026-04-15T19:00:00+07:00")
-    .bind(actual_checkout)
-    .execute(&pool)
-    .await
-    .expect("seeds a finished housekeeping task");
-
-    let req = VoidBookingRequest {
-        booking_id: "B-7".to_string(),
-        reason: None,
-    };
-
-    let mut tx = begin_tx(&pool).await.expect("begins tx");
-    void_lifecycle::void_booking_tx(&mut tx, &req, "admin-1", Local::now(), "R-7")
-        .await
-        .expect("voids stay");
-    tx.commit().await.expect("commits");
-
-    let tasks: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM housekeeping WHERE id = 'HK-7'")
-        .fetch_one(&pool)
-        .await
-        .expect("counts housekeeping tasks");
-    assert_eq!(tasks, 1, "việc dọn đã xảy ra thật, không được xoá dấu vết");
-}
-
 /// Hoá đơn đã xuất phải chuyển sang `voided`, và SỐ hoá đơn không được đụng —
 /// dãy số thủng lỗ không giải thích được còn tệ hơn giữ một dòng đã huỷ. Không
 /// test nào ở trên seed invoice, nên câu `UPDATE invoices` trong nhánh
@@ -481,10 +417,10 @@ async fn voiding_a_checked_out_stay_marks_the_invoice_voided_and_keeps_its_numbe
         .execute(&pool)
         .await
         .expect("marks booking checked out");
-    sqlx::query("UPDATE rooms SET status = 'cleaning' WHERE id = 'R-8'")
+    sqlx::query("UPDATE rooms SET status = 'vacant' WHERE id = 'R-8'")
         .execute(&pool)
         .await
-        .expect("marks room cleaning");
+        .expect("marks room vacant, matching a real checkout");
     sqlx::query(
         "INSERT INTO invoices (
             id, invoice_number, booking_id, hotel_name, hotel_address, hotel_phone,
@@ -521,76 +457,6 @@ async fn voiding_a_checked_out_stay_marks_the_invoice_voided_and_keeps_its_numbe
     assert_eq!(
         invoice_number, "INV-20260415-008",
         "số hoá đơn không được đổi hay xoá — dãy số không được thủng lỗ"
-    );
-}
-
-/// `DELETE` trong nhánh `checked_out` khoanh vùng bằng đúng `triggered_at` của
-/// lượt đang xoá, không phải "bất kỳ task chưa dọn nào trong phòng". Một task
-/// dọn phòng khác trong cùng phòng — giờ trigger khác, ví dụ còn sót từ trước
-/// hoặc nhân viên tự tạo — phải sống sót. Ba test ở Step 1 chỉ seed một task
-/// mỗi phòng nên không phân biệt được "khớp đúng thời điểm" khỏi "khớp cả
-/// phòng, bỏ qua thời điểm"; thêm ở đây để vế "và chỉ nó" trong chú thích ở
-/// `void_lifecycle.rs` có test bảo vệ thật.
-#[tokio::test]
-async fn voiding_a_checked_out_stay_leaves_an_unrelated_uncleaned_task_in_the_same_room_alone() {
-    let pool = test_pool().await;
-    seed_active_booking_with_room(&pool, "B-9", "R-9")
-        .await
-        .expect("seeds active booking");
-
-    let actual_checkout = "2026-04-15T18:08:00+07:00";
-    sqlx::query("UPDATE bookings SET status = 'checked_out', actual_checkout = ? WHERE id = 'B-9'")
-        .bind(actual_checkout)
-        .execute(&pool)
-        .await
-        .expect("marks booking checked out");
-    sqlx::query("UPDATE rooms SET status = 'cleaning' WHERE id = 'R-9'")
-        .execute(&pool)
-        .await
-        .expect("marks room cleaning");
-    sqlx::query(
-        "INSERT INTO housekeeping (id, room_id, status, triggered_at, created_at)
-         VALUES ('HK-9', 'R-9', 'needs_cleaning', ?, ?)",
-    )
-    .bind(actual_checkout)
-    .bind(actual_checkout)
-    .execute(&pool)
-    .await
-    .expect("seeds the housekeeping task this checkout created");
-    sqlx::query(
-        "INSERT INTO housekeeping (id, room_id, status, triggered_at, created_at)
-         VALUES ('HK-9-DECOY', 'R-9', 'needs_cleaning', '2026-04-10T09:00:00+07:00',
-                 '2026-04-10T09:00:00+07:00')",
-    )
-    .execute(&pool)
-    .await
-    .expect("seeds an unrelated uncleaned task in the same room");
-
-    let req = VoidBookingRequest {
-        booking_id: "B-9".to_string(),
-        reason: None,
-    };
-
-    let mut tx = begin_tx(&pool).await.expect("begins tx");
-    void_lifecycle::void_booking_tx(&mut tx, &req, "admin-1", Local::now(), "R-9")
-        .await
-        .expect("voids checked-out stay");
-    tx.commit().await.expect("commits");
-
-    let removed: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM housekeeping WHERE id = 'HK-9'")
-        .fetch_one(&pool)
-        .await
-        .expect("counts the task this checkout created");
-    assert_eq!(removed, 0, "task do đúng lượt này sinh ra phải bị gỡ");
-
-    let survived: i64 =
-        sqlx::query_scalar("SELECT COUNT(*) FROM housekeeping WHERE id = 'HK-9-DECOY'")
-            .fetch_one(&pool)
-            .await
-            .expect("counts the unrelated task");
-    assert_eq!(
-        survived, 1,
-        "task không liên quan trong cùng phòng không được bị cuốn theo"
     );
 }
 
@@ -655,10 +521,10 @@ async fn preview_reports_the_full_total_for_a_checked_out_stay() {
     .execute(&pool)
     .await
     .expect("marks checked out");
-    sqlx::query("UPDATE rooms SET status = 'cleaning' WHERE id = 'R-9'")
+    sqlx::query("UPDATE rooms SET status = 'vacant' WHERE id = 'R-9'")
         .execute(&pool)
         .await
-        .expect("marks room cleaning");
+        .expect("marks room vacant, matching a real checkout");
 
     let preview = crate::queries::booking::void_queries::load_void_preview(&pool, "B-9")
         .await
@@ -667,7 +533,10 @@ async fn preview_reports_the_full_total_for_a_checked_out_stay() {
     assert_eq!(preview.previous_status, "checked_out");
     assert_eq!(preview.revenue_impact, 500_000);
     assert_eq!(preview.revenue_date, "2026-04-16");
-    assert!(!preview.room_status_unchanged);
+    // Từ 09/08/2026 nhánh checked_out của `void_booking_tx` không còn đụng
+    // `rooms` — cờ này luôn true cho một lượt đã trả phòng, xem
+    // `void_queries.rs`.
+    assert!(preview.room_status_unchanged);
     assert!(!preview.is_group_booking);
     // Ngoài phạm vi hai assert của brief: `seed_active_booking_with_room` cố
     // định `nights = 1`, nên trả phòng xong phải ghi nhận đúng 1/1 — không
@@ -696,10 +565,10 @@ async fn preview_reports_room_revenue_plus_folio_plus_cancellation_fee_for_a_che
     .execute(&pool)
     .await
     .expect("marks checked out");
-    sqlx::query("UPDATE rooms SET status = 'cleaning' WHERE id = 'R-FOLIO-FEE'")
+    sqlx::query("UPDATE rooms SET status = 'vacant' WHERE id = 'R-FOLIO-FEE'")
         .execute(&pool)
         .await
-        .expect("marks room cleaning");
+        .expect("marks room vacant, matching a real checkout");
     seed_folio_line(&pool, "B-FOLIO-FEE", 142_500, "2026-04-15T20:00:00+07:00")
         .await
         .expect("seeds folio line");
@@ -755,11 +624,12 @@ async fn preview_flags_a_room_that_was_already_reused() {
 }
 
 /// Phòng đang giữ cho một lượt đặt trong tương lai (`booked`) — KHÔNG chỉ
-/// `occupied` mới là "đã bán lại". Gate thật trong `void_booking_tx` là
-/// `WHERE status = 'cleaning'`, không phải `WHERE status != 'occupied'`;
-/// một cờ `room_status_unchanged` chỉ so bằng `occupied` sẽ báo sai "về Trống" cho ca này —
-/// UPDATE của backend không khớp dòng nào (status không phải 'cleaning') nên
-/// phòng vẫn giữ nguyên `booked`, nhưng hộp thoại đã hứa nó về trống.
+/// `occupied` mới là "đã bán lại". Từ 09/08/2026 nhánh `checked_out` của
+/// `void_booking_tx` không còn câu UPDATE rooms nào (`void_lifecycle.rs`), nên
+/// `room_status_unchanged` không còn so bằng bất kỳ giá trị cụ thể nào của
+/// `rooms.status` — nó luôn true cho một lượt đã trả phòng, bất kể phòng đang
+/// `occupied`, `booked`, hay `vacant`. Test này chọn `booked` làm một trong ba
+/// ca đại diện để khoá đúng điều đó.
 #[tokio::test]
 async fn preview_flags_a_room_that_is_now_booked_for_a_future_reservation() {
     let pool = test_pool().await;
@@ -784,21 +654,17 @@ async fn preview_flags_a_room_that_is_now_booked_for_a_future_reservation() {
 
     assert!(
         preview.room_status_unchanged,
-        "phòng 'booked' cũng khiến UPDATE rooms của void_booking_tx không khớp dòng nào \
-         (gate chỉ nhận 'cleaning') — preview phải báo true như ca 'occupied', không phải \
-         chỉ so bằng occupied"
+        "lượt đã trả phòng luôn có room_status_unchanged = true — nhánh checked_out không \
+         còn UPDATE rooms nào để so sánh trạng thái phòng, giống hệt ca 'occupied'"
     );
 }
 
-/// Housekeeping dọn xong TRƯỚC khi ai đó phát hiện lượt này nhập sai — phòng
-/// đã về `vacant` rồi, không hề có khách nào khác. Đây chính là ca chứng minh
-/// một cái tên ngụ ý "phòng đang có khách khác" là sai: cờ chỉ nói "UPDATE
-/// rooms sẽ không khớp dòng nào vì phòng không còn ở 'cleaning'" — nó KHÔNG
-/// nói gì về việc phòng có khách hay không. Gate thật là `WHERE status =
-/// 'cleaning'`; `vacant` cũng khác `cleaning` nên UPDATE không khớp gì, giống
-/// hệt ca `occupied`/`booked` ở trên. `room_status_unchanged` phải báo true ở
-/// đây — và phía hiển thị (`VoidBookingDialog.tsx`) không được suy đoán "có
-/// khách khác" chỉ vì cờ này bật.
+/// Phòng đã về `vacant` — vẫn phải báo `room_status_unchanged = true`, y hệt
+/// ca `occupied`/`booked` ở trên. Đây chính là ca chứng minh một cái tên ngụ ý
+/// "phòng đang có khách khác" là sai: từ 09/08/2026 cờ này không nói gì về
+/// TRẠNG THÁI phòng — nó chỉ nói "trả phòng không đụng gì tới `rooms`", và
+/// luôn true cho mọi lượt đã trả phòng. Phía hiển thị (`VoidBookingDialog.tsx`)
+/// không được suy đoán "có khách khác" chỉ vì cờ này bật.
 #[tokio::test]
 async fn preview_flags_room_status_unchanged_when_room_is_already_vacant() {
     let pool = test_pool().await;
@@ -824,9 +690,8 @@ async fn preview_flags_room_status_unchanged_when_room_is_already_vacant() {
 
     assert!(
         preview.room_status_unchanged,
-        "phòng 'vacant' cũng khiến UPDATE rooms của void_booking_tx không khớp dòng nào \
-         (gate chỉ nhận 'cleaning') — preview phải báo true như ca 'occupied'/'booked', \
-         KHÔNG phải suy luận 'phòng đã trống sẵn nên không cần cảnh báo'"
+        "phòng 'vacant' vẫn phải báo true, y hệt 'occupied'/'booked' — cờ này luôn true cho \
+         một lượt đã trả phòng, KHÔNG phải suy luận 'phòng đã trống sẵn nên không cần cảnh báo'"
     );
 }
 

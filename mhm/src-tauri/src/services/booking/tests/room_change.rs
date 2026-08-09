@@ -146,7 +146,7 @@ async fn load_options_hides_room_taken_on_any_remaining_night() {
 async fn load_options_hides_a_dirty_room_when_the_guest_moves_in_tonight() {
     let pool = test_pool().await;
     seed_stay_in_progress(&pool).await;
-    sqlx::query("UPDATE rooms SET status = 'cleaning' WHERE id = 'R-NEW'")
+    sqlx::query("UPDATE rooms SET status = 'occupied' WHERE id = 'R-NEW'")
         .execute(&pool)
         .await
         .unwrap();
@@ -250,7 +250,7 @@ async fn change_room_keeps_past_nights_on_the_old_room() {
 }
 
 #[tokio::test]
-async fn change_room_sends_the_old_room_to_cleaning() {
+async fn change_room_frees_the_old_room_immediately() {
     let pool = test_pool().await;
     seed_stay_in_progress(&pool).await;
 
@@ -269,7 +269,7 @@ async fn change_room_sends_the_old_room_to_cleaning() {
         .fetch_one(&pool)
         .await
         .unwrap();
-    assert_eq!(old_status, "cleaning");
+    assert_eq!(old_status, "vacant");
 
     let new_status: String = sqlx::query_scalar("SELECT status FROM rooms WHERE id = 'R-NEW'")
         .fetch_one(&pool)
@@ -277,13 +277,12 @@ async fn change_room_sends_the_old_room_to_cleaning() {
         .unwrap();
     assert_eq!(new_status, "occupied");
 
-    let task_count: i32 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM housekeeping WHERE room_id = 'R-OLD' AND status = 'needs_cleaning'",
-    )
-    .fetch_one(&pool)
-    .await
-    .unwrap();
-    assert_eq!(task_count, 1, "phòng cũ phải sinh đúng một phiếu dọn");
+    let task_count: i32 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM housekeeping WHERE room_id = 'R-OLD'")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(task_count, 0, "đổi phòng không sinh phiếu dọn nào nữa");
 }
 
 #[tokio::test]

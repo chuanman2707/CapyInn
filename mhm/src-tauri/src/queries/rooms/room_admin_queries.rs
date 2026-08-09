@@ -169,7 +169,7 @@ mod tests {
             ("204", 2, "standard", "occupied"),
             ("201", 2, "deluxe", "vacant"),
             ("102", 1, "deluxe", "vacant"),
-            ("301", 3, "standard", "cleaning"),
+            ("301", 3, "standard", "booked"),
         ] {
             sqlx::query(
                 "INSERT INTO rooms (id, name, type, floor, has_balcony, base_price,
@@ -206,7 +206,7 @@ mod tests {
 
         assert!(
             !ids.contains(&"204".to_string()) && !ids.contains(&"301".to_string()),
-            "occupied and cleaning rooms are not vacant: {ids:?}"
+            "occupied and booked rooms are not vacant: {ids:?}"
         );
         assert_eq!(ids.len(), 4);
     }

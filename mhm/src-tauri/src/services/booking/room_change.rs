@@ -486,27 +486,18 @@ pub(super) async fn change_room_tx(
     // carries the old-state condition and is checked with
     // ensure_one_row_affected, so a room that already changed status under us
     // fails loudly instead of silently overwriting it.
+    //
+    // Phòng cũ về `vacant` ngay, giống hệt trả phòng. Spec chuyển phòng ngày
+    // 01/08 chốt `cleaning` để chặn bán lại phòng chưa dọn; hàng rào đó bị gỡ
+    // ngày 09/08 vì nó chỉ chặn lễ tân, không chặn phòng bẩn.
     if booking_status == status::booking::ACTIVE {
         let result = sqlx::query("UPDATE rooms SET status = ? WHERE id = ? AND status = ?")
-            .bind(status::room::CLEANING)
+            .bind(status::room::VACANT)
             .bind(&old_room_id)
             .bind(status::room::OCCUPIED)
             .execute(&mut **tx)
             .await?;
         ensure_one_row_affected(result, format!("room {old_room_id} is no longer occupied"))?;
-
-        let now = Local::now().to_rfc3339();
-        sqlx::query(
-            "INSERT INTO housekeeping (id, room_id, status, note, triggered_at, cleaned_at, created_at)
-             VALUES (?, ?, 'needs_cleaning', ?, ?, NULL, ?)",
-        )
-        .bind(uuid::Uuid::new_v4().to_string())
-        .bind(&old_room_id)
-        .bind(format!("Khách chuyển sang phòng {new_room_id}"))
-        .bind(&now)
-        .bind(&now)
-        .execute(&mut **tx)
-        .await?;
 
         let result = sqlx::query("UPDATE rooms SET status = ? WHERE id = ? AND status = ?")
             .bind(status::room::OCCUPIED)

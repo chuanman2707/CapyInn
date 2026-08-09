@@ -1310,7 +1310,7 @@ pub(crate) async fn group_checkout_tx(
     )?;
 
     let mut qb = sqlx::QueryBuilder::new("UPDATE rooms SET status = ");
-    qb.push_bind(status::room::CLEANING);
+    qb.push_bind(status::room::VACANT);
     qb.push(" WHERE status = ");
     qb.push_bind(status::room::OCCUPIED);
     qb.push(" AND id IN (");
@@ -1328,18 +1328,6 @@ pub(crate) async fn group_checkout_tx(
             req.group_id
         ),
     )?;
-
-    let mut qb = sqlx::QueryBuilder::new(
-        "INSERT INTO housekeeping (id, room_id, status, triggered_at, created_at) ",
-    );
-    qb.push_values(&room_ids, |mut b, rid| {
-        b.push_bind(uuid::Uuid::new_v4().to_string())
-            .push_bind(rid)
-            .push_bind("needs_cleaning")
-            .push_bind(&now)
-            .push_bind(&now);
-    });
-    qb.build().execute(&mut **tx).await?;
 
     // Snapshot `room_stays` before the DELETE below wipes `room_calendar` —
     // the same move `check_out_tx` (stay_lifecycle.rs) makes on the

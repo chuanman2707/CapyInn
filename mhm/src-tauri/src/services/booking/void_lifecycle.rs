@@ -131,37 +131,12 @@ pub async fn void_booking_tx(
             )?;
         }
         status::booking::CHECKED_OUT => {
-            // 0 dòng ảnh hưởng ở ĐÂY là hợp lệ, khác mọi chỗ khác trong repo:
-            // phòng có thể đã được bán lại cho khách khác giữa lúc trả phòng và
-            // lúc phát hiện nhập sai. Khách mới không được bị đá ra. Đừng "sửa
-            // lỗi" chỗ này thành `ensure_one_row_affected`.
-            sqlx::query("UPDATE rooms SET status = ? WHERE id = ? AND status = ?")
-                .bind(status::room::VACANT)
-                .bind(&room_id)
-                .bind(status::room::CLEANING)
-                .execute(&mut **tx)
-                .await
-                .map_err(BookingError::from)
-                .map_err(mark_write_db_error)?;
-
-            // `housekeeping` không có cột `booking_id`. `check_out_tx` chèn task
-            // với `triggered_at` bằng đúng `actual_checkout` của booking, nên bộ
-            // ba (phòng, thời điểm, chưa dọn xong) nhận diện được task do chính
-            // lượt này sinh ra — và chỉ nó.
-            sqlx::query(
-                "DELETE FROM housekeeping
-                 WHERE room_id = ?
-                   AND cleaned_at IS NULL
-                   AND triggered_at = (
-                       SELECT actual_checkout FROM bookings WHERE id = ?
-                   )",
-            )
-            .bind(&room_id)
-            .bind(&req.booking_id)
-            .execute(&mut **tx)
-            .await
-            .map_err(BookingError::from)
-            .map_err(mark_write_db_error)?;
+            // Không đụng `rooms`: từ 09/08/2026 trả phòng đã đặt `vacant` ngay,
+            // nên không còn trạng thái trung gian nào để hoàn tác. Phòng lúc
+            // này có thể đã bán lại cho khách khác — không có câu UPDATE nào ở
+            // đây là cách chắc chắn nhất để không đá khách mới ra.
+            //
+            // Không đụng `housekeeping`: trả phòng không còn sinh phiếu nào.
 
             // Hoá đơn đã xuất giữ nguyên số — dãy số không được thủng lỗ không
             // giải thích được. Cột `status` đã có sẵn, mặc định 'issued'.
@@ -229,7 +204,7 @@ pub async fn void_booking_idempotent(
         .with_outbox_event(OutboxEventSpec::new(
             "booking.voided",
             OutboxAggregateKeySource::response_field("booking", "booking_id"),
-            &["bookings", "rooms", "housekeeping"],
+            &["bookings", "rooms"],
         )?);
 
     let pool_for_lookup = pool.clone();
