@@ -636,6 +636,15 @@ describe("Reservations column width", () => {
     vi.restoreAllMocks();
   });
 
+  // GIỚI HẠN: test này ghim PHÉP TÍNH, không ghim ĐÍCH ĐO. Stub bề rộng gắn
+  // trên `HTMLElement.prototype` nên MỌI phần tử — kể cả một phần tử sai —
+  // đều trả lời cùng một con số; test không có cách nào phân biệt được
+  // `timelineRef` đang đo đúng khung lịch hay lỡ đo trúng một phần tử khác.
+  // Dời `ref={timelineRef}` từ khung lịch sang ô nhãn "Rooms" 140px vẫn qua
+  // được mọi test ở đây — trong trình duyệt thật phép đo đó ra
+  // `floor((140 - 140) / 16) = 0`, rơi về 80px, cả tính năng coi như chết —
+  // mà không một dòng nào đỏ. Chỉ một lần đổi cỡ cửa sổ bằng tay trên ứng
+  // dụng thật mới bắt được lỗi này.
   it("stretches day columns to fill the measured timeline width", async () => {
     // 1780 - 140 (cột tên phòng) = 1640, chia 16 ngày = 102.5 -> 102 sau khi
     // làm tròn xuống. Phần dư 8px chấp nhận được; làm tròn lên sẽ tràn ra
@@ -666,6 +675,15 @@ describe("Reservations column width", () => {
     });
 
     render(<Reservations />);
+
+    // Ghim nửa còn lại của cùng một bất biến: cột ngày phải rộng đúng bằng
+    // colWidth đo được, không chỉ thanh booking vẽ trên nó. Bar và cell tính
+    // từ cùng một colWidth nhưng qua hai đường code khác nhau (ba vòng lặp
+    // DAYS.map dựng cell, getBookingBars dựng bar) — chỉ ghim bar thì một
+    // cell bị revert về hằng số cũ (w-[80px]) vẫn lọt qua test, trong khi bar
+    // vẫn vẽ ở 102px/ngày trên cột 80px thật: đúng nghĩa "booking hiện sai
+    // ngày".
+    expect(screen.getByTestId("cell-R101-0").style.width).toBe("102px");
 
     const bar = await screen.findByTestId("booking-bar-B-WIDE");
     // rawStart = (-1 - -3) + 0.5 = 2.5 -> left = 2.5 * 102 = 255px
