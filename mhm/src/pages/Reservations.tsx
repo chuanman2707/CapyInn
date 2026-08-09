@@ -265,10 +265,13 @@ export default function Reservations() {
     const activeCount = visibleBookings.filter(b => b.status === "active").length;
     const bookedCount = visibleBookings.filter(b => b.status === "booked").length;
     const checkedOutCount = visibleBookings.filter(b => b.status === "checked_out").length;
-    // Lượt đã xóa không phải một booking đang tồn tại — không được góp vào
-    // "Tổng". Bản trước đếm nguyên visibleBookings.length, cộng cả những
-    // lượt đã voided nếu chúng lọt qua tới đây.
-    const totalCount = visibleBookings.filter(b => b.status !== "voided").length;
+    // M6 (rà cuối trước merge): trước đây lọc bằng danh sách ĐEN
+    // (`status !== "voided"`) nên "Tổng" vẫn cộng cả lượt "cancelled" dù bar
+    // trên lịch dùng danh sách TRẮNG `VISIBLE_BOOKING_STATUSES` (không có
+    // "cancelled") — hai chỗ lệch nhau trong cùng một commit. Dùng chung
+    // đúng một danh sách trắng cho cả hai: "Tổng" mô tả các lượt còn đang
+    // hiện diện trên lịch (có bar), không phải toàn bộ lịch sử đã từng tạo.
+    const totalCount = visibleBookings.filter(b => VISIBLE_BOOKING_STATUSES.includes(b.status)).length;
 
     function getBookingBars(roomId: string): BookingBar[] {
         return visibleBookings

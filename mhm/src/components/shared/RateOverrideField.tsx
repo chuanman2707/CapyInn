@@ -92,8 +92,8 @@ export default function RateOverrideField({
 
             {uneven && (
                 <p data-testid="rate-uneven-warning" className="text-[11px] text-amber-600">
-                    Giá tay cho {nights} đêm là {fmtMoney(overrideTotal ?? 0)}, khác giá engine{" "}
-                    {fmtMoney(engineTotal ?? 0)}.
+                    Giá tay cho {nights} đêm là {fmtMoney(overrideTotal ?? 0)}, khác giá hệ thống
+                    tính {fmtMoney(engineTotal ?? 0)}.
                 </p>
             )}
 

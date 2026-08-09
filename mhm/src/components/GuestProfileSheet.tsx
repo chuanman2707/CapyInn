@@ -6,6 +6,7 @@ import SlideDrawer from "@/components/shared/SlideDrawer";
 import StatCard from "@/components/shared/StatCard";
 import EmptyState from "@/components/shared/EmptyState";
 import { fmtDateShort, fmtMoney } from "@/lib/format";
+import type { BookingStatus } from "@/types";
 
 interface BookingWithRoom {
     booking_id: string;
@@ -13,7 +14,7 @@ interface BookingWithRoom {
     check_in_at: string;
     expected_checkout: string;
     total_price: number;
-    status: string;
+    status: BookingStatus;
 }
 
 interface GuestHistoryResponse {
@@ -28,7 +29,12 @@ interface GuestHistoryResponse {
 // khỏi lịch sử khách (8 đường đọc SQL), nhưng hàm này vẫn nhận diện nó tường
 // minh thay vì rơi vào default — cùng lý do phòng thủ theo chiều sâu như
 // Reservations.tsx.
-function guestBookingStatusLabel(status: string): string {
+/** Không bao giờ được gọi nếu switch bên dưới xét đủ mọi nhánh của BookingStatus. */
+function assertUnreachableStatus(status: never): never {
+    throw new Error(`Thiếu nhãn tiếng Việt cho status: ${String(status)}`);
+}
+
+export function guestBookingStatusLabel(status: BookingStatus): string {
     switch (status) {
         case "active":
             return "Đang ở";
@@ -43,7 +49,7 @@ function guestBookingStatusLabel(status: string): string {
         case "voided":
             return "Đã xóa";
         default:
-            return status;
+            return assertUnreachableStatus(status);
     }
 }
 

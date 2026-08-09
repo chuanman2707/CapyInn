@@ -64,6 +64,17 @@ describe("RateOverrideField", () => {
     expect(text).not.toContain("khác nhau");
   });
 
+  // M3 (rà cuối trước merge): chuỗi cảnh báo lẫn chữ "engine" — thuật ngữ kỹ
+  // thuật, lễ tân không biết đó là gì. Mọi chuỗi hiện cho người dùng phải là
+  // tiếng Việt thuần, không lẫn từ nội bộ (engine/override/folio/payload/snapshot…).
+  it("chuỗi cảnh báo không lẫn từ kỹ thuật 'engine'", () => {
+    render(
+      <RateOverrideField engineTotal={1300000} nights={3} value={400000} onChange={vi.fn()} />,
+    );
+    const text = screen.getByTestId("rate-uneven-warning").textContent ?? "";
+    expect(text.toLowerCase()).not.toContain("engine");
+  });
+
   it("không cảnh báo khi giá các đêm đều nhau", () => {
     render(
       <RateOverrideField engineTotal={1200000} nights={3} value={400000} onChange={vi.fn()} />,
