@@ -1359,8 +1359,90 @@ fn parse_date(value: &str) -> BookingResult<NaiveDate> {
 
 #[cfg(test)]
 mod tests {
-    use super::mark_write_db_error;
+    use super::{mark_write_db_error, resolve_manual_rate_per_night, MAX_RATE_PER_NIGHT_VND};
     use crate::domain::booking::BookingError;
+
+    /// Toàn bộ battery `manual_rate_*_rejects_*` (Task 14) chỉ phủ đường
+    /// INPUT — giá tay gõ lúc tạo/sửa đặt phòng. Hàm này là đường ĐỌC LẠI:
+    /// nó lấy `rate_per_night` từ `pricing_snapshot`, một cột JSON tự do
+    /// không đi qua validate ở input nữa (`confirm_reservation_tx` /
+    /// `modify_reservation_tx` gọi lại nó mỗi lần tính giá). Hai reviewer độc
+    /// lập cùng xoá dòng `if rate <= 0 || rate > MAX_RATE_PER_NIGHT_VND` và
+    /// 1406/1406 test vẫn xanh — nghĩa là hàng rào RE-CHECK này, dù có mặt
+    /// trong code, không có bằng chứng tự động nào chứng minh nó còn ở đó.
+    fn snapshot_with_rate(rate: i64) -> String {
+        serde_json::json!({ "manual_rate": { "rate_per_night": rate } }).to_string()
+    }
+
+    #[test]
+    fn resolve_manual_rate_per_night_returns_none_when_never_overridden() {
+        let resolved =
+            resolve_manual_rate_per_night("B1", None, None).expect("no override, no error");
+
+        assert_eq!(resolved, None);
+    }
+
+    #[test]
+    fn resolve_manual_rate_per_night_returns_the_stored_rate_when_valid() {
+        let snapshot = snapshot_with_rate(700_000);
+
+        let resolved =
+            resolve_manual_rate_per_night("B1", Some("2026-04-01T00:00:00+07:00"), Some(&snapshot))
+                .expect("a valid in-range rate must resolve");
+
+        assert_eq!(resolved, Some(700_000));
+    }
+
+    #[test]
+    fn resolve_manual_rate_per_night_rejects_a_zero_rate_read_back_from_the_snapshot() {
+        let snapshot = snapshot_with_rate(0);
+
+        let error =
+            resolve_manual_rate_per_night("B1", Some("2026-04-01T00:00:00+07:00"), Some(&snapshot))
+                .expect_err(
+                    "0đ/đêm đọc lại từ snapshot phải bị từ chối, không phải phòng miễn phí",
+                );
+
+        assert!(matches!(error, BookingError::Database(_)));
+    }
+
+    #[test]
+    fn resolve_manual_rate_per_night_rejects_a_negative_rate_read_back_from_the_snapshot() {
+        let snapshot = snapshot_with_rate(-500_000);
+
+        let error =
+            resolve_manual_rate_per_night("B1", Some("2026-04-01T00:00:00+07:00"), Some(&snapshot))
+                .expect_err("giá âm đọc lại từ snapshot phải bị từ chối");
+
+        assert!(matches!(error, BookingError::Database(_)));
+    }
+
+    #[test]
+    fn resolve_manual_rate_per_night_rejects_a_rate_above_the_cap_read_back_from_the_snapshot() {
+        let snapshot = snapshot_with_rate(MAX_RATE_PER_NIGHT_VND + 1);
+
+        let error =
+            resolve_manual_rate_per_night("B1", Some("2026-04-01T00:00:00+07:00"), Some(&snapshot))
+                .expect_err(
+                    "giá vượt trần đọc lại từ snapshot phải bị từ chối, kể cả khi input lúc \
+                     ghi từng hợp lệ (trần có thể đã bị hạ sau đó)",
+                );
+
+        assert!(matches!(error, BookingError::Database(_)));
+    }
+
+    /// Biên dương: đúng bằng trần phải QUA — chứng minh phép so là `>`, không
+    /// phải `>=`.
+    #[test]
+    fn resolve_manual_rate_per_night_accepts_a_rate_exactly_at_the_cap() {
+        let snapshot = snapshot_with_rate(MAX_RATE_PER_NIGHT_VND);
+
+        let resolved =
+            resolve_manual_rate_per_night("B1", Some("2026-04-01T00:00:00+07:00"), Some(&snapshot))
+                .expect("a rate exactly at the cap must resolve, not error");
+
+        assert_eq!(resolved, Some(MAX_RATE_PER_NIGHT_VND));
+    }
 
     #[test]
     fn mark_write_db_error_promotes_database_errors_but_preserves_missing_record() {
