@@ -204,10 +204,19 @@ export default function Reservations() {
         const node = timelineRef.current;
         if (!node) return;
 
+        // `clientWidth`, KHÔNG phải `getBoundingClientRect().width`: rect là hộp
+        // viền và đã tính cả phần thanh cuộn dọc chiếm chỗ, còn clientWidth là
+        // hộp nội dung — đã trừ đúng bề rộng thanh cuộn của MÁY ĐANG CHẠY. Trừ
+        // một hằng số là sai: bề rộng đó tuỳ hệ điều hành và tuỳ cài đặt (macOS
+        // để "Show scroll bars: Always" ra ~15px, overlay ra 0px).
+        //
+        // Đi cùng nó, `node` phải là chính khung cuộn dọc (xem `overflow-auto` ở
+        // khung lịch bên dưới). Đo một hộp mà thanh cuộn nằm ở hộp KHÁC thì
+        // clientWidth cũng không trừ gì cả.
         const measure = () => {
-            const available = node.getBoundingClientRect().width - ROOM_LABEL_WIDTH;
+            const available = node.clientWidth - ROOM_LABEL_WIDTH;
             const next = Math.floor(available / VISIBLE_DAYS);
-            setColWidth(Number.isFinite(next) && next > MIN_COL_WIDTH ? next : MIN_COL_WIDTH);
+            setColWidth(Math.max(next, MIN_COL_WIDTH));
         };
 
         measure();
@@ -499,7 +508,25 @@ export default function Reservations() {
             </div>
 
             {/* Timeline Grid */}
-            <div ref={timelineRef} className="flex-1 flex flex-col min-h-0 overflow-hidden relative">
+            {/* Chính thẻ này cuộn, và cũng chính nó được đo — hai vai đó phải
+                nằm trên cùng một thẻ, nếu không clientWidth ở trên không trừ được
+                gì. Trước đây thẻ này `overflow-hidden` còn phần thân mới cuộn.
+                Đo trên máy có thanh cuộn cổ điển (Windows, hoặc macOS để
+                "Show scroll bars: Always") bằng Chromium, khung 1600px, 12 phòng:
+                  - cũ: đo 1598px (đã gồm chỗ thanh cuộn dọc của thân) -> cột 91px
+                    -> lưới rộng 1596px trong khi hộp nội dung chỉ còn 1583px.
+                  - mới: đo clientWidth 1583px -> cột 90px -> lưới 1580px, vừa khít.
+                Phần dôi ra KHÔNG đẻ ra thanh cuộn ngang ở thân như tưởng: thân là
+                `w-max` nên luôn tự giãn bằng nội dung và không bao giờ tràn so với
+                chính nó. Chỗ dôi rơi lên thẻ này, mà `overflow-hidden` thì cắt cụt
+                và người dùng KHÔNG kéo tới được — mất 13px cuối của ngày thứ 16.
+                Cửa sổ hẹp còn nặng hơn: cột chạm sàn 80px, lưới 1420px trên khung
+                998px, 437px — hơn năm ngày — bị cắt và không có cách nào kéo tới.
+                Để `overflow-auto` ở đây vừa sửa phép đo, vừa trả lại đường kéo
+                ngang, vừa kéo luôn hàng ngày tháng (`sticky top-0`, nằm trong
+                chính khung cuộn này) đi cùng thân nên thanh booking không bao giờ
+                lệch khỏi ngày của nó. */}
+            <div ref={timelineRef} className="flex-1 flex flex-col min-h-0 overflow-auto relative">
 
                 {/* Day Headers */}
                 <div className="flex border-b border-slate-100 bg-white sticky top-0 z-10 w-max min-w-full">
@@ -516,7 +543,9 @@ export default function Reservations() {
                 </div>
 
                 {/* Timeline Body */}
-                <div className="flex-1 overflow-auto w-max min-w-full">
+                {/* KHÔNG `overflow-auto` ở đây: khung cuộn duy nhất là thẻ cha,
+                    để hàng ngày tháng (`sticky top-0`) cùng nằm trong nó. */}
+                <div className="flex-1 w-max min-w-full">
                     {roomGroups.map((group) => (
                         <div key={group.name}>
                             <div className="flex h-[36px] bg-slate-50/80 border-b border-slate-100">

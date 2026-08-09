@@ -645,21 +645,16 @@ describe("Reservations column width", () => {
   // `floor((140 - 140) / 16) = 0`, rơi về 80px, cả tính năng coi như chết —
   // mà không một dòng nào đỏ. Chỉ một lần đổi cỡ cửa sổ bằng tay trên ứng
   // dụng thật mới bắt được lỗi này.
+  // GIỚI HẠN THỨ HAI: jsdom không dựng layout nên `clientWidth` thật luôn là 0
+  // và không bao giờ đẻ ra thanh cuộn. Stub dưới đây trả về một con số cố định,
+  // tức là nó ghim phép tính "trừ 140 rồi chia 16" chứ KHÔNG chứng minh được
+  // điều quan trọng nhất: rằng đích đo đã trừ đi bề rộng thanh cuộn dọc. Chỉ
+  // chạy ứng dụng thật với thanh cuộn để chế độ luôn hiện mới kiểm được.
   it("stretches day columns to fill the measured timeline width", async () => {
     // 1780 - 140 (cột tên phòng) = 1640, chia 16 ngày = 102.5 -> 102 sau khi
     // làm tròn xuống. Phần dư 8px chấp nhận được; làm tròn lên sẽ tràn ra
     // ngoài và đẻ ra thanh cuộn ngang không cần thiết.
-    vi.spyOn(HTMLElement.prototype, "getBoundingClientRect").mockReturnValue({
-      width: 1780,
-      height: 600,
-      top: 0,
-      left: 0,
-      right: 1780,
-      bottom: 600,
-      x: 0,
-      y: 0,
-      toJSON: () => ({}),
-    } as DOMRect);
+    vi.spyOn(HTMLElement.prototype, "clientWidth", "get").mockReturnValue(1780);
 
     invoke.mockImplementation(async (command: string) => {
       if (command === "get_all_bookings") {
