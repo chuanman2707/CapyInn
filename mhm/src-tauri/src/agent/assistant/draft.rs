@@ -730,26 +730,37 @@ async fn build_warnings(
     })?;
 
     // Hai câu dưới đây nói giọng **từ chối**, không phải giọng "lưu ý":
-    // `check_in_tx` bắt `room_status != 'vacant'` là `Conflict` và trả về ngay,
-    // nên phòng bẩn hay phòng đang có khách đều không nhận phòng được. Cảnh báo
-    // của `draft_reserve`/`draft_backfill` viết thẳng "lệnh sẽ từ chối"; hai câu
-    // này từng không nói ra, nên lễ tân đọc chúng như lời khuyên có thể bỏ qua
-    // rồi bấm *Đồng ý* để nhận một lỗi.
+    // `check_in_tx` bắt `room_status != status::room::VACANT` là `Conflict` và
+    // trả về ngay ("Phòng {} không trống (status: {})"), nên **mọi** trạng thái
+    // khác `vacant` đều không nhận phòng được. Cảnh báo của
+    // `draft_reserve`/`draft_backfill` viết thẳng "lệnh sẽ từ chối"; hai câu này
+    // từng không nói ra, nên lễ tân đọc chúng như lời khuyên có thể bỏ qua rồi
+    // bấm *Đồng ý* để nhận một lỗi.
+    //
+    // Câu trạng thái so với `status::room::VACANT` — đúng phép so `check_in_tx`
+    // làm, đúng hình dạng `draft_backfill` đã dùng — chứ không bắt một chuỗi cụ
+    // thể. Nó từng bắt `"dirty"`, một giá trị **chưa từng** là thành viên của
+    // `status::room` và không đường ghi nào sinh ra, nên nhánh không bao giờ
+    // chạy: phòng còn kẹt ở `booked` hay `occupied` ra thẻ Sẵn sàng không một
+    // câu cảnh báo trạng thái nào, rồi bị lệnh chặn ở quầy.
+    //
+    // Phòng đang có khách đi trước và **thay** câu trạng thái chung: nó cũng là
+    // một phòng khác `vacant`, nhưng câu riêng nói thêm được việc phải làm. Hai
+    // câu cùng kể một lần từ chối là nhiễu trên cái thẻ lễ tân đọc.
     let mut warnings = Vec::new();
     if let Some(room) = rooms.iter().find(|room| room.room_id == room_id) {
-        if room.status.eq_ignore_ascii_case("dirty") {
-            warnings.push(
-                "Phòng đang ở trạng thái bẩn, chưa dọn. `check_in` sẽ TỪ CHỐI: nó chỉ nhận \
-                 phòng đang trống. Phải dọn và đổi trạng thái phòng trước."
-                    .to_string(),
-            );
-        }
         if room.booking_id.is_some() {
             warnings.push(
                 "Phòng đang có khách ở. `check_in` sẽ TỪ CHỐI: nó chỉ nhận phòng đang trống. \
                  Phải trả phòng cho khách hiện tại trước."
                     .to_string(),
             );
+        } else if !room.status.eq_ignore_ascii_case(status::room::VACANT) {
+            warnings.push(format!(
+                "Phòng đang ở trạng thái «{}», không phải trống. `check_in` sẽ TỪ CHỐI: nó chỉ \
+                 nhận phòng đang trống.",
+                room.status
+            ));
         }
     }
 
@@ -2238,33 +2249,39 @@ mod tests {
     ///
     /// Câu cảnh báo phải nói ra rằng lệnh sẽ **từ chối**, không phải một lời
     /// "lưu ý": `check_in_tx` bắt mọi `status` khác `vacant` là `Conflict` và
-    /// trả về ngay, nên phòng bẩn thì không nhận phòng được, chấm hết. Cảnh báo
-    /// của `draft_reserve`/`draft_backfill` viết thẳng điều đó; câu này từng
-    /// không, nên lễ tân đọc ra là lời khuyên có thể bỏ qua.
+    /// trả về ngay, nên phòng không trống thì không nhận phòng được, chấm hết.
+    /// Cảnh báo của `draft_reserve`/`draft_backfill` viết thẳng điều đó; câu này
+    /// từng không, nên lễ tân đọc ra là lời khuyên có thể bỏ qua.
+    ///
+    /// Fixture cố tình seed `occupied` — một **thành viên thật** của
+    /// `status::room` mà đường ghi sinh ra được. Bản trước seed `"dirty"`, thứ
+    /// chưa từng có trong `status::room`, nên nó xanh cho một nhánh mà PMS thật
+    /// không bao giờ chạm tới. Phòng không có `bookings` hàng `active` nào, nên
+    /// đây đúng là câu trạng thái chứ không phải câu "đang có khách ở".
     #[tokio::test]
-    async fn a_ready_draft_carries_a_pms_warning_when_the_room_is_dirty() {
+    async fn a_ready_draft_carries_a_pms_warning_when_the_room_is_not_vacant() {
         let pool = test_pool().await;
         seed_room(
             &pool,
-            "room-dirty",
+            "room-occupied",
             "P702",
             "Standard Room",
             300_000,
-            "dirty",
+            status::room::OCCUPIED,
         )
         .await;
 
         // Khách có số giấy tờ: test này canh đúng một cảnh báo trạng thái
         // phòng, không được vô tình cõng thêm cảnh báo thiếu giấy tờ.
         let args = serde_json::json!({
-            "room_id": "room-dirty",
+            "room_id": "room-occupied",
             "nights": 1,
             "guests": [{ "full_name": "Trần Thị Hoa", "doc_number": "079301005678" }]
         });
 
         let outcome = build_check_in_draft(&pool, &args, "2026-06-01")
             .await
-            .expect("phòng bẩn vẫn tra được giá — không phải lỗi hệ thống");
+            .expect("phòng không trống vẫn tra được giá — không phải lỗi hệ thống");
 
         let action = match outcome {
             DraftOutcome::Ready(action) => action,
@@ -2274,8 +2291,8 @@ mod tests {
         assert_eq!(
             action.warnings,
             vec![
-                "Phòng đang ở trạng thái bẩn, chưa dọn. `check_in` sẽ TỪ CHỐI: nó chỉ nhận \
-                 phòng đang trống. Phải dọn và đổi trạng thái phòng trước."
+                "Phòng đang ở trạng thái «occupied», không phải trống. `check_in` sẽ TỪ CHỐI: \
+                 nó chỉ nhận phòng đang trống."
                     .to_string()
             ]
         );
@@ -4963,6 +4980,17 @@ mod tests {
         assert!(
             warning.contains("TỪ CHỐI") && warning.contains("check_in"),
             "cảnh báo phải nói rõ lệnh nào sẽ từ chối, không nói giọng lưu ý: {warning}"
+        );
+        // Phòng này vừa `occupied` vừa có khách, nên nó khớp **cả hai** điều
+        // kiện của khối trạng thái phòng. Chỉ được ra một câu: câu riêng ở trên,
+        // vì nó nói thêm được việc phải làm. Thêm câu "đang ở trạng thái
+        // «occupied»" vào đây là kể cùng một lần từ chối hai lần trên một cái
+        // thẻ lễ tân đọc lúc có khách đứng trước mặt.
+        assert_eq!(
+            action.warnings.len(),
+            1,
+            "phòng bận chỉ được một câu cảnh báo, không kèm câu trạng thái trùng ý: {:?}",
+            action.warnings
         );
     }
 
