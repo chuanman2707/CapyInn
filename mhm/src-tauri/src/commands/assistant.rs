@@ -681,6 +681,7 @@ mod tests {
             paid_amount: None,
             pricing_type: None,
             rate_override_per_night: None,
+            guest_count: None,
         };
         let preview = serde_json::json!({ "total": 500000 });
         // Khoảng ngày y như đường thật: `build_check_in_draft` truyền
@@ -1162,6 +1163,7 @@ mod tests {
              Ảnh giấy tờ: /anh-giay-to/cccd-a.jpg\n\
              - check_in_date: Hôm nay, 04/08/2026\n\
              - check_out_date: 06/08/2026\n\
+             - guest_count: Không ghi (tính 1 người)\n\
              - guests: 1 người\n\
              - nights: 2 đêm\n\
              - notes: —\n\

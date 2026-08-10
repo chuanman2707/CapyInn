@@ -68,7 +68,12 @@ interface HotelStore {
     // dữ liệu mập mờ (string | number | undefined) đứng cạnh nhau — thêm một
     // `number | null` nữa vào cuối là chỗ dễ đọc nhầm thứ tự nhất. Gói riêng
     // buộc mọi call site phải gõ tên trường ra, đọc là hiểu ngay.
-    options?: { rateOverridePerNight?: number | null },
+    //
+    // `guestCount` vào đây chứ KHÔNG thành tham số vị trí thứ 8: nó cũng là
+    // `number | null`, đứng cạnh `rateOverridePerNight` thì đúng hai con số
+    // dễ hoán vị nhất nằm liền nhau — một cú gọi nhầm thứ tự sẽ lấy số khách
+    // làm giá phòng mà vẫn biên dịch trót lọt.
+    options?: { rateOverridePerNight?: number | null; guestCount?: number | null },
   ) => Promise<void>;
   checkOut: (
     bookingId: string,
@@ -177,6 +182,9 @@ export const useHotelStore = create<HotelStore>((set, get) => {
               source,
               notes,
               paid_amount: optionalMoneyVnd(paidAmount, "paid_amount"),
+              // Bỏ trống thì backend hiểu là một người. Gửi `null` chứ không
+              // gửi 1 ở đây, để chỗ quyết định "trống nghĩa là mấy" chỉ có một.
+              guest_count: options?.guestCount ?? null,
               // Khoá tường minh, kể cả khi không sửa giá: `null` đọc log ra
               // thấy được là "đã hỏi và giữ giá hệ thống", còn thiếu khoá thì
               // không phân biệt được với "phiên bản cũ chưa biết trường này".

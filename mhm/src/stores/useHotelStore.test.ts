@@ -94,6 +94,9 @@ describe("useHotelStore monitoring context", () => {
           source: "walk-in",
           notes: "Late arrival",
           paid_amount: 500000,
+          // Không khai số khách ở quầy thì gửi `null`; backend là chỗ duy nhất
+          // quyết định "trống nghĩa là một người".
+          guest_count: null,
           rate_override_per_night: null,
         },
       },
@@ -129,6 +132,7 @@ describe("useHotelStore monitoring context", () => {
           source: undefined,
           notes: "",
           paid_amount: 250000,
+          guest_count: null,
           rate_override_per_night: null,
         },
       },

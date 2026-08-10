@@ -193,9 +193,19 @@ pub struct CheckInRequest {
     pub notes: Option<String>,
     pub paid_amount: Option<MoneyVnd>,
     pub pricing_type: Option<String>,
+    /// Số người thực sự ở, hỏi ở quầy nhưng không bắt buộc điền.
+    ///
+    /// Khác với `guests` phía trên: danh sách kia là hồ sơ khai báo lưu trú, còn
+    /// đây là con số dùng để tính phụ thu vượt mốc. Bỏ trống nghĩa là **một
+    /// người** — không phải "chưa biết", vì một báo giá không được phép treo.
+    #[serde(default)]
+    pub guest_count: Option<i32>,
     /// Giá mỗi đêm do lễ tân gõ tay, đè giá engine. `None` ⇒ engine tính như cũ.
     /// Kiểu `Option` để mọi nơi dựng `CheckInRequest` hôm nay chỉ cần thêm
     /// `None` là biên dịch lại được, không phải đổi hành vi.
+    ///
+    /// Đi cùng `guest_count` ở trên nhưng KHÔNG nhân với nó: giá tay đè phẳng,
+    /// xem `check_in_tx`.
     pub rate_override_per_night: Option<MoneyVnd>,
 }
 

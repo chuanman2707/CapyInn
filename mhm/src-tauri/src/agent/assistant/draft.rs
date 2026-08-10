@@ -291,6 +291,23 @@ pub fn build_check_in_display(
         );
     }
 
+    // Con số TÍNH TIỀN, tách hẳn khỏi dòng `guests` phía trên (dòng kia đếm hồ
+    // sơ khai báo lưu trú). Hai con số này có thể lệch nhau một cách hợp lệ —
+    // khai ba người mà chỉ tính tiền một người là chuyện lễ tân phải nhìn thấy
+    // trước khi bấm Đồng ý, nên thẻ phải nói cả hai.
+    //
+    // Trợ lý luôn gửi `None` ở trường này (xem `build_check_in_draft`), nên vế
+    // `None` mới là thứ thật sự hiện ra. Chữ khác `ReserveRequest.guests`: ở
+    // đường đặt trước `None` nghĩa là KHÔNG thu phụ thu, còn ở đây `None` là
+    // MỘT người — `check_in_tx` làm `unwrap_or(1)`.
+    display.insert(
+        "guest_count".to_string(),
+        match payload.guest_count {
+            None => "Không ghi (tính 1 người)".to_string(),
+            Some(count) => format!("{count} người"),
+        },
+    );
+
     display.insert("nights".to_string(), format!("{} đêm", payload.nights));
     display.insert(
         "source".to_string(),
@@ -689,6 +706,12 @@ pub async fn build_check_in_draft(
             .map(str::to_string),
         paid_amount,
         pricing_type: Some(pricing_type),
+        // `None`, KHÔNG phải `guests.len()`: báo giá ở trên hỏi engine với số
+        // khách `None`, nên khai một con số ở đây sẽ làm thẻ báo một đằng mà
+        // lúc nhận phòng thu một nẻo — đúng thứ nguyên tắc "số báo cho khách
+        // phải là số sẽ thu" cấm. Muốn trợ lý thu phụ thu thêm người thì phải
+        // sửa CẢ hai chỗ cùng lúc, và đó là việc của một thay đổi khác.
+        guest_count: None,
         // Trợ lý không tự đặt giá tay: đó là việc lễ tân làm ở quầy khi mặc cả
         // với khách, không phải việc một mô hình ngôn ngữ quyết định thay. Thẻ
         // này vẫn đi qua đường engine như cũ.
@@ -1746,6 +1769,7 @@ mod tests {
             // Trợ lý không bao giờ tự đặt giá tay (xem `build_check_in_draft`),
             // nên `None` ở đây mới đúng hình dạng payload thật đi qua đường này.
             rate_override_per_night: None,
+            guest_count: None,
         }
     }
 

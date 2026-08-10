@@ -814,6 +814,7 @@ mod tests {
             notes: Some("Late arrival".to_string()),
             paid_amount: Some(500_000),
             pricing_type: None,
+            guest_count: Some(2),
             rate_override_per_night: None,
         });
 

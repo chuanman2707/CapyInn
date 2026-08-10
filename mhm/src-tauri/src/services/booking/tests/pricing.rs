@@ -339,6 +339,7 @@ async fn manual_rate_at_check_in_overrides_the_engine_price() {
             paid_amount: None,
             pricing_type: None,
             rate_override_per_night: Some(400_000),
+            guest_count: None,
         },
         Some("admin-1".to_string()),
     )
@@ -408,6 +409,7 @@ async fn manual_rate_rejects_paying_more_than_the_total() {
             paid_amount: Some(500_000),
             pricing_type: None,
             rate_override_per_night: Some(400_000),
+            guest_count: None,
         },
         Some("admin-1".to_string()),
     )
@@ -447,6 +449,7 @@ async fn manual_rate_at_check_in_rejects_a_huge_rate_even_with_paid_amount() {
             // MAX_RATE_PER_NIGHT_VND (100_000_000) — mô phỏng dán nhầm/gõ
             // thừa số 0.
             rate_override_per_night: Some(9_500_000_000_000_000),
+            guest_count: None,
         },
         Some("admin-1".to_string()),
     )
@@ -490,6 +493,7 @@ async fn manual_rate_at_check_in_rejects_a_negative_rate_even_with_paid_amount()
             paid_amount: Some(100_000),
             pricing_type: None,
             rate_override_per_night: Some(-500_000),
+            guest_count: None,
         },
         Some("admin-1".to_string()),
     )
@@ -540,6 +544,7 @@ async fn check_in_without_override_rejects_paying_more_than_the_engine_total() {
             paid_amount: Some(600_000),
             pricing_type: None,
             rate_override_per_night: None,
+            guest_count: None,
         },
         Some("admin-1".to_string()),
     )
@@ -596,6 +601,7 @@ async fn manual_rate_at_check_in_rejects_zero_and_negative_rates() {
                 paid_amount: None,
                 pricing_type: None,
                 rate_override_per_night: Some(rate),
+                guest_count: None,
             },
             Some("admin-1".to_string()),
         )
@@ -636,6 +642,7 @@ async fn manual_rate_at_check_in_rejects_a_rate_above_the_cap() {
             paid_amount: None,
             pricing_type: None,
             rate_override_per_night: Some(100_000_001),
+            guest_count: None,
         },
         Some("admin-1".to_string()),
     )
@@ -666,6 +673,7 @@ async fn manual_rate_at_check_in_allows_paying_exactly_the_total() {
             paid_amount: Some(800_000),
             pricing_type: None,
             rate_override_per_night: Some(400_000),
+            guest_count: None,
         },
         Some("admin-1".to_string()),
     )
@@ -696,6 +704,7 @@ async fn check_in_without_override_still_uses_the_engine() {
             paid_amount: None,
             pricing_type: None,
             rate_override_per_night: None,
+            guest_count: None,
         },
         Some("admin-1".to_string()),
     )

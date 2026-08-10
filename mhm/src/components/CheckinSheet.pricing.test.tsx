@@ -102,15 +102,31 @@ describe("CheckinSheet total price", () => {
     expect(Date.parse(checkOut) - Date.parse(checkIn)).toBe(86_400_000);
   });
 
-  /// `stay_lifecycle::check_in` prices with `None`, so a walk-in is never billed
-  /// the extra-person fee. Sending a guest count here would quote above what the
-  /// desk collects — the same defect as the multiplication, in the other
-  /// direction.
-  it("asks with no guest count, exactly as the check-in charges", async () => {
+  /// Ô số khách để trống thì không khai gì cả — `check_in` là chỗ duy nhất biết
+  /// "trống nghĩa là một người". Báo giá cũng hỏi bằng đúng con số ấy, nên hai
+  /// bên vẫn ra cùng một kết quả.
+  it("asks with no guest count while the field is blank", async () => {
     render(<CheckinSheet preSelectedRoomId="R101" />);
 
     await waitFor(() => expect(previewArgs().length).toBeGreaterThan(0));
     expect(previewArgs()[0].guests).toBeNull();
+  });
+
+  /// Khai 4 người thì báo giá phải hỏi bằng 4. Trước đây chỗ này cứng `null`, và
+  /// đó là lý do phụ thu thêm người chưa từng hiện trên báo giá lẫn hoá đơn.
+  it("asks with the headcount the desk actually entered", async () => {
+    const { container } = render(<CheckinSheet preSelectedRoomId="R101" />);
+    await waitFor(() => expect(previewArgs().length).toBeGreaterThan(0));
+
+    const field = Array.from(container.querySelectorAll("input[type=number]")).find(
+      (input) => (input as HTMLInputElement).value === "",
+    ) as HTMLInputElement;
+    fireEvent.change(field, { target: { value: "4" } });
+
+    await waitFor(() => {
+      const latest = previewArgs()[previewArgs().length - 1];
+      expect(latest.guests).toBe(4);
+    });
   });
 
   /// The local day is what `special_dates` is looked up by. `toISOString()`

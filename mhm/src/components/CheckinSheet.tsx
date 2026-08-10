@@ -36,6 +36,8 @@ export default function CheckinSheet({ preSelectedRoomId, preSelectedNights }: {
     // Giá tay lễ tân gõ đè, đơn vị mỗi đêm. `null` = đang dùng giá engine.
     const [rateOverride, setRateOverride] = useState<number | null>(null);
     const [nights, setNights] = useState(1);
+    // Chuỗi, không phải số: ô này được phép để trống, và "trống" khác "0".
+    const [guestCount, setGuestCount] = useState("");
     const [paidAmount, setPaidAmount] = useState(0);
     const [source, setSource] = useState("walk-in");
     const [notes, setNotes] = useState("");
@@ -181,6 +183,11 @@ export default function CheckinSheet({ preSelectedRoomId, preSelectedNights }: {
     // Con số phải do engine trả về. `base_price × nights` bỏ qua bảng giá đã
     // cấu hình, phụ thu cuối tuần và phụ thu ngày lễ — những thứ lúc thu tiền
     // đều tính.
+    // Trống, số âm, hay chữ vô nghĩa đều thành `null` — tức "không khai", chứ
+    // không thành 0 khách.
+    const parsedGuestCount =
+        guestCount.trim() === "" || Number(guestCount) < 1 ? null : Math.floor(Number(guestCount));
+
     const {
         preview: stayPrice,
         loading: priceLoading,
@@ -189,9 +196,10 @@ export default function CheckinSheet({ preSelectedRoomId, preSelectedNights }: {
         roomId: selectedRoom,
         checkIn: quoteCheckIn,
         checkOut: quoteCheckOut,
-        // `stay_lifecycle::check_in` truyền `None`, nên khách vãng lai không bị
-        // tính phụ thu thêm người. Gửi số khách ở đây sẽ báo cao hơn số thực thu.
-        guests: null,
+        // Đúng con số sẽ được thu: `check_in` giờ tính phụ thu theo số khách,
+        // nên báo giá phải hỏi bằng chính con số ấy. Để trống thì gửi `null` và
+        // backend hiểu là một người — chỗ quyết định "trống là mấy" chỉ có một.
+        guests: parsedGuestCount,
     });
 
     // Ngày địa phương, không phải `toISOString()`: trước 07:00 giờ Việt Nam thì
@@ -238,6 +246,7 @@ export default function CheckinSheet({ preSelectedRoomId, preSelectedNights }: {
         try {
             await checkIn(selectedRoom, guests, nights, paidAmount, source, notes, {
                 rateOverridePerNight: rateOverride,
+                guestCount: parsedGuestCount,
             });
             closeAll();
             toast.success("Check-in thành công!");
@@ -479,6 +488,14 @@ export default function CheckinSheet({ preSelectedRoomId, preSelectedNights }: {
                             value={String(nights)}
                             type="number"
                             onChange={(v) => setNights(Number(v) || 1)}
+                        />
+
+                        {/* Guest headcount — hỏi, nhưng không bắt buộc */}
+                        <FormField
+                            label="Số khách (để trống = 1)"
+                            value={guestCount}
+                            type="number"
+                            onChange={setGuestCount}
                         />
 
                         {/* Paid amount */}

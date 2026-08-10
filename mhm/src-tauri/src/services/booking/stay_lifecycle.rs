@@ -352,11 +352,23 @@ async fn check_in_tx(
         )));
     }
 
+    // Bỏ trống là một người. Truyền `None` xuống engine sẽ là "không biết", và
+    // engine hiểu "không biết" thành "không tính phụ thu" — đó chính là lý do
+    // phụ thu thêm người chưa bao giờ chạy trên đường nhận khách trực tiếp.
+    let guest_count = req.guest_count.unwrap_or(1);
+
     // Giá tay đè giá engine, và đè PHẲNG: tổng tiền là `rate × nights`, không
     // cộng thêm phụ thu người thứ N hay bất cứ dòng nào engine tính — lễ tân
     // đã mặc cả ra một con số chốt, không phải một cấu phần để engine tính
-    // tiếp. `check_in_tx` gốc cũng gọi engine với `guests: None` (không thu
-    // phụ thu thêm người), nên hành vi không-override giữ nguyên y hệt cũ.
+    // tiếp. `guest_count` vẫn được GHI vào cột `guests` ở câu INSERT bên dưới
+    // (hoá đơn và báo cáo đọc cột đó), nó chỉ không tham gia vào con số tiền
+    // của nhánh này.
+    //
+    // GỘP NHÁNH: trước khi có `guest_count`, nhánh không-override cũng gọi
+    // engine với `None` nên phụ thu thêm người chưa bao giờ chạy — đó chính là
+    // con bug nhánh này đi sửa. Từ đây nhánh không-override truyền
+    // `Some(guest_count)`, nên hành vi của nó CÓ đổi so với main: một lượt
+    // nhận phòng vượt mốc khách giờ thu thêm đúng như bảng giá đã cài.
     let (total_price, rate_overridden_at, pricing_snapshot) = match req.rate_override_per_night {
         Some(rate) => {
             // `validate_check_in_request` đã chặn giá ngoài biên trước khi
@@ -376,13 +388,19 @@ async fn check_in_tx(
             // dùng làm tiền thật — nên lỗi ở bước này không được làm hỏng cả
             // lượt nhận phòng. Lỗi thì lưu `null` (không rõ), không lưu 0 — 0
             // sẽ đọc nhầm thành "engine định giá phòng này bằng không".
+            //
+            // `Some(guest_count)` chứ không `None`: con số này để trả lời "đã
+            // giảm cho khách bao nhiêu", nên nó phải là giá engine SẼ thu cho
+            // đúng lượt này — mà từ nhánh gộp trở đi, giá đó có phụ thu thêm
+            // người. Truyền `None` sẽ lưu một con số hệ thống không bao giờ
+            // thu, làm phần giảm giá đọc ra lớn hơn thực tế.
             let engine_total = calculate_stay_price_tx(
                 tx,
                 &req.room_id,
                 &check_in_at,
                 &expected_checkout,
                 &pricing_type,
-                None,
+                Some(guest_count),
             )
             .await
             .map(|pricing| pricing.total)
@@ -407,7 +425,7 @@ async fn check_in_tx(
                 &check_in_at,
                 &expected_checkout,
                 &pricing_type,
-                None,
+                Some(guest_count),
             )
             .await?;
             (pricing.total, None, None)
@@ -440,8 +458,8 @@ async fn check_in_tx(
             id, room_id, primary_guest_id, check_in_at, expected_checkout,
             actual_checkout, nights, total_price, paid_amount, status, source,
             notes, created_by, booking_type, pricing_type, pricing_snapshot,
-            rate_overridden_at, created_at
-        ) VALUES (?, ?, ?, ?, ?, NULL, ?, ?, 0, ?, ?, ?, ?, 'walk-in', ?, ?, ?, ?)",
+            rate_overridden_at, created_at, guests
+        ) VALUES (?, ?, ?, ?, ?, NULL, ?, ?, 0, ?, ?, ?, ?, 'walk-in', ?, ?, ?, ?, ?)",
     )
     .bind(&booking_id)
     .bind(&req.room_id)
@@ -458,6 +476,7 @@ async fn check_in_tx(
     .bind(&pricing_snapshot)
     .bind(&rate_overridden_at)
     .bind(&check_in_at)
+    .bind(guest_count)
     .execute(&mut **tx)
     .await
     .map_err(BookingError::from)
@@ -2214,6 +2233,7 @@ mod tests {
             paid_amount: Some(100_000),
             pricing_type: None,
             rate_override_per_night: Some(rate),
+            guest_count: None,
         }
     }
 
