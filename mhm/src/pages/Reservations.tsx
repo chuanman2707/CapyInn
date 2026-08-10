@@ -435,8 +435,27 @@ export default function Reservations() {
         };
     }, [dragSel, DAYS, colWidth]);
 
+    // `max-h-full`, KHÔNG phải `h-full`: thẻ này phải BỊ CHẶN bằng chiều cao
+    // khung nhìn để khung lịch bên trong thành nơi cuộn (nhờ đó hàng ngày tháng
+    // `sticky top-0` mới bám được), nhưng vẫn ôm sát nội dung khi ít phòng. Đo
+    // trong Chromium, khung nhìn giả lập 422px, hàng 34px:
+    //   - `h-full` + 5 phòng: thẻ bị kéo căng 350px, chừa một mảng trắng dưới
+    //     hàng cuối — khách sạn 10 phòng hiện tại đổi hình mà chẳng được gì.
+    //   - `max-h-full` + 5 phòng: thẻ cao 258px, không thẻ nào cuộn. Giống hệt
+    //     hôm nay.
+    //   - `max-h-full` + 28 phòng: thẻ chạm trần 348px, chính khung lịch cuộn
+    //     700px còn hàng ngày tháng đứng yên ở mép trên.
+    // `max-height` vẫn cho `flex-1 min-h-0 overflow-auto` bên trong hoạt động:
+    // khi nội dung vượt trần, chiều cao thẻ thành xác định và khung lịch nhận
+    // đúng phần còn lại sau thanh công cụ.
+    // Chỉ chặn được khi thẻ bọc `animate-fade-up` ở `MainShell` có chiều cao xác
+    // định — xem `SELF_SCROLLING_TABS` ở đó. Thiếu vế kia thì `max-height:100%`
+    // rơi về `none` và cả hai vế cùng vô nghĩa.
     return (
-        <div className="flex flex-col h-full bg-white rounded-3xl shadow-soft overflow-hidden">
+        <div
+            data-testid="timeline-card"
+            className="flex flex-col max-h-full bg-white rounded-3xl shadow-soft overflow-hidden"
+        >
 
             {/* Toolbar */}
             <div className="flex items-center justify-between p-5 border-b border-slate-100 bg-white z-20">

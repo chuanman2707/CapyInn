@@ -74,6 +74,17 @@ const PAGE_TITLES: Record<string, string> = {
   declaration: "Khai báo tạm trú",
 };
 
+// Trang nào tự cuộn BÊN TRONG mình thì tên nằm ở đây. Chuỗi cao độ từ
+// `h-screen` xuống tới đây đều xác định (`main h-full` -> `flex-1` của vùng
+// nội dung), nhưng thẻ bọc `animate-fade-up` thì `height:auto`, nên mọi
+// `h-full`/`max-h-full` của trang con rơi về `auto` và trang cứ dài ra thay vì
+// tự cuộn. Thêm `h-full` vào đúng thẻ bọc đó là mắt xích còn thiếu.
+// Danh sách này CÓ CHỌN LỌC, không bật cho mọi trang: `pages/settings`
+// cũng có `h-full` ở gốc và một `Card overflow-y-auto` đang nằm im — bật
+// chiều cao xác định cho nó sẽ đổi luôn cách Settings cuộn (cột trái đứng
+// yên, chỉ thẻ phải chạy). Đó là thay đổi khác, không thuộc lần sửa này.
+const SELF_SCROLLING_TABS = new Set(["reservations"]);
+
 export function MainShell() {
   const { activeTab, setTab, setCheckinOpen, setGroupCheckinOpen, checkinRoomId, checkinNights } = useHotelStore();
   const { user, logout } = useAuthStore();
@@ -420,7 +431,7 @@ export function MainShell() {
 
         {/* CONTENT AREA */}
         <div className="flex-1 overflow-y-auto px-10 pb-10">
-          <div className="animate-fade-up">
+          <div className={`animate-fade-up${SELF_SCROLLING_TABS.has(activeTab) ? " h-full" : ""}`}>
             {activeTab === "dashboard" && <Dashboard />}
             {activeTab === "rooms" && <Rooms />}
             {activeTab === "reservations" && <Reservations />}

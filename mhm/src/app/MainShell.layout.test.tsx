@@ -176,6 +176,37 @@ describe("MainShell — bố cục ba cột", () => {
     expect(within(container).queryByPlaceholderText("Hỏi hoặc ra việc…")).toBeNull();
   });
 
+  // ── Chiều cao vùng nội dung ──────────────────────────────────────────────
+  //
+  // GIỚI HẠN: jsdom không dựng bố cục và không cuộn, nên nó KHÔNG kiểm được
+  // hàng ngày tháng của lịch có bám hay không. Nó chỉ ghim mắt xích chiều cao —
+  // nửa còn lại nằm ở `max-h-full` của thẻ lịch (`pages/Reservations`). Thiếu
+  // MỘT trong hai thì `max-height:100%` rơi về `none`, khung lịch không bao giờ
+  // tự cuộn, và `sticky top-0` của hàng ngày tháng trôi lên mất cùng cả thẻ.
+  describe("chiều cao thẻ bọc nội dung", () => {
+    const wrapper = (container: HTMLElement) => container.querySelector(".animate-fade-up");
+
+    it("cho trang lịch một chiều cao xác định để nó tự cuộn bên trong", async () => {
+      useHotelStore.setState({ activeTab: "reservations" });
+      const { container } = render(<MainShell />);
+      await waitFor(() => expect(screen.getByText("Reservations page")).toBeInTheDocument());
+
+      expect(wrapper(container)).toHaveClass("h-full");
+    });
+
+    it("KHÔNG áp chiều cao đó cho các trang cuộn theo cả trang", async () => {
+      // Vế âm mới là vế có răng. Bật `h-full` cho mọi trang thì `pages/settings`
+      // — vốn cũng có `h-full` ở gốc và một `Card overflow-y-auto` đang nằm im —
+      // lặng lẽ đổi cách cuộn: cột trái đứng yên, chỉ thẻ phải chạy. Đó là thay
+      // đổi cho một lần khác, không phải tác dụng phụ của lần sửa lịch này.
+      useHotelStore.setState({ activeTab: "settings" });
+      const { container } = render(<MainShell />);
+      await waitFor(() => expect(screen.getByText("Settings page")).toBeInTheDocument());
+
+      expect(wrapper(container)).not.toHaveClass("h-full");
+    });
+  });
+
   // ── Nút Trợ lý ở thanh điều hướng ────────────────────────────────────────
   //
   // Nút này TỪNG nằm ở cụm phải của header, cạnh `SCANNER READY`. Nó mở/đóng

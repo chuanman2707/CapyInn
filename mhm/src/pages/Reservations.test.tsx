@@ -718,6 +718,27 @@ describe("Reservations column width", () => {
     expect(screen.getByTestId("timeline-day-header").className).toContain("z-30");
   });
 
+  // GIỚI HẠN, cùng loại với test z-index ở trên: jsdom không dựng bố cục và
+  // không cuộn, nên nó KHÔNG thấy được hàng ngày tháng có bám hay không. Nó chỉ
+  // ghim đúng hai lớp làm nên khung cuộn. Kiểm mắt thường trên ứng dụng thật
+  // với số phòng cao hơn khung nhìn vẫn là bắt buộc.
+  it("chặn chiều cao thẻ lịch bằng khung nhìn thay vì kéo căng nó", async () => {
+    render(<Reservations />);
+
+    const card = await screen.findByTestId("timeline-card");
+
+    // `max-h-full` mới là thứ biến khung lịch bên trong thành nơi cuộn — thiếu
+    // nó thì thẻ dài ra theo số phòng, vùng nội dung của MainShell cuộn thay,
+    // và `sticky top-0` của hàng ngày tháng bám vào một khung không cuộn nên
+    // trôi lên mất cùng cả thẻ.
+    expect(card).toHaveClass("max-h-full");
+    // Vế âm: `h-full` kéo thẻ căng hết khung nhìn kể cả khi khách sạn chỉ có
+    // vài phòng, chừa một mảng trắng dưới hàng cuối. Dùng `toHaveClass` chứ
+    // KHÔNG dùng `className).toContain("h-full")` — chuỗi "max-h-full" chứa
+    // "h-full" nên phép so chuỗi luôn đúng và test sẽ xanh vĩnh viễn.
+    expect(card).not.toHaveClass("h-full");
+  });
+
   it("falls back to the 80px minimum when the timeline has no measurable width", async () => {
     invoke.mockImplementation(async (command: string) => {
       if (command === "get_all_bookings") {
