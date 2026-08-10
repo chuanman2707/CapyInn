@@ -166,6 +166,63 @@ async fn load_options_hides_an_occupied_room_when_the_guest_moves_in_tonight() {
     );
 }
 
+/// Ghim riêng vế `moving_in_today` của `requires_vacant_room`.
+///
+/// Test ngay trên tên là "moves in tonight" nhưng chạy trên
+/// `seed_stay_in_progress` — booking ACTIVE — nên vế sau của phép OR một mình
+/// đã đủ giữ nó xanh: xoá `moving_in_today ||` cả hai test kia vẫn xanh. Ở đây
+/// booking còn `booked` (chưa nhận phòng), nên chỉ còn vế `moving_in_today`
+/// giữ được bộ lọc.
+///
+/// `seed_booked_reservation` giữ 20/04 và 21/04; lấy hôm nay là 20/04 thì đêm
+/// chuyển đầu tiên đúng là tối nay. Đây là thứ `confirm_reservation_tx` đòi ở
+/// quầy: phòng phải `vacant` hoặc `booked` (`UPDATE rooms ... status IN (VACANT,
+/// BOOKED)`, `reservation_lifecycle.rs:768`). Gợi ý một phòng `occupied` thì lúc
+/// khách tới nhận phòng lệnh ghi trả về "room is no longer available for
+/// confirmation".
+#[tokio::test]
+async fn load_options_requires_vacant_room_for_a_booked_reservation_moving_in_tonight() {
+    let pool = test_pool().await;
+    seed_room(&pool, "R-RES").await.unwrap();
+    seed_room(&pool, "R-ALT").await.unwrap();
+    seed_pricing_rule(&pool, "standard", 250_000).await.unwrap();
+    seed_booked_reservation(&pool, "B-RES", "R-RES")
+        .await
+        .unwrap();
+    sqlx::query("UPDATE rooms SET status = 'occupied' WHERE id = 'R-ALT'")
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    let options = room_change::load_options(
+        &pool,
+        "B-RES",
+        NaiveDate::from_ymd_opt(2026, 4, 20).unwrap(),
+    )
+    .await
+    .unwrap();
+
+    let booking_status: String =
+        sqlx::query_scalar("SELECT status FROM bookings WHERE id = 'B-RES'")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(
+        booking_status, "booked",
+        "tiền đề: booking phải còn booked — nếu thành active thì vế ACTIVE tự làm test xanh"
+    );
+    assert_eq!(
+        options.from_date, "2026-04-20",
+        "tiền đề: đêm chuyển đầu tiên phải là hôm nay"
+    );
+
+    let ids: Vec<&str> = options.rooms.iter().map(|r| r.room_id.as_str()).collect();
+    assert!(
+        !ids.contains(&"R-ALT"),
+        "khách vào ngay tối nay thì không gợi ý phòng đang có người — confirm_reservation_tx sẽ từ chối"
+    );
+}
+
 /// `load_options` only applied the vacancy filter when `moving_in_today`. But
 /// `change_room_tx` requires the new room to be `vacant` whenever the booking
 /// is ACTIVE (see the final `UPDATE rooms ... WHERE status = 'vacant'` guard),

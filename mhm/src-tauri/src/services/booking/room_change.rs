@@ -134,6 +134,12 @@ pub async fn load_options(
 
     // Phòng trống suốt dải đêm còn lại. Dòng của chính booking này không tính là vướng.
     //
+    // Khách vào ngay tối nay thì phòng mới phải `vacant`, vì đó đúng là thứ
+    // `confirm_reservation_tx` đòi ở quầy — nó chỉ nhận phòng `vacant` hoặc
+    // `booked` (UPDATE rooms ... status IN (VACANT, BOOKED),
+    // `reservation_lifecycle.rs:768`) — nên gợi ý một phòng `occupied` là gợi ý
+    // một phòng mà lúc nhận phòng lệnh ghi sẽ từ chối.
+    //
     // Nhưng một booking đang ACTIVE thì luôn bắt buộc phòng mới phải `vacant`,
     // bất kể đêm chuyển đầu tiên có phải tối nay hay không — `change_room_tx`
     // đòi hỏi điều đó vô điều kiện cho booking active (UPDATE rooms ... WHERE
