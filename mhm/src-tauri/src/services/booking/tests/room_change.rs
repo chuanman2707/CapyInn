@@ -143,7 +143,7 @@ async fn load_options_hides_room_taken_on_any_remaining_night() {
 }
 
 #[tokio::test]
-async fn load_options_hides_an_occupied_room_when_the_guest_moves_in_tonight() {
+async fn load_options_hides_an_occupied_room_for_an_active_booking() {
     let pool = test_pool().await;
     seed_stay_in_progress(&pool).await;
     sqlx::query("UPDATE rooms SET status = 'occupied' WHERE id = 'R-NEW'")

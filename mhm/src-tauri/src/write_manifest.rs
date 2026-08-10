@@ -237,9 +237,22 @@ mod tests {
                 "{anchor} phải đọc được từ commands/"
             );
         }
+
+        // Ngưỡng và mỏ neo mới chỉ chặn được bộ đọc trả RỖNG. Bộ đọc mất một
+        // KHÚC ĐUÔI — chẳng hạn thêm một dòng trong `generate_handler![…]` mà
+        // trim ra `])` — vẫn qua cả hai, rồi để test dưới đỏ với thông điệp bảo
+        // "gỡ dòng manifest": xúi gỡ một dòng đang sống. Hai tập này bằng nhau
+        // đúng nghĩa (mọi lệnh khai đều đăng ký và ngược lại), nên so bằng ở đây
+        // biến mọi kiểu đọc thiếu thành lỗi mang hình dạng BỘ ĐỌC.
+        assert_eq!(
+            registered, declared,
+            "hai bộ đọc lệch nhau — sửa bộ đọc, đừng sửa manifest"
+        );
     }
 
-    /// Chiều thuận: mọi lệnh bắt buộc phải có dòng trong manifest.
+    /// Chiều thuận: 14 lệnh trong danh sách cứng dưới đây bắt buộc phải có dòng
+    /// trong manifest. KHÔNG phải bảo đảm tổng quát: thêm một lệnh ghi mới mà
+    /// quên dòng manifest thì không test nào ở đây bắt được.
     ///
     /// Đi cùng `command_manifest_has_no_entry_for_a_removed_command` bên dưới —
     /// một mình nó chỉ là kiểm tra chứa một chiều, không bắt được dòng mồ côi.

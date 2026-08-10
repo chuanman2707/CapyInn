@@ -529,7 +529,20 @@ export default function Reservations() {
             <div ref={timelineRef} className="flex-1 flex flex-col min-h-0 overflow-auto relative">
 
                 {/* Day Headers */}
-                <div className="flex border-b border-slate-100 bg-white sticky top-0 z-10 w-max min-w-full">
+                {/* `z-30`, KHÔNG phải `z-10`: từ lúc khung cuộn dời lên thẻ cha, hàng
+                    ngày tháng và các hàng phòng nằm CHUNG một ngữ cảnh xếp lớp. Cùng
+                    z-10 thì thẻ đứng sau trong DOM thắng, nên nhãn phòng (`z-10`) và
+                    thanh booking (`z-10`) vẽ ĐÈ lên hàng ngày, còn vạch hôm nay (`z-20`)
+                    xuyên qua nó. Không chỉ xấu: cú bấm nhắm vào ô ngày rơi trúng
+                    `onClick` của thanh booking và mở nhầm khách. Phải vượt `z-20` chứ
+                    không chỉ vượt `z-10`. Trước đây chuyện này bất khả vì phần thân tự
+                    cuộn nên tự cắt nội dung ở mép trên của chính nó.
+                    `z-20` của ô "Rooms" bên trong vẫn chạy: thẻ này là ngữ cảnh xếp
+                    lớp riêng nên con của nó xếp trong lòng nó. */}
+                <div
+                    data-testid="timeline-day-header"
+                    className="flex border-b border-slate-100 bg-white sticky top-0 z-30 w-max min-w-full"
+                >
                     <div style={{ width: ROOM_LABEL_WIDTH }} className="shrink-0 border-r border-slate-100 bg-white shadow-[2px_0_10px_rgba(0,0,0,0.02)] sticky left-0 z-20 flex items-center px-4">
                         <span className="text-xs font-semibold text-slate-500">Rooms</span>
                     </div>

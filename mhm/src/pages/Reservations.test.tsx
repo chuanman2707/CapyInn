@@ -687,6 +687,37 @@ describe("Reservations column width", () => {
     expect(bar.style.width).toBe("408px");
   });
 
+  // GIỚI HẠN: ghim TÊN LỚP, không ghim thứ tự vẽ thật — jsdom không vẽ và không
+  // cuộn, nên nó không thấy được cảnh hàng phòng đè lên hàng ngày tháng. Nó chỉ
+  // chặn việc lặng lẽ hạ z-index của hàng ngày về ngang hàng với thanh booking.
+  // Kiểm mắt thường trên ứng dụng thật vẫn là bắt buộc.
+  it("keeps the day header stacked above the bars and the today marker", async () => {
+    // Từ lúc khung cuộn dời lên thẻ cha, hàng ngày và các hàng phòng nằm chung
+    // một ngữ cảnh xếp lớp. Cùng z-10 thì thẻ sau trong DOM thắng: nhãn phòng và
+    // thanh booking vẽ đè lên hàng ngày, vạch hôm nay xuyên qua, và cú bấm vào ô
+    // ngày rơi trúng onClick của thanh booking. Hàng ngày phải vượt CẢ z-20.
+    invoke.mockImplementation(async (command: string) => {
+      if (command === "get_all_bookings") {
+        return [
+          bookingAt({
+            id: "B-STACK",
+            status: "active",
+            scheduled_checkin: dateOffsetFromToday(-1),
+            scheduled_checkout: dateOffsetFromToday(3),
+          }),
+        ];
+      }
+      return undefined;
+    });
+
+    render(<Reservations />);
+
+    const bar = await screen.findByTestId("booking-bar-B-STACK");
+    expect(bar.className).toContain("z-10");
+    expect(screen.getByTestId("timeline-today-marker").className).toContain("z-20");
+    expect(screen.getByTestId("timeline-day-header").className).toContain("z-30");
+  });
+
   it("falls back to the 80px minimum when the timeline has no measurable width", async () => {
     invoke.mockImplementation(async (command: string) => {
       if (command === "get_all_bookings") {
