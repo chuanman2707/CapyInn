@@ -232,12 +232,13 @@ describe("PendingList", () => {
 
     render(<PendingList />);
 
-    expect(
-      await screen.findByText(/Khách nước ngoài \(XML\)/i),
-    ).toBeInTheDocument();
-    expect(screen.getByText(/Khách Việt Nam \(XLSX\)/i)).toBeInTheDocument();
-    expect(screen.getByText("ZOLOCHEVSKAIA VERONIKA")).toBeInTheDocument();
+    // Chờ đúng thứ chỉ có sau khi rows về. Hai tiêu đề nhóm luôn được render
+    // (kèm "Không có khách nào"), nên `findByText` vào tiêu đề sẽ trả về ngay
+    // lập tức và các assert sau đó đua với lượt tải dữ liệu.
+    expect(await screen.findByText("ZOLOCHEVSKAIA VERONIKA")).toBeInTheDocument();
     expect(screen.getByText("Nguyễn Văn A")).toBeInTheDocument();
+    expect(screen.getByText(/Khách nước ngoài \(XML\)/i)).toBeInTheDocument();
+    expect(screen.getByText(/Khách Việt Nam \(XLSX\)/i)).toBeInTheDocument();
   });
 
   it("shows blocking error codes on the row", async () => {
