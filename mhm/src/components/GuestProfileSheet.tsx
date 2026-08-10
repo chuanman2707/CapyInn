@@ -6,6 +6,7 @@ import SlideDrawer from "@/components/shared/SlideDrawer";
 import StatCard from "@/components/shared/StatCard";
 import EmptyState from "@/components/shared/EmptyState";
 import { fmtDateShort, fmtMoney } from "@/lib/format";
+import type { BookingStatus } from "@/types";
 
 interface BookingWithRoom {
     booking_id: string;
@@ -13,12 +14,43 @@ interface BookingWithRoom {
     check_in_at: string;
     expected_checkout: string;
     total_price: number;
-    status: string;
+    status: BookingStatus;
 }
 
 interface GuestHistoryResponse {
     guest: { id: string; full_name: string; doc_number: string; nationality: string | null; date_of_birth: string | null; gender: string | null };
     bookings: BookingWithRoom[];
+}
+
+// Nhãn tiếng Việt cho từng status lượt lưu trú. Bản trước chỉ có hai giá trị
+// nhị phân, tiếng Anh, suy từ `status === "active"`: mọi status khác (kể cả
+// "booked" chưa hề diễn ra, hay "cancelled" đã hủy) đều bị gộp vào
+// "Completed" — vừa sai ngôn ngữ vừa sai sự thật. Backend đã lọc "voided"
+// khỏi lịch sử khách (8 đường đọc SQL), nhưng hàm này vẫn nhận diện nó tường
+// minh thay vì rơi vào default — cùng lý do phòng thủ theo chiều sâu như
+// Reservations.tsx.
+/** Không bao giờ được gọi nếu switch bên dưới xét đủ mọi nhánh của BookingStatus. */
+function assertUnreachableStatus(status: never): never {
+    throw new Error(`Thiếu nhãn tiếng Việt cho status: ${String(status)}`);
+}
+
+export function guestBookingStatusLabel(status: BookingStatus): string {
+    switch (status) {
+        case "active":
+            return "Đang ở";
+        case "checked_out":
+            return "Đã trả phòng";
+        case "booked":
+            return "Đặt trước";
+        case "cancelled":
+            return "Đã hủy";
+        case "no_show":
+            return "Không đến";
+        case "voided":
+            return "Đã xóa";
+        default:
+            return assertUnreachableStatus(status);
+    }
 }
 
 export default function GuestProfileSheet({ guestId, onClose }: { guestId: string; onClose: () => void }) {
@@ -103,7 +135,7 @@ export default function GuestProfileSheet({ guestId, onClose }: { guestId: strin
                                         <div className="flex items-center justify-between">
                                             <span className="font-semibold text-sm">Room {b.room_id}</span>
                                             <Badge className={`text-[10px] px-2 py-0 rounded-md border-0 ${isActive ? "bg-blue-50 text-blue-700" : "bg-slate-100 text-slate-500"}`}>
-                                                {isActive ? "Active" : "Completed"}
+                                                {guestBookingStatusLabel(b.status)}
                                             </Badge>
                                         </div>
                                         <p className="text-xs text-brand-muted mt-1">

@@ -30,7 +30,7 @@
 
 ![CapyInn dashboard hero](Public/dashboard.png)
 
-> Built for mini hotels that need one local app for room status, guest intake, nightly billing, housekeeping, and end-of-day reconciliation.
+> Built for mini hotels that need one local app for room status, guest intake, nightly billing, and end-of-day reconciliation.
 
 <p align="center">
   <img src="https://img.shields.io/badge/Offline--first-0F172A?style=flat-square" alt="Offline-first">
@@ -39,7 +39,7 @@
   <img src="https://img.shields.io/badge/Storage-Local%20SQLite-1D4ED8?style=flat-square" alt="Local SQLite">
 </p>
 
-CapyInn is a desktop app for mini hotels and guesthouses that need a local-first operating tool without relying on a remote backend. The project focuses on real front-desk workflows: room layout setup, faster guest intake, Vietnamese ID OCR, nightly pricing, housekeeping, revenue reporting, and end-of-day reconciliation.
+CapyInn is a desktop app for mini hotels and guesthouses that need a local-first operating tool without relying on a remote backend. The project focuses on real front-desk workflows: room layout setup, faster guest intake, Vietnamese ID OCR, nightly pricing, revenue reporting, and end-of-day reconciliation.
 
 > Note: `CapyInn` is a clean-slate rename from `MHM`. Current builds use the new runtime root at `~/CapyInn` and do not auto-migrate legacy local data from `~/MHM`.
 
@@ -116,6 +116,11 @@ CapyInn is built for a narrow but practical use case: small hotels that need a s
 
 - Dashboard organized around the configured room layout
 - Check-in, check-out, extend-stay, and reservation flows in one desktop app
+- Mid-stay room change for an in-house guest, listing the valid target rooms for that booking and offering a choice between keeping the original price and charging the difference
+- Reservation calendar timeline: click or drag across empty cells to open a check-in or a reservation with those dates already filled in
+- Backfill sheet for recording a stay that already happened, opened from the same calendar
+- Read-only detail popup for a booking that has already checked out, including its issued invoice
+- Void a booking entered by mistake: admin-only, behind a two-second hold, with a confirmation box that states the money and room impact before the action
 - Support for multiple guests on the same booking
 - Fast copy flow for guest registration details
 
@@ -125,16 +130,19 @@ CapyInn is built for a narrow but practical use case: small hotels that need a s
 - Watches `~/CapyInn/Scans/` for new scan files
 - Extracts guest name, national ID number, birth date, and address for check-in
 
-### Billing, payments, and reporting
+### Pricing, billing, and reporting
 
-- Night-based pricing by room type
+- Rates are a property of the room type, not of the individual room: hourly, overnight, and nightly/daily models, with an hourly total capped at the cheaper block
+- Weekend uplift, peak-season uplift, and early check-in / late check-out surcharges
+- Peak seasons are declared in Settings as date ranges; the uplift is charged only for the nights that fall inside one
+- Extra-person surcharge per guest per night above the room's included headcount — reservations carry a guest count and are quoted with it
+- Manual nightly rate: the front desk can override the engine price per night at check-in, on a reservation, and per room on a group check-in; the override survives confirm and modify because it is stored as a rate per night, not a total
+- Prices shown before a stay come from the backend preview that will charge it, never from arithmetic in the UI — the one exception is a manually entered rate, where the sheet shows `rate × nights` and the backend recomputes and validates the same product before it charges
 - Charge, payment, deposit, and balance tracking
 - Revenue analytics, expense tracking, and CSV export
 
-### Housekeeping and night audit
+### Night audit
 
-- Post-checkout housekeeping state tracking
-- Maintenance notes per room
 - Night-audit flow for daily reconciliation
 
 ### Temporary residence declaration (Khai báo tạm trú)
@@ -226,7 +234,10 @@ npm run build
 cargo check --manifest-path src-tauri/Cargo.toml
 cargo test --manifest-path src-tauri/Cargo.toml
 cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings
+cargo fmt --manifest-path src-tauri/Cargo.toml -- --check
 ```
+
+Every command above is a hard CI gate, `cargo fmt` included — skipping the format check locally means a red build on a PR that otherwise passes.
 
 The repository also ships scripted verification gates. `verify:full` is the smoke gate the release checklist expects to pass before a tag is pushed; it runs the quick wave, the frontend suite, booking and backup scenario tests, and a native Tauri startup smoke against an isolated runtime root.
 
@@ -271,6 +282,7 @@ CapyInn/
 - Check-in OCR is optimized for Vietnamese national ID cards; the passport MRZ reader currently lives in the temporary residence declaration workspace rather than the check-in scan flow
 - macOS Apple Silicon is the primary target; Windows and Linux bundles are published by CI but are not verified as thoroughly
 - The project is designed for mini-hotel scale, not large chain operations
+- Voiding a booking is per booking: a room inside a group booking cannot be voided on its own yet
 
 ## Additional docs
 
@@ -290,7 +302,7 @@ Short checklist:
 1. Fork the repository
 2. Create a branch from `main`
 3. Keep commit messages in Conventional Commits format
-4. Re-run `npm test`, `npm run build`, `cargo check`, `cargo test`, and `cargo clippy`
+4. Re-run `npm test`, `npm run build`, `cargo check`, `cargo test`, `cargo clippy`, and `cargo fmt -- --check`
 5. Open a pull request with scope and verification notes
 
 ## License

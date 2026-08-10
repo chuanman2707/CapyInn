@@ -37,6 +37,17 @@ pub fn group_checkin_hash_payload_for_test(req: &GroupCheckinRequest) -> serde_j
             (room_id.clone(), serde_json::json!(guests))
         })
         .collect::<serde_json::Map<_, _>>();
+    // Phải khớp CHÍNH XÁC cách `build_group_checkin_hash_payload`
+    // (group_lifecycle.rs) mã hoá trường này — object, không phải mảng — nếu
+    // không hai hàm này băm ra hai giá trị khác nhau cho cùng một request và
+    // mọi test so hash ở module này (vd.
+    // `group_checkin_idempotent_materializes_omitted_checkin_date_in_hash`) sẽ
+    // đỏ dù code chạy đúng.
+    let rate_override_per_room = req
+        .rate_override_per_room
+        .iter()
+        .map(|(room_id, rate)| (room_id.clone(), serde_json::json!(rate)))
+        .collect::<serde_json::Map<_, _>>();
 
     serde_json::json!({
         "schema": "group.checkin.v1",
@@ -51,6 +62,7 @@ pub fn group_checkin_hash_payload_for_test(req: &GroupCheckinRequest) -> serde_j
         "source": req.source.clone(),
         "notes": req.notes.clone(),
         "paid_minor_units": paid_minor_units,
+        "rate_override_per_room": rate_override_per_room,
     })
 }
 

@@ -25,7 +25,6 @@ describe("13 — Store Hardening", () => {
             stats: null,
             roomDetail: null,
             activeTab: "dashboard",
-            housekeepingTasks: [],
             loading: false,
             isCheckinOpen: false,
             checkinRoomId: null,
@@ -128,6 +127,7 @@ describe("13 — Store Hardening", () => {
             guests_per_room: {},
             nights: 1,
             source: "walk-in",
+            rate_override_per_room: {},
         };
 
         setMockResponse("group_checkin", () => {
@@ -228,6 +228,7 @@ describe("13 — Store Hardening", () => {
                     guests_per_room: {},
                     nights: 1,
                     source: "walk-in",
+                    rate_override_per_room: {},
                 }),
         ],
         [

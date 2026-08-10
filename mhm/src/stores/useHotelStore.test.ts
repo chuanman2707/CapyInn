@@ -35,16 +35,11 @@ describe("useHotelStore monitoring context", () => {
         return [];
       }
 
-      if (command === "get_housekeeping_tasks") {
-        return [];
-      }
-
       if (command === "get_dashboard_stats") {
         return {
           total_rooms: 10,
           occupied: 2,
           vacant: 8,
-          cleaning: 0,
           revenue_today: 0,
         };
       }
@@ -61,7 +56,6 @@ describe("useHotelStore monitoring context", () => {
       dashboardRefreshVersion: 0,
       roomDetail: null,
       activeTab: "dashboard",
-      housekeepingTasks: [],
       loading: false,
       isCheckinOpen: false,
       checkinRoomId: null,
@@ -103,6 +97,7 @@ describe("useHotelStore monitoring context", () => {
           // Không khai số khách ở quầy thì gửi `null`; backend là chỗ duy nhất
           // quyết định "trống nghĩa là một người".
           guest_count: null,
+          rate_override_per_night: null,
         },
       },
       {
@@ -138,6 +133,7 @@ describe("useHotelStore monitoring context", () => {
           notes: "",
           paid_amount: 250000,
           guest_count: null,
+          rate_override_per_night: null,
         },
       },
       {
@@ -149,6 +145,46 @@ describe("useHotelStore monitoring context", () => {
           notes_present: false,
         },
       },
+    );
+  });
+
+  it("gửi rate_override_per_night tường minh khi options.rateOverridePerNight có giá trị", async () => {
+    await useHotelStore.getState().checkIn(
+      "101",
+      [{ full_name: "Nguyen Van A", doc_number: "012345678901" }],
+      1,
+      undefined,
+      undefined,
+      undefined,
+      { rateOverridePerNight: 400000 },
+    );
+
+    expect(invokeWriteCommand).toHaveBeenCalledWith(
+      "check_in",
+      expect.objectContaining({
+        req: expect.objectContaining({ rate_override_per_night: 400000 }),
+      }),
+      expect.anything(),
+    );
+  });
+
+  it("từ chối rate_override_per_night âm trước khi gọi backend", async () => {
+    await expect(
+      useHotelStore.getState().checkIn(
+        "101",
+        [{ full_name: "Nguyen Van A", doc_number: "012345678901" }],
+        1,
+        undefined,
+        undefined,
+        undefined,
+        { rateOverridePerNight: -1000 },
+      ),
+    ).rejects.toThrow(/rateOverridePerNight/);
+
+    expect(invokeWriteCommand).not.toHaveBeenCalledWith(
+      "check_in",
+      expect.anything(),
+      expect.anything(),
     );
   });
 
@@ -189,6 +225,59 @@ describe("useHotelStore monitoring context", () => {
     expect(invoke).not.toHaveBeenCalledWith("extend_stay", expect.anything());
   });
 
+  // `void_booking` (`src-tauri/src/commands/bookings.rs`) nhận `req:
+  // VoidBookingRequest` — struct đó không có `#[serde(rename_all = ...)]`, nên
+  // field JSON phải giữ snake_case (`booking_id`, `reason`), không phải
+  // camelCase như `bookingId` ở lệnh `extend_stay` phía trên. Sai hình dạng
+  // này chỉ vỡ lúc chạy thật, không vỡ lúc build — test này khoá đúng hình
+  // dạng để không cần đợi tới lúc chạy thật mới biết.
+  it("routes voidBooking through invokeWriteCommand with the req wrapper and monitoring context", async () => {
+    await useHotelStore.getState().voidBooking("booking-void-1", "Bấm nhầm");
+
+    expect(invokeWriteCommand).toHaveBeenCalledWith(
+      "void_booking",
+      { req: { booking_id: "booking-void-1", reason: "Bấm nhầm" } },
+      {
+        correlationId: "COR-1A2B3C4D",
+        monitoringContext: {
+          operation: "void_booking",
+        },
+      },
+    );
+    expect(invoke).not.toHaveBeenCalledWith("void_booking", expect.anything());
+  });
+
+  it("passes a null voidBooking reason through unchanged", async () => {
+    await useHotelStore.getState().voidBooking("booking-void-2", null);
+
+    expect(invokeWriteCommand).toHaveBeenCalledWith(
+      "void_booking",
+      { req: { booking_id: "booking-void-2", reason: null } },
+      expect.anything(),
+    );
+  });
+
+  it("refreshes rooms, stats, and the dashboard version after voidBooking succeeds", async () => {
+    await useHotelStore.getState().voidBooking("booking-void-3", null);
+
+    expect(invoke).toHaveBeenCalledWith("get_rooms");
+    expect(invoke).toHaveBeenCalledWith("get_dashboard_stats");
+    expect(useHotelStore.getState().dashboardRefreshVersion).toBe(1);
+  });
+
+  it("rethrows and leaves the dashboard version untouched when voidBooking fails", async () => {
+    invokeWriteCommand.mockRejectedValueOnce({
+      code: "CONFLICT_INVALID_STATE_TRANSITION",
+      message: "Lượt vừa thay đổi bởi thao tác khác — vui lòng tải lại trang",
+      kind: "user",
+      support_id: null,
+    });
+
+    await expect(useHotelStore.getState().voidBooking("booking-void-4", null)).rejects.toBeTruthy();
+
+    expect(useHotelStore.getState().dashboardRefreshVersion).toBe(0);
+  });
+
   it("passes an idempotency key for groupCheckIn", async () => {
     const req = {
       group_name: "Retry Group",
@@ -199,6 +288,7 @@ describe("useHotelStore monitoring context", () => {
       nights: 1,
       source: "walk-in",
       paid_amount: 100000,
+      rate_override_per_room: {},
     };
 
     await useHotelStore.getState().groupCheckIn(req);
@@ -289,20 +379,6 @@ describe("useHotelStore monitoring context", () => {
     );
   });
 
-  it("routes updateHousekeeping through invokeWriteCommand", async () => {
-    await useHotelStore.getState().updateHousekeeping("task-1", "cleaning", "Started");
-
-    expect(invokeWriteCommand).toHaveBeenCalledWith("update_housekeeping", {
-      taskId: "task-1",
-      newStatus: "cleaning",
-      note: "Started",
-    });
-    expect(invoke).not.toHaveBeenCalledWith(
-      "update_housekeeping",
-      expect.anything(),
-    );
-  });
-
   it("rejects fractional checkIn paid_amount before invoking backend", async () => {
     await expect(
       useHotelStore.getState().checkIn(
@@ -332,6 +408,30 @@ describe("useHotelStore monitoring context", () => {
     );
   });
 
+  it("rejects fractional setBookingRate ratePerNight before invoking backend", async () => {
+    await expect(
+      useHotelStore.getState().setBookingRate("booking-1", 400000.5),
+    ).rejects.toThrow(/ratePerNight/);
+
+    expect(invokeWriteCommand).not.toHaveBeenCalledWith(
+      "set_booking_rate",
+      expect.anything(),
+      expect.anything(),
+    );
+  });
+
+  it("rejects negative setBookingRate ratePerNight before invoking backend", async () => {
+    await expect(
+      useHotelStore.getState().setBookingRate("booking-1", -1000),
+    ).rejects.toThrow(/ratePerNight/);
+
+    expect(invokeWriteCommand).not.toHaveBeenCalledWith(
+      "set_booking_rate",
+      expect.anything(),
+      expect.anything(),
+    );
+  });
+
   it("rejects fractional group money before invoking backend", async () => {
     await expect(
       useHotelStore.getState().groupCheckIn({
@@ -342,6 +442,7 @@ describe("useHotelStore monitoring context", () => {
         guests_per_room: {},
         nights: 1,
         paid_amount: 100000.5,
+        rate_override_per_room: {},
       }),
     ).rejects.toThrow(/paid_amount/);
 
@@ -365,6 +466,67 @@ describe("useHotelStore monitoring context", () => {
     );
     expect(invokeWriteCommand).not.toHaveBeenCalledWith(
       "group_checkout",
+      expect.anything(),
+      expect.anything(),
+    );
+  });
+
+  it("rejects a negative rate_override_per_room entry before invoking backend", async () => {
+    await expect(
+      useHotelStore.getState().groupCheckIn({
+        group_name: "Retry Group",
+        organizer_name: "Organizer",
+        room_ids: ["101", "102"],
+        master_room_id: "101",
+        guests_per_room: {},
+        nights: 1,
+        rate_override_per_room: { "101": -1 },
+      }),
+    ).rejects.toThrow(/rate_override_per_room/);
+
+    expect(invokeWriteCommand).not.toHaveBeenCalledWith(
+      "group_checkin",
+      expect.anything(),
+      expect.anything(),
+    );
+  });
+
+  /// I1 (review Task 18): xoá trắng ô giá gửi `Number("") === 0`.
+  /// `assertNonNegativeMoneyVnd` (>= 0) cho 0 đi lọt, trong khi backend từ
+  /// chối `rate <= 0` (`group_lifecycle.rs:1524`) — hàng rào ở đây phải khớp
+  /// đúng gate backend, và thông báo phải nêu đúng phòng để lễ tân biết ngay
+  /// phòng nào đang gõ sai, thay vì một lỗi chung từ chối cả đoàn.
+  it("rejects a zero rate_override_per_room entry and names the room", async () => {
+    useHotelStore.setState({
+      rooms: [
+        {
+          id: "101",
+          name: "Phòng 101",
+          type: "Standard Room",
+          floor: 1,
+          has_balcony: false,
+          base_price: 500000,
+          max_guests: 2,
+          extra_person_fee: 0,
+          status: "vacant",
+        },
+      ],
+    });
+
+    await expect(
+      useHotelStore.getState().groupCheckIn({
+        group_name: "Retry Group",
+        organizer_name: "Organizer",
+        room_ids: ["101", "102"],
+        master_room_id: "101",
+        guests_per_room: {},
+        nights: 1,
+        rate_override_per_room: { "101": 0 },
+      }),
+    ).rejects.toThrow(/Phòng 101/);
+
+    expect(invokeWriteCommand).not.toHaveBeenCalledWith(
+      "group_checkin",
       expect.anything(),
       expect.anything(),
     );
@@ -399,9 +561,8 @@ describe("useHotelStore navigation side effects", () => {
     invokeWriteCommand.mockResolvedValue(undefined);
     invoke.mockImplementation(async (command: string) => {
       if (command === "get_rooms") return [];
-      if (command === "get_housekeeping_tasks") return [];
       if (command === "get_dashboard_stats") {
-        return { total_rooms: 10, occupied: 2, vacant: 8, cleaning: 0, revenue_today: 0 };
+        return { total_rooms: 10, occupied: 2, vacant: 8, revenue_today: 0 };
       }
       throw new Error(`Unhandled invoke ${command}`);
     });
@@ -486,5 +647,103 @@ describe("useHotelStore room type rates", () => {
 
     // Giá cũ còn lại thì thẻ phòng in giá của một bảng giá đã đổi — tệ hơn "—".
     expect(useHotelStore.getState().roomTypeRates).toBeNull();
+  });
+});
+
+describe("useHotelStore room change", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    createCorrelationId.mockReturnValue("COR-1A2B3C4D");
+    invokeWriteCommand.mockResolvedValue(undefined);
+    invoke.mockImplementation(async (command: string) => {
+      if (command === "get_rooms") return [];
+      if (command === "get_dashboard_stats") {
+        return { total_rooms: 10, occupied: 2, vacant: 8, revenue_today: 0 };
+      }
+      throw new Error(`Unhandled invoke ${command}`);
+    });
+    useHotelStore.setState({
+      rooms: [],
+      stats: null,
+      dashboardRefreshVersion: 0,
+      loading: false,
+      isRoomChangeOpen: false,
+      roomChangeBookingId: null,
+    });
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it("gửi change_room kèm đủ tham số rồi nạp lại phòng", async () => {
+    await useHotelStore.getState().changeRoom("B1", "2B", false, "máy lạnh hỏng");
+
+    expect(invokeWriteCommand).toHaveBeenCalledWith(
+      "change_room",
+      expect.objectContaining({
+        bookingId: "B1",
+        newRoomId: "2B",
+        keepPrice: false,
+        reason: "máy lạnh hỏng",
+      }),
+      expect.objectContaining({
+        correlationId: "COR-1A2B3C4D",
+      }),
+    );
+    expect(invoke).toHaveBeenCalledWith("get_rooms");
+  });
+
+  // Cùng lý do với check-in / check-out ở trên: Dashboard chỉ nạp lại khi
+  // `dashboardRefreshVersion` nhích lên, mà chuyển phòng vừa đổi công suất
+  // từng phòng vừa đổi `total_price` — hai thứ Dashboard đang hiển thị.
+  it("chuyển phòng cũng phải nhích dashboardRefreshVersion", async () => {
+    await useHotelStore.getState().changeRoom("B1", "2B", false, undefined);
+
+    expect(useHotelStore.getState().dashboardRefreshVersion).toBe(1);
+  });
+
+  it("setRoomChangeOpen mở sheet cho đúng booking", () => {
+    useHotelStore.getState().setRoomChangeOpen(true, "B1");
+    expect(useHotelStore.getState().isRoomChangeOpen).toBe(true);
+    expect(useHotelStore.getState().roomChangeBookingId).toBe("B1");
+
+    useHotelStore.getState().setRoomChangeOpen(false);
+    expect(useHotelStore.getState().isRoomChangeOpen).toBe(false);
+    expect(useHotelStore.getState().roomChangeBookingId).toBeNull();
+  });
+
+  it("fetchRoomChangeOptions đọc get_room_change_options và giữ nguyên priceDifference âm", async () => {
+    const options = {
+      bookingId: "B1",
+      currentRoomId: "1A",
+      currentRoomName: "Phòng 1A",
+      fromDate: "2026-08-02",
+      toDate: "2026-08-05",
+      nightsRemaining: 3,
+      nightsStayed: 0,
+      guestCount: 2,
+      rooms: [
+        {
+          roomId: "2B",
+          name: "Phòng 2B",
+          roomType: "Standard",
+          floor: 2,
+          maxGuests: 2,
+          priceDifference: -150000,
+        },
+      ],
+    };
+    invoke.mockImplementation(async (command: string) => {
+      if (command === "get_room_change_options") return options;
+      throw new Error(`Unhandled invoke ${command}`);
+    });
+
+    const result = await useHotelStore.getState().fetchRoomChangeOptions("B1");
+
+    expect(invoke).toHaveBeenCalledWith("get_room_change_options", { bookingId: "B1" });
+    expect(result).toEqual(options);
+    expect(result.rooms[0].priceDifference).toBe(-150000);
   });
 });

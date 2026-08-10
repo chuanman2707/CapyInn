@@ -2,6 +2,7 @@ import { type ComponentType, useEffect, useState } from "react";
 import {
   BarChart3,
   BedDouble,
+  Bot,
   Calendar,
   ChevronsLeft,
   ChevronsRight,
@@ -10,7 +11,6 @@ import {
   Moon,
   Settings as SettingsIcon,
   ShieldCheck,
-  Sparkles,
   Users,
   UsersRound,
 } from "lucide-react";
@@ -21,11 +21,13 @@ import { useSidebarCollapse } from "@/app/useSidebarCollapse";
 import AppUpdateBadge from "@/components/AppUpdateBadge";
 import AppUpdateRestartModal from "@/components/AppUpdateRestartModal";
 import AppLogo from "@/components/AppLogo";
+import { AssistantPanel } from "@/components/assistant/AssistantPanel";
 import { BackupFailureAlert } from "@/components/BackupFailureAlert";
 import { BackupStatusIndicator } from "@/components/BackupStatusIndicator";
 import CheckinSheet from "@/components/CheckinSheet";
 import CrashReportPrompt from "@/components/CrashReportPrompt";
 import GroupCheckinSheet from "@/components/GroupCheckinSheet";
+import { RoomChangeSheet } from "@/components/RoomChangeSheet";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { useAppUpdate } from "@/contexts/AppUpdateContext";
@@ -36,11 +38,11 @@ import Dashboard from "@/pages/Dashboard";
 import Declaration from "@/pages/Declaration";
 import GroupManagement from "@/pages/GroupManagement";
 import Guests from "@/pages/Guests";
-import Housekeeping from "@/pages/Housekeeping";
 import NightAudit from "@/pages/NightAudit";
 import Reservations from "@/pages/Reservations";
 import Rooms from "@/pages/Rooms";
 import Settings from "@/pages/settings";
+import { useAssistantStore } from "@/stores/useAssistantStore";
 import { useAuthStore } from "@/stores/useAuthStore";
 import { useHotelStore } from "@/stores/useHotelStore";
 
@@ -53,7 +55,6 @@ const NAV_MAIN = [
 ];
 
 const NAV_MANAGEMENT = [
-  { key: "housekeeping" as const, label: "Housekeeping", icon: Sparkles },
   { key: "analytics" as const, label: "Analytics", icon: BarChart3 },
   { key: "audit" as const, label: "Night Audit", icon: Moon },
   { key: "declaration" as const, label: "Khai báo tạm trú", icon: ShieldCheck },
@@ -67,17 +68,38 @@ const PAGE_TITLES: Record<string, string> = {
   rooms: "Rooms",
   guests: "Guests",
   groups: "Group Booking",
-  housekeeping: "Housekeeping",
   analytics: "Analytics",
   settings: "Settings",
   audit: "Night Audit",
   declaration: "Khai báo tạm trú",
 };
 
+// Trang nào tự cuộn BÊN TRONG mình thì tên nằm ở đây. Chuỗi cao độ từ
+// `h-screen` xuống tới đây đều xác định (`main h-full` -> `flex-1` của vùng
+// nội dung), nhưng thẻ bọc `animate-fade-up` thì `height:auto`, nên mọi
+// `h-full`/`max-h-full` của trang con rơi về `auto` và trang cứ dài ra thay vì
+// tự cuộn. Thêm `h-full` vào đúng thẻ bọc đó là mắt xích còn thiếu.
+// Danh sách này CÓ CHỌN LỌC, không bật cho mọi trang: `pages/settings`
+// cũng có `h-full` ở gốc và một `Card overflow-y-auto` đang nằm im — bật
+// chiều cao xác định cho nó sẽ đổi luôn cách Settings cuộn (cột trái đứng
+// yên, chỉ thẻ phải chạy). Đó là thay đổi khác, không thuộc lần sửa này.
+const SELF_SCROLLING_TABS = new Set(["reservations"]);
+
 export function MainShell() {
   const { activeTab, setTab, setCheckinOpen, setGroupCheckinOpen, checkinRoomId, checkinNights } = useHotelStore();
   const { user, logout } = useAuthStore();
-  const { collapsed, toggleCollapse } = useSidebarCollapse();
+
+  // Từng trường một, không destructure nguyên store: set() của Zustand đổi cả
+  // reference top-level bất kể field nào đổi, mà shell ba cột là gốc của gần
+  // như mọi thứ đang hiện trên màn hình. Cùng idiom với AssistantPanel.tsx.
+  const assistantOpen = useAssistantStore((state) => state.open);
+  const assistantSettings = useAssistantStore((state) => state.settings);
+  const toggleAssistant = useAssistantStore((state) => state.togglePanel);
+  const refreshAssistantSettings = useAssistantStore((state) => state.refreshSettings);
+
+  // Panel trợ lý là cột giữa thường trực, nên mở nó ra là thanh điều hướng tự
+  // thu về icon để nhường chỗ. Lễ tân bấm mở lại được — xem `useSidebarCollapse`.
+  const { collapsed, toggleCollapse } = useSidebarCollapse(assistantOpen);
 
   // Số khách đã đến trong 48h mà chưa nằm trong lô nào được đối chiếu khớp.
   // Con số này làm module hữu ích ngay từ trước khi ai bấm vào tab.
@@ -107,6 +129,19 @@ export function MainShell() {
     gatewayRuntimeEnabled,
     remoteCrashReportingEnabled,
   } = useRuntimeState();
+
+  // Trợ lý không còn đứng sau cờ `agentRuntimeEnabled`. Cờ đó chỉ bật được bằng
+  // biến môi trường lúc khởi động, mà lễ tân thì bấm icon để mở app — nên nó
+  // giấu tính năng khỏi đúng những người tính năng sinh ra để phục vụ. Cờ vẫn
+  // giữ cho CEO Telegram, thứ thật sự còn thí nghiệm.
+  //
+  // Công tắc tắt bây giờ là `gate.ready`: nằm trong database nên nhớ qua mọi
+  // lần khởi động, và admin tự tắt được trong Cài đặt → Trợ lý quầy. Tắt opt-in
+  // là panel biến mất và `assistant_turn` từ chối trước khi dựng prompt.
+  useEffect(() => {
+    void refreshAssistantSettings();
+  }, [refreshAssistantSettings]);
+  const assistantAvailable = Boolean(assistantSettings?.gate.ready);
 
   const today = new Date().toLocaleDateString("vi-VN", {
     weekday: "long",
@@ -178,7 +213,14 @@ export function MainShell() {
       )}
 
       {/* SIDEBAR */}
+      {/* `aria-label` không phải trang trí: nó là thứ DUY NHẤT cho test khẳng
+          định được nút Trợ lý nằm ở thanh điều hướng chứ không phải ở header.
+          Không có nó thì test chỉ nói được "có một nút tên Trợ lý ở đâu đó" —
+          đúng câu nó nói được cả trước lẫn sau khi nút bị trả về header, tức
+          không canh gì. Panel trợ lý cũng là một `<aside>` có nhãn
+          (`AssistantPanel.tsx`), nên hai vùng phân biệt được nhau. */}
       <aside
+        aria-label="Điều hướng"
         className={`${
           collapsed ? "w-[72px]" : "w-[260px]"
         } bg-white border-r border-slate-100 flex flex-col z-20 shrink-0 transition-all duration-300`}
@@ -187,6 +229,51 @@ export function MainShell() {
         <div className={`${collapsed ? "px-4 py-6" : "p-6"} mb-4 flex justify-center`}>
           <AppLogo className={collapsed ? "h-10 w-10 shrink-0" : "h-14 w-14 shrink-0"} />
         </div>
+
+        {/* TRỢ LÝ — ngay dưới logo, TRÊN cả nhóm điều hướng (bố cục Airtable).
+            Đứng riêng một khối có vạch ngăn vì nó KHÔNG cùng loại với các mục
+            bên dưới: chúng gọi `setTab()` để đổi trang, nút này gọi
+            `togglePanel()` để mở/đóng cột giữa. Trộn nó vào nhóm MAIN là dạy
+            người dùng rằng bấm vào sẽ chuyển sang một trang tên "Trợ lý".
+
+            Vạch ngăn nằm TRONG câu điều kiện, không bọc-luôn-vẽ-nội-dung-có-
+            điều-kiện: chưa bật opt-in thì cả khối biến mất, không để lại một
+            vạch kẻ lơ lửng dưới logo. jsdom không nhìn thấy đường kẻ nên không
+            test nào bắt được lỗi ấy — cùng bẫy `historyNotice` và
+            `ProposedActionCard` đã dính, xem chú thích ở đó. */}
+        {assistantAvailable && (
+          <div
+            className={`${collapsed ? "px-2" : "px-4"} mb-3 border-b border-slate-100 pb-3`}
+          >
+            <Button
+              variant={assistantOpen ? "secondary" : "ghost"}
+              className={`w-full justify-start rounded-xl font-medium ${
+                collapsed ? "px-3" : ""
+              } ${
+                assistantOpen
+                  ? "bg-brand-primary/10 text-brand-primary hover:bg-brand-primary/20"
+                  : "text-brand-muted hover:text-brand-text"
+              }`}
+              size="lg"
+              onClick={toggleAssistant}
+              // `aria-pressed` là chỗ phân biệt NÚT BẬT/TẮT với mục điều hướng.
+              // Các mục dưới kia không có nó vì chúng chuyển trang; nút này thì
+              // có, và nó là thứ test khẳng định được thay vì đi so class CSS.
+              aria-pressed={assistantOpen}
+              // Mở panel thì sidebar TỰ THU (`useSidebarCollapse`), nên lúc
+              // panel đang mở nút gần như luôn ở dạng chỉ-icon và `title` là
+              // nhãn duy nhất còn lại. Đổi theo trạng thái để nó nói được việc
+              // bấm tiếp sẽ làm gì — cùng lối Airtable đổi thành "Close Omni".
+              title={assistantOpen ? "Đóng trợ lý quầy" : "Mở trợ lý quầy"}
+            >
+              {/* `Bot`, KHÔNG phải `Sparkles`. `Bot` cũng chính là icon của mục
+                  *Trợ lý quầy* trong Cài đặt (`pages/settings/index.tsx`), nên
+                  hai chỗ nói về cùng một thứ trông giống nhau. */}
+              <Bot className={collapsed ? "" : "mr-3"} size={20} />
+              {!collapsed && "Trợ lý"}
+            </Button>
+          </div>
+        )}
 
         {/* Navigation */}
         <nav
@@ -256,6 +343,9 @@ export function MainShell() {
             className="w-full justify-center rounded-xl opacity-40 hover:opacity-100"
             size="sm"
             onClick={toggleCollapse}
+            // Lúc thu, nút chỉ còn mỗi icon nên không còn tên gọi nào — đặt
+            // `title` như các mục điều hướng ở trên vẫn làm.
+            title={collapsed ? "Mở rộng" : "Thu gọn"}
           >
             {collapsed ? (
               <ChevronsRight size={16} />
@@ -267,6 +357,11 @@ export function MainShell() {
           </Button>
         </div>
       </aside>
+
+      {/* ASSISTANT PANEL — cột giữa, giữa điều hướng và nội dung (bố cục
+          Airtable). Không phải drawer đè lên bên phải: nó đẩy nội dung hẹp lại
+          chứ không che, nên lễ tân vừa hỏi vừa nhìn được màn hình đang làm. */}
+      {assistantAvailable && <AssistantPanel />}
 
       {/* MAIN CONTENT */}
       <main className="flex-1 flex flex-col h-full relative min-w-0">
@@ -304,6 +399,9 @@ export function MainShell() {
                 {gatewayRunning ? "● MCP Gateway" : "○ Gateway Off"}
               </Badge>
             )}
+            {/* Nút Trợ lý ĐÃ CHUYỂN sang thanh điều hướng, ngay dưới logo —
+                nó mở/đóng cột giữa nên nó thuộc về cột trái, không thuộc về
+                cụm trạng thái ở đây. */}
             <Badge className="bg-green-50 text-green-700 border-0 rounded-full py-1.5 px-3 uppercase tracking-wider text-[10px] font-bold">
               ● Scanner Ready
             </Badge>
@@ -333,13 +431,12 @@ export function MainShell() {
 
         {/* CONTENT AREA */}
         <div className="flex-1 overflow-y-auto px-10 pb-10">
-          <div className="animate-fade-up">
+          <div className={`animate-fade-up${SELF_SCROLLING_TABS.has(activeTab) ? " h-full" : ""}`}>
             {activeTab === "dashboard" && <Dashboard />}
             {activeTab === "rooms" && <Rooms />}
             {activeTab === "reservations" && <Reservations />}
             {activeTab === "guests" && <Guests />}
             {activeTab === "groups" && <GroupManagement />}
-            {activeTab === "housekeeping" && <Housekeeping />}
             {activeTab === "analytics" && <Analytics />}
             {activeTab === "audit" && <NightAudit />}
             {activeTab === "declaration" && <Declaration />}
@@ -350,6 +447,10 @@ export function MainShell() {
 
       <CheckinSheet preSelectedRoomId={checkinRoomId ?? undefined} preSelectedNights={checkinNights ?? undefined} />
       <GroupCheckinSheet />
+      {/* Sheet dùng chung cho mọi lối vào chuyển phòng (Task 9) — render một lần
+          duy nhất ở gốc, không lặp trong từng màn hình, để tránh nhiều bản sao
+          cùng đọc một store và cùng mở một lúc. */}
+      <RoomChangeSheet />
       <AppToaster />
     </div>
   );

@@ -11,13 +11,25 @@ use sqlx::{Pool, Row, Sqlite};
 use crate::db::row::get_money_vnd;
 use crate::models::{BookingWithRoom, Guest, GuestSummary};
 
+// Bộ lọc `b.status != 'voided'` nằm trong ĐIỀU KIỆN JOIN của `bookings`, không
+// phải trong `WHERE`: đây là `LEFT JOIN` từ `guests`, và một khách chỉ có lượt
+// đã xoá vẫn phải xuất hiện trong danh sách với total_stays = 0 — đặt điều
+// kiện ở `WHERE` sẽ biến LEFT JOIN thành INNER JOIN trên thực tế cho đúng
+// những hàng cần giữ nhất.
+//
+// `COUNT(b.id)` chứ không phải `COUNT(bg.booking_id)`: `booking_guests` không
+// biết gì về trạng thái booking, nên hàng liên kết của một lượt đã xoá vẫn
+// tồn tại và `bg.booking_id` vẫn khác NULL — đếm cột đó sẽ đếm cả lượt đã xoá.
+// `b.id` thì NULL đúng ở hàng đó (điều kiện join phía trên chặn khớp), nên
+// `COUNT(b.id)` bỏ qua nó tự nhiên, và `SUM(b.total_price)`/`MAX(b.check_in_at)`
+// đã bỏ qua NULL sẵn từ trước — cả ba cột đều đúng nhờ cùng một chỗ sửa.
 const GUEST_SUMMARY_SELECT: &str = "SELECT g.id, g.full_name, g.doc_number, g.nationality,
-                COUNT(bg.booking_id) as total_stays,
+                COUNT(b.id) as total_stays,
                 COALESCE(SUM(b.total_price), 0) as total_spent,
                 MAX(b.check_in_at) as last_visit
          FROM guests g
          LEFT JOIN booking_guests bg ON bg.guest_id = g.id
-         LEFT JOIN bookings b ON b.id = bg.booking_id";
+         LEFT JOIN bookings b ON b.id = bg.booking_id AND b.status != 'voided'";
 
 const GUEST_SUMMARY_TAIL: &str = " GROUP BY g.id ORDER BY last_visit DESC";
 
@@ -102,7 +114,7 @@ pub async fn load_guest_bookings(
                 b.total_price, b.status
          FROM bookings b
          JOIN booking_guests bg ON bg.booking_id = b.id
-         WHERE bg.guest_id = ?
+         WHERE bg.guest_id = ? AND b.status != 'voided'
          ORDER BY b.check_in_at DESC",
     )
     .bind(guest_id)

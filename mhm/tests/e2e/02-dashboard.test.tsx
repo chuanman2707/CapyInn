@@ -7,7 +7,7 @@ import { useHotelStore } from "@/stores/useHotelStore";
 import { createAllRooms, createStats, createBookingWithGuest } from "../helpers/mock-data";
 
 const mockRooms = createAllRooms();
-const mockStats = createStats({ occupied: 3, vacant: 6, cleaning: 1, revenue_today: 1200000 });
+const mockStats = createStats({ occupied: 3, vacant: 6, revenue_today: 1200000 });
 
 describe("02 — Dashboard", () => {
     beforeEach(() => {
@@ -20,7 +20,6 @@ describe("02 — Dashboard", () => {
             dashboardRefreshVersion: 0,
             activeTab: "dashboard",
             roomDetail: null,
-            housekeepingTasks: [],
             loading: false,
             isCheckinOpen: false,
         });
@@ -69,7 +68,7 @@ describe("02 — Dashboard", () => {
         });
 
         expect(screen.getByText("6")).toBeInTheDocument(); // vacant
-        expect(screen.getByText("1")).toBeInTheDocument(); // cleaning
+        expect(screen.queryByText("Need Cleaning")).toBeNull();
     });
 
     it("renders 10 room cards", async () => {

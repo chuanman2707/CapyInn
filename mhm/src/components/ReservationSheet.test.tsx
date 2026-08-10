@@ -188,6 +188,7 @@ describe("ReservationSheet", () => {
             deposit_amount: 250000,
             source: "zalo",
             notes: "Khách thích tầng cao",
+            rate_override_per_night: null,
           },
         },
         {
@@ -623,7 +624,11 @@ describe("ReservationSheet", () => {
 
     await waitFor(() => {
       expect(screen.getByText("Phụ thu 2 khách")).toBeInTheDocument();
-      expect(screen.getByText("1.200.000₫")).toBeInTheDocument();
+      // Tổng giờ hiển thị qua RateOverrideField (nút rate-display), dùng
+      // fmtMoney ("đ") thay vì phép nối chuỗi "₫" thủ công cũ. Hậu tố tiền
+      // tệ phải còn nguyên (M-3, review Task 17) — khớp chuỗi con không kèm
+      // hậu tố sẽ vẫn xanh nếu ai đó lỡ làm mất "đ".
+      expect(screen.getByTestId("rate-display")).toHaveTextContent("1.200.000đ");
     });
   });
 
@@ -660,9 +665,299 @@ describe("ReservationSheet", () => {
     });
 
     await waitFor(() => {
-      expect(screen.getByText("1.000.000₫")).toBeInTheDocument();
+      expect(screen.getByTestId("rate-display")).toHaveTextContent("1.000.000");
     });
-    expect(screen.queryByText("5.000.000₫")).not.toBeInTheDocument();
+    expect(screen.queryByText(/5\.000\.000/)).not.toBeInTheDocument();
+  });
+
+  it("gửi rate_override_per_night khi lễ tân sửa giá", async () => {
+    const user = userEvent.setup();
+    // Tổng engine 632.500 không chia hết cho 3 đêm — nếu component lỡ gửi lại
+    // giá engine (hoặc giá prefill làm tròn) thay vì đúng con số lễ tân gõ,
+    // test này bắt được ngay vì hai con số cách xa nhau.
+    invoke.mockImplementation(async (command: string) => {
+      if (command === "calculate_room_price_preview") {
+        return {
+          pricing_type: "nightly",
+          base_amount: 632_500,
+          surcharge_amount: 0,
+          weekend_amount: 0,
+          total: 632_500,
+          capped: false,
+          breakdown: [{ label: "3 đêm", amount: 632_500 }],
+        };
+      }
+      return { available: true, conflicts: [], max_nights: null };
+    });
+
+    render(<ReservationSheet open onOpenChange={vi.fn()} />);
+    fireEvent.change(screen.getByLabelText(/^phòng$/i), { target: { value: "R101" } });
+    fireEvent.change(screen.getByLabelText(/ngày đến/i), {
+      target: { value: "2026-08-06" },
+    });
+    fireEvent.change(screen.getByLabelText(/ngày đi/i), {
+      target: { value: "2026-08-09" },
+    });
+    await user.type(screen.getByPlaceholderText("Họ và tên *"), "Nguyen Van A");
+
+    fireEvent.click(await screen.findByTestId("rate-display"));
+    fireEvent.change(screen.getByTestId("rate-input"), { target: { value: "400000" } });
+
+    await user.click(screen.getByRole("button", { name: /đặt phòng/i }));
+
+    await waitFor(() => {
+      expect(invokeWriteCommand).toHaveBeenCalledWith(
+        "create_reservation",
+        expect.objectContaining({
+          req: expect.objectContaining({ rate_override_per_night: 400000 }),
+        }),
+        expect.anything(),
+      );
+    });
+  });
+
+  // M-5 (review Task 17): tên cũ "không gửi rate_override_per_night khi giữ
+  // giá hệ thống" không khớp hợp đồng thật — assertion đòi khoá tường minh
+  // `: null`, không phải khoá vắng mặt. Đổi tên cho khớp.
+  it("gửi rate_override_per_night: null khi giữ giá hệ thống", async () => {
+    const user = userEvent.setup();
+    render(<ReservationSheet open onOpenChange={vi.fn()} />);
+    fireEvent.change(screen.getByLabelText(/^phòng$/i), { target: { value: "R101" } });
+    await user.type(screen.getByPlaceholderText("Họ và tên *"), "Nguyen Van A");
+
+    await user.click(screen.getByRole("button", { name: /đặt phòng/i }));
+
+    await waitFor(() => {
+      expect(invokeWriteCommand).toHaveBeenCalledWith(
+        "create_reservation",
+        expect.objectContaining({
+          req: expect.objectContaining({ rate_override_per_night: null }),
+        }),
+        expect.anything(),
+      );
+    });
+  });
+
+  // I-1 (review Task 17): đóng sheet bằng X/bấm ra ngoài chỉ gọi
+  // onOpenChange(false) (Reservations.tsx) — không có resetForm(), và
+  // component KHÔNG unmount (Reservations.tsx render vô điều kiện, chỉ đổi
+  // prop `open`). Trước bản vá, mở lại ĐÚNG phòng cũ không đổi roomId nên
+  // effect `[roomId]` không chạy, và giá tay của khách A rò sang khách B.
+  it("đóng không submit rồi mở lại CÙNG phòng thì không còn giá tay của lượt trước", async () => {
+    invoke.mockImplementation(async (command: string) => {
+      if (command === "calculate_room_price_preview") {
+        return {
+          pricing_type: "nightly",
+          base_amount: 1_000_000,
+          surcharge_amount: 0,
+          weekend_amount: 0,
+          total: 1_000_000,
+          capped: false,
+          breakdown: [],
+        };
+      }
+      return { available: true, conflicts: [], max_nights: null };
+    });
+
+    const { rerender } = render(<ReservationSheet open onOpenChange={vi.fn()} />);
+    fireEvent.change(screen.getByLabelText(/^phòng$/i), { target: { value: "R101" } });
+
+    // Khách A: gõ đè giá 400.000/đêm rồi đóng sheet không submit.
+    fireEvent.click(await screen.findByTestId("rate-display"));
+    fireEvent.change(screen.getByTestId("rate-input"), { target: { value: "400000" } });
+    expect(screen.getByTestId("rate-input")).toBeInTheDocument();
+
+    rerender(<ReservationSheet open={false} onOpenChange={vi.fn()} />);
+
+    // Mở lại CÙNG phòng R101 cho khách B.
+    rerender(<ReservationSheet open onOpenChange={vi.fn()} />);
+
+    await waitFor(() => {
+      expect(screen.queryByTestId("rate-input")).not.toBeInTheDocument();
+    });
+    expect(await screen.findByTestId("rate-display")).toBeInTheDocument();
+
+    await userEvent.setup().type(
+      screen.getByPlaceholderText("Họ và tên *"),
+      "Nguyen Van B",
+    );
+    await userEvent.setup().click(screen.getByRole("button", { name: /đặt phòng/i }));
+
+    await waitFor(() => {
+      expect(invokeWriteCommand).toHaveBeenCalledWith(
+        "create_reservation",
+        expect.objectContaining({
+          req: expect.objectContaining({
+            room_id: "R101",
+            guest_name: "Nguyen Van B",
+            rate_override_per_night: null,
+          }),
+        }),
+        expect.anything(),
+      );
+    });
+  });
+
+  // M-4 (review Task 17): một mutation xoá `setRateOverride(null)` khỏi
+  // resetForm() không làm đỏ test nào — vì mọi test override khác đóng sheet
+  // qua reopen (roomId đổi) hoặc submit với preSelectedRoomId trống. Đường
+  // thật resetForm() tự bảo vệ: sheet mở từ kéo-thả lịch (preSelectedRoomId
+  // có giá trị) thì sau submit thành công, resetForm() gọi
+  // setRoomId(preSelectedRoomId) = giá trị CŨ (cùng phòng) ⇒ React bail-out
+  // (Object.is so trùng) ⇒ effect `[roomId]` KHÔNG chạy lại. Chỉ dòng
+  // setRateOverride(null) nằm ngay trong resetForm() mới dọn được state lúc
+  // này — pin đúng đường đó bằng cách submit hai lần liên tiếp với cùng
+  // preSelectedRoomId.
+  it("submit hai lần liên tiếp từ cùng preSelectedRoomId (kéo-thả lịch) không rò giá tay lượt đầu", async () => {
+    const user = userEvent.setup();
+    invoke.mockImplementation(async (command: string) => {
+      if (command === "calculate_room_price_preview") {
+        return {
+          pricing_type: "nightly",
+          base_amount: 1_000_000,
+          surcharge_amount: 0,
+          weekend_amount: 0,
+          total: 1_000_000,
+          capped: false,
+          breakdown: [],
+        };
+      }
+      return { available: true, conflicts: [], max_nights: null };
+    });
+
+    render(
+      <ReservationSheet
+        open
+        onOpenChange={vi.fn()}
+        preSelectedRoomId="R101"
+        prefillDates={{ checkIn: "2026-08-06", checkOut: "2026-08-08" }}
+      />,
+    );
+
+    fireEvent.click(await screen.findByTestId("rate-display"));
+    fireEvent.change(screen.getByTestId("rate-input"), { target: { value: "400000" } });
+    await user.type(screen.getByPlaceholderText("Họ và tên *"), "Khach A");
+    await user.click(screen.getByRole("button", { name: /đặt phòng/i }));
+
+    await waitFor(() => {
+      expect(invokeWriteCommand).toHaveBeenCalledWith(
+        "create_reservation",
+        expect.objectContaining({
+          req: expect.objectContaining({
+            room_id: "R101",
+            rate_override_per_night: 400000,
+          }),
+        }),
+        expect.anything(),
+      );
+    });
+
+    // Sau submit thành công, resetForm() chạy; roomId quay lại
+    // preSelectedRoomId ("R101") — CÙNG giá trị cũ, nên effect [roomId]
+    // không chạy lại. Gõ tên khách B rồi submit lần hai cùng phòng.
+    await user.type(screen.getByPlaceholderText("Họ và tên *"), "Khach B");
+    await user.click(screen.getByRole("button", { name: /đặt phòng/i }));
+
+    await waitFor(() => {
+      expect(invokeWriteCommand).toHaveBeenCalledTimes(2);
+    });
+    expect(invokeWriteCommand).toHaveBeenLastCalledWith(
+      "create_reservation",
+      expect.objectContaining({
+        req: expect.objectContaining({
+          room_id: "R101",
+          guest_name: "Khach B",
+          rate_override_per_night: null,
+        }),
+      }),
+      expect.anything(),
+    );
+  });
+
+  // Mục 4 của brief: đổi phòng khi giá tay đang bật là một quyết định, không
+  // phải chi tiết. Chọn: BỎ giá tay khi đổi phòng — giá thương lượng gắn với
+  // phòng cụ thể đang chọn (101, 400k/đêm), mang nguyên số đó sang phòng vừa
+  // đổi tới (ví dụ suite) là im lặng thu sai giá phòng mới.
+  it("đổi phòng thì bỏ giá tay đã gõ, quay lại giá engine", async () => {
+    invoke.mockImplementation(async (command: string) => {
+      if (command === "calculate_room_price_preview") {
+        return {
+          pricing_type: "nightly",
+          base_amount: 1_000_000,
+          surcharge_amount: 0,
+          weekend_amount: 0,
+          total: 1_000_000,
+          capped: false,
+          breakdown: [],
+        };
+      }
+      return { available: true, conflicts: [], max_nights: null };
+    });
+
+    render(<ReservationSheet open onOpenChange={vi.fn()} />);
+    fireEvent.change(screen.getByLabelText(/^phòng$/i), { target: { value: "R101" } });
+
+    fireEvent.click(await screen.findByTestId("rate-display"));
+    fireEvent.change(screen.getByTestId("rate-input"), { target: { value: "400000" } });
+    expect(screen.getByTestId("rate-input")).toBeInTheDocument();
+
+    fireEvent.change(screen.getByLabelText(/^phòng$/i), { target: { value: "R102" } });
+
+    // Đổi phòng: ô giá quay lại trạng thái hiển thị giá engine (chưa sửa),
+    // không còn kẹt ở ô nhập với giá tay của phòng cũ.
+    await waitFor(() => {
+      expect(screen.queryByTestId("rate-input")).not.toBeInTheDocument();
+    });
+    expect(await screen.findByTestId("rate-display")).toBeInTheDocument();
+
+    await userEvent.setup().type(
+      screen.getByPlaceholderText("Họ và tên *"),
+      "Nguyen Van A",
+    );
+    await userEvent.setup().click(screen.getByRole("button", { name: /đặt phòng/i }));
+
+    await waitFor(() => {
+      expect(invokeWriteCommand).toHaveBeenCalledWith(
+        "create_reservation",
+        expect.objectContaining({
+          req: expect.objectContaining({ room_id: "R102", rate_override_per_night: null }),
+        }),
+        expect.anything(),
+      );
+    });
+  });
+
+  // Mục 2 của brief: bảng phụ thu mô tả giá engine, đặt cạnh một tổng đã bị
+  // đè là in hai con số mâu thuẫn — phải ẩn đi khi có giá tay.
+  it("ẩn bảng phụ thu khi lễ tân đang gõ giá tay", async () => {
+    invoke.mockImplementation(async (command: string) => {
+      if (command === "calculate_room_price_preview") {
+        return {
+          pricing_type: "nightly",
+          base_amount: 1_000_000,
+          surcharge_amount: 0,
+          weekend_amount: 0,
+          total: 1_200_000,
+          capped: false,
+          breakdown: [
+            { label: "2 đêm x 500.000", amount: 1_000_000 },
+            { label: "Phụ thu 2 khách", amount: 200_000 },
+          ],
+        };
+      }
+      return { available: true, conflicts: [], max_nights: null };
+    });
+
+    render(<ReservationSheet open onOpenChange={vi.fn()} />);
+    fireEvent.change(screen.getByLabelText(/^phòng$/i), { target: { value: "R101" } });
+
+    await waitFor(() => {
+      expect(screen.getByText("Phụ thu 2 khách")).toBeInTheDocument();
+    });
+
+    fireEvent.click(screen.getByTestId("rate-display"));
+
+    expect(screen.queryByText("Phụ thu 2 khách")).not.toBeInTheDocument();
   });
 
   it("báo lỗi rõ ràng khi tính giá thất bại, và không còn hiện giá cũ bên cạnh thông báo lỗi", async () => {
@@ -700,7 +995,7 @@ describe("ReservationSheet", () => {
 
     // Lượt gọi đầu tiên thành công — giá hiện lên bình thường.
     await waitFor(() => {
-      expect(screen.getByText("600.000₫")).toBeInTheDocument();
+      expect(screen.getByTestId("rate-display")).toHaveTextContent("600.000");
     });
 
     // Đổi số khách để kích hoạt một lượt gọi mới, lượt này thất bại.
@@ -709,7 +1004,10 @@ describe("ReservationSheet", () => {
     await waitFor(() => {
       expect(screen.getByText(/không tính được giá/i)).toBeInTheDocument();
     });
-    expect(screen.queryByText("600.000₫")).not.toBeInTheDocument();
+    // M-2 (review Task 17): bản chặt — giá cũ (600.000) không được còn sót
+    // lại đâu đó cạnh thông báo lỗi. Regex tránh phụ thuộc ký tự tiền tệ
+    // ("₫" hay "đ").
+    expect(screen.queryByText(/600\.000/)).not.toBeInTheDocument();
     expect(screen.queryByText("Tổng")).not.toBeInTheDocument();
   });
 
@@ -855,7 +1153,7 @@ describe("ReservationSheet", () => {
   // khác hẳn. Cửa chặn đúng chiều thời gian là check_availability (theo
   // khoảng ngày) và chốt chặn trong transaction ở create_reservation_tx —
   // danh sách phòng không được đoán thay chúng.
-  it.each(["occupied", "cleaning"])(
+  it.each(["occupied"])(
     "vẫn liệt kê phòng đang %s để đặt trước cho ngày phòng đó đã trống",
     async (status) => {
       rooms = [ORIGINAL_ROOMS[0], { ...ORIGINAL_ROOMS[1], status }];

@@ -10,11 +10,12 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { FormField, FormFieldSelect } from "@/components/shared/FormField";
+import RateOverrideField from "@/components/shared/RateOverrideField";
 import { formatAppError } from "@/lib/appError";
 import { fmtMoney } from "@/lib/format";
 import { addDays, addDaysIso, localDateIso, localRfc3339 } from "@/lib/timelineSelection";
 import { useLocalDay } from "@/hooks/useLocalDay";
-import { sumRoomPrices, useRoomPrices } from "@/hooks/useRoomPrices";
+import { sumRoomPricesWithOverrides, useRoomPrices } from "@/hooks/useRoomPrices";
 import { toast } from "sonner";
 import { Sparkles, Hand, Check, ChevronLeft, ChevronRight, Users, Star, CalendarClock } from "lucide-react";
 import type { CheckInGuestInput, RoomAssignment } from "@/types";
@@ -64,6 +65,16 @@ export default function GroupCheckinSheet() {
     const [paidAmount, setPaidAmount] = useState(0);
     const [notes, setNotes] = useState("");
 
+    // Giá tay theo từng phòng, đơn vị mỗi đêm. Khoá là room_id — khớp
+    // `GroupCheckinRequest.rate_override_per_room` phía backend.
+    const [rateOverrides, setRateOverrides] = useState<Record<string, number>>({});
+    // Phòng vừa được lễ tân sửa/mở giá gần nhất — nguồn cho "Áp cho tất cả
+    // phòng". KHÔNG dùng `Object.keys(rateOverrides)[0]`: thứ tự khoá object
+    // là thứ tự CHÈN vào map, không phải thứ tự lễ tân thao tác — sửa phòng
+    // thứ hai sau khi đã mở (không gõ) phòng thứ nhất sẽ áp nhầm giá của
+    // phòng thứ nhất.
+    const [lastEditedRoomId, setLastEditedRoomId] = useState<string | null>(null);
+
     const vacantRooms = rooms.filter((r) => r.status === "vacant");
 
     useEffect(() => {
@@ -86,6 +97,20 @@ export default function GroupCheckinSheet() {
             setGuestsPerRoom({});
             setPaidAmount(0);
             setNotes("");
+            // Giá tay của đoàn trước không được rò sang đoàn kế tiếp (bài học
+            // Task 17: sheet không unmount, chỉ đổi prop `open`).
+            //
+            // M1 (review Task 18): không cần ép remount `RateOverrideField`
+            // bằng key kiểu `${id}:${session}` như CheckinSheet/
+            // ReservationSheet đã làm ở Task 17. Ở SHEET NÀY, `RateOverrideField`
+            // chỉ được render qua `selectedRooms.map(...)` (bước Xác nhận) —
+            // đặt `selectedRooms = []` ngay dưới đây đã kéo số phần tử map về
+            // 0, tức MỌI `RateOverrideField` đang mount đều unmount thật sự
+            // trong chính lần đóng này, không phải chỉ đổi prop. Reset dữ liệu
+            // (`rateOverrides`) là đủ; không còn trạng thái "đang sửa" nào của
+            // component con sống sót qua lần đóng để cần ép remount thêm.
+            setRateOverrides({});
+            setLastEditedRoomId(null);
         }
     }, [isGroupCheckinOpen]);
 
@@ -98,6 +123,18 @@ export default function GroupCheckinSheet() {
             const ids = result.assignments.map((a: RoomAssignment) => a.room.id);
             setSelectedRooms(ids);
             if (ids.length > 0) setMasterRoomId(ids[0]);
+            // Cùng lý do với `toggleRoom`: auto-assign thay HẲN danh sách
+            // phòng, nên override của một phòng không còn trong danh sách mới
+            // phải bị dọn theo — `group_checkin_tx` từ chối cả giao dịch nếu
+            // map còn khoá không nằm trong `room_ids`.
+            const idSet = new Set(ids);
+            setRateOverrides((current) => {
+                const entries = Object.entries(current).filter(([roomId]) => idSet.has(roomId));
+                return entries.length === Object.keys(current).length
+                    ? current
+                    : Object.fromEntries(entries);
+            });
+            setLastEditedRoomId((current) => (current != null && !idSet.has(current) ? null : current));
             toast.success(`Đã chọn tự động ${ids.length} phòng`);
         } catch (err) {
             toast.error(formatAppError(err));
@@ -105,10 +142,67 @@ export default function GroupCheckinSheet() {
     };
 
     const toggleRoom = (id: string) => {
+        const wasSelected = selectedRooms.includes(id);
         setSelectedRooms((prev) =>
             prev.includes(id) ? prev.filter((r) => r !== id) : [...prev, id]
         );
+        if (wasSelected) {
+            // `group_checkin_tx` từ chối cả giao dịch nếu map override còn
+            // khoá không nằm trong `room_ids` — dọn ngay tại đường bỏ chọn,
+            // đừng đợi tới lúc submit mới phát hiện.
+            //
+            // M3 (review Task 18): không cần tự tay null `lastEditedRoomId`
+            // ở đây — xoá `id` khỏi `rateOverrides` ngay phía trên đã đủ để
+            // `overrideSourceRoomId` (kiểm `rateOverrides[lastEditedRoomId]
+            // != null`) tự rơi về nhánh fallback nếu `id` từng là nguồn.
+            setRateOverrides((current) => {
+                if (!(id in current)) return current;
+                const next = { ...current };
+                delete next[id];
+                return next;
+            });
+        }
     };
+
+    const setRoomRate = (roomId: string, rate: number | null) => {
+        setRateOverrides((current) => {
+            const next = { ...current };
+            if (rate == null) {
+                delete next[roomId];
+            } else {
+                next[roomId] = rate;
+            }
+            return next;
+        });
+        // Ghi nhận "vừa sửa" cả khi bấm mở ô giá (prefill) lẫn khi thật sự gõ
+        // số mới — cả hai đều là một lượt tương tác với ô giá của phòng này,
+        // và đúng là cái "Áp cho tất cả phòng" nên coi là nguồn.
+        //
+        // C1 (review Task 18): khi `rate == null` ("Về giá gốc"), CHỈ xoá
+        // `lastEditedRoomId` nếu `roomId` chính là phòng đang giữ vị trí đó.
+        // Xoá vô điều kiện làm "Về giá gốc" một phòng KHÔNG LIÊN QUAN (chạm
+        // nhầm) xoá mất dấu vết của phòng vừa sửa THẬT — "Áp cho tất cả
+        // phòng" khi đó rơi về phòng đầu tiên còn override trong
+        // `selectedRooms`, không phải phòng lễ tân vừa gõ giá thương lượng.
+        setLastEditedRoomId((current) =>
+            rate == null ? (current === roomId ? null : current) : roomId,
+        );
+    };
+
+    // Đoàn hầu như luôn chốt một giá chung; không có nút này thì đoàn 8 phòng
+    // phải gõ 8 lần.
+    const applyRateToAllRooms = (rate: number) => {
+        setRateOverrides(Object.fromEntries(selectedRooms.map((roomId) => [roomId, rate])));
+    };
+
+    // Nguồn giá cho nút "Áp cho tất cả phòng": ưu tiên phòng vừa sửa gần
+    // nhất; nếu phòng đó đã bị bỏ chọn hoặc chưa từng có (mở sheet lại chẳng
+    // hạn) thì rơi về phòng đầu tiên trong `selectedRooms` (giữ đúng THỨ TỰ
+    // CHỌN của lễ tân) đang có override.
+    const overrideSourceRoomId =
+        lastEditedRoomId != null && rateOverrides[lastEditedRoomId] != null
+            ? lastEditedRoomId
+            : selectedRooms.find((id) => rateOverrides[id] != null) ?? null;
 
     // `group_lifecycle.rs` tính tiền cho đặt trước bằng ngày trần, còn khách vãng
     // lai bằng `Local::now()` và `now + nights`. Bản xem trước phải hỏi đúng cặp
@@ -142,9 +236,10 @@ export default function GroupCheckinSheet() {
         disabled: !isGroupCheckinOpen,
     });
 
-    // `null` khi còn phòng chưa có giá — thà không hiện tổng còn hơn hiện một
-    // tổng thiếu mất một phòng.
-    const totalPrice = sumRoomPrices(selectedRooms, priceByRoom);
+    // `null` khi còn phòng chưa có giá VÀ chưa được sửa giá tay — thà không
+    // hiện tổng còn hơn hiện một tổng thiếu mất một phòng. Phòng có override
+    // dùng `override × nights`, không cần đợi giá engine của chính nó.
+    const totalPrice = sumRoomPricesWithOverrides(selectedRooms, priceByRoom, rateOverrides, nights);
 
     const handleSubmit = async () => {
         try {
@@ -160,6 +255,7 @@ export default function GroupCheckinSheet() {
                 source,
                 notes: notes || undefined,
                 paid_amount: paidAmount || undefined,
+                rate_override_per_room: rateOverrides,
             });
             if (isReservation) {
                 toast.success(`📅 Đã đặt phòng đoàn "${groupName}" cho ngày ${checkInDate} — ${selectedRooms.length} phòng`);
@@ -427,14 +523,39 @@ export default function GroupCheckinSheet() {
                                 {selectedRooms.map((id) => {
                                     const room = rooms.find((r) => r.id === id);
                                     return (
-                                        <div key={id} className="flex justify-between text-sm">
-                                            <span>{room?.name || id}</span>
-                                            <span className="font-medium tabular-nums">
-                                                {priceByRoom[id] ? fmtMoney(priceByRoom[id].total) : "—"}
-                                            </span>
+                                        <div key={id} className="flex justify-between items-start gap-3 text-sm">
+                                            <span className="pt-1.5">{room?.name || id}</span>
+                                            <RateOverrideField
+                                                // M1 (review Task 18): `key={id}` là đủ ở đây — không cần
+                                                // ghép thêm một "session" để ép remount. Sheet đóng thì
+                                                // `selectedRooms` bị đặt về `[]` (effect ở trên), tức
+                                                // `.map()` này rỗng đi, tức MỌI RateOverrideField unmount
+                                                // thật sự ngay trong lần đóng đó. Khác với CheckinSheet.tsx
+                                                // / ReservationSheet.tsx (Task 17, commit fc76e43): ở hai
+                                                // sheet đó field luôn có mặt trong cây (không rơi vào một
+                                                // `.map()` cạn về rỗng khi đóng), nên đổi `open` KHÔNG tự
+                                                // unmount và cần ép remount bằng key — điều đó không đúng
+                                                // ở sheet này.
+                                                key={id}
+                                                engineTotal={priceByRoom[id]?.total ?? null}
+                                                nights={nights}
+                                                value={rateOverrides[id] ?? null}
+                                                onChange={(rate) => setRoomRate(id, rate)}
+                                            />
                                         </div>
                                     );
                                 })}
+                                {overrideSourceRoomId != null && selectedRooms.length > 1 && (
+                                    <button
+                                        type="button"
+                                        onClick={() =>
+                                            applyRateToAllRooms(rateOverrides[overrideSourceRoomId])
+                                        }
+                                        className="text-xs text-indigo-600 underline cursor-pointer"
+                                    >
+                                        Áp cho tất cả phòng
+                                    </button>
+                                )}
                                 <hr className="border-slate-200" />
                                 <div className="flex justify-between text-base font-bold">
                                     <span>Tổng cộng</span>

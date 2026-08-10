@@ -22,9 +22,11 @@ use super::{
     billing_service::{record_charge_tx, record_payment_tx, record_payment_with_origin_tx},
     guest_service::{create_group_guest_manifest, link_booking_guests},
     pricing_service::calculate_stay_price_tx,
+    stay_lifecycle::MAX_RATE_PER_NIGHT_VND,
     support::{
         begin_immediate_tx, ensure_one_row_affected, ensure_rows_affected,
-        insert_room_calendar_rows, invalid_state_transition, validate_non_negative_booking_money,
+        insert_room_calendar_rows, invalid_state_transition, merge_pricing_snapshot,
+        room_calendar_stays_tx, room_stays_to_json, validate_non_negative_booking_money,
     },
 };
 
@@ -33,6 +35,10 @@ const GROUP_BOOKED: &str = "booked";
 const GROUP_COMPLETED: &str = "completed";
 const GROUP_PARTIAL_CHECKOUT: &str = "partial_checkout";
 
+/// Cũng là cơ chế rải dư cho `allocate_paid_amount_by_room_price` bên dưới —
+/// đọc doc-comment của hàm đó để biết vì sao gọi lại đúng hàm này (không viết
+/// một vòng rải dư thứ hai) vẫn giữ đúng tính chất "tổng cộng lại đúng bằng
+/// `total`, dư rải từng 1 đồng một theo thứ tự ổn định".
 fn allocate_positive_money_evenly(total: MoneyVnd, count: usize) -> Vec<MoneyVnd> {
     if total <= 0 || count == 0 {
         return vec![0; count];
@@ -45,16 +51,90 @@ fn allocate_positive_money_evenly(total: MoneyVnd, count: usize) -> Vec<MoneyVnd
         .collect()
 }
 
-fn allocate_positive_money_evenly_by_room(
-    total: MoneyVnd,
-    room_ids: &[String],
+/// Phân bổ `paid_amount` cho các phòng trong đoàn theo TỈ LỆ tổng tiền từng
+/// phòng — khác `allocate_positive_money_evenly` (chia đều theo SỐ LƯỢNG
+/// phòng, không biết giá). Bắt buộc từ khi Task 15 cho phép giá tay khác
+/// nhau giữa các phòng cùng đoàn: chia đều theo số lượng có thể cấp cho một
+/// phòng NHIỀU HƠN chính tổng tiền phòng đó. Ví dụ thật từ báo cáo review:
+/// G-R1 override 400.000đ × 2 đêm = 800.000đ, G-R2 giá engine 500.000đ × 2
+/// đêm = 1.000.000đ, `paid_amount = 1.800.000đ` (khách trả đủ CẢ ĐOÀN) — chia
+/// đều ra 900.000đ/phòng, vượt hẳn tổng 800.000đ của G-R1, khiến guard
+/// thu-vượt bên dưới từ chối cả lượt nhận đoàn dù khách trả đúng khớp.
+///
+/// QUY TẮC LÀM TRÒN: phần nguyên `floor(paid_amount × room_total /
+/// Σ room_total)` cho từng phòng — nhân trước bằng `i128` rồi mới chia, cùng
+/// kỹ thuật `percentage_money_line` (money.rs) dùng cho tỉ lệ phần trăm, để
+/// phép nhân không tràn `i64` trước khi chia (VND thật không đủ lớn để tràn
+/// `i128`, nên không cần `checked_mul`). Phần dư — LUÔN nhỏ hơn số phòng, vì
+/// tổng phần mất mát do làm tròn XUỐNG của N số hạng luôn nhỏ hơn N — rải cho
+/// các phòng đã sắp theo `room_id` bằng chính `allocate_positive_money_evenly`
+/// (dư, số phòng): hàm đó cho ra một vector toàn 0 trừ đúng `dư` phòng ĐẦU
+/// (theo thứ tự đã sắp) nhận 1 — đúng quy tắc rải dư
+/// `allocate_positive_money_evenly_by_room` (bản trước Task 15) từng dùng,
+/// nên khi mọi phòng cùng giá, hàm này cho kết quả giống hệt bản cũ (xem
+/// `group_checkin_reservation_blocks_calendar_and_tracks_deposit` và các test
+/// khác chia tiền cọc đều trong `tests/groups.rs` — không sửa gì mà vẫn
+/// xanh).
+///
+/// AN TOÀN — "không phòng nào nhận quá tổng tiền của chính nó" khi
+/// `paid_amount <= Σ room_total` — suy ra trực tiếp từ hai điều trên:
+/// - `paid_amount < Σ room_total` NGHIÊM NGẶT: làm tròn xuống một số thực nhỏ
+///   hơn `room_total` (số nguyên) luôn cho kết quả `<= room_total - 1`, nên
+///   mọi phòng còn dư ít nhất 1 đồng "chỗ trống" trước khi rải — rải thêm 1
+///   đồng vẫn an toàn.
+/// - `paid_amount == Σ room_total` (thu ĐỦ): phép chia của mỗi phòng ra ĐÚNG
+///   số nguyên `room_total`, phần dư bằng 0 — không có gì để rải, mỗi phòng
+///   nhận đúng tổng của chính mình, không hơn không kém (đây chính là ranh
+///   giới review Task 15 chỉ ra).
+///
+/// Khi `paid_amount > Σ room_total` (thu vượt CẢ ĐOÀN — lỗi nhập liệu thật):
+/// mọi phần nguyên đều `>= room_total` (chứng minh tương tự chiều ngược lại),
+/// nên hoặc phần nguyên đã vượt tổng của chính phòng đó, hoặc phần dư (luôn
+/// dương trong trường hợp này) rải thêm sẽ đẩy ít nhất một phòng vượt — guard
+/// thu-vượt theo từng phòng ở `group_checkin_tx` (không đổi) vẫn bắt được,
+/// đúng vai trò "lưới đỡ" báo cáo review yêu cầu giữ lại.
+fn allocate_paid_amount_by_room_price(
+    total_paid: MoneyVnd,
+    room_totals: &[(String, MoneyVnd)],
 ) -> std::collections::HashMap<String, MoneyVnd> {
-    let normalized_room_ids = normalized_room_ids(room_ids);
-    allocate_positive_money_evenly(total, normalized_room_ids.len())
+    let mut ordered = room_totals.to_vec();
+    ordered.sort_by(|a, b| a.0.cmp(&b.0));
+
+    let grand_total: i128 = ordered.iter().map(|(_, total)| i128::from(*total)).sum();
+
+    if total_paid <= 0 || grand_total <= 0 {
+        return ordered
+            .into_iter()
+            .map(|(room_id, _)| (room_id, 0))
+            .collect();
+    }
+
+    let total_paid_i128 = i128::from(total_paid);
+    let bases: Vec<MoneyVnd> = ordered
+        .iter()
+        .map(|(_, room_total)| {
+            ((total_paid_i128 * i128::from(*room_total)) / grand_total) as MoneyVnd
+        })
+        .collect();
+
+    let base_sum: MoneyVnd = bases.iter().sum();
+    let leftover = total_paid - base_sum;
+    let remainder_units = allocate_positive_money_evenly(leftover, ordered.len());
+
+    let allocations: std::collections::HashMap<String, MoneyVnd> = ordered
         .into_iter()
-        .zip(normalized_room_ids)
-        .map(|(amount, room_id)| (room_id, amount))
-        .collect()
+        .zip(bases)
+        .zip(remainder_units)
+        .map(|(((room_id, _), base), extra)| (room_id, base + extra))
+        .collect();
+
+    debug_assert_eq!(
+        allocations.values().sum::<MoneyVnd>(),
+        total_paid,
+        "phân bổ theo tỉ lệ phải cộng đúng bằng paid_amount, không lệch một đồng"
+    );
+
+    allocations
 }
 
 fn map_group_checkin_command_error(error: BookingError) -> CommandError {
@@ -127,6 +207,22 @@ fn build_group_checkin_hash_payload(req: &GroupCheckinRequest) -> serde_json::Va
             (room_id.clone(), json!(guests))
         })
         .collect::<serde_json::Map<_, _>>();
+    // `HashMap` không có thứ tự lặp ổn định giữa hai lần dựng độc lập, kể cả
+    // với đúng một nội dung (mỗi request đi qua deserialize riêng dựng một
+    // `HashMap` với seed hash riêng) — nhưng một OBJECT JSON thì có: mọi object
+    // đi qua `command_idempotency::canonicalize_json_value` trước khi băm
+    // (`stable_json_string`), hàm đó sắp khoá object theo thứ tự chữ cái trước
+    // khi serialize, y hệt cách `guests_per_room` ở trên đã an toàn từ trước.
+    // Đổi trường này thành MẢNG `[[room_id, rate], ...]` sẽ làm mất tính chất
+    // đó — mảng không bị sắp lại — nên hai lượt gọi lại giống hệt nhau dưới
+    // cùng idempotency key có thể băm ra hai giá trị khác nhau, và một retry
+    // hợp lệ sẽ dừng replay trong im lặng. Xem
+    // `group_checkin_hash_payload_encodes_rate_override_as_object_not_array`.
+    let rate_override_per_room = req
+        .rate_override_per_room
+        .iter()
+        .map(|(room_id, rate)| (room_id.clone(), json!(rate)))
+        .collect::<serde_json::Map<_, _>>();
 
     json!({
         "schema": "group.checkin.v1",
@@ -141,6 +237,13 @@ fn build_group_checkin_hash_payload(req: &GroupCheckinRequest) -> serde_json::Va
         "source": req.source.clone(),
         "notes": req.notes.clone(),
         "paid_minor_units": paid_minor_units,
+        // Ảnh hưởng trực tiếp tới `total_price` của từng phòng, giống mọi
+        // trường khác ở trên — thiếu nó thì hai lượt nhận đoàn dưới cùng
+        // idempotency key nhưng GIÁ khác nhau sẽ lặp lại kết quả CŨ (giá cũ,
+        // sai) trong im lặng thay vì bị báo `CONFLICT_IDEMPOTENCY_HASH_MISMATCH`
+        // — một bug tiền bạc, cùng lý do `rate_override_per_night` đã vào hash
+        // của check-in (Task 13) và tạo đặt trước (Task 14).
+        "rate_override_per_room": rate_override_per_room,
     })
 }
 
@@ -346,6 +449,18 @@ pub async fn group_checkin_idempotent(
         .await
 }
 
+/// Giá đã tính cho một phòng ở LƯỢT 1 của `group_checkin_tx` (giá tay hoặc
+/// engine — xem nhánh `match` trong đó). Giữ lại để LƯỢT 2 dùng khi ghi
+/// booking mà không phải gọi lại `calculate_stay_price_tx`, và để phân bổ
+/// `paid_amount` theo tỉ lệ (`allocate_paid_amount_by_room_price`) — muốn
+/// chia theo tỉ lệ thì phải biết tổng của MỌI phòng trước, nên việc TÍNH giá
+/// và việc GHI booking không còn gộp một lượt như trước Task 15's review.
+struct GroupRoomPricing {
+    total_price: MoneyVnd,
+    rate_overridden_at: Option<String>,
+    pricing_snapshot: Option<String>,
+}
+
 async fn group_checkin_tx(
     tx: &mut Transaction<'_, Sqlite>,
     user_id: Option<&str>,
@@ -397,11 +512,165 @@ async fn group_checkin_tx(
     .execute(&mut **tx)
     .await?;
 
-    let paid_allocations_by_room =
-        allocate_positive_money_evenly_by_room(req.paid_amount.unwrap_or(0), &req.room_ids);
+    // Bốn giá trị dưới đây (trạng thái booking, mốc giờ check-in/check-out,
+    // cửa sổ ngày định giá) không phụ thuộc room_id — giống nhau cho MỌI
+    // phòng trong đoàn — nên tính một lần ở đây, dùng chung cho cả hai lượt
+    // bên dưới, thay vì tính lại mỗi vòng lặp.
+    let booking_status = if is_reservation {
+        status::booking::BOOKED
+    } else {
+        status::booking::ACTIVE
+    };
+    let booking_type = if is_reservation {
+        "reservation"
+    } else {
+        "walk-in"
+    };
+    let booking_checkin_at = if is_reservation {
+        format!("{}T14:00:00+07:00", checkin_date)
+    } else {
+        now_rfc3339.clone()
+    };
+    let booking_checkout_at = if is_reservation {
+        format!("{}T12:00:00+07:00", checkout_date)
+    } else {
+        (now + Duration::days(req.nights as i64)).to_rfc3339()
+    };
+    let pricing_start = if is_reservation {
+        checkin_date.as_str()
+    } else {
+        booking_checkin_at.as_str()
+    };
+    let pricing_end = if is_reservation {
+        checkout_date.as_str()
+    } else {
+        booking_checkout_at.as_str()
+    };
+
+    // LƯỢT 1: giá từng phòng — chỉ ĐỌC (`calculate_stay_price_tx` chỉ
+    // SELECT, không ghi gì). Bắt buộc tách khỏi LƯỢT 2 (ghi) bên dưới:
+    // `paid_amount` giờ chia THEO TỈ LỆ tổng tiền từng phòng
+    // (`allocate_paid_amount_by_room_price`, thay cho chia đều theo số lượng
+    // — xem doc-comment hàm đó) — muốn chia theo tỉ lệ thì phải biết tổng của
+    // MỌI phòng trước, không thể vừa tính vừa ghi như một vòng lặp duy nhất.
+    let mut room_pricing: Vec<GroupRoomPricing> = Vec::with_capacity(req.room_ids.len());
+    for room_id in &req.room_ids {
+        // Giá tay đè giá engine theo TỪNG phòng, và đè PHẲNG: tổng tiền là
+        // `rate × nights`, không cộng thêm dòng nào engine tính — cùng luật
+        // `check_in_tx` (Task 13) / `create_reservation_tx` (Task 14). Đoàn
+        // gần như luôn mặc cả, thường một giá cho cả đoàn hoặc riêng vài
+        // phòng, nên tra theo `room_id`; phòng không có trong map đi đúng
+        // đường engine như hôm nay (`req.rate_override_per_room` rỗng ⇒ hành
+        // vi không đổi so với trước Task 15).
+        let (total_price, rate_overridden_at, pricing_snapshot) = match req
+            .rate_override_per_room
+            .get(room_id)
+            .copied()
+        {
+            Some(rate) => {
+                // `validate_group_checkin_request` đã chặn giá ngoài biên
+                // trước khi tới được đây — đó là gate DUY NHẤT (xem comment
+                // ở đó), nên KHÔNG lặp lại phép kiểm biên ở đây.
+                let total =
+                    crate::pricing::checked_mul_money(rate, i64::from(req.nights), "total_price")
+                        .map_err(BookingError::validation)?;
+
+                // Giá engine chỉ tính để LƯU LẠI trong pricing_snapshot cho
+                // chủ khách sạn tra cứu sau này (đã giảm giá cho ai bao
+                // nhiêu), không dùng làm tiền thật — nên lỗi ở bước này
+                // không được làm hỏng cả lượt nhận đoàn. Lỗi thì lưu `null`
+                // (không rõ), không lưu 0 — 0 sẽ đọc nhầm thành "engine
+                // định giá phòng này bằng không".
+                let engine_total = calculate_stay_price_tx(
+                    tx,
+                    room_id,
+                    pricing_start,
+                    pricing_end,
+                    "nightly",
+                    None,
+                )
+                .await
+                .map(|pricing| pricing.total)
+                .ok();
+
+                let snapshot = merge_pricing_snapshot(
+                    None,
+                    "manual_rate",
+                    json!({
+                        "rate_per_night": rate,
+                        "engine_total": engine_total,
+                        "set_at": now_rfc3339.clone(),
+                    }),
+                );
+
+                (total, Some(now_rfc3339.clone()), Some(snapshot))
+            }
+            None => {
+                let pricing = calculate_stay_price_tx(
+                    tx,
+                    room_id,
+                    pricing_start,
+                    pricing_end,
+                    "nightly",
+                    None,
+                )
+                .await?;
+                (pricing.total, None, None)
+            }
+        };
+
+        room_pricing.push(GroupRoomPricing {
+            total_price,
+            rate_overridden_at,
+            pricing_snapshot,
+        });
+    }
+
+    // `paid_amount` chia THEO TỈ LỆ tổng tiền từng phòng vừa tính ở LƯỢT 1 —
+    // xem `allocate_paid_amount_by_room_price` để biết vì sao (chia đều theo
+    // số lượng có thể cấp một phòng nhiều hơn chính tổng tiền phòng đó) và
+    // quy tắc làm tròn/rải dư.
+    let room_totals: Vec<(String, MoneyVnd)> = req
+        .room_ids
+        .iter()
+        .cloned()
+        .zip(room_pricing.iter().map(|pricing| pricing.total_price))
+        .collect();
+    let paid_amount = req.paid_amount.unwrap_or(0);
+
+    // `allocate_paid_amount_by_room_price` trả toàn 0 khi Σ giá phòng <= 0 —
+    // đúng và cần thiết cho `paid_amount <= 0` (không có gì để chia), nhưng
+    // SAI khi `paid_amount > 0`: khách đã trả tiền thật mà không phòng nào
+    // còn giá để chia tỉ lệ vào, nên khoản đó biến mất khỏi mọi booking sắp
+    // ghi mà không một lỗi nào báo — xem doc-comment của hàm đó để biết vì
+    // sao guard thu-vượt từng phòng ngay dưới không tự bắt được ca này (nó
+    // hoá thành `0 > 0` = false). Chặn ở đây, TRƯỚC khi gọi hàm chia, để lỗi
+    // nêu đúng nguyên nhân (giá phòng bằng 0) thay vì một guard thu-vượt lạc
+    // đề bắt được nó tình cờ.
+    let grand_total: MoneyVnd = room_totals.iter().map(|(_, total)| *total).sum();
+    if grand_total <= 0 && paid_amount > 0 {
+        return Err(BookingError::validation(format!(
+            "Tổng tiền phòng của đoàn đang bằng 0đ nhưng khách đã trả {paid_amount}đ — \
+             không thể phân bổ khoản này cho phòng nào, kiểm tra lại giá phòng trước khi \
+             ghi nhận thanh toán"
+        )));
+    }
+
+    let paid_allocations_by_room = allocate_paid_amount_by_room_price(paid_amount, &room_totals);
+
     let mut master_booking_id: Option<String> = None;
 
-    for room_id in &req.room_ids {
+    // LƯỢT 2: ghi. `room_pricing` cùng độ dài, cùng thứ tự với `req.room_ids`
+    // (mỗi vòng lặp ở LƯỢT 1 trên đẩy đúng một phần tử, theo đúng thứ tự
+    // duyệt) nên zip theo vị trí ở đây không thể lệch phòng; dùng lại giá đã
+    // tính, không gọi lại `calculate_stay_price_tx`.
+    for (room_id, room_price) in req.room_ids.iter().zip(room_pricing) {
+        let GroupRoomPricing {
+            total_price,
+            rate_overridden_at,
+            pricing_snapshot,
+        } = room_price;
+
         let paid_for_room = paid_allocations_by_room.get(room_id).copied().unwrap_or(0);
         let is_master = room_id == &req.master_room_id;
         let room_guests = req
@@ -418,44 +687,31 @@ async fn group_checkin_tx(
         .await?;
 
         let booking_id = uuid::Uuid::new_v4().to_string();
-        let booking_status = if is_reservation {
-            status::booking::BOOKED
-        } else {
-            status::booking::ACTIVE
-        };
-        let booking_type = if is_reservation {
-            "reservation"
-        } else {
-            "walk-in"
-        };
-        let booking_checkin_at = if is_reservation {
-            format!("{}T14:00:00+07:00", checkin_date)
-        } else {
-            now_rfc3339.clone()
-        };
-        let booking_checkout_at = if is_reservation {
-            format!("{}T12:00:00+07:00", checkout_date)
-        } else {
-            (now + Duration::days(req.nights as i64)).to_rfc3339()
-        };
-        let pricing = calculate_stay_price_tx(
-            tx,
-            room_id,
-            if is_reservation {
-                &checkin_date
-            } else {
-                &booking_checkin_at
-            },
-            if is_reservation {
-                &checkout_date
-            } else {
-                &booking_checkout_at
-            },
-            "nightly",
-            None,
-        )
-        .await?;
-        let total_price = pricing.total;
+
+        // Thu vượt tổng tiền CỦA PHÒNG NÀY dẫn tới đúng lỗ hổng `check_in_tx`/
+        // `create_reservation_tx` đã vá: một booking có `paid_amount >
+        // total_price` không có lối thoát nếu sau này bị `check_out_tx` từ
+        // chối vì `already_paid > final_total`. Đặt SAU khi `total_price` đã
+        // biết ở CẢ hai nhánh (giá tay lẫn giá engine) — `validate_group_checkin_request`
+        // không biết giá từng phòng (chưa mở transaction, chưa gọi engine) nên
+        // không chặn được ở đó, đúng lý do guard tương ứng nằm trong
+        // `check_in_tx` chứ không phải `validate_check_in_request`. Đặt TRƯỚC
+        // các ghi CỦA PHÒNG NÀY (INSERT bookings, charge, payment ngay dưới) —
+        // toàn bộ `group_checkin_tx` chạy trong một transaction nên các phòng
+        // đã ghi trước đó trong vòng lặp cũng được rollback theo khi hàm này
+        // trả lỗi.
+        //
+        // Với `allocate_paid_amount_by_room_price` chia theo tỉ lệ, nhánh này
+        // KHÔNG THỂ còn xảy ra khi `paid_amount <= Σ total_price` (chứng minh
+        // trong doc-comment của hàm đó) — chỉ còn là LƯỚI ĐỠ cho một
+        // `paid_amount` thu vượt tổng CẢ ĐOÀN, đúng vai trò báo cáo review
+        // yêu cầu giữ lại.
+        if paid_for_room > total_price {
+            return Err(BookingError::validation(format!(
+                "Khách trả {paid_for_room}đ cho phòng {room_id}, cao hơn tổng tiền {total_price}đ — sửa lại giá hoặc số tiền thu"
+            )));
+        }
+
         let deposit_amount = if is_reservation { paid_for_room } else { 0 };
         let guest_phone = room_guests.first().and_then(|guest| guest.phone.as_deref());
 
@@ -464,8 +720,9 @@ async fn group_checkin_tx(
                 id, room_id, primary_guest_id, check_in_at, expected_checkout, actual_checkout,
                 nights, total_price, paid_amount, status, source, notes, created_by,
                 booking_type, pricing_type, deposit_amount, guest_phone, scheduled_checkin,
-                scheduled_checkout, group_id, is_master_room, pricing_snapshot, created_at
-             ) VALUES (?, ?, ?, ?, ?, NULL, ?, ?, 0, ?, ?, ?, ?, ?, 'nightly', ?, ?, ?, ?, ?, ?, NULL, ?)",
+                scheduled_checkout, group_id, is_master_room, pricing_snapshot,
+                rate_overridden_at, created_at
+             ) VALUES (?, ?, ?, ?, ?, NULL, ?, ?, 0, ?, ?, ?, ?, ?, 'nightly', ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         )
         .bind(&booking_id)
         .bind(room_id)
@@ -493,6 +750,8 @@ async fn group_checkin_tx(
         })
         .bind(&group_id)
         .bind(if is_master { 1 } else { 0 })
+        .bind(&pricing_snapshot)
+        .bind(&rate_overridden_at)
         .bind(&now_rfc3339)
         .execute(&mut **tx)
         .await?;
@@ -669,6 +928,7 @@ fn group_checkout_initial_lock_keys_from_payload(
     Ok(vec![crate::aggregate_locks::group_key(group_id)?])
 }
 
+#[cfg(test)]
 struct GroupCheckoutLockState {
     selected_booking_room_map: std::collections::HashMap<String, String>,
     booking_ids_to_lock: Vec<String>,
@@ -681,12 +941,17 @@ struct GroupCheckoutResolvedGuard {
     locked_payment_candidate_booking_ids: Vec<String>,
 }
 
-async fn load_group_checkout_lock_state(
+/// Pha 1 (dưới khoá `group:G`): xác định danh sách booking phải khoá.
+///
+/// Chỉ đọc id, không đọc phòng — đọc phòng ở pha này vẫn có thể cũ ngay khi
+/// vừa đọc xong, vì `change_room` không cầm `group:`, chỉ cầm
+/// `booking:`/`folio:`/`room:`. Xem `load_group_checkout_room_lock_state`.
+async fn load_group_checkout_booking_ids_to_lock(
     pool: &Pool<Sqlite>,
     group_id: &str,
     selected_booking_ids: &[String],
     final_paid: Option<MoneyVnd>,
-) -> BookingResult<GroupCheckoutLockState> {
+) -> BookingResult<Vec<String>> {
     let group_exists: Option<String> =
         sqlx::query_scalar("SELECT id FROM booking_groups WHERE id = ? LIMIT 1")
             .bind(group_id)
@@ -700,7 +965,7 @@ async fn load_group_checkout_lock_state(
     }
 
     let mut selected_query: sqlx::QueryBuilder<Sqlite> =
-        sqlx::QueryBuilder::new("SELECT id, room_id FROM bookings WHERE group_id = ");
+        sqlx::QueryBuilder::new("SELECT id FROM bookings WHERE group_id = ");
     selected_query.push_bind(group_id);
     selected_query.push(" AND id IN (");
     let mut selected_sep = selected_query.separated(", ");
@@ -710,14 +975,13 @@ async fn load_group_checkout_lock_state(
     selected_sep.push_unseparated(")");
 
     let selected_rows = selected_query.build().fetch_all(pool).await?;
-    let mut selected_booking_room_map = std::collections::HashMap::new();
-    for row in selected_rows {
-        selected_booking_room_map
-            .insert(row.get::<String, _>("id"), row.get::<String, _>("room_id"));
-    }
+    let existing_selected_ids = selected_rows
+        .into_iter()
+        .map(|row| row.get::<String, _>("id"))
+        .collect::<std::collections::HashSet<_>>();
 
     for booking_id in selected_booking_ids {
-        if !selected_booking_room_map.contains_key(booking_id) {
+        if !existing_selected_ids.contains(booking_id) {
             return Err(BookingError::not_found(format!(
                 "Booking {} không tìm thấy hoặc đã checkout",
                 booking_id
@@ -725,29 +989,82 @@ async fn load_group_checkout_lock_state(
         }
     }
 
-    let mut booking_ids_to_lock = selected_booking_ids.to_vec();
-    let mut room_ids_to_lock = selected_booking_ids
-        .iter()
-        .filter_map(|booking_id| selected_booking_room_map.get(booking_id).cloned())
-        .collect::<Vec<_>>();
-
-    if final_paid.unwrap_or(0) > 0 {
-        let rows = sqlx::query("SELECT id, room_id FROM bookings WHERE group_id = ?")
+    let mut booking_ids_to_lock = if final_paid.unwrap_or(0) > 0 {
+        let rows = sqlx::query("SELECT id FROM bookings WHERE group_id = ?")
             .bind(group_id)
             .fetch_all(pool)
             .await?;
-        booking_ids_to_lock.clear();
-        room_ids_to_lock.clear();
-        for row in rows {
-            booking_ids_to_lock.push(row.get("id"));
-            room_ids_to_lock.push(row.get("room_id"));
-        }
-    }
+        rows.into_iter()
+            .map(|row| row.get::<String, _>("id"))
+            .collect::<Vec<_>>()
+    } else {
+        selected_booking_ids.to_vec()
+    };
 
     booking_ids_to_lock.sort();
     booking_ids_to_lock.dedup();
+
+    Ok(booking_ids_to_lock)
+}
+
+/// Pha 2 (dưới khoá `booking:`/`folio:` của mọi booking trong
+/// `booking_ids_to_lock`): đọc phòng của từng booking. Đây mới là chân lý —
+/// mọi lệnh dời phòng (`change_room`) buộc phải cầm khoá `booking:` trước khi
+/// đổi `bookings.room_id`, nên đọc dưới khoá này không thể cũ.
+async fn load_group_checkout_room_lock_state(
+    pool: &Pool<Sqlite>,
+    selected_booking_ids: &[String],
+    booking_ids_to_lock: &[String],
+) -> BookingResult<(std::collections::HashMap<String, String>, Vec<String>)> {
+    let mut room_query: sqlx::QueryBuilder<Sqlite> =
+        sqlx::QueryBuilder::new("SELECT id, room_id FROM bookings WHERE id IN (");
+    let mut room_sep = room_query.separated(", ");
+    for booking_id in booking_ids_to_lock {
+        room_sep.push_bind(booking_id);
+    }
+    room_sep.push_unseparated(")");
+
+    let rows = room_query.build().fetch_all(pool).await?;
+    let mut booking_room_map = std::collections::HashMap::new();
+    for row in rows {
+        booking_room_map.insert(row.get::<String, _>("id"), row.get::<String, _>("room_id"));
+    }
+
+    let selected_booking_room_map = selected_booking_ids
+        .iter()
+        .filter_map(|booking_id| {
+            booking_room_map
+                .get(booking_id)
+                .cloned()
+                .map(|room_id| (booking_id.clone(), room_id))
+        })
+        .collect::<std::collections::HashMap<_, _>>();
+
+    let mut room_ids_to_lock = booking_ids_to_lock
+        .iter()
+        .filter_map(|booking_id| booking_room_map.get(booking_id).cloned())
+        .collect::<Vec<_>>();
     room_ids_to_lock.sort();
     room_ids_to_lock.dedup();
+
+    Ok((selected_booking_room_map, room_ids_to_lock))
+}
+
+/// Wrapper mỏng cho helper test `group_checkout` (single-shot, không qua ba
+/// pha aggregate lock) — gọi lần lượt hai hàm trên.
+#[cfg(test)]
+async fn load_group_checkout_lock_state(
+    pool: &Pool<Sqlite>,
+    group_id: &str,
+    selected_booking_ids: &[String],
+    final_paid: Option<MoneyVnd>,
+) -> BookingResult<GroupCheckoutLockState> {
+    let booking_ids_to_lock =
+        load_group_checkout_booking_ids_to_lock(pool, group_id, selected_booking_ids, final_paid)
+            .await?;
+    let (selected_booking_room_map, room_ids_to_lock) =
+        load_group_checkout_room_lock_state(pool, selected_booking_ids, &booking_ids_to_lock)
+            .await?;
 
     Ok(GroupCheckoutLockState {
         selected_booking_room_map,
@@ -760,29 +1077,55 @@ async fn resolve_group_checkout_locks(
     pool: Pool<Sqlite>,
     req: GroupCheckoutRequest,
 ) -> CommandResult<ResolvedWriteCommandGuard<GroupCheckoutResolvedGuard>> {
+    // Pha 1: khoá group trước. Danh sách booking phải khoá chỉ đứng yên khi
+    // đã cầm khoá này.
+    let guard = crate::aggregate_locks::global_manager()
+        .acquire([crate::aggregate_locks::group_key(&req.group_id)?])
+        .await?;
+
     let unique_booking_ids = normalized_booking_ids(&req.booking_ids);
-    let lock_state =
-        load_group_checkout_lock_state(&pool, &req.group_id, &unique_booking_ids, req.final_paid)
+    let booking_ids_to_lock = load_group_checkout_booking_ids_to_lock(
+        &pool,
+        &req.group_id,
+        &unique_booking_ids,
+        req.final_paid,
+    )
+    .await
+    .map_err(map_group_checkout_command_error)?;
+
+    // Pha 2: booking + folio cho mọi booking sẽ khoá, hạng cao hơn `group:`.
+    // `change_room` không cầm `group:`, nên phòng chỉ đứng yên từ đây trở đi.
+    let mut booking_phase_keys = Vec::new();
+    for booking_id in &booking_ids_to_lock {
+        booking_phase_keys.push(crate::aggregate_locks::booking_key(booking_id)?);
+        booking_phase_keys.push(crate::aggregate_locks::folio_key(booking_id)?);
+    }
+
+    let guard = guard
+        .acquire_next(crate::aggregate_locks::global_manager(), booking_phase_keys)
+        .await?;
+
+    let (selected_booking_room_map, room_ids_to_lock) =
+        load_group_checkout_room_lock_state(&pool, &unique_booking_ids, &booking_ids_to_lock)
             .await
             .map_err(map_group_checkout_command_error)?;
-    let mut lock_keys = vec![crate::aggregate_locks::group_key(&req.group_id)?];
 
-    for booking_id in &lock_state.booking_ids_to_lock {
-        lock_keys.push(crate::aggregate_locks::booking_key(booking_id)?);
-        lock_keys.push(crate::aggregate_locks::folio_key(booking_id)?);
-    }
-    for room_id in &lock_state.room_ids_to_lock {
-        lock_keys.push(crate::aggregate_locks::room_key(room_id)?);
+    // Pha 3: room, hạng cao hơn booking/folio.
+    let mut room_phase_keys = Vec::new();
+    for room_id in &room_ids_to_lock {
+        room_phase_keys.push(crate::aggregate_locks::room_key(room_id)?);
     }
 
-    let guard = crate::aggregate_locks::global_manager()
-        .acquire(lock_keys.clone())
+    let guard = guard
+        .acquire_next(crate::aggregate_locks::global_manager(), room_phase_keys)
         .await?;
+    let lock_keys = guard.keys().to_vec();
+
     Ok(ResolvedWriteCommandGuard::new(
         GroupCheckoutResolvedGuard {
             _guard: guard,
-            locked_booking_room_map: lock_state.selected_booking_room_map,
-            locked_payment_candidate_booking_ids: lock_state.booking_ids_to_lock,
+            locked_booking_room_map: selected_booking_room_map,
+            locked_payment_candidate_booking_ids: booking_ids_to_lock,
         },
         lock_keys,
     ))
@@ -967,7 +1310,7 @@ pub(crate) async fn group_checkout_tx(
     )?;
 
     let mut qb = sqlx::QueryBuilder::new("UPDATE rooms SET status = ");
-    qb.push_bind(status::room::CLEANING);
+    qb.push_bind(status::room::VACANT);
     qb.push(" WHERE status = ");
     qb.push_bind(status::room::OCCUPIED);
     qb.push(" AND id IN (");
@@ -986,17 +1329,44 @@ pub(crate) async fn group_checkout_tx(
         ),
     )?;
 
-    let mut qb = sqlx::QueryBuilder::new(
-        "INSERT INTO housekeeping (id, room_id, status, triggered_at, created_at) ",
-    );
-    qb.push_values(&room_ids, |mut b, rid| {
-        b.push_bind(uuid::Uuid::new_v4().to_string())
-            .push_bind(rid)
-            .push_bind("needs_cleaning")
-            .push_bind(&now)
-            .push_bind(&now);
-    });
-    qb.build().execute(&mut **tx).await?;
+    // Snapshot `room_stays` before the DELETE below wipes `room_calendar` —
+    // the same move `check_out_tx` (stay_lifecycle.rs) makes on the
+    // single-booking path, and for the same reason: after checkout the
+    // snapshot is the only place the invoice can learn that a booking slept in
+    // more than one room. `change_room_tx` did write a snapshot at move time,
+    // but nothing has refreshed it since — an `extend_stay_tx` after the move
+    // added `room_calendar` rows and left it behind — so skipping this leaves
+    // a group booking's invoice splitting its money over the wrong nights.
+    //
+    // No truncation here, unlike `check_out_tx`: group checkout never settles
+    // fewer nights than booked — it leaves `bookings.nights` and `total_price`
+    // untouched (see the status UPDATE above), so `room_calendar` already
+    // holds exactly the nights being charged. A group is at most ~10 bookings,
+    // so a per-booking UPDATE is cheap.
+    for booking_id in &unique_booking_ids {
+        let room_stays = room_calendar_stays_tx(tx, booking_id).await?;
+        if room_stays.is_empty() {
+            continue;
+        }
+
+        let existing_snapshot: Option<String> =
+            sqlx::query_scalar("SELECT pricing_snapshot FROM bookings WHERE id = ?")
+                .bind(booking_id)
+                .fetch_optional(&mut **tx)
+                .await?
+                .flatten();
+        let merged_snapshot = merge_pricing_snapshot(
+            existing_snapshot.as_deref(),
+            "room_stays",
+            room_stays_to_json(&room_stays),
+        );
+
+        sqlx::query("UPDATE bookings SET pricing_snapshot = ? WHERE id = ?")
+            .bind(&merged_snapshot)
+            .bind(booking_id)
+            .execute(&mut **tx)
+            .await?;
+    }
 
     let mut qb = sqlx::QueryBuilder::new("DELETE FROM room_calendar WHERE booking_id IN (");
     let mut sep = qb.separated(", ");
@@ -1125,6 +1495,45 @@ fn validate_group_checkin_request(req: &GroupCheckinRequest) -> BookingResult<()
         return Err(BookingError::validation(
             "Phòng không được lặp trong cùng một group".to_string(),
         ));
+    }
+
+    // Biên trước, phép nhân sau — cùng thứ tự `validate_check_in_request`
+    // (Task 13, stay_lifecycle.rs) / `validate_reservation_rate_override`
+    // (Task 14, reservation_lifecycle.rs): chặn giá ngoài biên NGAY TẠI ĐÂY,
+    // trước khi `group_checkin_tx` có cơ hội đưa bất cứ giá trị nào trong map
+    // vào `checked_mul_money` — nếu không, một giá trị tràn số/không an toàn có
+    // thể trả thẳng ra người dùng một thông báo overflow TIẾNG ANH, hoặc — với
+    // giá âm — lọt xuống guard thu-vượt-tổng bên dưới và đọc nhầm một tổng âm
+    // ra như một mức giá.
+    //
+    // Đây là GATE DUY NHẤT cho `rate_override_per_room` — KHÔNG có bản sao
+    // "belt-and-braces" bên trong `group_checkin_tx` như `check_in_tx` có cho
+    // `rate_override_per_night`. Lý do: mọi validation KHÁC của chính hàm này
+    // (số đêm, phòng đại diện, phòng trùng ở trên) cũng chỉ kiểm một lần, một
+    // chỗ — `group_checkin_tx` chỉ có đúng một lối vào, và cả hai người gọi nó
+    // (`group_checkin` lẫn `group_checkin_idempotent`) đều bắt buộc gọi hàm
+    // này trước. Chính vì chỉ một lối vào đó, thêm một bản sao thứ hai bên
+    // trong `group_checkin_tx` sẽ không có test nào khiến nó đỏ nếu xoá đi —
+    // khác `check_in_tx`, nơi bản sao có lý do phòng thủ chiều sâu vì hàm đó
+    // lịch sử được gọi từ nhiều chỗ hơn.
+    //
+    // Cũng kiểm luôn khoá của map phải nằm trong `room_ids`: một khoá lạ (gõ
+    // sai `room_id`, hoặc phòng đã bị bỏ khỏi đoàn nhưng bảng giá tay chưa cập
+    // nhật) sẽ bị `group_checkin_tx` ÂM THẦM bỏ qua vì vòng lặp ở đó chỉ tra
+    // cứu map theo từng `room_id` trong `room_ids` — với một trường tiền bạc,
+    // im lặng bỏ qua một mục có khả năng do nhầm lẫn còn rủi ro hơn từ chối rõ
+    // ràng ngay từ đầu.
+    for (room_id, rate) in &req.rate_override_per_room {
+        if !req.room_ids.contains(room_id) {
+            return Err(BookingError::validation(format!(
+                "Phòng {room_id} trong bảng giá tay không nằm trong danh sách phòng của đoàn"
+            )));
+        }
+        if *rate <= 0 || *rate > MAX_RATE_PER_NIGHT_VND {
+            return Err(BookingError::validation(
+                "Giá mỗi đêm không hợp lệ".to_string(),
+            ));
+        }
     }
 
     Ok(())
@@ -1315,6 +1724,61 @@ mod tests {
         assert_eq!(allocation.iter().sum::<MoneyVnd>(), 100_000);
     }
 
+    /// Ranh giới chính review Task 15 chỉ ra: thu ĐỦ (paid_amount = tổng cả
+    /// đoàn) trên hai phòng CHÊNH giá nhau phải cấp cho mỗi phòng ĐÚNG BẰNG
+    /// tổng của chính nó — không hơn, không kém. Số liệu lấy nguyên từ ví dụ
+    /// trong báo cáo review (G-R1 override 400.000×2, G-R2 engine 500.000×2).
+    #[test]
+    fn allocate_paid_amount_by_room_price_gives_each_room_exactly_its_own_total_when_paid_in_full()
+    {
+        let room_totals = vec![
+            ("G-R1".to_string(), 800_000),
+            ("G-R2".to_string(), 1_000_000),
+        ];
+
+        let allocations = allocate_paid_amount_by_room_price(1_800_000, &room_totals);
+
+        assert_eq!(allocations.get("G-R1").copied(), Some(800_000));
+        assert_eq!(allocations.get("G-R2").copied(), Some(1_000_000));
+    }
+
+    /// Trả một phần, không chia hết theo tỉ lệ (1.000.000 × 800.000/1.800.000
+    /// = 444.444,44...) — ghim quy tắc làm tròn XUỐNG + rải dư 1 đồng theo
+    /// `room_id` đã sắp, và ghim tổng cộng lại đúng bằng `paid_amount`, không
+    /// lệch một đồng dù làm tròn.
+    #[test]
+    fn allocate_paid_amount_by_room_price_sums_exactly_when_not_evenly_divisible() {
+        let room_totals = vec![
+            ("G-R1".to_string(), 800_000),
+            ("G-R2".to_string(), 1_000_000),
+        ];
+
+        let allocations = allocate_paid_amount_by_room_price(1_000_000, &room_totals);
+
+        assert_eq!(allocations.get("G-R1").copied(), Some(444_445));
+        assert_eq!(allocations.get("G-R2").copied(), Some(555_555));
+        assert_eq!(allocations.values().sum::<MoneyVnd>(), 1_000_000);
+    }
+
+    /// Mọi phòng cùng giá phải cho kết quả giống hệt `allocate_positive_money_evenly`
+    /// — cùng số phòng, cùng `paid_amount`, cùng quy tắc rải dư theo thứ tự đã
+    /// sắp (ở đây "A" < "B" < "C" nên đã đúng thứ tự `room_ids` luôn).
+    #[test]
+    fn allocate_paid_amount_by_room_price_matches_even_split_when_prices_equal() {
+        let room_totals = vec![
+            ("A".to_string(), 500_000),
+            ("B".to_string(), 500_000),
+            ("C".to_string(), 500_000),
+        ];
+
+        let allocations = allocate_paid_amount_by_room_price(100_000, &room_totals);
+        let even_split = allocate_positive_money_evenly(100_000, 3);
+
+        assert_eq!(allocations.get("A").copied(), Some(even_split[0]));
+        assert_eq!(allocations.get("B").copied(), Some(even_split[1]));
+        assert_eq!(allocations.get("C").copied(), Some(even_split[2]));
+    }
+
     #[test]
     fn map_group_checkin_command_error_maps_invalid_state_transition_code() {
         let error = map_group_checkin_command_error(BookingError::conflict(format!(
@@ -1323,5 +1787,128 @@ mod tests {
         )));
 
         assert_eq!(error.code, codes::CONFLICT_INVALID_STATE_TRANSITION);
+    }
+
+    fn minimal_group_request(room_ids: &[&str]) -> GroupCheckinRequest {
+        GroupCheckinRequest {
+            group_name: "Group".to_string(),
+            organizer_name: "Organizer".to_string(),
+            organizer_phone: None,
+            check_in_date: None,
+            room_ids: room_ids.iter().map(|id| id.to_string()).collect(),
+            master_room_id: room_ids[0].to_string(),
+            guests_per_room: Default::default(),
+            nights: 2,
+            source: None,
+            notes: None,
+            paid_amount: None,
+            rate_override_per_room: Default::default(),
+        }
+    }
+
+    /// Cùng cấu trúc `validate_check_in_request_rejects_bad_rates_before_any_multiply`
+    /// (Task 13, stay_lifecycle.rs): `huge` đủ lớn để vượt cả
+    /// `MAX_RATE_PER_NIGHT_VND` VÀ vượt biên an toàn số nguyên (giả sử biên bị
+    /// gỡ, phép nhân sẽ ăn giá trị này và trả một thông báo overflow TIẾNG
+    /// ANH); `negative` không tràn số (nhân với đêm dương vẫn ra một số "hợp
+    /// lệ") nên nếu biên bị gỡ, request sẽ lọt qua `checked_mul_money` — bug
+    /// thật đang chặn.
+    #[test]
+    fn validate_group_checkin_request_rejects_bad_rate_override_bounds() {
+        let huge = 9_500_000_000_000_000_i64;
+        let negative = -500_000_i64;
+
+        for rate in [huge, negative] {
+            let mut req = minimal_group_request(&["room-a", "room-b"]);
+            req.rate_override_per_room
+                .insert("room-a".to_string(), rate);
+
+            let error = validate_group_checkin_request(&req).unwrap_err();
+            assert_eq!(
+                error,
+                BookingError::validation("Giá mỗi đêm không hợp lệ".to_string()),
+                "giá {rate} phải bị chặn bằng thông báo biên tiếng Việt, nhận được: {error:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn validate_group_checkin_request_rejects_zero_rate_override() {
+        let mut req = minimal_group_request(&["room-a", "room-b"]);
+        req.rate_override_per_room.insert("room-a".to_string(), 0);
+
+        let error = validate_group_checkin_request(&req).unwrap_err();
+        assert_eq!(
+            error,
+            BookingError::validation("Giá mỗi đêm không hợp lệ".to_string())
+        );
+    }
+
+    #[test]
+    fn validate_group_checkin_request_rejects_above_cap_rate_override() {
+        let mut req = minimal_group_request(&["room-a", "room-b"]);
+        req.rate_override_per_room
+            .insert("room-a".to_string(), MAX_RATE_PER_NIGHT_VND + 1);
+
+        let error = validate_group_checkin_request(&req).unwrap_err();
+        assert_eq!(
+            error,
+            BookingError::validation("Giá mỗi đêm không hợp lệ".to_string())
+        );
+    }
+
+    /// Biên dương: đúng bằng trần phải QUA — chứng minh phép so là `>`, không
+    /// phải `>=`, nên không vô tình xiết chặt hơn `check_in_tx`/`create_reservation_tx`
+    /// dùng cùng hằng số này.
+    #[test]
+    fn validate_group_checkin_request_accepts_rate_override_at_cap() {
+        let mut req = minimal_group_request(&["room-a", "room-b"]);
+        req.rate_override_per_room
+            .insert("room-a".to_string(), MAX_RATE_PER_NIGHT_VND);
+
+        assert!(validate_group_checkin_request(&req).is_ok());
+    }
+
+    /// Một khoá lạ trong map (gõ sai `room_id`, hoặc phòng đã bị bỏ khỏi đoàn
+    /// nhưng bảng giá tay chưa cập nhật) phải bị từ chối rõ ràng — không bị
+    /// `group_checkin_tx` âm thầm bỏ qua.
+    #[test]
+    fn validate_group_checkin_request_rejects_rate_override_for_room_not_in_group() {
+        let mut req = minimal_group_request(&["room-a", "room-b"]);
+        req.rate_override_per_room
+            .insert("room-c".to_string(), 400_000);
+
+        let error = validate_group_checkin_request(&req).unwrap_err();
+        assert!(
+            matches!(&error, BookingError::Validation(message) if message.contains("room-c")),
+            "lỗi phải nêu rõ phòng room-c không thuộc đoàn, nhận được: {error:?}"
+        );
+    }
+
+    /// `canonicalize_json_value` (dùng bởi `stable_request_hash`) chỉ sắp khoá
+    /// của OBJECT, giữ nguyên thứ tự phần tử của MẢNG. `HashMap` không có thứ
+    /// tự lặp ổn định giữa hai lần dựng độc lập, kể cả cùng nội dung — nếu
+    /// trường này lỡ mã hoá thành mảng `[[room_id, rate], ...]` thay vì object,
+    /// hai lượt gọi lại giống hệt nhau dưới cùng idempotency key có thể băm ra
+    /// hai giá trị khác nhau, và một retry hợp lệ sẽ dừng replay trong im
+    /// lặng — pin trực tiếp phần tích hợp Task 15 thêm vào, khác với test biên
+    /// giá ở trên.
+    #[test]
+    fn group_checkin_hash_payload_encodes_rate_override_as_object_not_array() {
+        let mut req = minimal_group_request(&["room-a", "room-b"]);
+        req.rate_override_per_room
+            .insert("room-a".to_string(), 400_000);
+        req.rate_override_per_room
+            .insert("room-b".to_string(), 500_000);
+
+        let payload = build_group_checkin_hash_payload(&req);
+
+        assert!(
+            payload["rate_override_per_room"].is_object(),
+            "rate_override_per_room phải là object để canonicalize_json_value sắp khoá trước khi băm, nhận được: {:?}",
+            payload["rate_override_per_room"]
+        );
+        assert_eq!(payload["rate_override_per_room"]["room-a"], 400_000);
+        assert_eq!(payload["rate_override_per_room"]["room-b"], 500_000);
     }
 }

@@ -26,6 +26,15 @@ const MODE_OPTIONS: Array<{ value: CheckoutSettlementMode; label: string }> = [
     { value: "booked_nights", label: "Đã đặt" },
 ];
 
+// Booking đã bị lễ tân đổi giá tay (`set_booking_rate`) không được chốt theo
+// giá niêm yết mặc định — "Thực tế" tính lại từ pricing engine, bỏ qua giá đã
+// thương lượng. Với booking như vậy, mặc định phải là "Đã đặt" (dùng
+// total_price đã lưu), giữ đúng mức giá lễ tân đã chốt với khách. Lễ tân vẫn
+// có thể tự tay đổi sang cách tính khác.
+function defaultSettlementMode(booking: Booking): CheckoutSettlementMode {
+    return booking.rate_overridden_at ? "booked_nights" : "actual_nights";
+}
+
 export default function CheckoutSettlementModal({
     open,
     roomId,
@@ -33,7 +42,9 @@ export default function CheckoutSettlementModal({
     onClose,
     onConfirm,
 }: CheckoutSettlementModalProps) {
-    const [settlementMode, setSettlementMode] = useState<CheckoutSettlementMode>("actual_nights");
+    const [settlementMode, setSettlementMode] = useState<CheckoutSettlementMode>(() =>
+        defaultSettlementMode(booking)
+    );
     const [preview, setPreview] = useState<CheckoutSettlementPreview | null>(null);
     const [finalTotal, setFinalTotal] = useState(0);
     const [loadingPreview, setLoadingPreview] = useState(false);
@@ -42,14 +53,14 @@ export default function CheckoutSettlementModal({
 
     useEffect(() => {
         if (!open) {
-            setSettlementMode("actual_nights");
+            setSettlementMode(defaultSettlementMode(booking));
             setPreview(null);
             setFinalTotal(0);
             setLoadingPreview(false);
             setSubmitting(false);
             manualOverrideRef.current = false;
         }
-    }, [open]);
+    }, [open, booking]);
 
     useEffect(() => {
         if (!open) {
@@ -145,6 +156,13 @@ export default function CheckoutSettlementModal({
                         })}
                     </div>
                 </div>
+
+                {booking.rate_overridden_at && (
+                    <p className="text-[12px] text-amber-600">
+                        Booking này đã được đổi giá thủ công — mặc định chốt theo tổng tiền đã đặt
+                        để giữ đúng giá đã thương lượng với khách.
+                    </p>
+                )}
 
                 <p className="rounded-xl bg-slate-50 px-3 py-2 text-slate-600 min-h-11">
                     {loadingPreview ? "Đang tính lại..." : preview?.explanation ?? ""}

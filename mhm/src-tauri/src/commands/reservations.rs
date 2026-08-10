@@ -707,6 +707,7 @@ mod tests {
             source: Some("zalo".to_string()),
             notes: Some("Khách thích tầng cao".to_string()),
             guests: None,
+            rate_override_per_night: None,
         }
     }
 

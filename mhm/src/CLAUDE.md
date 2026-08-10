@@ -26,6 +26,19 @@ Errors come back as structured `AppError` (`lib/appError/`). Do not stringify an
 
 `usePricePreview` calls `calculate_room_price_preview`. It is a preview: the authoritative amount is whatever the backend returns at commit time. Never recompute a total in the frontend to display alongside it.
 
+`RateOverrideField` and `sumRoomPricesWithOverrides` (`hooks/useRoomPrices.ts`) are the
+documented exceptions to "never recompute a total in the frontend": both show
+`rate × nights` for a manually entered rate — the field for a single room, the sum for
+a group check-in screen adding up several rooms, some overridden and some not. Both are
+a preview of the same product the backend recomputes and validates at commit time — do
+not extend that arithmetic to anything the engine prices (surcharges, uplifts, extra
+guests).
+The unit is per night, matching `pricing_snapshot.manual_rate.rate_per_night` — the
+actual stored rate; a total would break extend-stay. `bookings.rate_overridden_at` is
+**not** that value: it is a `TEXT` RFC3339 timestamp (`db/core_extensions.rs`) written
+as `now_rfc3339` when a manual rate is set — a flag marking *that* an override
+happened and *when*, carrying no price and no unit of its own.
+
 Room types come from the backend as **display names containing spaces** (`"Standard Room"`, `"Deluxe Balcony"`). Never join or split a list of them on a character delimiter — use `JSON.stringify`. Use real multi-word names in fixtures; single-word placeholders hide the bug.
 
 ## Tests

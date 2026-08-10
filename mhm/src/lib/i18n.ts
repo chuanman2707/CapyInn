@@ -6,14 +6,12 @@ const translations: Record<string, Record<Locale, string>> = {
     "nav.reservations": { vi: "Đặt phòng", en: "Reservations" },
     "nav.rooms": { vi: "Phòng", en: "Rooms" },
     "nav.guests": { vi: "Khách hàng", en: "Guests" },
-    "nav.housekeeping": { vi: "Dọn phòng", en: "Housekeeping" },
     "nav.analytics": { vi: "Thống kê", en: "Analytics" },
     "nav.settings": { vi: "Cài đặt", en: "Settings" },
 
     // Dashboard
     "dashboard.occupied": { vi: "Có khách", en: "Occupied" },
     "dashboard.vacant": { vi: "Trống", en: "Vacant" },
-    "dashboard.cleaning": { vi: "Cần dọn", en: "Need Cleaning" },
     "dashboard.revenue_today": { vi: "Doanh thu hôm nay", en: "Revenue Today" },
     "dashboard.accommodation": { vi: "Sơ đồ phòng", en: "Accommodation" },
     "dashboard.recent_bookings": { vi: "Booking gần đây", en: "Recent Bookings" },
@@ -69,7 +67,6 @@ const translations: Record<string, Record<Locale, string>> = {
     "rooms.total": { vi: "Tổng", en: "Total" },
     "rooms.vacant": { vi: "Trống", en: "Vacant" },
     "rooms.occupied": { vi: "Có khách", en: "Occupied" },
-    "rooms.cleaning": { vi: "Cần dọn", en: "Need Cleaning" },
     "rooms.reserved": { vi: "Đặt trước", en: "Reserved" },
 
     // Toasts

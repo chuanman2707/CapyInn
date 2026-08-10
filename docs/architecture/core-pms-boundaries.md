@@ -17,12 +17,13 @@ Core PMS is the stable product surface required for day-to-day hotel operations:
 - stays, check-in, extend-stay, and check-out;
 - reservations and reservation lifecycle;
 - guests and guest registration data;
-- housekeeping and maintenance state;
 - billing, folios, payments, invoices, and financial reporting;
 - group booking and group invoices;
 - night audit and end-of-day reconciliation;
 - settings, authentication, and app lock;
 - SQLite schema, migrations, and queries required for normal PMS workflows.
+
+The `housekeeping` table is retained for its history rows; nothing in the product reads or writes it, and it is not part of the current Core PMS surface.
 
 Core PMS work should be understandable, testable, and able to run without experimental runtime enabled.
 

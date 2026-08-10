@@ -11,11 +11,14 @@ pub mod status {
         pub const BOOKED: &str = "booked";
         pub const CANCELLED: &str = "cancelled";
         pub const NO_SHOW: &str = "no_show";
+        /// Lượt bị xoá vì nhập sai. Không phải sự kiện kinh doanh — khác hẳn
+        /// `CANCELLED` (khách thật sự huỷ, có thể giữ cọc và ghi phí huỷ).
+        /// Mọi báo cáo tiền phải loại trạng thái này.
+        pub const VOIDED: &str = "voided";
     }
     pub mod room {
         pub const VACANT: &str = "vacant";
         pub const OCCUPIED: &str = "occupied";
-        pub const CLEANING: &str = "cleaning";
         pub const BOOKED: &str = "booked";
     }
     pub mod calendar {
@@ -150,6 +153,9 @@ pub struct Booking {
     pub source: Option<String>,
     pub notes: Option<String>,
     pub created_at: String,
+    /// Thời điểm gần nhất giá/đêm bị đổi tay qua `set_booking_rate`. `None`
+    /// nghĩa là tổng tiền vẫn là giá tính bình thường từ pricing engine.
+    pub rate_overridden_at: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -162,20 +168,9 @@ pub struct Expense {
     pub created_at: String,
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone)]
-pub struct HousekeepingTask {
-    pub id: String,
-    pub room_id: String,
-    pub status: String,
-    pub note: Option<String>,
-    pub triggered_at: String,
-    pub cleaned_at: Option<String>,
-    pub created_at: String,
-}
-
 // --- Request/Response DTOs ---
 
-#[derive(Debug, Deserialize, Clone)]
+#[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct CreateGuestRequest {
     pub guest_type: Option<String>,
     pub full_name: String,
@@ -189,7 +184,7 @@ pub struct CreateGuestRequest {
     pub phone: Option<String>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct CheckInRequest {
     pub room_id: String,
     pub guests: Vec<CreateGuestRequest>,
@@ -205,10 +200,23 @@ pub struct CheckInRequest {
     /// người** — không phải "chưa biết", vì một báo giá không được phép treo.
     #[serde(default)]
     pub guest_count: Option<i32>,
+    /// Giá mỗi đêm do lễ tân gõ tay, đè giá engine. `None` ⇒ engine tính như cũ.
+    /// Kiểu `Option` để mọi nơi dựng `CheckInRequest` hôm nay chỉ cần thêm
+    /// `None` là biên dịch lại được, không phải đổi hành vi.
+    ///
+    /// Đi cùng `guest_count` ở trên nhưng KHÔNG nhân với nó: giá tay đè phẳng,
+    /// xem `check_in_tx`.
+    pub rate_override_per_night: Option<MoneyVnd>,
 }
 
 /// Ghi bù một lượt khách đã ở nhưng chưa được nhập máy.
-#[derive(Debug, Deserialize)]
+///
+/// `Serialize, Clone` là để thẻ xác nhận của trợ lý mang **chính** kiểu này làm
+/// payload (`agent::assistant::draft::ActionPayload::Backfill`): thẻ phải
+/// serialize được ra webview, và test đường nối phải nhân bản được payload để
+/// chạy nó qua đúng lệnh `backfill_stay`. Cùng lý do đã thêm hai derive ấy cho
+/// `CreateReservationRequest`.
+#[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct BackfillStayRequest {
     pub room_id: String,
     pub guests: Vec<CreateGuestRequest>,
@@ -218,6 +226,10 @@ pub struct BackfillStayRequest {
     pub check_out_date: Option<String>,
     /// YYYY-MM-DD; bắt buộc khi khách còn ở, phải sau hôm nay.
     pub expected_checkout_date: Option<String>,
+    /// **Số của preview, không phải số model đưa.** `backfill_stay` là lệnh ghi
+    /// duy nhất bắt người gọi đưa tiền phòng vào (`check_in` và
+    /// `create_reservation` tự tính), nên đây là chỗ duy nhất một mô hình ngôn
+    /// ngữ có thể quyết định khách nợ bao nhiêu — xem `build_backfill_draft`.
     pub total_price: MoneyVnd,
     pub paid_amount: MoneyVnd,
     pub source: Option<String>,
@@ -249,6 +261,61 @@ pub struct CheckOutResponse {
 }
 
 #[derive(Debug, Deserialize)]
+pub struct VoidBookingRequest {
+    pub booking_id: String,
+    /// Lý do chọn từ danh sách rút gọn ở giao diện. Không bắt buộc.
+    pub reason: Option<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
+pub struct VoidBookingResponse {
+    pub ok: bool,
+    pub booking_id: String,
+    pub room_id: String,
+    /// Trạng thái ngay trước khi xoá — để giao diện báo đúng câu.
+    pub previous_status: String,
+    pub voided_at: String,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
+pub struct VoidBookingPreview {
+    pub booking_id: String,
+    pub guest_name: String,
+    pub room_id: String,
+    pub previous_status: String,
+    /// Số tiền sẽ biến mất khỏi doanh thu: tiền phòng đã ghi nhận (toàn bộ
+    /// `total_price` nếu đã trả phòng, phần theo tỉ lệ đêm nếu đang ở, 0 nếu
+    /// mới đặt — chưa nhận phòng thì chưa được tính vào doanh thu phòng) CỘNG
+    /// toàn bộ `folio_lines` và các `transactions` loại `cancellation_fee` của
+    /// booking này — cả hai đều bị lọc khỏi báo cáo bởi `status != 'voided'`
+    /// giống tiền phòng, nên đều là tiền thật sự "biến mất" khi voided.
+    ///
+    /// KHÔNG gồm `deposit_amount` — xem field đó.
+    pub revenue_impact: MoneyVnd,
+    /// Ngày mà con số trên đang được tính vào, `YYYY-MM-DD`.
+    pub revenue_date: String,
+    /// Tiền cọc đã thu, hiển thị RIÊNG khỏi `revenue_impact` — ĐỪNG gộp lại.
+    /// Cọc là một khoản THU (`transactions` loại `deposit`), không phải doanh
+    /// thu: không báo cáo doanh thu nào cộng cọc vào cả, và `transactions` là
+    /// append-only nên voided không xoá dòng cọc này — tiền cọc không "biến
+    /// mất" khỏi đâu cả khi xoá. Gộp vào `revenue_impact` sẽ báo nhầm một
+    /// khoản tiền chưa từng ở trong doanh thu là tiền "biến mất khỏi doanh
+    /// thu".
+    pub deposit_amount: MoneyVnd,
+    pub nights_recognized: i32,
+    pub nights_total: i32,
+    pub is_audited: bool,
+    /// True nghĩa là xoá lượt này sẽ KHÔNG đổi trạng thái phòng. Từ 09/08/2026
+    /// nhánh checked_out của `void_booking_tx` (`void_lifecycle.rs`) không
+    /// còn câu UPDATE rooms nào, nên cờ này luôn true khi `previous_status ==
+    /// checked_out` (`void_queries.rs`) — luôn false với mọi trạng thái khác,
+    /// kể cả khi ở đó phòng thật sự cũng không bị đụng (booked). KHÔNG suy ra
+    /// có khách khác đang ở: true cả khi phòng đã Trống.
+    pub room_status_unchanged: bool,
+    pub is_group_booking: bool,
+}
+
+#[derive(Debug, Deserialize)]
 pub struct CheckoutSettlementPreviewRequest {
     pub booking_id: String,
     pub settlement_mode: CheckoutSettlementMode,
@@ -267,6 +334,13 @@ pub struct RoomWithBooking {
     pub room: Room,
     pub booking: Option<Booking>,
     pub guests: Vec<Guest>,
+    /// `group_id` của lượt đang ở (nếu có), lấy trực tiếp từ `bookings.group_id`.
+    /// Cố tình KHÔNG thêm vào `Booking` dùng chung — struct đó xuất hiện ở rất
+    /// nhiều nơi không cần trường này. Đây là dữ liệu duy nhất để `RoomDrawer`
+    /// (Task 12) tự khoá nút xóa lượt thuộc đoàn TRƯỚC khi bấm, giống hệt
+    /// `BookingWithGuest.group_id` đã cho `BookingDetailPopup` làm ở Task 11 —
+    /// xem `queries/booking/room_queries.rs::load_room_detail`.
+    pub group_id: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -282,7 +356,6 @@ pub struct DashboardStats {
     pub total_rooms: i32,
     pub occupied: i32,
     pub vacant: i32,
-    pub cleaning: i32,
     pub revenue_today: MoneyVnd,
 }
 
@@ -384,6 +457,7 @@ pub struct BookingWithGuest {
     pub scheduled_checkout: Option<String>,
     pub guest_phone: Option<String>,
     pub guests: Option<i32>,
+    pub group_id: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -511,7 +585,12 @@ pub struct CreateUserRequest {
 
 // ── Reservation Calendar DTOs ──
 
-#[derive(Debug, Deserialize)]
+/// `Serialize` + `Clone` để trợ lý quầy mang được **chính** kiểu này ra thẻ xác
+/// nhận (`agent::assistant::draft::ActionPayload::Reserve`). Nút *Đồng ý* gửi
+/// thẳng `payload` của thẻ sang lệnh `create_reservation`, nên payload phải là
+/// kiểu ấy chứ không phải một bản chép tay — bản chép tay là một nguồn sự thật
+/// thứ hai để trôi lệch, và thẻ là thứ con người duyệt trước khi tiền đi.
+#[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct CreateReservationRequest {
     pub room_id: String,
     pub guest_name: String,
@@ -526,6 +605,10 @@ pub struct CreateReservationRequest {
     /// Số khách ở thực tế. `None` ⇒ không phụ thu, giá giữ nguyên như cũ.
     /// Kiểu `Option` để gateway và agent không phải sửa theo.
     pub guests: Option<i32>,
+    /// Giá mỗi đêm do lễ tân gõ tay khi chốt qua điện thoại, đè giá engine.
+    /// `None` ⇒ engine tính như cũ. Không có đường sửa sau: `set_booking_rate`
+    /// chặn thẳng khi `status != 'active'`, nên giá phải đúng ngay lúc tạo.
+    pub rate_override_per_night: Option<MoneyVnd>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -603,7 +686,14 @@ pub struct InvoiceData {
     pub total: MoneyVnd,
     pub balance_due: MoneyVnd,
     pub policy_text: Option<String>,
+    /// The booking's own notes, copied verbatim — front-desk shorthand, NOT
+    /// guest-facing. Neither invoice renderer prints this; see
+    /// `settlement_note` for the text that is meant to be read by the guest.
     pub notes: Option<String>,
+    /// Guest-facing explanation of how the total was reached, set only when
+    /// the breakdown splits per room (`invoice_generation.rs`). `None` on a
+    /// single-line invoice, where the breakdown line already says it.
+    pub settlement_note: Option<String>,
     pub status: String,
     pub created_at: String,
 }
@@ -659,6 +749,13 @@ pub struct GroupCheckinRequest {
     pub source: Option<String>,
     pub notes: Option<String>,
     pub paid_amount: Option<MoneyVnd>,
+    /// Giá mỗi đêm gõ tay, theo TỪNG phòng — một đoàn gần như luôn mặc cả, và
+    /// thường một giá chung cho cả đoàn nên đây là map chứ không phải một giá
+    /// đơn. Phòng không có trong map ⇒ engine tính, đúng như trước. Map rỗng ⇒
+    /// toàn bộ đoàn theo engine. `#[serde(default)]` để mọi request cũ (chưa
+    /// biết trường này) vẫn deserialize được ra map rỗng.
+    #[serde(default)]
+    pub rate_override_per_room: std::collections::HashMap<String, MoneyVnd>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -740,9 +837,47 @@ pub struct GroupInvoiceRoomLine {
     pub guest_name: String,
 }
 
+// ── Room Change DTOs ──
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RoomChangeOption {
+    pub room_id: String,
+    pub name: String,
+    pub room_type: String,
+    pub floor: i32,
+    pub max_guests: i32,
+    /// Chênh lệch cho toàn bộ dải ngày còn lại: giá phòng này trừ giá phòng hiện tại.
+    /// Âm khi chuyển xuống hạng thấp hơn.
+    ///
+    /// Đây là số duy nhất DTO này trả về để hiển thị giá — không có
+    /// `base_price`. `rooms.base_price` không phải giá hệ thống tính tiền
+    /// (xem `pricing_queries.rs`): tiền tính theo `room_type` qua
+    /// `pricing_rules`, `base_price` chỉ là dự phòng khi loại phòng chưa có
+    /// luật giá. Đưa `base_price` ra giao diện dễ khiến lễ tân đọc một số mà
+    /// hệ thống tính tiền khách một số khác.
+    pub price_difference: MoneyVnd,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RoomChangeOptions {
+    pub booking_id: String,
+    pub current_room_id: String,
+    pub current_room_name: String,
+    /// Đêm đầu tiên được chuyển, dạng `YYYY-MM-DD`.
+    pub from_date: String,
+    /// Đêm cuối cùng được chuyển, dạng `YYYY-MM-DD`. Bao gồm chính nó.
+    pub to_date: String,
+    pub nights_remaining: i32,
+    pub nights_stayed: i32,
+    pub guest_count: i32,
+    pub rooms: Vec<RoomChangeOption>,
+}
+
 #[cfg(test)]
 mod tests {
-    use super::Booking;
+    use super::{Booking, Guest, Room, RoomWithBooking};
     use crate::money::MoneyVnd;
 
     fn assert_money_vnd(_: MoneyVnd) {}
@@ -763,9 +898,71 @@ mod tests {
             source: None,
             notes: None,
             created_at: "2026-04-30T14:00:00+07:00".to_string(),
+            rate_overridden_at: None,
         };
 
         assert_money_vnd(booking.total_price);
         assert_money_vnd(booking.paid_amount);
+    }
+
+    // Ranh giới Rust/TypeScript: tên field serde chính là khoá JSON cả hai
+    // phía đọc (frontend: `mhm/src/types/index.ts`, `RoomWithBooking.group_id`).
+    // Lệch tên (đổi field Rust, thêm `#[serde(rename = ...)]`, hay gõ nhầm bên
+    // TS) chỉ vỡ lúc CHẠY — payload thiếu field, `roomDetail.group_id` luôn ra
+    // `undefined` — không vỡ lúc build ở bên nào cả. Ghim trực tiếp bằng cách
+    // serialize thật và soi đúng khoá, thay vì chỉ tin xuông convention giữ
+    // nguyên.
+    #[test]
+    fn room_with_booking_serializes_group_id_under_its_own_json_key() {
+        let detail = RoomWithBooking {
+            room: Room {
+                id: "101".to_string(),
+                name: "101".to_string(),
+                room_type: "standard".to_string(),
+                floor: 1,
+                has_balcony: false,
+                base_price: 500_000,
+                max_guests: 2,
+                extra_person_fee: 100_000,
+                status: "occupied".to_string(),
+            },
+            booking: None,
+            guests: Vec::<Guest>::new(),
+            group_id: Some("GRP-1".to_string()),
+        };
+
+        let json = serde_json::to_value(&detail).expect("serializes RoomWithBooking");
+        assert_eq!(json["group_id"], serde_json::json!("GRP-1"));
+    }
+
+    // `rate_override_per_room` là `HashMap`, không phải `Option` — serde KHÔNG
+    // tự coi một khoá vắng mặt là rỗng cho `HashMap` như nó làm với `Option`
+    // (đó là hành vi đặc cách chỉ có ở `Option`), nên `#[serde(default)]` là
+    // bắt buộc, không phải trang trí: xoá nó đi, request cũ (frontend Task
+    // 16-18 chưa build, hoặc bất cứ caller nào chưa biết trường mới) sẽ vỡ
+    // ngay lúc deserialize với lỗi "missing field" thay vì lặng lẽ ra map
+    // rỗng. Không có test nào khác trong bộ này đi qua đường JSON thật của
+    // `GroupCheckinRequest` (mọi test đoàn khác dựng struct Rust trực tiếp),
+    // nên đây là bằng chứng duy nhất cho tính tương thích ngược này.
+    #[test]
+    fn group_checkin_request_defaults_rate_override_when_key_is_absent_from_json() {
+        let payload = serde_json::json!({
+            "group_name": "Đoàn cũ",
+            "organizer_name": "Trưởng đoàn",
+            "organizer_phone": null,
+            "check_in_date": null,
+            "room_ids": ["R1", "R2"],
+            "master_room_id": "R1",
+            "guests_per_room": {},
+            "nights": 2,
+            "source": null,
+            "notes": null,
+            "paid_amount": null,
+        });
+
+        let request: crate::models::GroupCheckinRequest = serde_json::from_value(payload)
+            .expect("request without rate_override_per_room still deserializes");
+
+        assert!(request.rate_override_per_room.is_empty());
     }
 }

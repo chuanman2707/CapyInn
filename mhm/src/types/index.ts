@@ -1,12 +1,13 @@
 import type { MoneyVnd } from "@/lib/money";
 
-export type RoomStatus = "vacant" | "occupied" | "cleaning" | "booked";
+export type RoomStatus = "vacant" | "occupied" | "booked";
 export type BookingStatus =
   | "active"
   | "checked_out"
   | "booked"
   | "cancelled"
-  | "no_show";
+  | "no_show"
+  | "voided";
 export type BookingSource =
   | "walk-in"
   | "phone"
@@ -71,6 +72,29 @@ export interface Booking {
   source?: BookingSource | null;
   notes?: string;
   created_at: string;
+  /** Thời điểm gần nhất giá/đêm bị lễ tân đổi tay; null nếu chưa từng đổi. */
+  rate_overridden_at?: string | null;
+}
+
+export interface RoomChangeOption {
+  roomId: string;
+  name: string;
+  roomType: string;
+  floor: number;
+  maxGuests: number;
+  priceDifference: MoneyVnd;
+}
+
+export interface RoomChangeOptions {
+  bookingId: string;
+  currentRoomId: string;
+  currentRoomName: string;
+  fromDate: string;
+  toDate: string;
+  nightsRemaining: number;
+  nightsStayed: number;
+  guestCount: number;
+  rooms: RoomChangeOption[];
 }
 
 export type CheckoutSettlementMode = "actual_nights" | "hourly" | "booked_nights";
@@ -91,24 +115,15 @@ export interface RoomWithBooking {
   room: Room;
   booking: Booking | null;
   guests: Guest[];
+  /** group_id của lượt đang ở (nếu có); null khi không thuộc đoàn hoặc không có lượt nào. */
+  group_id?: string | null;
 }
 
 export interface DashboardStats {
   total_rooms: number;
   occupied: number;
   vacant: number;
-  cleaning: number;
   revenue_today: MoneyVnd;
-}
-
-export interface HousekeepingTask {
-  id: string;
-  room_id: string;
-  status: string;
-  note?: string;
-  triggered_at: string;
-  cleaned_at?: string;
-  created_at: string;
 }
 
 export interface Expense {
@@ -133,7 +148,6 @@ export type HotelTab =
   | "reservations"
   | "guests"
   | "groups"
-  | "housekeeping"
   | "analytics"
   | "settings"
   | "declaration"
@@ -314,6 +328,7 @@ export interface BookingWithGuest {
   scheduled_checkout: string | null;
   guest_phone: string | null;
   guests: number | null;
+  group_id: string | null;
 }
 
 export interface ActivityItem {
@@ -321,7 +336,7 @@ export interface ActivityItem {
   text: string;
   time: string;
   color: string;
-  kind?: "check_in" | "check_out" | "housekeeping";
+  kind?: "check_in" | "check_out";
   room_id?: string | null;
   guest_name?: string | null;
   occurred_at?: string;
@@ -413,6 +428,13 @@ export interface GroupCheckinRequest {
   source?: string;
   notes?: string;
   paid_amount?: MoneyVnd;
+  /**
+   * Giá mỗi đêm gõ tay theo TỪNG phòng. Khoá là room_id. Phòng không có
+   * trong map ⇒ engine tính. `group_checkin_tx` từ chối cả giao dịch nếu map
+   * chứa một khoá không nằm trong `room_ids` — luôn gửi map, kể cả rỗng,
+   * không gửi `undefined`.
+   */
+  rate_override_per_room: Record<string, MoneyVnd>;
 }
 
 export interface GroupCheckoutRequest {
@@ -575,4 +597,27 @@ export interface DeclarationBatch {
   verified_count: number | null;
   verified_at: string | null;
   created_at: string;
+}
+
+/** Khớp `VoidBookingPreview` (`src-tauri/src/models.rs`) — không thêm bớt field. */
+export interface VoidBookingPreview {
+  booking_id: string;
+  guest_name: string;
+  room_id: string;
+  previous_status: string;
+  /** Tiền rời khỏi báo cáo: tiền phòng đã ghi nhận + folio + phí huỷ. */
+  revenue_impact: MoneyVnd;
+  revenue_date: string;
+  /** Tiền cọc. KHÔNG nằm trong revenue_impact — cọc là khoản thanh toán,
+   *  chưa bao giờ là doanh thu, và `transactions` chỉ ghi thêm nên xoá lượt
+   *  không gỡ nó đi. Hiển thị thành dòng riêng, chữ khác. */
+  deposit_amount: MoneyVnd;
+  nights_recognized: number;
+  nights_total: number;
+  is_audited: boolean;
+  /** True = xoá lượt này sẽ KHÔNG đổi trạng thái phòng (chỉ tính cho
+   *  previous_status "checked_out", luôn false ở nơi khác). KHÔNG suy ra có
+   *  khách khác đang ở — true cả khi phòng đã Trống. */
+  room_status_unchanged: boolean;
+  is_group_booking: boolean;
 }

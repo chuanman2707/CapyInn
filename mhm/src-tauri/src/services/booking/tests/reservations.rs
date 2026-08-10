@@ -55,6 +55,7 @@ async fn create_reservation_rejects_inconsistent_nights_input() {
             source: Some("phone".to_string()),
             notes: Some("test reservation".to_string()),
             guests: None,
+            rate_override_per_night: None,
         },
     )
     .await
@@ -91,6 +92,7 @@ async fn create_reservation_rejects_nights_beyond_the_ceiling() {
             source: Some("phone".to_string()),
             notes: None,
             guests: None,
+            rate_override_per_night: None,
         },
     )
     .await
@@ -145,6 +147,7 @@ async fn reservation_lifecycle_smoke_covers_confirm_and_cancel_paths() {
             source: Some("phone".to_string()),
             notes: Some("reservation smoke".to_string()),
             guests: None,
+            rate_override_per_night: None,
         }
     };
 
@@ -790,6 +793,7 @@ async fn create_reservation_charges_extra_guests() {
             source: Some("phone".to_string()),
             notes: None,
             guests: Some(4),
+            rate_override_per_night: None,
         },
         None,
     )
@@ -830,6 +834,7 @@ async fn create_reservation_without_guests_prices_like_before() {
             source: None,
             notes: None,
             guests: None,
+            rate_override_per_night: None,
         },
         None,
     )
@@ -869,6 +874,7 @@ async fn modify_reservation_keeps_the_extra_guest_charge() {
             source: None,
             notes: None,
             guests: Some(4),
+            rate_override_per_night: None,
         },
         None,
     )
@@ -934,6 +940,7 @@ async fn confirm_reservation_keeps_the_extra_guest_charge() {
             source: None,
             notes: None,
             guests: Some(4),
+            rate_override_per_night: None,
         },
         None,
     )
@@ -972,6 +979,7 @@ async fn modify_reservation_prefers_explicit_new_guests_over_stored_count() {
             notes: None,
             // Stored count starts within max_guests (2), so no extra-person fee applies yet.
             guests: Some(2),
+            rate_override_per_night: None,
         },
         None,
     )
@@ -1031,6 +1039,7 @@ async fn modify_reservation_keeps_null_guests_null() {
             source: None,
             notes: None,
             guests: None,
+            rate_override_per_night: None,
         },
         None,
     )
@@ -1070,4 +1079,703 @@ async fn modify_reservation_keeps_null_guests_null() {
     assert_eq!(row.get::<Option<i32>, _>("guests"), None);
 
     tx.rollback().await.unwrap();
+}
+
+// ── Task 14: giá override khi tạo đặt trước ──────────────────────────────
+//
+// Mirror của battery `manual_rate_at_check_in_*` trong `tests/pricing.rs`
+// (Task 13), điều chỉnh cho reservation: `deposit_amount` thay `paid_amount`,
+// và không có dòng "charge" nào được ghi lúc tạo (khác check-in) — tiền phòng
+// chỉ vào folio ở `confirm_reservation_tx`.
+
+/// Chốt giá qua điện thoại: đặt trước cũng phải nhận được giá tay, vì
+/// `set_booking_rate` chặn thẳng khi `status != 'active'` — không có đường sửa
+/// sau cho một reservation. Giá tay đè PHẲNG: tổng tiền luôn đúng bằng
+/// `rate × nights`, không cộng thêm bất cứ dòng nào engine tính.
+#[tokio::test]
+async fn manual_rate_applies_when_creating_a_reservation() {
+    let pool = test_pool().await;
+    seed_room_with_price(&pool, "R-RES", 500_000)
+        .await
+        .expect("seeds room");
+
+    let booking = reservation_lifecycle::create_reservation(
+        &pool,
+        CreateReservationRequest {
+            room_id: "R-RES".to_string(),
+            guest_name: "Khách đặt trước".to_string(),
+            guest_phone: None,
+            guest_doc_number: None,
+            check_in_date: "2026-05-01".to_string(),
+            check_out_date: "2026-05-03".to_string(),
+            nights: 2,
+            deposit_amount: None,
+            source: None,
+            notes: None,
+            guests: None,
+            rate_override_per_night: Some(350_000),
+        },
+    )
+    .await
+    .expect("creates reservation with a manual rate");
+
+    assert_eq!(booking.total_price, 700_000, "2 đêm × 350.000");
+    assert!(
+        booking.rate_overridden_at.is_some(),
+        "phải đánh dấu là giá tay để tra cứu sau này"
+    );
+
+    // Giá engine gốc phải còn dấu vết trong pricing_snapshot — không dùng để
+    // tính tiền, nhưng để chủ khách sạn tra được sau này đã giảm giá bao
+    // nhiêu. Không ghim giá trị `engine_total` cụ thể vì nó phụ thuộc ngày
+    // chạy test có rơi vào cuối tuần hay không.
+    let pricing_snapshot: Option<String> =
+        sqlx::query_scalar("SELECT pricing_snapshot FROM bookings WHERE id = ?")
+            .bind(&booking.id)
+            .fetch_one(&pool)
+            .await
+            .expect("reads pricing_snapshot");
+    let snapshot: serde_json::Value = serde_json::from_str(
+        &pricing_snapshot.expect("giá tay phải để lại vết tích trong pricing_snapshot"),
+    )
+    .expect("pricing_snapshot phải là JSON hợp lệ");
+    assert_eq!(
+        snapshot["manual_rate"]["rate_per_night"], 350_000,
+        "phải ghi đúng giá tay đã gõ, không phải giá engine: {snapshot}"
+    );
+    assert!(
+        snapshot["manual_rate"]["engine_total"].is_number(),
+        "phải giữ giá engine gốc để chủ khách sạn tra được đã giảm bao nhiêu: {snapshot}"
+    );
+
+    // Khác check-in: tạo đặt trước không ghi dòng "charge" nào — tiền phòng
+    // chỉ vào folio khi `confirm_reservation_tx` chạy lúc khách tới.
+    let charge_count: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM transactions WHERE booking_id = ? AND type = 'charge'",
+    )
+    .bind(&booking.id)
+    .fetch_one(&pool)
+    .await
+    .expect("đếm charge");
+    assert_eq!(charge_count, 0);
+}
+
+/// Khác check-in: `check_in_tx` luôn gọi engine với `guests: None` ở CẢ HAI
+/// nhánh (có/không override), nên `engine_total` ghi lại trong snapshot không
+/// bao giờ phản ánh phụ thu thêm người. Đường không-override của reservation
+/// lại dùng `req.guests` THẬT (`calculate_stay_price_tx(..., req.guests)`) —
+/// nên nhánh giá tay cũng phải gọi engine với đúng tham số ấy để
+/// `engine_total` là một so sánh thật, không phải một con số nói dối chủ
+/// khách sạn về việc đã giảm bao nhiêu. Tổng tiền thật (`total_price`) vẫn
+/// PHẲNG, không đụng tới phụ thu.
+#[tokio::test]
+async fn manual_rate_at_reservation_engine_snapshot_reflects_guest_count() {
+    let pool = test_pool().await;
+    seed_room_with_guest_pricing(&pool, "R-RES-GUESTS", 500_000, 2, 100_000)
+        .await
+        .expect("seeds room with an extra-person fee");
+    // Khoá phụ thu cuối tuần về 0 (xem `confirm_reservation_keeps_the_extra_guest_charge`
+    // ở trên): `seed_room_with_guest_pricing` không tự chèn `pricing_rules`
+    // nên rơi về `PricingRule::default()`, mang phụ thu cuối tuần 20%.
+    seed_pricing_rule(&pool, "standard", 500_000)
+        .await
+        .expect("khoá weekend uplift về 0");
+
+    let booking = reservation_lifecycle::create_reservation(
+        &pool,
+        CreateReservationRequest {
+            room_id: "R-RES-GUESTS".to_string(),
+            guest_name: "Khách đông người".to_string(),
+            guest_phone: None,
+            guest_doc_number: None,
+            check_in_date: "2026-05-01".to_string(),
+            check_out_date: "2026-05-02".to_string(),
+            nights: 1,
+            deposit_amount: None,
+            source: None,
+            notes: None,
+            guests: Some(4),
+            rate_override_per_night: Some(350_000),
+        },
+    )
+    .await
+    .expect("creates reservation with a manual rate and extra guests");
+
+    // Giá tay vẫn PHẲNG: 1 đêm × 350.000, không cộng phụ thu 4 khách.
+    assert_eq!(booking.total_price, 350_000);
+
+    let pricing_snapshot: Option<String> =
+        sqlx::query_scalar("SELECT pricing_snapshot FROM bookings WHERE id = ?")
+            .bind(&booking.id)
+            .fetch_one(&pool)
+            .await
+            .expect("reads pricing_snapshot");
+    let snapshot: serde_json::Value =
+        serde_json::from_str(&pricing_snapshot.expect("phải có snapshot"))
+            .expect("pricing_snapshot phải là JSON hợp lệ");
+    // (500.000 base + 2 khách vượt mốc × 100.000 phụ thu) × 1 đêm = 700.000.
+    assert_eq!(
+        snapshot["manual_rate"]["engine_total"], 700_000,
+        "engine_total phải cộng phụ thu 2 khách vượt mốc, không phải giá base trần: {snapshot}"
+    );
+}
+
+/// Cọc nhiều hơn tổng tiền đẩy booking vào ngõ cụt y hệt check-in:
+/// `record_deposit_tx` cộng thẳng `deposit_amount` vào `paid_amount`,
+/// `confirm_reservation_tx` mang `paid_amount` đó đi nguyên vẹn khi kích hoạt
+/// booking, và `check_out_tx` cuối cùng từ chối thẳng khi
+/// `already_paid > final_total`. Chặn ngay lúc tạo.
+#[tokio::test]
+async fn manual_rate_rejects_a_deposit_more_than_the_total() {
+    let pool = test_pool().await;
+    seed_room(&pool, "R-RES2").await.expect("seeds room");
+
+    let error = reservation_lifecycle::create_reservation(
+        &pool,
+        CreateReservationRequest {
+            room_id: "R-RES2".to_string(),
+            guest_name: "Khách cọc dư".to_string(),
+            guest_phone: None,
+            guest_doc_number: None,
+            check_in_date: "2026-05-01".to_string(),
+            check_out_date: "2026-05-02".to_string(),
+            nights: 1,
+            deposit_amount: Some(500_000),
+            source: None,
+            notes: None,
+            guests: None,
+            rate_override_per_night: Some(400_000),
+        },
+    )
+    .await
+    .expect_err("overpayment must be rejected at creation");
+
+    assert!(
+        error.to_string().contains("cao hơn tổng tiền"),
+        "thông báo phải nói rõ cọc cao hơn tổng, thấy: {error}"
+    );
+
+    let booking_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM bookings")
+        .fetch_one(&pool)
+        .await
+        .expect("đếm booking");
+    assert_eq!(
+        booking_count, 0,
+        "bị từ chối thì không được ghi booking nào"
+    );
+}
+
+/// Đường thường (không override) cũng phải bị chặn khi cọc vượt tổng —
+/// guard đặt SAU khi `total_price` đã biết ở cả hai nhánh, không chỉ ở nhánh
+/// giá tay. Cùng luật `check_in_without_override_rejects_paying_more_than_the_engine_total`.
+#[tokio::test]
+async fn create_reservation_without_override_rejects_a_deposit_more_than_the_engine_total() {
+    let pool = test_pool().await;
+    seed_room_with_price(&pool, "R-RES9", 500_000)
+        .await
+        .expect("seeds room with a deterministic engine price");
+
+    let error = reservation_lifecycle::create_reservation(
+        &pool,
+        CreateReservationRequest {
+            room_id: "R-RES9".to_string(),
+            guest_name: "Khách cọc dư không giá tay".to_string(),
+            guest_phone: None,
+            guest_doc_number: None,
+            check_in_date: "2026-05-01".to_string(),
+            check_out_date: "2026-05-02".to_string(),
+            nights: 1,
+            // Engine: 1 đêm × 500.000 = 500.000. Cọc 600.000 là vượt tổng.
+            deposit_amount: Some(600_000),
+            source: None,
+            notes: None,
+            guests: None,
+            rate_override_per_night: None,
+        },
+    )
+    .await
+    .unwrap_err();
+
+    assert!(
+        matches!(error, BookingError::Validation(_)),
+        "phải bị từ chối vì cọc vượt tổng, nhận được: {error:?}"
+    );
+    assert!(error.to_string().contains("cao hơn tổng tiền"));
+
+    let booking_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM bookings")
+        .fetch_one(&pool)
+        .await
+        .expect("đếm booking");
+    assert_eq!(
+        booking_count, 0,
+        "bị từ chối thì không được ghi booking nào"
+    );
+}
+
+/// Giá tay tràn số VÀ có `deposit_amount` phải bị chặn ở guard biên (đặt
+/// TRƯỚC phép nhân), không phải lọt qua rồi vỡ ở `checked_mul_money` — thứ trả
+/// thông báo TIẾNG ANH ra người dùng. Cùng luật
+/// `manual_rate_at_check_in_rejects_a_huge_rate_even_with_paid_amount`.
+#[tokio::test]
+async fn manual_rate_at_reservation_rejects_a_huge_rate_even_with_deposit() {
+    let pool = test_pool().await;
+    seed_room(&pool, "R-RES7").await.expect("seeds room");
+
+    let error = reservation_lifecycle::create_reservation(
+        &pool,
+        CreateReservationRequest {
+            room_id: "R-RES7".to_string(),
+            guest_name: "Khách gõ thừa nhiều số 0".to_string(),
+            guest_phone: None,
+            guest_doc_number: None,
+            check_in_date: "2026-05-01".to_string(),
+            check_out_date: "2026-05-02".to_string(),
+            nights: 1,
+            deposit_amount: Some(100_000),
+            source: None,
+            notes: None,
+            guests: None,
+            // Vượt xa biên an toàn số nguyên lẫn MAX_RATE_PER_NIGHT_VND —
+            // mô phỏng dán nhầm/gõ thừa số 0.
+            rate_override_per_night: Some(9_500_000_000_000_000),
+        },
+    )
+    .await
+    .unwrap_err();
+
+    assert_eq!(
+        error.to_string(),
+        "Giá mỗi đêm không hợp lệ",
+        "phải là thông báo biên tiếng Việt, không phải lỗi tràn số/không an toàn từ phép nhân: {error}"
+    );
+    let booking_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM bookings")
+        .fetch_one(&pool)
+        .await
+        .expect("đếm booking");
+    assert_eq!(
+        booking_count, 0,
+        "bị từ chối thì không được ghi booking nào"
+    );
+}
+
+/// Giá âm VÀ có `deposit_amount` từng có nguy cơ lọt qua phép nhân (âm × đêm
+/// dương ra một số "hợp lệ") rồi vỡ ở guard cọc-vượt-tổng, đọc tổng ÂM ra như
+/// một mức "tổng tiền" trong thông báo — sai cả nội dung lẫn thủ phạm. Phải bị
+/// chặn ở guard biên trước khi tới đó. Cùng luật
+/// `manual_rate_at_check_in_rejects_a_negative_rate_even_with_paid_amount`.
+#[tokio::test]
+async fn manual_rate_at_reservation_rejects_a_negative_rate_even_with_deposit() {
+    let pool = test_pool().await;
+    seed_room(&pool, "R-RES8").await.expect("seeds room");
+
+    let error = reservation_lifecycle::create_reservation(
+        &pool,
+        CreateReservationRequest {
+            room_id: "R-RES8".to_string(),
+            guest_name: "Khách gõ nhầm dấu trừ".to_string(),
+            guest_phone: None,
+            guest_doc_number: None,
+            check_in_date: "2026-05-01".to_string(),
+            check_out_date: "2026-05-02".to_string(),
+            nights: 1,
+            deposit_amount: Some(100_000),
+            source: None,
+            notes: None,
+            guests: None,
+            rate_override_per_night: Some(-500_000),
+        },
+    )
+    .await
+    .unwrap_err();
+
+    assert_eq!(
+        error.to_string(),
+        "Giá mỗi đêm không hợp lệ",
+        "phải là thông báo biên tiếng Việt, không phải guard cọc-vượt-tổng đọc tổng âm ra như một mức giá: {error}"
+    );
+    let booking_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM bookings")
+        .fetch_one(&pool)
+        .await
+        .expect("đếm booking");
+    assert_eq!(
+        booking_count, 0,
+        "bị từ chối thì không được ghi booking nào"
+    );
+}
+
+/// Biên dưới: 0 và âm đều là gõ nhầm, không phải một mức giá thật. Cùng luật
+/// `manual_rate_at_check_in_rejects_zero_and_negative_rates`.
+#[tokio::test]
+async fn manual_rate_at_reservation_rejects_zero_and_negative_rates() {
+    let pool = test_pool().await;
+    seed_room(&pool, "R-RES4").await.expect("seeds room");
+
+    for (index, rate) in [0_i64, -1_000].into_iter().enumerate() {
+        let error = reservation_lifecycle::create_reservation(
+            &pool,
+            CreateReservationRequest {
+                room_id: "R-RES4".to_string(),
+                guest_name: format!("Khách gõ nhầm {index}"),
+                guest_phone: None,
+                guest_doc_number: None,
+                check_in_date: "2026-05-01".to_string(),
+                check_out_date: "2026-05-02".to_string(),
+                nights: 1,
+                deposit_amount: None,
+                source: None,
+                notes: None,
+                guests: None,
+                rate_override_per_night: Some(rate),
+            },
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            matches!(error, BookingError::Validation(_)),
+            "giá {rate} phải bị từ chối, nhận được: {error:?}"
+        );
+    }
+
+    let booking_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM bookings")
+        .fetch_one(&pool)
+        .await
+        .expect("đếm booking");
+    assert_eq!(
+        booking_count, 0,
+        "bị từ chối thì không được ghi booking nào"
+    );
+}
+
+/// Biên trên: trần chống gõ nhầm thừa số 0 (`MAX_RATE_PER_NIGHT_VND`). Cùng
+/// luật `manual_rate_at_check_in_rejects_a_rate_above_the_cap`.
+#[tokio::test]
+async fn manual_rate_at_reservation_rejects_a_rate_above_the_cap() {
+    let pool = test_pool().await;
+    seed_room(&pool, "R-RES5").await.expect("seeds room");
+
+    let error = reservation_lifecycle::create_reservation(
+        &pool,
+        CreateReservationRequest {
+            room_id: "R-RES5".to_string(),
+            guest_name: "Khách gõ thừa số 0".to_string(),
+            guest_phone: None,
+            guest_doc_number: None,
+            check_in_date: "2026-05-01".to_string(),
+            check_out_date: "2026-05-02".to_string(),
+            nights: 1,
+            deposit_amount: None,
+            source: None,
+            notes: None,
+            guests: None,
+            rate_override_per_night: Some(100_000_001),
+        },
+    )
+    .await
+    .unwrap_err();
+
+    assert!(matches!(error, BookingError::Validation(_)));
+}
+
+/// Biên chính xác: guard cọc-vượt-tổng dùng `>` chứ không phải `>=`, nên cọc
+/// đúng bằng tổng tiền phải được cho qua. Cùng luật
+/// `manual_rate_at_check_in_allows_paying_exactly_the_total`.
+#[tokio::test]
+async fn manual_rate_at_reservation_allows_a_deposit_exactly_equal_to_the_total() {
+    let pool = test_pool().await;
+    seed_room(&pool, "R-RES6").await.expect("seeds room");
+
+    let booking = reservation_lifecycle::create_reservation(
+        &pool,
+        CreateReservationRequest {
+            room_id: "R-RES6".to_string(),
+            guest_name: "Khách cọc vừa khít".to_string(),
+            guest_phone: None,
+            guest_doc_number: None,
+            check_in_date: "2026-05-01".to_string(),
+            check_out_date: "2026-05-03".to_string(),
+            nights: 2,
+            // 2 đêm × 400.000 = 800.000, đúng bằng số cọc — phải được cho qua.
+            deposit_amount: Some(800_000),
+            source: None,
+            notes: None,
+            guests: None,
+            rate_override_per_night: Some(400_000),
+        },
+    )
+    .await
+    .expect("cọc đúng bằng tổng tiền phải được chấp nhận");
+
+    assert_eq!(booking.total_price, 800_000);
+    assert_eq!(booking.paid_amount, 800_000);
+}
+
+/// Không truyền override thì đường cũ giữ nguyên — engine tính, không có dấu
+/// `rate_overridden_at`. Cùng luật `check_in_without_override_still_uses_the_engine`.
+#[tokio::test]
+async fn create_reservation_without_override_still_uses_the_engine() {
+    let pool = test_pool().await;
+    seed_room_with_price(&pool, "R-RES3", 500_000)
+        .await
+        .expect("seeds room");
+
+    let booking = reservation_lifecycle::create_reservation(
+        &pool,
+        CreateReservationRequest {
+            room_id: "R-RES3".to_string(),
+            guest_name: "Khách thường".to_string(),
+            guest_phone: None,
+            guest_doc_number: None,
+            check_in_date: "2026-05-01".to_string(),
+            check_out_date: "2026-05-02".to_string(),
+            nights: 1,
+            deposit_amount: None,
+            source: None,
+            notes: None,
+            guests: None,
+            rate_override_per_night: None,
+        },
+    )
+    .await
+    .expect("creates reservation without override");
+
+    assert!(booking.rate_overridden_at.is_none());
+}
+
+// ── Áp lại giá tay khi confirm/modify, không chỉ lúc tạo ─────────────────
+//
+// Task 14 (Task 15 ở đây) để lộ một lỗ: `confirm_reservation_tx` và
+// `modify_reservation_tx` tính lại `total_price` bằng pricing engine mỗi
+// lần, không đọc `rate_overridden_at`/`pricing_snapshot.manual_rate` — giá
+// tay lễ tân đã chốt qua điện thoại "biến mất" ngay khi khách nhận phòng
+// hoặc khi đổi ngày. Ba test dưới đây cố tình chọn số đêm LÚC CONFIRM/MODIFY
+// khác số đêm LÚC TẠO, để phân biệt "áp lại giá tay lên số đêm MỚI" (đúng)
+// khỏi cả hai biến thể lỗi có thể xảy ra: mang tổng tiền CŨ đi nguyên xi,
+// hoặc tụt về giá engine.
+
+/// `confirm_reservation_tx`: giá tay phải sống sót qua confirm, áp lại lên
+/// số đêm THẬT của lượt xác nhận (5), không phải số đêm lúc tạo (2).
+#[tokio::test]
+async fn confirm_reservation_reapplies_manual_rate_to_the_new_night_count() {
+    let pool = test_pool().await;
+    seed_room_with_price(&pool, "R-CONFIRM-MANUAL", 500_000)
+        .await
+        .expect("seeds room with a deterministic 500.000đ/night engine price");
+
+    let booking = reservation_lifecycle::create_reservation(
+        &pool,
+        CreateReservationRequest {
+            room_id: "R-CONFIRM-MANUAL".to_string(),
+            guest_name: "Khách chốt giá qua điện thoại".to_string(),
+            guest_phone: None,
+            guest_doc_number: None,
+            check_in_date: "2026-05-01".to_string(),
+            check_out_date: "2026-05-03".to_string(),
+            nights: 2,
+            deposit_amount: None,
+            source: None,
+            notes: None,
+            guests: None,
+            rate_override_per_night: Some(350_000),
+        },
+    )
+    .await
+    .expect("creates reservation with a manual rate");
+
+    // Chốt lúc tạo: 2 đêm × 350.000 = 700.000 — con số này KHÔNG được sống
+    // sót nguyên xi qua confirm bên dưới (đó là biến thể lỗi thứ hai).
+    assert_eq!(booking.total_price, 700_000);
+    assert!(booking.rate_overridden_at.is_some());
+
+    // Đẩy `scheduled_checkout` ra 5 đêm kể từ HÔM NAY thật — khác 2 đêm lúc
+    // tạo — để `confirm_reservation_tx` tính `actual_nights = 5`. Hàm chỉ đọc
+    // cột này (không đọc `scheduled_checkin`) nên không cần sửa gì khác.
+    let today = Local::now().date_naive();
+    let scheduled_checkout = (today + Duration::days(5)).format("%Y-%m-%d").to_string();
+    sqlx::query("UPDATE bookings SET scheduled_checkout = ? WHERE id = ?")
+        .bind(&scheduled_checkout)
+        .bind(&booking.id)
+        .execute(&pool)
+        .await
+        .expect("moves scheduled_checkout out to 5 nights from today");
+
+    let confirmed = reservation_lifecycle::confirm_reservation(&pool, &booking.id)
+        .await
+        .expect("confirms the reservation");
+
+    assert_eq!(confirmed.status, "active");
+    assert_eq!(confirmed.nights, 5);
+    // Giá tay (350.000) × 5 đêm MỚI = 1.750.000 — khác cả tổng cũ (700.000,
+    // ứng với 2 đêm) lẫn giá engine cho 5 đêm (500.000 × 5 = 2.500.000). Ba
+    // giá trị phân biệt: nếu bản vá thiếu, test đỏ với MỘT trong hai số kia.
+    assert_eq!(
+        confirmed.total_price, 1_750_000,
+        "phải áp lại giá tay 350.000đ/đêm lên 5 đêm mới, không phải mang tổng cũ 700.000đ đi nguyên xi hay tụt về giá engine 2.500.000đ"
+    );
+    assert!(
+        confirmed.rate_overridden_at.is_some(),
+        "vẫn phải giữ dấu đã chốt giá tay sau khi xác nhận"
+    );
+
+    // Dòng "charge" ghi vào folio lúc xác nhận cũng phải theo giá tay đã áp
+    // lại, không phải giá engine — đây là số tiền khách thực sự bị thu.
+    let charge_amount: i64 = sqlx::query_scalar(
+        "SELECT amount FROM transactions WHERE booking_id = ? AND type = 'charge' LIMIT 1",
+    )
+    .bind(&booking.id)
+    .fetch_one(&pool)
+    .await
+    .expect("reads the charge transaction");
+    assert_eq!(charge_amount, 1_750_000);
+}
+
+/// `modify_reservation_tx`: giá tay phải sống sót qua đổi ngày, áp lại lên
+/// số đêm MỚI của lần sửa (4), không phải số đêm lúc tạo (2).
+#[tokio::test]
+async fn modify_reservation_reapplies_manual_rate_to_the_new_night_count() {
+    let pool = test_pool().await;
+    seed_room_with_price(&pool, "R-MODIFY-MANUAL", 500_000)
+        .await
+        .expect("seeds room with a deterministic 500.000đ/night engine price");
+
+    let booking = reservation_lifecycle::create_reservation(
+        &pool,
+        CreateReservationRequest {
+            room_id: "R-MODIFY-MANUAL".to_string(),
+            guest_name: "Khách chốt giá qua điện thoại".to_string(),
+            guest_phone: None,
+            guest_doc_number: None,
+            check_in_date: "2026-06-01".to_string(),
+            check_out_date: "2026-06-03".to_string(),
+            nights: 2,
+            deposit_amount: None,
+            source: None,
+            notes: None,
+            guests: None,
+            rate_override_per_night: Some(350_000),
+        },
+    )
+    .await
+    .expect("creates reservation with a manual rate");
+
+    // Chốt lúc tạo: 2 đêm × 350.000 = 700.000.
+    assert_eq!(booking.total_price, 700_000);
+    assert!(booking.rate_overridden_at.is_some());
+
+    let modified = reservation_lifecycle::modify_reservation(
+        &pool,
+        reservation_modify_request(&booking.id, "2026-07-01", "2026-07-05", 4),
+    )
+    .await
+    .expect("modifies the reservation to a different night count");
+
+    assert_eq!(modified.nights, 4);
+    // Giá tay (350.000) × 4 đêm MỚI = 1.400.000 — khác cả tổng cũ (700.000,
+    // ứng với 2 đêm) lẫn giá engine cho 4 đêm (500.000 × 4 = 2.000.000).
+    assert_eq!(
+        modified.total_price, 1_400_000,
+        "phải áp lại giá tay 350.000đ/đêm lên 4 đêm mới, không phải mang tổng cũ 700.000đ đi nguyên xi hay tụt về giá engine 2.000.000đ"
+    );
+    assert!(
+        modified.rate_overridden_at.is_some(),
+        "vẫn phải giữ dấu đã chốt giá tay sau khi sửa"
+    );
+
+    let row_total: i64 = sqlx::query_scalar("SELECT total_price FROM bookings WHERE id = ?")
+        .bind(&booking.id)
+        .fetch_one(&pool)
+        .await
+        .expect("reads total_price back");
+    assert_eq!(row_total, 1_400_000);
+}
+
+/// Không có giá tay (`rate_override_per_night: None`) thì `confirm_reservation_tx`
+/// và `modify_reservation_tx` phải tiếp tục định giá bằng pricing engine y hệt
+/// trước bản vá này — `resolve_manual_rate_per_night` phải trả `None` ngay từ
+/// `rate_overridden_at.is_none()` mà không đụng gì tới nhánh cũ. Hai phòng
+/// riêng cho hai nhánh vì confirm chuyển booking sang `active`, còn
+/// `modify_reservation_tx` chỉ nhận booking đang `booked`.
+#[tokio::test]
+async fn confirm_and_modify_without_manual_rate_still_price_from_the_engine() {
+    let pool = test_pool().await;
+    // Cả hai phòng cùng room_type mặc định "standard" (`seed_room`), nên chỉ
+    // được gọi `seed_room_with_price`/`seed_pricing_rule` MỘT lần cho cả pool
+    // — gọi hai lần đụng UNIQUE constraint trên `pricing_rules.room_type`.
+    seed_room_with_price(&pool, "R-NO-OVERRIDE-CONFIRM", 500_000)
+        .await
+        .expect("seeds room with a deterministic 500.000đ/night engine price");
+    seed_room(&pool, "R-NO-OVERRIDE-MODIFY")
+        .await
+        .expect("seeds a second room sharing the same standard pricing rule");
+
+    // Nhánh confirm.
+    let booking_for_confirm = reservation_lifecycle::create_reservation(
+        &pool,
+        CreateReservationRequest {
+            room_id: "R-NO-OVERRIDE-CONFIRM".to_string(),
+            guest_name: "Khách giá thường (confirm)".to_string(),
+            guest_phone: None,
+            guest_doc_number: None,
+            check_in_date: "2026-05-01".to_string(),
+            check_out_date: "2026-05-03".to_string(),
+            nights: 2,
+            deposit_amount: None,
+            source: None,
+            notes: None,
+            guests: None,
+            rate_override_per_night: None,
+        },
+    )
+    .await
+    .expect("creates reservation without a manual rate");
+    assert!(booking_for_confirm.rate_overridden_at.is_none());
+
+    let today = Local::now().date_naive();
+    let scheduled_checkout = (today + Duration::days(3)).format("%Y-%m-%d").to_string();
+    sqlx::query("UPDATE bookings SET scheduled_checkout = ? WHERE id = ?")
+        .bind(&scheduled_checkout)
+        .bind(&booking_for_confirm.id)
+        .execute(&pool)
+        .await
+        .expect("moves scheduled_checkout out to 3 nights from today");
+
+    let confirmed = reservation_lifecycle::confirm_reservation(&pool, &booking_for_confirm.id)
+        .await
+        .expect("confirms the reservation");
+    assert_eq!(confirmed.nights, 3);
+    // Giá engine: 500.000 × 3 đêm = 1.500.000 — không có giá tay nào để áp.
+    assert_eq!(confirmed.total_price, 1_500_000);
+    assert!(confirmed.rate_overridden_at.is_none());
+
+    // Nhánh modify — reservation riêng (xem doc-comment của test).
+    let booking_for_modify = reservation_lifecycle::create_reservation(
+        &pool,
+        CreateReservationRequest {
+            room_id: "R-NO-OVERRIDE-MODIFY".to_string(),
+            guest_name: "Khách giá thường (modify)".to_string(),
+            guest_phone: None,
+            guest_doc_number: None,
+            check_in_date: "2026-06-01".to_string(),
+            check_out_date: "2026-06-03".to_string(),
+            nights: 2,
+            deposit_amount: None,
+            source: None,
+            notes: None,
+            guests: None,
+            rate_override_per_night: None,
+        },
+    )
+    .await
+    .expect("creates a second reservation without a manual rate");
+    assert!(booking_for_modify.rate_overridden_at.is_none());
+
+    let modified = reservation_lifecycle::modify_reservation(
+        &pool,
+        reservation_modify_request(&booking_for_modify.id, "2026-07-01", "2026-07-05", 4),
+    )
+    .await
+    .expect("modifies the reservation");
+    assert_eq!(modified.nights, 4);
+    // Giá engine: 500.000 × 4 đêm = 2.000.000.
+    assert_eq!(modified.total_price, 2_000_000);
+    assert!(modified.rate_overridden_at.is_none());
 }

@@ -46,7 +46,6 @@
                 "folio_truth",
                 "invoice_truth",
                 "ledger_truth",
-                "housekeeping_truth",
                 "audit_truth"
             ]
         },

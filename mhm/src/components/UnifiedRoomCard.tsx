@@ -1,4 +1,4 @@
-import { BedDouble, CalendarClock, LogIn, Sparkles, User, Eye } from "lucide-react";
+import { BedDouble, CalendarClock, LogIn, User, Eye } from "lucide-react";
 import { ROOM_STATUS_CARD_BG, ROOM_STATUS_TEXT, STATUS_DOT_COLORS, STATUS_LABELS, getRoomTypeLabel } from "@/lib/constants";
 import { fmtDateShort } from "@/lib/format";
 import { nightlyRateDisplay } from "@/lib/roomTypeRate";
@@ -16,7 +16,6 @@ interface UnifiedRoomCardProps {
 
 const QUICK_ACTION_CONFIG: Record<string, { label: string; icon: typeof LogIn; className: string }> = {
     vacant: { label: "Check-in", icon: LogIn, className: "bg-emerald-500 hover:bg-emerald-600 text-white" },
-    cleaning: { label: "Dọn phòng", icon: Sparkles, className: "bg-amber-500 hover:bg-amber-600 text-white" },
     occupied: { label: "Chi tiết", icon: Eye, className: "bg-blue-500 hover:bg-blue-600 text-white" },
     booked: { label: "Chi tiết", icon: Eye, className: "bg-purple-500 hover:bg-purple-600 text-white" },
 };
@@ -50,14 +49,6 @@ export default function UnifiedRoomCard({
                     );
                 }
                 return null;
-
-            case "cleaning":
-                return (
-                    <div className="flex items-center gap-1.5 text-[11px] text-amber-600 font-medium">
-                        <Sparkles size={10} className="shrink-0 animate-pulse" />
-                        <span>Cần dọn</span>
-                    </div>
-                );
 
             case "booked":
                 if (booking) {

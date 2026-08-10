@@ -26,14 +26,20 @@ pub async fn load_room_detail(
 
     let room = map_room(&row);
 
-    let booking = sqlx::query(
-        "SELECT id, room_id, primary_guest_id, check_in_at, expected_checkout, actual_checkout, nights, total_price, paid_amount, status, source, notes, created_at
+    let booking_row = sqlx::query(
+        "SELECT id, room_id, primary_guest_id, check_in_at, expected_checkout, actual_checkout, nights, total_price, paid_amount, status, source, notes, created_at, rate_overridden_at, group_id
          FROM bookings WHERE room_id = ? AND status = 'active' LIMIT 1"
     )
     .bind(room_id)
     .fetch_optional(pool)
-    .await?
-    .map(|r| map_booking(&r));
+    .await?;
+
+    // `group_id` không thuộc `Booking` dùng chung (xem models.rs) nên phải đọc
+    // ra khỏi hàng thô ở đây, trước khi `map_booking` bỏ qua cột này.
+    let group_id: Option<String> = booking_row
+        .as_ref()
+        .and_then(|r| r.get::<Option<String>, _>("group_id"));
+    let booking = booking_row.map(|r| map_booking(&r));
 
     let guests = if let Some(ref b) = booking {
         let rows = sqlx::query(
@@ -54,6 +60,7 @@ pub async fn load_room_detail(
         room,
         booking,
         guests,
+        group_id,
     })
 }
 
@@ -228,6 +235,7 @@ fn map_booking(row: &SqliteRow) -> Booking {
         source: row.get("source"),
         notes: row.get("notes"),
         created_at: row.get("created_at"),
+        rate_overridden_at: row.get("rate_overridden_at"),
     }
 }
 
@@ -409,6 +417,51 @@ mod tests {
             .collect();
         guest_names.sort_unstable();
         assert_eq!(guest_names, vec!["An Tran", "Mai Nguyen"]);
+        assert_eq!(detail.group_id, None);
+    }
+
+    // RoomDrawer (Task 12) mirrors BookingDetailPopup's (Task 11) group gate —
+    // xem RoomDrawer.tsx — và cần đúng `group_id` này để tự khoá nút xóa
+    // TRƯỚC khi bấm, thay vì đợi preview trả lời rồi mới biết bị chặn. Thiếu
+    // cột `group_id` trong SELECT của `load_room_detail` thì trường luôn ra
+    // `None` dù booking thật sự thuộc đoàn — im lặng, không lỗi biên dịch.
+    #[tokio::test]
+    async fn load_room_detail_returns_the_active_bookings_group_id() {
+        let pool = migrated_pool().await;
+        insert_room(&pool, "101", 1, "occupied").await;
+        insert_guest(&pool, "guest-1", "Mai Nguyen").await;
+        insert_booking(
+            &pool,
+            BookingFixture {
+                id: "booking-1",
+                room_id: "101",
+                guest_id: "guest-1",
+                status: "active",
+                scheduled_checkin: "2026-05-20",
+                scheduled_checkout: "2026-05-22",
+                deposit_amount: 0,
+            },
+        )
+        .await;
+        sqlx::query(
+            "INSERT INTO booking_groups (id, group_name, master_booking_id, organizer_name,
+                                          total_rooms, status, created_at)
+             VALUES ('GRP-1', 'Đoàn thử', 'booking-1', 'Trưởng đoàn', 1, 'active',
+                     '2026-05-20T00:00:00Z')",
+        )
+        .execute(&pool)
+        .await
+        .expect("inserts booking group");
+        sqlx::query("UPDATE bookings SET group_id = 'GRP-1' WHERE id = 'booking-1'")
+            .execute(&pool)
+            .await
+            .expect("links booking to group");
+
+        let detail = load_room_detail(&pool, "101")
+            .await
+            .expect("loads room detail");
+
+        assert_eq!(detail.group_id.as_deref(), Some("GRP-1"));
     }
 
     #[tokio::test]

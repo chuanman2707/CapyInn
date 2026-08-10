@@ -1,4 +1,4 @@
-import { useState, useEffect, useMemo, useRef, type MouseEvent as ReactMouseEvent } from "react";
+import { useState, useEffect, useLayoutEffect, useMemo, useRef, type MouseEvent as ReactMouseEvent } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { Search, ChevronLeft, ChevronRight, Plus } from "lucide-react";
 import { Input } from "@/components/ui/input";
@@ -33,7 +33,11 @@ type BookingBar = BookingWithGuest & {
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 const VISIBLE_DAYS = 16;
-const COL_WIDTH = 80;
+/** Bề rộng cột hẹp nhất — đúng giá trị cố định dùng trước 09/08/2026, nên cửa
+ *  sổ hẹp giữ nguyên hành vi cũ và cuộn ngang. */
+const MIN_COL_WIDTH = 80;
+/** Cột tên phòng, cố định và dính bên trái. */
+const ROOM_LABEL_WIDTH = 140;
 /** Nhận phòng buổi chiều, trả phòng buổi sáng: bar lệch nửa ô ở cả hai đầu. */
 const HALF_DAY = 0.5;
 /** Khách nhận và trả cùng ngày vẫn phải nhìn thấy được. */
@@ -97,19 +101,64 @@ function parseDate(s: string): Date {
     return Number.isNaN(parsed.getTime()) ? parsed : startOfLocalDay(parsed);
 }
 
+// Chỉ những status này mới có bar trên lịch. DANH SÁCH TRẮNG — cố ý, không
+// phải danh sách đen (`status !== "cancelled"` cũ). Một status mới thêm vào
+// BookingStatus mà không có mặt ở đây thì KHÔNG vẽ bar, thay vì lọt qua mặc
+// định như đường đen — đúng chiều an toàn khi status là dữ liệu người dùng
+// không kiểm soát được (đọc từ backend, có thể là bug tầng SQL sót lại).
+const VISIBLE_BOOKING_STATUSES: readonly BookingStatus[] = [
+    "active",
+    "booked",
+    "checked_out",
+    "no_show",
+];
+
+/** Không bao giờ được gọi nếu switch bên dưới xét đủ mọi nhánh của BookingStatus. */
+function assertUnreachableStatus(status: never): never {
+    throw new Error(`Thiếu nhánh xử lý cho status: ${String(status)}`);
+}
+
+// switch cạn kiệt (exhaustive) thay vì chuỗi if/else: thêm một status mới vào
+// BookingStatus mà quên xử lý ở đây là LỖI BIÊN DỊCH, không phải một bar màu
+// cam âm thầm hiện ra. Đây chính là rào chắn C1 yêu cầu — trước đây if/else
+// với nhánh mặc định (`return status`) không ép tsc bắt lỗi thiếu nhánh.
 function getBookingBarColor(status: BookingStatus): string {
-    if (status === "booked") return "bg-blue-100 text-blue-700 border-blue-300";
-    if (status === "active") return "bg-emerald-100 text-emerald-700 border-emerald-300";
-    if (status === "checked_out") return "bg-slate-100 text-slate-500 border-slate-200";
-    return "bg-orange-100 text-orange-700 border-orange-200";
+    switch (status) {
+        case "booked":
+            return "bg-blue-100 text-blue-700 border-blue-300";
+        case "active":
+            return "bg-emerald-100 text-emerald-700 border-emerald-300";
+        case "checked_out":
+            return "bg-slate-100 text-slate-500 border-slate-200";
+        case "no_show":
+            return "bg-orange-100 text-orange-700 border-orange-200";
+        // cancelled/voided không bao giờ tới đây (đã lọc ở VISIBLE_BOOKING_STATUSES)
+        // — màu xám trung tính, không phải cam (cam đang là màu "đến hạn/chú ý").
+        case "cancelled":
+        case "voided":
+            return "bg-slate-100 text-slate-400 border-slate-200";
+        default:
+            return assertUnreachableStatus(status);
+    }
 }
 
 function getStatusLabel(status: BookingStatus): string {
-    if (status === "booked") return "Đặt trước";
-    if (status === "active") return "Đang ở";
-    if (status === "checked_out") return "Đã trả";
-    if (status === "no_show") return "Không đến";
-    return status;
+    switch (status) {
+        case "booked":
+            return "Đặt trước";
+        case "active":
+            return "Đang ở";
+        case "checked_out":
+            return "Đã trả";
+        case "no_show":
+            return "Không đến";
+        case "cancelled":
+            return "Đã hủy";
+        case "voided":
+            return "Đã xóa";
+        default:
+            return assertUnreachableStatus(status);
+    }
 }
 
 // `get_all_bookings` là lệnh ĐỌC: chữ ký của nó là `Result<_, String>`, nên
@@ -126,7 +175,7 @@ function describeLoadError(error: unknown): string {
 }
 
 export default function Reservations() {
-    const { rooms, fetchRooms, setCheckinOpen } = useHotelStore();
+    const { rooms, fetchRooms, setCheckinOpen, setRoomChangeOpen } = useHotelStore();
     const [bookings, setBookings] = useState<BookingWithGuest[]>([]);
     const [loadError, setLoadError] = useState<string | null>(null);
     const [searchQuery, setSearchQuery] = useState("");
@@ -142,6 +191,39 @@ export default function Reservations() {
 
     const DAYS = useMemo(() => getDateRange(dateOffset), [dateOffset]);
     const rangeLabel = formatRangeLabel(DAYS);
+
+    const timelineRef = useRef<HTMLDivElement | null>(null);
+    const [colWidth, setColWidth] = useState(MIN_COL_WIDTH);
+
+    // Đo một lần khi vẽ (`useLayoutEffect`, trước khi trình duyệt sơn) rồi theo
+    // dõi tiếp bằng ResizeObserver. Phép đo đầu tiên KHÔNG được phó mặc cho
+    // observer: trong ứng dụng thật nó khiến lịch hiện cột 80px rồi mới nhảy,
+    // và trong test `ResizeObserver` là một lớp rỗng ở `tests/setup.ts` không
+    // bao giờ gọi callback — nhánh tính toán sẽ không bao giờ chạy.
+    useLayoutEffect(() => {
+        const node = timelineRef.current;
+        if (!node) return;
+
+        // `clientWidth`, KHÔNG phải `getBoundingClientRect().width`: rect là hộp
+        // viền và đã tính cả phần thanh cuộn dọc chiếm chỗ, còn clientWidth là
+        // hộp nội dung — đã trừ đúng bề rộng thanh cuộn của MÁY ĐANG CHẠY. Trừ
+        // một hằng số là sai: bề rộng đó tuỳ hệ điều hành và tuỳ cài đặt (macOS
+        // để "Show scroll bars: Always" ra ~15px, overlay ra 0px).
+        //
+        // Đi cùng nó, `node` phải là chính khung cuộn dọc (xem `overflow-auto` ở
+        // khung lịch bên dưới). Đo một hộp mà thanh cuộn nằm ở hộp KHÁC thì
+        // clientWidth cũng không trừ gì cả.
+        const measure = () => {
+            const available = node.clientWidth - ROOM_LABEL_WIDTH;
+            const next = Math.floor(available / VISIBLE_DAYS);
+            setColWidth(Math.max(next, MIN_COL_WIDTH));
+        };
+
+        measure();
+        const observer = new ResizeObserver(measure);
+        observer.observe(node);
+        return () => observer.disconnect();
+    }, []);
 
     useEffect(() => { fetchRooms(); }, []);
 
@@ -220,11 +302,17 @@ export default function Reservations() {
     const activeCount = visibleBookings.filter(b => b.status === "active").length;
     const bookedCount = visibleBookings.filter(b => b.status === "booked").length;
     const checkedOutCount = visibleBookings.filter(b => b.status === "checked_out").length;
-    const totalCount = visibleBookings.length;
+    // M6 (rà cuối trước merge): trước đây lọc bằng danh sách ĐEN
+    // (`status !== "voided"`) nên "Tổng" vẫn cộng cả lượt "cancelled" dù bar
+    // trên lịch dùng danh sách TRẮNG `VISIBLE_BOOKING_STATUSES` (không có
+    // "cancelled") — hai chỗ lệch nhau trong cùng một commit. Dùng chung
+    // đúng một danh sách trắng cho cả hai: "Tổng" mô tả các lượt còn đang
+    // hiện diện trên lịch (có bar), không phải toàn bộ lịch sử đã từng tạo.
+    const totalCount = visibleBookings.filter(b => VISIBLE_BOOKING_STATUSES.includes(b.status)).length;
 
-    function getBookingBars(roomId: string): BookingBar[] {
+    function getBookingBars(roomId: string, columnWidth: number): BookingBar[] {
         return visibleBookings
-            .filter(b => b.room_id === roomId && b.status !== "cancelled")
+            .filter(b => b.room_id === roomId && VISIBLE_BOOKING_STATUSES.includes(b.status))
             .flatMap((b): BookingBar[] => {
                 const checkIn = parseDate(b.scheduled_checkin || b.check_in_at);
                 // Booking đã trả: bar dừng đúng lúc trả phòng thực tế, kể cả khi trước đó lỡ extend.
@@ -249,8 +337,8 @@ export default function Reservations() {
 
                 return [{
                     ...b,
-                    left: visStart * COL_WIDTH,
-                    width: (visEnd - visStart) * COL_WIDTH,
+                    left: visStart * columnWidth,
+                    width: (visEnd - visStart) * columnWidth,
                     clippedLeft: rawStart < 0,
                     clippedRight: rawEnd > VISIBLE_DAYS,
                     color: getBookingBarColor(b.status),
@@ -310,7 +398,7 @@ export default function Reservations() {
         const onMouseMove = (event: MouseEvent) => {
             const grid = dragGridRef.current;
             if (!grid) return;
-            const col = Math.floor((event.clientX - grid.getBoundingClientRect().left) / COL_WIDTH);
+            const col = Math.floor((event.clientX - grid.getBoundingClientRect().left) / colWidth);
             const clamped = Math.max(0, Math.min(DAYS.length - 1, col));
             setDragSel((prev) => (prev && prev.endIndex !== clamped ? { ...prev, endIndex: clamped } : prev));
         };
@@ -345,10 +433,29 @@ export default function Reservations() {
             window.removeEventListener("keydown", onKeyDown);
             window.removeEventListener("blur", onBlur);
         };
-    }, [dragSel, DAYS]);
+    }, [dragSel, DAYS, colWidth]);
 
+    // `max-h-full`, KHÔNG phải `h-full`: thẻ này phải BỊ CHẶN bằng chiều cao
+    // khung nhìn để khung lịch bên trong thành nơi cuộn (nhờ đó hàng ngày tháng
+    // `sticky top-0` mới bám được), nhưng vẫn ôm sát nội dung khi ít phòng. Đo
+    // trong Chromium, khung nhìn giả lập 422px, hàng 34px:
+    //   - `h-full` + 5 phòng: thẻ bị kéo căng 350px, chừa một mảng trắng dưới
+    //     hàng cuối — khách sạn 10 phòng hiện tại đổi hình mà chẳng được gì.
+    //   - `max-h-full` + 5 phòng: thẻ cao 258px, không thẻ nào cuộn. Giống hệt
+    //     hôm nay.
+    //   - `max-h-full` + 28 phòng: thẻ chạm trần 348px, chính khung lịch cuộn
+    //     700px còn hàng ngày tháng đứng yên ở mép trên.
+    // `max-height` vẫn cho `flex-1 min-h-0 overflow-auto` bên trong hoạt động:
+    // khi nội dung vượt trần, chiều cao thẻ thành xác định và khung lịch nhận
+    // đúng phần còn lại sau thanh công cụ.
+    // Chỉ chặn được khi thẻ bọc `animate-fade-up` ở `MainShell` có chiều cao xác
+    // định — xem `SELF_SCROLLING_TABS` ở đó. Thiếu vế kia thì `max-height:100%`
+    // rơi về `none` và cả hai vế cùng vô nghĩa.
     return (
-        <div className="flex flex-col h-full bg-white rounded-3xl shadow-soft overflow-hidden">
+        <div
+            data-testid="timeline-card"
+            className="flex flex-col max-h-full bg-white rounded-3xl shadow-soft overflow-hidden"
+        >
 
             {/* Toolbar */}
             <div className="flex items-center justify-between p-5 border-b border-slate-100 bg-white z-20">
@@ -363,7 +470,7 @@ export default function Reservations() {
                         Đã trả <span className="ml-1 bg-slate-200 text-slate-600 rounded px-1.5 py-0.5 text-[10px]">{checkedOutCount}</span>
                     </Badge>
                     <Badge className="bg-orange-50 text-orange-600 border border-orange-200 rounded-lg px-3 py-1 text-xs font-bold">
-                        Tổng <span className="ml-1 bg-orange-200 text-orange-700 rounded px-1.5 py-0.5 text-[10px]">{totalCount}</span>
+                        Tổng <span data-testid="total-booking-count" className="ml-1 bg-orange-200 text-orange-700 rounded px-1.5 py-0.5 text-[10px]">{totalCount}</span>
                     </Badge>
                 </div>
 
@@ -420,16 +527,47 @@ export default function Reservations() {
             </div>
 
             {/* Timeline Grid */}
-            <div className="flex-1 flex flex-col min-h-0 overflow-hidden relative">
+            {/* Chính thẻ này cuộn, và cũng chính nó được đo — hai vai đó phải
+                nằm trên cùng một thẻ, nếu không clientWidth ở trên không trừ được
+                gì. Trước đây thẻ này `overflow-hidden` còn phần thân mới cuộn.
+                Đo trên máy có thanh cuộn cổ điển (Windows, hoặc macOS để
+                "Show scroll bars: Always") bằng Chromium, khung 1600px, 12 phòng:
+                  - cũ: đo 1598px (đã gồm chỗ thanh cuộn dọc của thân) -> cột 91px
+                    -> lưới rộng 1596px trong khi hộp nội dung chỉ còn 1583px.
+                  - mới: đo clientWidth 1583px -> cột 90px -> lưới 1580px, vừa khít.
+                Phần dôi ra KHÔNG đẻ ra thanh cuộn ngang ở thân như tưởng: thân là
+                `w-max` nên luôn tự giãn bằng nội dung và không bao giờ tràn so với
+                chính nó. Chỗ dôi rơi lên thẻ này, mà `overflow-hidden` thì cắt cụt
+                và người dùng KHÔNG kéo tới được — mất 13px cuối của ngày thứ 16.
+                Cửa sổ hẹp còn nặng hơn: cột chạm sàn 80px, lưới 1420px trên khung
+                998px, 437px — hơn năm ngày — bị cắt và không có cách nào kéo tới.
+                Để `overflow-auto` ở đây vừa sửa phép đo, vừa trả lại đường kéo
+                ngang, vừa kéo luôn hàng ngày tháng (`sticky top-0`, nằm trong
+                chính khung cuộn này) đi cùng thân nên thanh booking không bao giờ
+                lệch khỏi ngày của nó. */}
+            <div ref={timelineRef} className="flex-1 flex flex-col min-h-0 overflow-auto relative">
 
                 {/* Day Headers */}
-                <div className="flex border-b border-slate-100 bg-white sticky top-0 z-10 w-max min-w-full">
-                    <div className="w-[140px] shrink-0 border-r border-slate-100 bg-white shadow-[2px_0_10px_rgba(0,0,0,0.02)] sticky left-0 z-20 flex items-center px-4">
+                {/* `z-30`, KHÔNG phải `z-10`: từ lúc khung cuộn dời lên thẻ cha, hàng
+                    ngày tháng và các hàng phòng nằm CHUNG một ngữ cảnh xếp lớp. Cùng
+                    z-10 thì thẻ đứng sau trong DOM thắng, nên nhãn phòng (`z-10`) và
+                    thanh booking (`z-10`) vẽ ĐÈ lên hàng ngày, còn vạch hôm nay (`z-20`)
+                    xuyên qua nó. Không chỉ xấu: cú bấm nhắm vào ô ngày rơi trúng
+                    `onClick` của thanh booking và mở nhầm khách. Phải vượt `z-20` chứ
+                    không chỉ vượt `z-10`. Trước đây chuyện này bất khả vì phần thân tự
+                    cuộn nên tự cắt nội dung ở mép trên của chính nó.
+                    `z-20` của ô "Rooms" bên trong vẫn chạy: thẻ này là ngữ cảnh xếp
+                    lớp riêng nên con của nó xếp trong lòng nó. */}
+                <div
+                    data-testid="timeline-day-header"
+                    className="flex border-b border-slate-100 bg-white sticky top-0 z-30 w-max min-w-full"
+                >
+                    <div style={{ width: ROOM_LABEL_WIDTH }} className="shrink-0 border-r border-slate-100 bg-white shadow-[2px_0_10px_rgba(0,0,0,0.02)] sticky left-0 z-20 flex items-center px-4">
                         <span className="text-xs font-semibold text-slate-500">Rooms</span>
                     </div>
 
                     {DAYS.map((d, i) => (
-                        <div key={i} className={`w-[80px] shrink-0 border-r border-slate-200 flex flex-col items-center justify-center py-2.5 ${d.isToday ? "bg-blue-50/40" : ""}`}>
+                        <div key={i} style={{ width: colWidth }} className={`shrink-0 border-r border-slate-200 flex flex-col items-center justify-center py-2.5 ${d.isToday ? "bg-blue-50/40" : ""}`}>
                             <span className={`text-[10px] font-semibold uppercase ${d.isToday ? "text-brand-primary" : "text-slate-400"}`}>{d.day}</span>
                             <span className={`text-sm font-bold ${d.isToday ? "text-brand-primary" : "text-slate-700"}`}>{d.date}</span>
                         </div>
@@ -437,25 +575,27 @@ export default function Reservations() {
                 </div>
 
                 {/* Timeline Body */}
-                <div className="flex-1 overflow-auto w-max min-w-full">
+                {/* KHÔNG `overflow-auto` ở đây: khung cuộn duy nhất là thẻ cha,
+                    để hàng ngày tháng (`sticky top-0`) cùng nằm trong nó. */}
+                <div className="flex-1 w-max min-w-full">
                     {roomGroups.map((group) => (
                         <div key={group.name}>
                             <div className="flex h-[36px] bg-slate-50/80 border-b border-slate-100">
-                                <div className="w-[140px] shrink-0 border-r border-slate-100 bg-slate-50 sticky left-0 z-10 flex items-center px-4">
+                                <div style={{ width: ROOM_LABEL_WIDTH }} className="shrink-0 border-r border-slate-100 bg-slate-50 sticky left-0 z-10 flex items-center px-4">
                                     <span className="text-xs font-bold text-slate-500 uppercase tracking-wider">{group.name}</span>
                                 </div>
                                 <div className="flex">
                                     {DAYS.map((d, i) => (
-                                        <div key={i} className={`w-[80px] shrink-0 border-r border-slate-200 ${d.isToday ? "bg-blue-50/20" : ""}`} />
+                                        <div key={i} style={{ width: colWidth }} className={`shrink-0 border-r border-slate-200 ${d.isToday ? "bg-blue-50/20" : ""}`} />
                                     ))}
                                 </div>
                             </div>
 
                             {group.rooms.map((room) => {
-                                const bars = getBookingBars(room.id);
+                                const bars = getBookingBars(room.id, colWidth);
                                 return (
                                     <div key={room.id} className="flex group border-b border-slate-100 h-[64px]">
-                                        <div className="w-[140px] shrink-0 border-r border-slate-100 bg-white shadow-[2px_0_10px_rgba(0,0,0,0.02)] sticky left-0 z-10 flex items-center px-4 group-hover:bg-slate-50/50 transition-colors">
+                                        <div style={{ width: ROOM_LABEL_WIDTH }} className="shrink-0 border-r border-slate-100 bg-white shadow-[2px_0_10px_rgba(0,0,0,0.02)] sticky left-0 z-10 flex items-center px-4 group-hover:bg-slate-50/50 transition-colors">
                                             <span className="font-bold text-sm text-slate-700">Room {room.id}</span>
                                         </div>
 
@@ -470,13 +610,14 @@ export default function Reservations() {
                                                         key={colIndex}
                                                         data-testid={`cell-${room.id}-${colIndex}`}
                                                         onMouseDown={(event) => handleCellMouseDown(room.id, colIndex, event)}
+                                                        style={{ width: colWidth }}
                                                         // Ô đang chọn KHÔNG mang lớp hover: `group-hover:` có
                                                         // độ ưu tiên CSS cao hơn `bg-blue-100/70` nên nó đè mất
                                                         // màu vùng chọn. Mà kéo thì con trỏ luôn nằm trên chính
                                                         // hàng đang kéo, nên trước đây vùng chọn vô hình suốt cú
                                                         // kéo và chỉ lộ ra khi con trỏ rời sang hàng khác — đo
                                                         // trong trình duyệt thật: nền ô đã chọn ra slate-50/30.
-                                                        className={`w-[80px] shrink-0 border-r border-slate-200 select-none cursor-pointer transition-colors ${inSelection
+                                                        className={`shrink-0 border-r border-slate-200 select-none cursor-pointer transition-colors ${inSelection
                                                             ? "bg-blue-100/70"
                                                             : `${d.isToday ? "bg-blue-50/10" : ""} group-hover:bg-slate-50/30`
                                                             }`}
@@ -485,14 +626,23 @@ export default function Reservations() {
                                             })}
 
                                             {DAYS.some(d => d.isToday) && (
-                                                <div data-testid="timeline-today-marker" className="absolute top-0 bottom-0 w-[2px] bg-brand-primary/60 z-20 pointer-events-none" style={{ left: `${DAYS.findIndex(d => d.isToday) * COL_WIDTH + COL_WIDTH / 2}px` }} />
+                                                <div data-testid="timeline-today-marker" className="absolute top-0 bottom-0 w-[2px] bg-brand-primary/60 z-20 pointer-events-none" style={{ left: `${DAYS.findIndex(d => d.isToday) * colWidth + colWidth / 2}px` }} />
                                             )}
 
                                             {bars.map((bar) => (
                                                 <div
                                                     key={bar.id}
                                                     data-testid={`booking-bar-${bar.id}`}
-                                                    className="absolute top-1/2 -translate-y-1/2 px-0.5 z-10 cursor-pointer"
+                                                    // `inset-y-0`, KHÔNG phải `top-1/2
+                                                    // -translate-y-1/2`: khung bọc cao bằng thanh
+                                                    // 42px sẽ chừa 11px hở trên và 11px hở dưới
+                                                    // trong hàng 64px, và `mousedown` ở dải đó rơi
+                                                    // xuống ô ngày bên dưới. Bấm trúng dải ấy trên
+                                                    // một phòng đang có khách mở biểu mẫu đặt phòng
+                                                    // cho đúng ngày khách đang ở — cảnh báo đỏ, nút
+                                                    // bấm chết. Cả chiều cao hàng thuộc về khách
+                                                    // đang chiếm ngày đó.
+                                                    className="absolute inset-y-0 px-0.5 z-10 cursor-pointer flex items-center"
                                                     style={{ left: `${bar.left}px`, width: `${bar.width}px` }}
                                                     onClick={() => {
                                                         if (bar.status === "active") setDrawerRoomId(bar.room_id);
@@ -560,6 +710,7 @@ export default function Reservations() {
                     onEdit={(booking) => { setEditBooking(booking); setSelectedBooking(null); }}
                     onCancel={handleCancelReservation}
                     onViewInvoice={viewInvoice}
+                    onRoomChange={(bookingId) => setRoomChangeOpen(true, bookingId)}
                     invoiceLoading={invoiceLoading}
                 />
             )}

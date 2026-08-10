@@ -148,8 +148,7 @@ async fn stay_lifecycle_smoke_covers_checkin_extend_and_checkout() {
 
     assert_eq!(checked_out.response["ok"], serde_json::json!(true));
     assert_booking_status(&pool, &booking_id, "checked_out").await;
-    assert_room_status(&pool, "R-SMOKE-STAY", "cleaning").await;
-    assert_housekeeping_rows(&pool, "R-SMOKE-STAY", "needs_cleaning", 1).await;
+    assert_room_status(&pool, "R-SMOKE-STAY", "vacant").await;
     assert_eq!(
         sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM room_calendar WHERE booking_id = ?")
             .bind(&booking_id)
@@ -313,6 +312,7 @@ async fn check_in_idempotent_duplicate_in_flight_returns_conflict() {
         "notes": "test check-in",
         "paid_amount": 0,
         "pricing_type": "nightly",
+        "rate_override_per_night": null,
     });
     seed_live_in_progress_command(&pool, &ctx.command_name, &ctx.idempotency_key, &payload).await;
 
@@ -381,7 +381,7 @@ async fn check_in_fails_when_second_pool_blocks_room_calendar_first() {
 }
 
 #[tokio::test]
-async fn check_out_idempotent_retry_replays_without_duplicate_money_or_housekeeping() {
+async fn check_out_idempotent_retry_replays_without_duplicate_money_and_creates_no_housekeeping() {
     let pool = test_pool().await;
     seed_room(&pool, "R-CHECKOUT-IDEM").await.unwrap();
     seed_active_booking(&pool, "B-CHECKOUT-IDEM", "R-CHECKOUT-IDEM")
@@ -411,7 +411,10 @@ async fn check_out_idempotent_retry_replays_without_duplicate_money_or_housekeep
             .fetch_one(&pool)
             .await
             .unwrap();
-    assert_eq!(housekeeping_count, 1);
+    assert_eq!(
+        housekeeping_count, 0,
+        "trả phòng không được sinh phiếu dọn nào nữa, kể cả khi replay"
+    );
 
     let checkout_money_count: i64 = sqlx::query_scalar(
         "SELECT COUNT(*) FROM transactions
@@ -631,4 +634,64 @@ async fn the_headcount_is_recorded_on_the_booking() {
         .await
         .unwrap();
     assert_eq!(stored, Some(3));
+}
+
+#[tokio::test]
+async fn a_room_can_be_checked_in_again_immediately_after_checkout() {
+    let pool = test_pool().await;
+    seed_room_with_price(&pool, "R-TURNOVER", 250_000)
+        .await
+        .expect("seed turnover room/pricing");
+
+    let check_in_ctx = cmd_with_request("check_in", "req-turnover-in-1", "idem-turnover-in-1");
+    let first = stay_lifecycle::check_in_idempotent(
+        &pool,
+        &check_in_ctx,
+        paid_checkin_req("R-TURNOVER", 0),
+        Some("user-turnover".to_string()),
+    )
+    .await
+    .expect("first guest checks in");
+    let first_id = first.response["id"]
+        .as_str()
+        .expect("first booking id")
+        .to_string();
+
+    let check_out_ctx = cmd_with_request("check_out", "req-turnover-out", "idem-turnover-out");
+    stay_lifecycle::check_out_idempotent(
+        &pool,
+        &check_out_ctx,
+        checkout_req(&first_id, CheckoutSettlementMode::BookedNights, 500_000),
+    )
+    .await
+    .expect("first guest checks out");
+
+    // Đây là toàn bộ lý do tồn tại của thay đổi này: không có bước trung gian
+    // nào giữa trả phòng và nhận phòng. Trước 09/08/2026 phòng rơi vào
+    // `cleaning` và lời gọi dưới đây trả về Conflict "Phòng R-TURNOVER không
+    // trống (status: cleaning)".
+    assert_room_status(&pool, "R-TURNOVER", "vacant").await;
+
+    let second_ctx = cmd_with_request("check_in", "req-turnover-in-2", "idem-turnover-in-2");
+    let second = stay_lifecycle::check_in_idempotent(
+        &pool,
+        &second_ctx,
+        paid_checkin_req("R-TURNOVER", 0),
+        Some("user-turnover".to_string()),
+    )
+    .await
+    .expect("second guest checks in with no housekeeping step in between");
+
+    assert_eq!(second.response["status"], serde_json::json!("active"));
+    assert_room_status(&pool, "R-TURNOVER", "occupied").await;
+
+    let housekeeping_rows: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM housekeeping WHERE room_id = 'R-TURNOVER'")
+            .fetch_one(&pool)
+            .await
+            .expect("counts housekeeping rows");
+    assert_eq!(
+        housekeeping_rows, 0,
+        "trả phòng không được sinh phiếu dọn nào nữa"
+    );
 }

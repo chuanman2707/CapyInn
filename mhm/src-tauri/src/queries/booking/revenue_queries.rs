@@ -24,15 +24,11 @@ pub async fn load_dashboard_stats_for_date(
     let vacant: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM rooms WHERE status = 'vacant'")
         .fetch_one(pool)
         .await?;
-    let cleaning: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM rooms WHERE status = 'cleaning'")
-        .fetch_one(pool)
-        .await?;
 
     Ok(DashboardStats {
         total_rooms: total.0 as i32,
         occupied: occupied.0 as i32,
         vacant: vacant.0 as i32,
-        cleaning: cleaning.0 as i32,
         revenue_today: load_total_revenue(pool, date, date).await?,
     })
 }
@@ -108,12 +104,14 @@ pub async fn load_analytics(
              SELECT COALESCE(b.source, 'walk-in') AS source, fl.amount AS amount
              FROM folio_lines fl
              JOIN bookings b ON b.id = fl.booking_id
-             WHERE {folio_created_date} BETWEEN {range_from} AND {range_to}
+             WHERE b.status != 'voided'
+               AND {folio_created_date} BETWEEN {range_from} AND {range_to}
              UNION ALL
              SELECT COALESCE(b.source, 'walk-in') AS source, t.amount AS amount
              FROM transactions t
              JOIN bookings b ON b.id = t.booking_id
              WHERE t.type = 'cancellation_fee'
+               AND b.status != 'voided'
                AND {transaction_created_date} BETWEEN {range_from} AND {range_to}
          ) revenue_items
          GROUP BY source
@@ -164,12 +162,14 @@ pub async fn load_analytics(
              SELECT b.room_id AS room_id, fl.amount AS amount
              FROM folio_lines fl
              JOIN bookings b ON b.id = fl.booking_id
-             WHERE {folio_created_date} BETWEEN {range_from} AND {range_to}
+             WHERE b.status != 'voided'
+               AND {folio_created_date} BETWEEN {range_from} AND {range_to}
              UNION ALL
              SELECT b.room_id AS room_id, t.amount AS amount
              FROM transactions t
              JOIN bookings b ON b.id = t.booking_id
              WHERE t.type = 'cancellation_fee'
+               AND b.status != 'voided'
                AND {transaction_created_date} BETWEEN {range_from} AND {range_to}
          ) revenue_items
          GROUP BY room_id
@@ -230,13 +230,17 @@ pub async fn load_folio_revenue(
     from: &str,
     to: &str,
 ) -> Result<MoneyVnd, sqlx::Error> {
-    let created_date = local_date_sql("created_at");
+    let created_date = local_date_sql("fl.created_at");
     let range_from = local_date_sql("?");
     let range_to = local_date_sql("?");
+    // JOIN bookings là bắt buộc, không phải trang trí: không có nó thì dịch vụ
+    // của một lượt đã bị xoá vì nhập sai vẫn cộng vào doanh thu.
     let row = sqlx::query(&format!(
-        "SELECT COALESCE(SUM(amount), 0) AS value
-         FROM folio_lines
-         WHERE {created_date} BETWEEN {range_from} AND {range_to}"
+        "SELECT COALESCE(SUM(fl.amount), 0) AS value
+         FROM folio_lines fl
+         JOIN bookings b ON b.id = fl.booking_id
+         WHERE b.status != 'voided'
+           AND {created_date} BETWEEN {range_from} AND {range_to}"
     ))
     .bind(from)
     .bind(to)
@@ -251,13 +255,15 @@ pub async fn load_cancellation_fee_revenue(
     from: &str,
     to: &str,
 ) -> Result<MoneyVnd, sqlx::Error> {
-    let created_date = local_date_sql("created_at");
+    let created_date = local_date_sql("t.created_at");
     let range_from = local_date_sql("?");
     let range_to = local_date_sql("?");
     let row = sqlx::query(&format!(
-        "SELECT COALESCE(SUM(amount), 0) AS value
-         FROM transactions
-         WHERE type = 'cancellation_fee'
+        "SELECT COALESCE(SUM(t.amount), 0) AS value
+         FROM transactions t
+         JOIN bookings b ON b.id = t.booking_id
+         WHERE t.type = 'cancellation_fee'
+           AND b.status != 'voided'
            AND {created_date} BETWEEN {range_from} AND {range_to}"
     ))
     .bind(from)

@@ -156,6 +156,54 @@ async fn create_reservation_same_key_different_payload_conflicts() {
     );
 }
 
+/// `rate_override_per_night` ảnh hưởng trực tiếp tới `total_price` như mọi
+/// trường khác trong hash — thiếu nó thì đổi giá tay dưới cùng một
+/// idempotency key sẽ lặp lại kết quả CŨ (giá cũ, sai) trong im lặng thay vì
+/// bị báo `CONFLICT_IDEMPOTENCY_HASH_MISMATCH`. Đây chính là bug tiền bạc mà
+/// việc thêm trường vào hash phải chặn — xem `Task 14 brief`.
+#[tokio::test]
+async fn create_reservation_same_key_different_rate_override_conflicts() {
+    let pool = test_pool().await;
+    seed_room_with_price(&pool, "R605", 600_000)
+        .await
+        .expect("seeds room/pricing");
+    let ctx = cmd("create_reservation", "idem-reservation-rate-conflict");
+
+    reservation_lifecycle::create_reservation_idempotent(
+        &pool,
+        &ctx,
+        reservation_req("R605")
+            .guest("Rate Conflict Guest")
+            .doc("DOC605")
+            .phone(None)
+            .dates("2026-05-01", "2026-05-02")
+            .nights(1)
+            .deposit(None)
+            .build(),
+    )
+    .await
+    .expect("first reservation succeeds");
+
+    let mut changed = reservation_req("R605")
+        .guest("Rate Conflict Guest")
+        .doc("DOC605")
+        .phone(None)
+        .dates("2026-05-01", "2026-05-02")
+        .nights(1)
+        .deposit(None)
+        .build();
+    changed.rate_override_per_night = Some(350_000);
+
+    let error = reservation_lifecycle::create_reservation_idempotent(&pool, &ctx, changed)
+        .await
+        .expect_err("same key with a different rate override conflicts");
+
+    assert_eq!(
+        error.code,
+        crate::app_error::codes::CONFLICT_IDEMPOTENCY_HASH_MISMATCH
+    );
+}
+
 #[tokio::test]
 async fn reservation_command_idempotency_create_hashes_deposit_as_integer_vnd_units() {
     let pool = test_pool().await;
@@ -175,6 +223,7 @@ async fn reservation_command_idempotency_create_hashes_deposit_as_integer_vnd_un
         notes: None,
         deposit_amount: Some(500_000),
         guests: None,
+        rate_override_per_night: None,
     };
 
     reservation_lifecycle::create_reservation_idempotent(&pool, &ctx, request)
@@ -203,6 +252,7 @@ async fn reservation_command_idempotency_create_hashes_deposit_as_integer_vnd_un
         "source": "phone",
         "notes": null,
         "deposit_vnd_units": 500000,
+        "rate_override_per_night": null,
     });
     let mut cents_payload = expected_payload.clone();
     cents_payload["deposit_vnd_units"] = serde_json::json!(50000000);
@@ -846,4 +896,54 @@ async fn reservation_command_idempotency_same_plain_key_across_commands_scopes_o
     assert_eq!(origins.len(), 2);
     assert!(origins.contains(&format!("{}:{}", create_ctx.command_name, plain_key)));
     assert!(origins.contains(&format!("{}:{}", cancel_ctx.command_name, plain_key)));
+}
+
+#[tokio::test]
+async fn cancel_reservation_idempotent_reads_the_room_after_taking_the_booking_lock() {
+    let pool = test_pool().await;
+    seed_room(&pool, "R921").await.unwrap();
+    seed_room(&pool, "R922").await.unwrap();
+    seed_booked_reservation(&pool, "B921", "R921")
+        .await
+        .unwrap();
+
+    let blocker = crate::aggregate_locks::global_manager()
+        .acquire([crate::aggregate_locks::booking_key("B921").unwrap()])
+        .await
+        .expect("blocker lock");
+
+    let ctx = cmd("cancel_reservation", "idem-cancel-race");
+    let pool_for_task = pool.clone();
+    let command = tokio::spawn(async move {
+        reservation_lifecycle::cancel_reservation_idempotent(&pool_for_task, &ctx, "B921").await
+    });
+
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    assert!(
+        !command.is_finished(),
+        "lệnh phải kẹt ở pha 1, chưa được phép đọc phòng"
+    );
+
+    sqlx::query("UPDATE room_calendar SET room_id = 'R922' WHERE booking_id = 'B921'")
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE bookings SET room_id = 'R922' WHERE id = 'B921'")
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    drop(blocker);
+
+    command
+        .await
+        .expect("task joins")
+        .expect("cancel reservation phải thành công trên phòng mới");
+
+    let remaining: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM room_calendar WHERE booking_id = 'B921'")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(remaining, 0, "lịch của phòng mới phải được dọn");
 }

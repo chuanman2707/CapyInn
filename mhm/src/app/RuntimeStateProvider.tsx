@@ -48,6 +48,7 @@ type RuntimeStateValue = {
   onExportCrashReport: () => Promise<void>;
   gatewayRunning: boolean;
   gatewayRuntimeEnabled: boolean;
+  agentRuntimeEnabled: boolean;
   remoteCrashReportingEnabled: boolean;
 };
 
@@ -72,6 +73,10 @@ export function RuntimeStateProvider({ children }: { children: ReactNode }) {
   const remoteCrashReportingEnabled = hasRemoteCrashReporting();
   const experimentalRuntime = useExperimentalRuntimeStatus(isAuthenticated);
   const gatewayRuntimeEnabled = experimentalRuntime.gatewayRuntimeEnabled;
+  // Trợ lý quầy đọc chính cờ này, cùng cờ mà màn hình cài đặt đọc để hiện hay
+  // ẩn tab "Trợ lý quầy" (`pages/settings/index.tsx`). Hai bên phải luôn khớp:
+  // gỡ cờ mà panel vẫn chạy thì chủ nhà mất luôn chỗ để tắt cái opt-in cloud.
+  const agentRuntimeEnabled = experimentalRuntime.agentRuntimeEnabled;
 
   useEffect(() => {
     if (!isAuthenticated) return;
@@ -332,6 +337,7 @@ export function RuntimeStateProvider({ children }: { children: ReactNode }) {
       onExportCrashReport,
       gatewayRunning,
       gatewayRuntimeEnabled,
+      agentRuntimeEnabled,
       remoteCrashReportingEnabled,
     }),
     [
@@ -346,6 +352,7 @@ export function RuntimeStateProvider({ children }: { children: ReactNode }) {
       onExportCrashReport,
       gatewayRunning,
       gatewayRuntimeEnabled,
+      agentRuntimeEnabled,
       remoteCrashReportingEnabled,
     ],
   );

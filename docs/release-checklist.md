@@ -19,7 +19,10 @@ npm run build
 cargo check --manifest-path src-tauri/Cargo.toml
 cargo test --manifest-path src-tauri/Cargo.toml
 cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings
+cargo fmt --manifest-path src-tauri/Cargo.toml -- --check
 ```
+
+These are the same commands the CI `build-test` job runs, in the same order.
 
 Expected: every command passes without requiring Telegram, OpenAI, MCP, gateway, watcher, or agent configuration.
 
@@ -43,7 +46,7 @@ Expected: the suite passes and covers:
 
 Confirm the release is valid for the normal core PMS profile:
 
-- rooms, reservations, stays, guests, housekeeping, billing, invoices, groups, night audit, settings, and auth remain available without experimental services
+- rooms, reservations, stays, guests, billing, invoices, groups, night audit, settings, and auth remain available without experimental services
 - normal app startup does not require external API keys
 - disabled experimental runtime means no gateway, Telegram, OpenAI, MCP, watcher, or agent write configuration is required
 - PMS state changes still enter through validated Tauri command boundaries and service/lifecycle modules

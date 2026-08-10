@@ -27,6 +27,7 @@ pub fn minimal_checkin_request(room_id: &str) -> CheckInRequest {
         paid_amount: None,
         pricing_type: Some("nightly".to_string()),
         guest_count: None,
+        rate_override_per_night: None,
     }
 }
 
@@ -43,6 +44,7 @@ pub fn minimal_reservation_request(room_id: &str) -> CreateReservationRequest {
         source: Some("phone".to_string()),
         notes: Some("test reservation".to_string()),
         guests: None,
+        rate_override_per_night: None,
     }
 }
 
@@ -96,6 +98,7 @@ pub fn minimal_group_checkin_request(room_ids: &[&str]) -> GroupCheckinRequest {
         source: Some("walk-in".to_string()),
         notes: Some("group test".to_string()),
         paid_amount: Some(100_000),
+        rate_override_per_room: Default::default(),
     }
 }
 
@@ -138,6 +141,7 @@ pub fn rich_group_checkin_request(
         source: Some("walk-in".to_string()),
         notes: Some("group checkin idempotent".to_string()),
         paid_amount,
+        rate_override_per_room: Default::default(),
     }
 }
 

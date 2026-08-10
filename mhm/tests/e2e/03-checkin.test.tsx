@@ -18,7 +18,6 @@ function setupAuthenticated() {
         stats: mockStats,
         activeTab: "dashboard",
         roomDetail: null,
-        housekeepingTasks: [],
         loading: false,
         isCheckinOpen: false,
     });

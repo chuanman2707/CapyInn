@@ -8,6 +8,7 @@ const invokeWriteCommand = vi.hoisted(() => vi.fn());
 const createCorrelationId = vi.hoisted(() => vi.fn());
 const toastSuccess = vi.hoisted(() => vi.fn());
 const fetchRooms = vi.hoisted(() => vi.fn());
+const setRoomChangeOpen = vi.hoisted(() => vi.fn());
 
 vi.mock("@tauri-apps/api/core", () => ({
   invoke,
@@ -32,6 +33,7 @@ vi.mock("@/stores/useHotelStore", () => ({
       },
     ],
     fetchRooms,
+    setRoomChangeOpen,
   }),
 }));
 
@@ -180,6 +182,15 @@ describe("Reservations", () => {
 
     expect(screen.queryByText(/Reservation — Nguyen Van A/)).toBeNull();
   });
+
+  it("opens the room change sheet for a booked reservation", async () => {
+    const user = userEvent.setup();
+    await openBookedReservationActions(user);
+
+    await user.click(screen.getByRole("button", { name: /chuyển phòng/i }));
+
+    expect(setRoomChangeOpen).toHaveBeenCalledWith(true, "B101");
+  });
 });
 
 describe("Reservations timeline geometry", () => {
@@ -282,6 +293,38 @@ describe("Reservations timeline geometry", () => {
     // rawEnd = (2 - -3) + 0.5 = 5.5 -> width = 5.5 * 80 = 440px
     expect(bar.style.width).toBe("440px");
     expect(bar.querySelector(".rounded-l-none")).not.toBeNull();
+  });
+
+  // GIỚI HẠN: test này ghim CƠ CHẾ (tên lớp CSS), không ghim HÀNH VI. jsdom không
+  // dựng layout và ResizeObserver của nó là mock không bao giờ bắn, nên không thể
+  // kiểm một cú bấm thật rơi trúng đâu. Nó bắt được việc gỡ `inset-y-0`, gỡ
+  // `flex items-center`, hay đổi chiều cao thanh; nó KHÔNG bắt được lỗi hit-test
+  // thật trên trình duyệt, cũng không bắt được việc dời `relative` sang một thẻ
+  // cha có chiều cao khác. Kiểm bằng tay trên ứng dụng thật vẫn là bắt buộc.
+  it("stretches the booking bar hit area over the full row height", async () => {
+    // Hàng cao 64px, thanh cao 42px. Nếu khung bọc chỉ cao bằng thanh thì còn
+    // 11px hở trên và 11px hở dưới, và chuột rơi xuống ô ngày bên dưới — bấm
+    // vào đó mở biểu mẫu đặt phòng cho một ngày đã có khách.
+    mockBookings([
+      bookingAt({
+        id: "B-HITAREA",
+        status: "active",
+        scheduled_checkin: dateOffsetFromToday(-1),
+        scheduled_checkout: dateOffsetFromToday(3),
+      }),
+    ]);
+
+    render(<Reservations />);
+
+    const bar = await screen.findByTestId("booking-bar-B-HITAREA");
+    expect(bar.className).toContain("inset-y-0");
+    expect(bar.className).not.toContain("top-1/2");
+    // Khung bọc cao trọn hàng rồi thì việc căn giữa thanh 42px CHỈ còn dựa vào
+    // `flex items-center`. Bỏ hai lớp này mà giữ `inset-y-0` thì vùng bấm vẫn
+    // đúng nhưng thanh dán lên mép trên hàng — phải ghim cả hai.
+    expect(bar.className).toContain("flex");
+    expect(bar.className).toContain("items-center");
+    expect(bar.querySelector(".h-\\[42px\\]")).not.toBeNull();
   });
 });
 
@@ -420,6 +463,7 @@ describe("Reservations checked-out bookings", () => {
     expect(screen.getByText(/Đã trả — Hoseo Kim/)).toBeTruthy();
     expect(screen.getByText("Trả phòng lúc")).toBeTruthy();
     expect(screen.queryByRole("button", { name: /^hủy$/i })).toBeNull();
+    expect(screen.queryByRole("button", { name: /chuyển phòng/i })).toBeNull();
   });
 
   it("reads the existing invoice instead of generating a new one", async () => {
@@ -445,6 +489,81 @@ describe("Reservations checked-out bookings", () => {
 // đổ lỗi "no such column: b.guests". `.catch(() => setBookings([]))` nuốt trọn
 // nó và trang hiện "Chưa có booking nào" — chủ đọc ra là mất sạch dữ liệu, đi
 // tìm bản backup, trong khi 25 booking vẫn nằm nguyên trong database.
+// C1 (rà cuối trước merge): backend đã bịt 8 đường đọc SQL còn sót lượt đã
+// xoá, nhưng frontend lọc bar bằng danh sách ĐEN (`status !== "cancelled"`) —
+// đúng lớp lỗi "quên rà nhánh status" đã cắn ba lần trên nhánh này. Một lượt
+// "voided" lọt qua tầng SQL (index cũ, cache, hay chính bug đang sửa) vẫn phải
+// biến mất khỏi lịch ở tầng này — phòng thủ theo chiều sâu.
+describe("Reservations voided bookings", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    resetEventMocks();
+    invokeWriteCommand.mockResolvedValue(undefined);
+    createCorrelationId.mockReturnValue("COR-5E6F7A8B");
+  });
+
+  it("không vẽ thanh cho lượt đã xóa (voided), dù nó lọt qua tới tận đây", async () => {
+    invoke.mockImplementation(async (command: string) => {
+      if (command === "get_all_bookings") {
+        return [bookingAt({ id: "B-VOIDED", status: "voided" })];
+      }
+      return undefined;
+    });
+
+    render(<Reservations />);
+
+    await waitFor(() => {
+      expect(screen.getByText("Room R101")).toBeTruthy();
+    });
+    expect(screen.queryByTestId("booking-bar-B-VOIDED")).toBeNull();
+  });
+
+  it("không đếm lượt đã xóa vào tổng số booking hiển thị", async () => {
+    invoke.mockImplementation(async (command: string) => {
+      if (command === "get_all_bookings") {
+        return [
+          bookingAt({ id: "B-VOIDED", status: "voided" }),
+          bookingAt({ id: "B-OK", status: "booked" }),
+        ];
+      }
+      return undefined;
+    });
+
+    render(<Reservations />);
+
+    await waitFor(() => {
+      expect(screen.getByTestId("booking-bar-B-OK")).toBeTruthy();
+    });
+    expect(screen.getByTestId("total-booking-count").textContent).toBe("1");
+  });
+
+  // M6 (rà cuối trước merge): `totalCount` lọc bằng danh sách ĐEN
+  // (`status !== "voided"`), trong khi bar trên lịch lọc bằng danh sách
+  // TRẮNG `VISIBLE_BOOKING_STATUSES` (không có "cancelled") — lệch nhau
+  // trong cùng một commit. Lượt đã hủy không có bar nào trên lịch (không
+  // nằm trong VISIBLE_BOOKING_STATUSES) nên không được góp vào "Tổng" —
+  // "Tổng" ở đây mô tả các lượt còn đang hiện diện trên lịch, không phải
+  // toàn bộ lịch sử booking đã từng tạo ra.
+  it("không đếm lượt đã hủy (cancelled) vào tổng số booking hiển thị, giống hệt lượt đã xóa", async () => {
+    invoke.mockImplementation(async (command: string) => {
+      if (command === "get_all_bookings") {
+        return [
+          bookingAt({ id: "B-CANCELLED", status: "cancelled" }),
+          bookingAt({ id: "B-OK", status: "booked" }),
+        ];
+      }
+      return undefined;
+    });
+
+    render(<Reservations />);
+
+    await waitFor(() => {
+      expect(screen.getByTestId("booking-bar-B-OK")).toBeTruthy();
+    });
+    expect(screen.getByTestId("total-booking-count").textContent).toBe("1");
+  });
+});
+
 describe("Reservations load errors", () => {
   beforeEach(() => {
     vi.clearAllMocks();
@@ -504,5 +623,140 @@ describe("Reservations load errors", () => {
 
     expect(await screen.findByTestId("booking-bar-B101")).toBeTruthy();
     expect(screen.queryByText(/database is locked/i)).toBeNull();
+  });
+});
+
+describe("Reservations column width", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    createCorrelationId.mockReturnValue("COR-5E6F7A8B");
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  // GIỚI HẠN: test này ghim PHÉP TÍNH, không ghim ĐÍCH ĐO. Stub bề rộng gắn
+  // trên `HTMLElement.prototype` nên MỌI phần tử — kể cả một phần tử sai —
+  // đều trả lời cùng một con số; test không có cách nào phân biệt được
+  // `timelineRef` đang đo đúng khung lịch hay lỡ đo trúng một phần tử khác.
+  // Dời `ref={timelineRef}` từ khung lịch sang ô nhãn "Rooms" 140px vẫn qua
+  // được mọi test ở đây — trong trình duyệt thật phép đo đó ra
+  // `floor((140 - 140) / 16) = 0`, rơi về 80px, cả tính năng coi như chết —
+  // mà không một dòng nào đỏ. Chỉ một lần đổi cỡ cửa sổ bằng tay trên ứng
+  // dụng thật mới bắt được lỗi này.
+  // GIỚI HẠN THỨ HAI: jsdom không dựng layout nên `clientWidth` thật luôn là 0
+  // và không bao giờ đẻ ra thanh cuộn. Stub dưới đây trả về một con số cố định,
+  // tức là nó ghim phép tính "trừ 140 rồi chia 16" chứ KHÔNG chứng minh được
+  // điều quan trọng nhất: rằng đích đo đã trừ đi bề rộng thanh cuộn dọc. Chỉ
+  // chạy ứng dụng thật với thanh cuộn để chế độ luôn hiện mới kiểm được.
+  it("stretches day columns to fill the measured timeline width", async () => {
+    // 1780 - 140 (cột tên phòng) = 1640, chia 16 ngày = 102.5 -> 102 sau khi
+    // làm tròn xuống. Phần dư 8px chấp nhận được; làm tròn lên sẽ tràn ra
+    // ngoài và đẻ ra thanh cuộn ngang không cần thiết.
+    vi.spyOn(HTMLElement.prototype, "clientWidth", "get").mockReturnValue(1780);
+
+    invoke.mockImplementation(async (command: string) => {
+      if (command === "get_all_bookings") {
+        return [
+          bookingAt({
+            id: "B-WIDE",
+            scheduled_checkin: dateOffsetFromToday(-1),
+            scheduled_checkout: dateOffsetFromToday(3),
+          }),
+        ];
+      }
+      return undefined;
+    });
+
+    render(<Reservations />);
+
+    // Ghim nửa còn lại của cùng một bất biến: cột ngày phải rộng đúng bằng
+    // colWidth đo được, không chỉ thanh booking vẽ trên nó. Bar và cell tính
+    // từ cùng một colWidth nhưng qua hai đường code khác nhau (ba vòng lặp
+    // DAYS.map dựng cell, getBookingBars dựng bar) — chỉ ghim bar thì một
+    // cell bị revert về hằng số cũ (w-[80px]) vẫn lọt qua test, trong khi bar
+    // vẫn vẽ ở 102px/ngày trên cột 80px thật: đúng nghĩa "booking hiện sai
+    // ngày".
+    expect(screen.getByTestId("cell-R101-0").style.width).toBe("102px");
+
+    const bar = await screen.findByTestId("booking-bar-B-WIDE");
+    // rawStart = (-1 - -3) + 0.5 = 2.5 -> left = 2.5 * 102 = 255px
+    expect(bar.style.left).toBe("255px");
+    // rawEnd = (3 - -3) + 0.5 = 6.5 -> width = 4 * 102 = 408px
+    expect(bar.style.width).toBe("408px");
+  });
+
+  // GIỚI HẠN: ghim TÊN LỚP, không ghim thứ tự vẽ thật — jsdom không vẽ và không
+  // cuộn, nên nó không thấy được cảnh hàng phòng đè lên hàng ngày tháng. Nó chỉ
+  // chặn việc lặng lẽ hạ z-index của hàng ngày về ngang hàng với thanh booking.
+  // Kiểm mắt thường trên ứng dụng thật vẫn là bắt buộc.
+  it("keeps the day header stacked above the bars and the today marker", async () => {
+    // Từ lúc khung cuộn dời lên thẻ cha, hàng ngày và các hàng phòng nằm chung
+    // một ngữ cảnh xếp lớp. Cùng z-10 thì thẻ sau trong DOM thắng: nhãn phòng và
+    // thanh booking vẽ đè lên hàng ngày, vạch hôm nay xuyên qua, và cú bấm vào ô
+    // ngày rơi trúng onClick của thanh booking. Hàng ngày phải vượt CẢ z-20.
+    invoke.mockImplementation(async (command: string) => {
+      if (command === "get_all_bookings") {
+        return [
+          bookingAt({
+            id: "B-STACK",
+            status: "active",
+            scheduled_checkin: dateOffsetFromToday(-1),
+            scheduled_checkout: dateOffsetFromToday(3),
+          }),
+        ];
+      }
+      return undefined;
+    });
+
+    render(<Reservations />);
+
+    const bar = await screen.findByTestId("booking-bar-B-STACK");
+    expect(bar.className).toContain("z-10");
+    expect(screen.getByTestId("timeline-today-marker").className).toContain("z-20");
+    expect(screen.getByTestId("timeline-day-header").className).toContain("z-30");
+  });
+
+  // GIỚI HẠN, cùng loại với test z-index ở trên: jsdom không dựng bố cục và
+  // không cuộn, nên nó KHÔNG thấy được hàng ngày tháng có bám hay không. Nó chỉ
+  // ghim đúng hai lớp làm nên khung cuộn. Kiểm mắt thường trên ứng dụng thật
+  // với số phòng cao hơn khung nhìn vẫn là bắt buộc.
+  it("chặn chiều cao thẻ lịch bằng khung nhìn thay vì kéo căng nó", async () => {
+    render(<Reservations />);
+
+    const card = await screen.findByTestId("timeline-card");
+
+    // `max-h-full` mới là thứ biến khung lịch bên trong thành nơi cuộn — thiếu
+    // nó thì thẻ dài ra theo số phòng, vùng nội dung của MainShell cuộn thay,
+    // và `sticky top-0` của hàng ngày tháng bám vào một khung không cuộn nên
+    // trôi lên mất cùng cả thẻ.
+    expect(card).toHaveClass("max-h-full");
+    // Vế âm: `h-full` kéo thẻ căng hết khung nhìn kể cả khi khách sạn chỉ có
+    // vài phòng, chừa một mảng trắng dưới hàng cuối. Dùng `toHaveClass` chứ
+    // KHÔNG dùng `className).toContain("h-full")` — chuỗi "max-h-full" chứa
+    // "h-full" nên phép so chuỗi luôn đúng và test sẽ xanh vĩnh viễn.
+    expect(card).not.toHaveClass("h-full");
+  });
+
+  it("falls back to the 80px minimum when the timeline has no measurable width", async () => {
+    invoke.mockImplementation(async (command: string) => {
+      if (command === "get_all_bookings") {
+        return [
+          bookingAt({
+            id: "B-NARROW",
+            scheduled_checkin: dateOffsetFromToday(-1),
+            scheduled_checkout: dateOffsetFromToday(3),
+          }),
+        ];
+      }
+      return undefined;
+    });
+
+    render(<Reservations />);
+
+    const bar = await screen.findByTestId("booking-bar-B-NARROW");
+    expect(bar.style.left).toBe("200px");
+    expect(bar.style.width).toBe("320px");
   });
 });

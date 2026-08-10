@@ -9,16 +9,24 @@ use sqlx::{Pool, Row, Sqlite};
 use crate::db::row::{get_money_vnd, get_optional_money_vnd};
 use crate::models::{BookingGroup, BookingWithGuest, GroupDetailResponse, GroupService};
 
+// `b.status != 'voided'`: `void_booking_tx` (`void_lifecycle.rs`) hiện chặn
+// xóa một booking có `group_id` ở tầng service ("Lượt này thuộc đoàn — chưa hỗ
+// trợ xóa từng phòng"), nên hôm nay không đường ghi nào tạo ra được một hàng
+// vừa `voided` vừa thuộc đoàn. Bộ lọc ở tầng đọc không được phép dựa vào đó:
+// nó phải đứng vững bất kể `voided` sinh ra bằng đường nào — kể cả một sửa DB
+// tay, hay một tính năng "xoá từng phòng trong đoàn" sau này — không chỉ
+// đường duy nhất mà service hôm nay cho phép. Thiếu dòng này thì tổng tiền
+// đoàn (`total_group_detail`) sẽ cộng nhầm ngay khi guard kia được nới.
 const GROUP_BOOKINGS_SQL: &str =
     "SELECT b.id, b.room_id, r.name as room_name, g.full_name as guest_name,
             b.check_in_at, b.expected_checkout, b.actual_checkout, b.nights,
             b.total_price, b.paid_amount, b.status, b.source,
             b.booking_type, b.deposit_amount, b.scheduled_checkin, b.scheduled_checkout,
-            b.guest_phone, b.guests
+            b.guest_phone, b.guests, b.group_id
      FROM bookings b
      JOIN rooms r ON r.id = b.room_id
      JOIN guests g ON g.id = b.primary_guest_id
-     WHERE b.group_id = ?
+     WHERE b.group_id = ? AND b.status != 'voided'
      ORDER BY r.floor, r.id";
 
 pub async fn load_group(pool: &Pool<Sqlite>, group_id: &str) -> Result<BookingGroup, sqlx::Error> {
@@ -145,6 +153,7 @@ fn map_group_booking(row: &sqlx::sqlite::SqliteRow) -> BookingWithGuest {
         scheduled_checkout: row.get("scheduled_checkout"),
         guest_phone: row.get("guest_phone"),
         guests: row.get("guests"),
+        group_id: row.get("group_id"),
     }
 }
 
@@ -203,6 +212,10 @@ mod tests {
             scheduled_checkout: None,
             guest_phone: None,
             guests: None,
+            // `load_group_bookings` chỉ trả về hàng có `WHERE b.group_id = ?`,
+            // nên mọi booking từ hàm này thực tế luôn thuộc một đoàn — khớp id
+            // với fixture `group()` ở trên thay vì để trống cho đúng bản chất.
+            group_id: Some("GRP-1".to_string()),
         }
     }
 

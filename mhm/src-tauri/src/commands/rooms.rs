@@ -9,10 +9,7 @@ use crate::{
     money::validate_non_negative_money_vnd,
     queries::booking::{expense_queries, revenue_queries, room_queries, stay_info_queries},
     repositories::booking::expense_repository,
-    services::{
-        booking::{backfill, stay_lifecycle},
-        housekeeping::housekeeping_service,
-    },
+    services::booking::{backfill, room_change, stay_lifecycle},
 };
 use serde_json::{json, Value};
 use sqlx::{Pool, Sqlite};
@@ -73,6 +70,20 @@ fn extend_stay_failure_context(booking_id: &str) -> Value {
     json!({
         "booking_id": booking_id,
         "operation": "add_one_night",
+    })
+}
+
+fn shorten_stay_failure_context(booking_id: &str) -> Value {
+    json!({
+        "booking_id": booking_id,
+        "operation": "remove_one_night",
+    })
+}
+
+fn change_room_failure_context(booking_id: &str, new_room_id: &str) -> Value {
+    json!({
+        "booking_id": booking_id,
+        "new_room_id": new_room_id,
     })
 }
 
@@ -363,30 +374,250 @@ pub async fn extend_stay(
     Ok(booking)
 }
 
-// ─── Housekeeping Commands ───
+// ─── Shorten Stay ───
 
 #[tauri::command]
-pub async fn get_housekeeping_tasks(
+pub async fn shorten_stay(
     state: State<'_, AppState>,
-) -> Result<Vec<HousekeepingTask>, String> {
-    housekeeping_service::list_open_tasks(&state.db).await
+    booking_id: String,
+    app: tauri::AppHandle,
+    correlation_id: Option<String>,
+    idempotency_key: String,
+) -> CommandResult<Booking> {
+    let effective_correlation_id = normalize_correlation_id(correlation_id);
+    let error_context = shorten_stay_failure_context(&booking_id);
+    let actor_id = get_user_id(&state)
+        .ok_or_else(|| CommandError::user(codes::AUTH_NOT_AUTHENTICATED, "Chưa đăng nhập"))?;
+    let mut write_command_context = WriteCommandContext::for_scoped_command(
+        effective_correlation_id.value.clone(),
+        idempotency_key,
+        "shorten_stay",
+    )?;
+    write_command_context.actor_id = Some(actor_id);
+    log::info!(
+        "shorten_stay start correlation_id={} source={:?} booking_id={}",
+        effective_correlation_id.value,
+        effective_correlation_id.source,
+        booking_id
+    );
+    let result =
+        stay_lifecycle::shorten_stay_idempotent(&state.db, &write_command_context, &booking_id)
+            .await
+            .inspect_err(|command_error| {
+                record_command_failure_with_db_group(
+                    "shorten_stay",
+                    command_error,
+                    &effective_correlation_id.value,
+                    None,
+                    error_context.clone(),
+                );
+            })?;
+    let booking: Booking = serde_json::from_value(result.response).map_err(|error| {
+        CommandError::system(
+            codes::SYSTEM_INTERNAL_ERROR,
+            format!("Invalid shorten_stay idempotent response: {error}"),
+        )
+        .with_request_id(write_command_context.request_id.clone())
+    })?;
+
+    log::info!(
+        "shorten_stay success correlation_id={} source={:?} booking_id={} room_id={}",
+        effective_correlation_id.value,
+        effective_correlation_id.source,
+        booking.id,
+        booking.room_id
+    );
+
+    emit_db_update(&app, "rooms");
+
+    Ok(booking)
+}
+
+// ─── Change Room ───
+
+#[tauri::command]
+pub async fn get_room_change_options(
+    state: State<'_, AppState>,
+    booking_id: String,
+) -> Result<RoomChangeOptions, String> {
+    room_change::load_options(&state.db, &booking_id, chrono::Local::now().date_naive())
+        .await
+        .map_err(|error| error.to_string())
+}
+
+#[allow(clippy::too_many_arguments)]
+#[tauri::command]
+pub async fn change_room(
+    state: State<'_, AppState>,
+    booking_id: String,
+    new_room_id: String,
+    keep_price: bool,
+    reason: Option<String>,
+    app: tauri::AppHandle,
+    correlation_id: Option<String>,
+    idempotency_key: String,
+) -> CommandResult<Booking> {
+    let effective_correlation_id = normalize_correlation_id(correlation_id);
+    let error_context = change_room_failure_context(&booking_id, &new_room_id);
+    let actor_id = get_user_id(&state)
+        .ok_or_else(|| CommandError::user(codes::AUTH_NOT_AUTHENTICATED, "Chưa đăng nhập"))?;
+    let mut write_command_context = WriteCommandContext::for_scoped_command(
+        effective_correlation_id.value.clone(),
+        idempotency_key,
+        "change_room",
+    )?;
+    write_command_context.actor_id = Some(actor_id);
+    log::info!(
+        "change_room start correlation_id={} source={:?} booking_id={} new_room_id={}",
+        effective_correlation_id.value,
+        effective_correlation_id.source,
+        booking_id,
+        new_room_id
+    );
+
+    let result = room_change::change_room_idempotent(
+        &state.db,
+        &write_command_context,
+        &booking_id,
+        &new_room_id,
+        keep_price,
+        reason,
+    )
+    .await
+    .inspect_err(|command_error| {
+        record_command_failure_with_db_group(
+            "change_room",
+            command_error,
+            &effective_correlation_id.value,
+            None,
+            error_context.clone(),
+        );
+    })?;
+
+    let booking: Booking = serde_json::from_value(result.response).map_err(|error| {
+        CommandError::system(
+            codes::SYSTEM_INTERNAL_ERROR,
+            format!("Invalid change_room idempotent response: {error}"),
+        )
+        .with_request_id(write_command_context.request_id.clone())
+    })?;
+
+    log::info!(
+        "change_room success correlation_id={} source={:?} booking_id={} room_id={}",
+        effective_correlation_id.value,
+        effective_correlation_id.source,
+        booking.id,
+        booking.room_id
+    );
+
+    emit_db_update(&app, "rooms");
+
+    Ok(booking)
+}
+
+// ─── Set Booking Rate ───
+
+fn set_booking_rate_failure_context(booking_id: &str) -> Value {
+    json!({
+        "booking_id": booking_id,
+        "operation": "set_booking_rate",
+    })
 }
 
 #[tauri::command]
-pub async fn update_housekeeping(
+pub async fn set_booking_rate(
     state: State<'_, AppState>,
+    booking_id: String,
+    rate_per_night: i64,
     app: tauri::AppHandle,
-    task_id: String,
-    new_status: String,
-    note: Option<String>,
-) -> Result<(), String> {
-    housekeeping_service::update_status(&state.db, &task_id, &new_status, note.as_deref())
-        .await
-        .map_err(|error| format!("{}: {}", error.code, error.message))?;
+    correlation_id: Option<String>,
+    idempotency_key: String,
+) -> CommandResult<Booking> {
+    let effective_correlation_id = normalize_correlation_id(correlation_id);
+    let error_context = set_booking_rate_failure_context(&booking_id);
+    let actor_id = get_user_id(&state)
+        .ok_or_else(|| CommandError::user(codes::AUTH_NOT_AUTHENTICATED, "Chưa đăng nhập"))?;
+    let mut write_command_context = WriteCommandContext::for_scoped_command(
+        effective_correlation_id.value.clone(),
+        idempotency_key,
+        "set_booking_rate",
+    )?;
+    write_command_context.actor_id = Some(actor_id);
+    log::info!(
+        "set_booking_rate start correlation_id={} booking_id={}",
+        effective_correlation_id.value,
+        booking_id
+    );
+    let result = stay_lifecycle::set_booking_rate_idempotent(
+        &state.db,
+        &write_command_context,
+        &booking_id,
+        rate_per_night,
+    )
+    .await
+    .inspect_err(|command_error| {
+        record_command_failure_with_db_group(
+            "set_booking_rate",
+            command_error,
+            &effective_correlation_id.value,
+            None,
+            error_context.clone(),
+        );
+    })?;
+    let booking: Booking = serde_json::from_value(result.response).map_err(|error| {
+        CommandError::system(
+            codes::SYSTEM_INTERNAL_ERROR,
+            format!("Invalid set_booking_rate idempotent response: {error}"),
+        )
+        .with_request_id(write_command_context.request_id.clone())
+    })?;
 
-    emit_db_update(&app, "housekeeping");
+    log::info!(
+        "set_booking_rate success correlation_id={} booking_id={}",
+        effective_correlation_id.value,
+        booking.id
+    );
 
-    Ok(())
+    emit_db_update(&app, "rooms");
+
+    Ok(booking)
+}
+
+// ─── Update Booking Notes ───
+
+fn require_update_booking_notes_actor_id(user_id: Option<String>) -> CommandResult<String> {
+    user_id.ok_or_else(|| CommandError::user(codes::AUTH_NOT_AUTHENTICATED, "Chưa đăng nhập"))
+}
+
+#[tauri::command]
+pub async fn update_booking_notes(
+    state: State<'_, AppState>,
+    booking_id: String,
+    notes: Option<String>,
+    app: tauri::AppHandle,
+) -> CommandResult<Booking> {
+    let actor_id = require_update_booking_notes_actor_id(get_user_id(&state))?;
+    let mut write_command_context = WriteCommandContext::new_internal("update_booking_notes");
+    write_command_context.actor_id = Some(actor_id);
+
+    let result = stay_lifecycle::update_booking_notes_idempotent(
+        &state.db,
+        &write_command_context,
+        &booking_id,
+        notes,
+    )
+    .await?;
+    let booking: Booking = serde_json::from_value(result.response).map_err(|error| {
+        CommandError::system(
+            codes::SYSTEM_INTERNAL_ERROR,
+            format!("Invalid update_booking_notes idempotent response: {error}"),
+        )
+        .with_request_id(write_command_context.request_id.clone())
+    })?;
+
+    emit_db_update(&app, "rooms");
+
+    Ok(booking)
 }
 
 // ─── Expense Commands ───
@@ -488,8 +719,8 @@ pub async fn scan_image(path: String) -> Result<crate::ocr::CccdInfo, String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        check_in_failure_context, check_out_failure_context, should_request_checkout_backup,
-        validate_create_expense_request,
+        check_in_failure_context, check_out_failure_context, require_update_booking_notes_actor_id,
+        should_request_checkout_backup, validate_create_expense_request,
     };
     use crate::app_error::{
         codes, correlation_context, log_system_error, record_command_failure_with_db_group,
@@ -518,6 +749,21 @@ mod tests {
             Some(value) => std::env::set_var("CAPYINN_RUNTIME_ROOT", value),
             None => std::env::remove_var("CAPYINN_RUNTIME_ROOT"),
         }
+    }
+
+    #[test]
+    fn update_booking_notes_requires_authenticated_actor() {
+        let error = require_update_booking_notes_actor_id(None).expect_err("missing user rejects");
+
+        assert_eq!(error.code, codes::AUTH_NOT_AUTHENTICATED);
+    }
+
+    #[test]
+    fn update_booking_notes_accepts_authenticated_actor() {
+        let actor_id = require_update_booking_notes_actor_id(Some("user-1".to_string()))
+            .expect("authenticated user is accepted");
+
+        assert_eq!(actor_id, "user-1");
     }
 
     #[test]
@@ -569,6 +815,7 @@ mod tests {
             paid_amount: Some(500_000),
             pricing_type: None,
             guest_count: Some(2),
+            rate_override_per_night: None,
         });
 
         assert_eq!(

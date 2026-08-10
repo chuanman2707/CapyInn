@@ -20,12 +20,22 @@ mod prelude {
         commands::reservations,
         domain::booking::{BookingError, OriginSideEffect},
         models::{
-            AddGroupServiceRequest, BackfillStayRequest, CheckOutRequest, CheckoutSettlementMode,
-            CheckoutSettlementPreviewRequest, CreateGuestRequest, CreateReservationRequest,
-            GroupCheckoutRequest, ModifyReservationRequest,
+            AddGroupServiceRequest, BackfillStayRequest, BookingFilter, CheckOutRequest,
+            CheckoutSettlementMode, CheckoutSettlementPreviewRequest, CreateGuestRequest,
+            CreateReservationRequest, GroupCheckoutRequest, ModifyReservationRequest,
+            VoidBookingRequest,
         },
         money::MAX_TRANSPORT_SAFE_MONEY_VND,
-        queries::booking::{audit_queries, billing_queries, revenue_queries},
+        queries::{
+            booking::{
+                activity_queries, audit_queries, billing_queries, booking_list_queries,
+                revenue_queries, void_queries,
+            },
+            export_queries,
+            groups::group_queries,
+            guests::guest_queries,
+            rooms::assistant_queries,
+        },
     };
 
     pub(crate) use crate::services::booking::{
@@ -38,11 +48,12 @@ mod prelude {
         },
         group_lifecycle, group_service_management, guest_service, pricing_service,
         pricing_service::calculate_stay_price_tx,
-        reservation_lifecycle, stay_lifecycle,
+        reservation_lifecycle, room_change, stay_lifecycle,
     };
 }
 
 mod backfill;
+mod booking_edits;
 mod checkout_settlement;
 mod extend_stay;
 mod folio;
@@ -57,5 +68,8 @@ mod pricing;
 mod reporting;
 mod reservation_idempotency;
 mod reservations;
+mod room_change;
+mod shorten_stay;
 mod stay_error_mapping;
 mod stays;
+mod void_stay;

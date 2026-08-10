@@ -14,7 +14,6 @@ vi.mock("./pages/Dashboard", () => ({ default: () => <div>Dashboard page</div> }
 vi.mock("./pages/Rooms", () => ({ default: () => <div>Rooms page</div> }));
 vi.mock("./pages/Reservations", () => ({ default: () => <div>Reservations page</div> }));
 vi.mock("./pages/Guests", () => ({ default: () => <div>Guests page</div> }));
-vi.mock("./pages/Housekeeping", () => ({ default: () => <div>Housekeeping page</div> }));
 vi.mock("./pages/Analytics", () => ({ default: () => <div>Analytics page</div> }));
 vi.mock("./pages/settings", () => ({ default: () => <div>Settings page</div> }));
 vi.mock("./pages/NightAudit", () => ({ default: () => <div>Night Audit page</div> }));
@@ -75,7 +74,6 @@ function setupAuthenticatedShell(
     stats: null,
     roomDetail: null,
     activeTab: "dashboard",
-    housekeepingTasks: [],
     loading: false,
     isCheckinOpen: false,
     checkinRoomId: null,
@@ -94,7 +92,6 @@ function setupAuthenticatedShell(
       total_rooms: 10,
       occupied: 0,
       vacant: 10,
-      cleaning: 0,
       revenue_today: 0,
     }),
   });
@@ -146,6 +143,61 @@ describe("App experimental runtime gates", () => {
 
     expect(invoke.mock.calls.some(([command]) => command === "gateway_get_status")).toBe(true);
     expect(listen).toHaveBeenCalledWith("mcp_reservation_created", expect.any(Function));
+  });
+
+  // ─── Công tắc tắt của trợ lý quầy ───
+  //
+  // Trợ lý đã tách khỏi CAPYINN_EXPERIMENTAL_AGENT_RUNTIME. Cờ đó chỉ bật được
+  // bằng biến môi trường lúc khởi động, mà lễ tân thì bấm icon để mở app — nên
+  // nó giấu tính năng khỏi đúng những người tính năng sinh ra để phục vụ.
+  //
+  // Công tắc tắt bây giờ là `gate.ready` (API key + opt-in, lưu trong
+  // database). Hai test dưới đây khoá cả hai chiều: không cờ vẫn phải mở được,
+  // và tắt opt-in vẫn phải đóng được. Thiếu chiều thứ hai thì "gỡ cờ" biến
+  // thành "gỡ luôn cách tắt".
+
+  const READY_ASSISTANT_SETTINGS = {
+    config: { preset: "deep_seek", base_url: "https://api.deepseek.com/v1", model: "deepseek-chat" },
+    has_api_key: true,
+    cloud_data_opt_in: true,
+    gate: { ready: true, missing: [] },
+  };
+
+  it("không cờ thí nghiệm nào bật, lễ tân vẫn thấy nút Trợ lý", async () => {
+    setupAuthenticatedShell();
+    setMockResponses({ get_assistant_settings: () => READY_ASSISTANT_SETTINGS });
+
+    render(<App />);
+
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: /trợ lý/i })).toBeInTheDocument();
+    });
+    expect(invoke.mock.calls.some(([command]) => command === "get_assistant_settings")).toBe(true);
+  });
+
+  it("chưa bật opt-in thì không có nút Trợ lý, dù cờ agent runtime có bật", async () => {
+    setupAuthenticatedShell({
+      experimental_runtime_enabled: false,
+      gateway_runtime_enabled: false,
+      agent_runtime_enabled: true,
+      gateway_disabled_by_override: false,
+      agent_disabled_by_override: false,
+    });
+    setMockResponses({
+      get_assistant_settings: () => ({
+        ...READY_ASSISTANT_SETTINGS,
+        cloud_data_opt_in: false,
+        gate: { ready: false, missing: ["cloud_data_opt_in"] },
+      }),
+    });
+
+    render(<App />);
+
+    await waitFor(() => {
+      expect(screen.getByText("Overview")).toBeInTheDocument();
+    });
+
+    expect(screen.queryByRole("button", { name: /trợ lý/i })).not.toBeInTheDocument();
   });
 
   it("ignores gateway status responses from a disabled profile generation", async () => {

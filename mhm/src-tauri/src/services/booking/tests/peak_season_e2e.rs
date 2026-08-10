@@ -187,6 +187,7 @@ async fn the_owners_case_is_what_gets_written_to_the_booking() {
             source: Some("phone".to_string()),
             notes: None,
             guests: Some(4),
+            rate_override_per_night: None,
         },
     )
     .await
@@ -559,10 +560,52 @@ async fn the_migrated_special_dates_table_matches_what_the_code_assumes() {
     db.close().await;
 }
 
-/// Nhánh này không được thêm hay sửa migration nào: phiên bản schema phải đứng
-/// yên ở 22, đúng như trên `main`.
+/// Dây bẫy số hiệu schema. Con số dưới đây cố ý viết cứng chứ không đọc
+/// `LATEST_SCHEMA_VERSION` — đọc hằng số thì test luôn xanh và chẳng canh gì cả.
+///
+/// Hợp đồng nó canh: **số hiệu này đã được dời có chủ đích, hiện là 28.** Bản
+/// thân tính năng mùa cao điểm không cần migration riêng (nó chỉ ghi vào
+/// `special_dates`, có từ v3); con số ở đây phản ánh migration mới nhất của cả
+/// repo, hiện là `migrate_v28_booking_void` (27 là
+/// `migrate_v27_assistant_conversations`, 26 là `migrate_v26_booking_rate_override`,
+/// 25 là `migrate_v25_invoice_settlement_note` đến từ main).
+///
+/// Nếu test này đỏ, nghĩa là ai đó vừa thêm migration. **Đừng tăng số này lên
+/// một rồi đi tiếp.** Số hiệu bị trùng là lỗi im lặng và chết người: gate
+/// `current < N` sai ngay trên DB đã ở N, migration không chạy, và mọi truy vấn
+/// chạm cột mới chết lúc runtime. Nhánh này từng ship đúng lỗi đó với v23 —
+/// máy khách sạn đã ở 23 do nhánh kbtt, nên cột `invoices.settlement_note`
+/// không bao giờ được tạo và toàn bộ đường hoá đơn/check-out chết ngay lần mở
+/// app đầu tiên. Nhánh `feat/room-drawer-stay-edits` cũng đã vấp y hệt (commit
+/// 4c5c1c3).
+///
+/// Việc phải làm trước khi nâng: quét MỌI ref, không chỉ `main` —
+/// `git for-each-ref --format='%(refname:short)' | xargs -I{} git show
+/// {}:mhm/src-tauri/src/db.rs | grep LATEST_SCHEMA_VERSION` — và đọc thẳng DB
+/// thật (`sqlite3 "file:…/capyinn.db?immutable=1" "SELECT MAX(version) FROM
+/// schema_version"`), đừng tin con số ai đó nói miệng. Chọn số cao hơn tất cả;
+/// bỏ trống vài số là vô hại, trùng số thì không.
+///
+/// Khảo sát lúc chốt số **ngày 2026-08-07** (nhánh
+/// `feat/void-booking-and-manual-rate`, task 1 — migration v28 và hằng số
+/// trạng thái voided): mọi ref (`main` và các nhánh khác) đều ở 27, DB thật của
+/// khách sạn cũng 27.
+///
+/// Đó là **ảnh chụp tại thời điểm ấy, KHÔNG phải giấy thông hành.** Người merge
+/// nhánh này PHẢI chạy lại đúng cuộc khảo sát vừa mô tả ở trên, ngay trước khi
+/// merge. Lúc chốt số vẫn còn nhánh anh em đang sống cũng ở 27 (ví dụ
+/// `feat/assistant-rail`, `feat/assistant-stay-dates`), nên hoàn toàn có thể
+/// một nhánh khác chiếm mất 28 trước — và va chạm đó im lặng: test này chạy
+/// trên DB rỗng nên vẫn xanh, chỉ máy khách sạn mới chết.
+///
+/// Viết trùng ý với doc-comment của `LATEST_SCHEMA_VERSION` (`db.rs:145-196`) là
+/// cố ý. Bản cũ ở đây viết thì quá khứ hoàn thành, không ngày tháng, không đòi
+/// chạy lại — tức nó **miễn** cho người merge đúng cái bước mà 25 dòng ngay phía
+/// trên tồn tại để bắt buộc, và miễn ngay bên trong con canary sinh ra để ép làm
+/// bước ấy. Hai file khi đó nói ngược nhau, mà repo đã ship lỗi trùng số **hai
+/// lần** vì đúng chế độ hỏng này.
 #[tokio::test]
-async fn the_branch_does_not_move_the_schema_version() {
+async fn the_schema_version_is_the_one_this_branch_deliberately_claimed() {
     let db = migrated_db("schema-version").await;
 
     let version: i64 = sqlx::query_scalar("SELECT version FROM schema_version LIMIT 1")
@@ -570,7 +613,11 @@ async fn the_branch_does_not_move_the_schema_version() {
         .await
         .expect("đọc schema_version");
 
-    assert_eq!(version, 22, "nhánh mùa cao điểm không đụng vào migration");
+    assert_eq!(
+        version, 29,
+        "một migration mới vừa xuất hiện — quét mọi ref và đọc DB thật để chắc \
+         số hiệu chưa bị nhánh nào chiếm, rồi mới nâng con số này"
+    );
 
     db.close().await;
 }

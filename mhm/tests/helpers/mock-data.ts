@@ -2,7 +2,7 @@
  * Mock data factories for tests.
  * Creates realistic test data matching Rust backend interfaces.
  */
-import type { Booking, DashboardStats, Guest, HousekeepingTask, Room, RoomWithBooking } from "@/types";
+import type { Booking, DashboardStats, Guest, Room, RoomWithBooking } from "@/types";
 
 let idCounter = 0;
 const nextId = () => `test-${++idCounter}`;
@@ -33,7 +33,7 @@ export function createAllRooms(): Room[] {
         createRoom({ id: "1B", name: "1B", type: "standard", floor: 1, has_balcony: false, base_price: 300000, status: "vacant" }),
         createRoom({ id: "2A", name: "2A", type: "deluxe", floor: 2, has_balcony: true, base_price: 400000, status: "occupied" }),
         createRoom({ id: "2B", name: "2B", type: "standard", floor: 2, has_balcony: false, base_price: 300000, status: "vacant" }),
-        createRoom({ id: "3A", name: "3A", type: "deluxe", floor: 3, has_balcony: true, base_price: 400000, status: "cleaning" }),
+        createRoom({ id: "3A", name: "3A", type: "deluxe", floor: 3, has_balcony: true, base_price: 400000, status: "booked" }),
         createRoom({ id: "3B", name: "3B", type: "standard", floor: 3, has_balcony: false, base_price: 300000, status: "occupied" }),
         createRoom({ id: "4A", name: "4A", type: "deluxe", floor: 4, has_balcony: true, base_price: 400000, status: "vacant" }),
         createRoom({ id: "4B", name: "4B", type: "standard", floor: 4, has_balcony: false, base_price: 300000, status: "vacant" }),
@@ -86,7 +86,6 @@ export function createStats(overrides: Partial<DashboardStats> = {}): DashboardS
         total_rooms: 10,
         occupied: 3,
         vacant: 6,
-        cleaning: 1,
         revenue_today: 1200000,
         ...overrides,
     };
@@ -99,18 +98,6 @@ export function createRoomWithBooking(overrides: { room?: Partial<Room>; booking
     const guests = overrides.guests ?? [createGuest()];
 
     return { room, booking, guests };
-}
-
-// --- Housekeeping ---
-export function createHousekeepingTask(overrides: Partial<HousekeepingTask> = {}): HousekeepingTask {
-    return {
-        id: nextId(),
-        room_id: "3A",
-        status: "needs_cleaning",
-        triggered_at: new Date().toISOString(),
-        created_at: new Date().toISOString(),
-        ...overrides,
-    };
 }
 
 // --- User (Auth) ---

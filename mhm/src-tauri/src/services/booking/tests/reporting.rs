@@ -623,3 +623,377 @@ async fn billing_and_export_queries_preserve_canonical_revenue_columns() {
     assert_eq!(export_rows[0].folio_total, 35_000);
     assert_eq!(export_rows[0].recognized_revenue, 285_000);
 }
+
+/// Đổi `bookings.status` thành `voided` một mình nó KHÔNG đủ: ba nhánh trong
+/// `revenue_queries` đọc thẳng `folio_lines` / `transactions` mà không hề join
+/// `bookings`. Test này canh đúng ba nhánh đó.
+///
+/// PHẠM VI: chỉ `revenue_queries` (tổng doanh thu + phân tích). Tên cũ của hàm
+/// này ("...every_revenue_path") từng bị đọc nhầm thành "mọi đường đọc
+/// bookings" — vòng review cuối chỉ ra đó là một lời hứa sai: thân hàm chưa
+/// từng gọi `booking_list_queries`, `guest_queries`, `activity_queries`,
+/// `group_queries`, hay `assistant_queries`. Bài kiểm phủ tám đường đọc đó nằm
+/// ở `voided_booking_disappears_from_the_eight_audited_booking_read_paths`
+/// bên dưới; hàm này giữ nguyên phạm vi hẹp và đổi tên cho khớp.
+#[tokio::test]
+async fn voided_booking_disappears_from_the_recognized_revenue_totals() {
+    let pool = test_pool().await;
+    seed_room(&pool, "R-VOID").await.expect("seeds room");
+    seed_active_booking(&pool, "B-VOID", "R-VOID")
+        .await
+        .expect("seeds booking");
+
+    seed_folio_line(&pool, "B-VOID", 120_000, "2026-04-15T11:00:00+07:00")
+        .await
+        .expect("seeds folio line");
+    seed_transaction(
+        &pool,
+        "B-VOID",
+        80_000,
+        "cancellation_fee",
+        "Phí huỷ",
+        "2026-04-15T11:00:00+07:00",
+    )
+    .await
+    .expect("seeds cancellation fee");
+
+    let before = revenue_queries::load_total_revenue(&pool, "2026-04-15", "2026-04-15")
+        .await
+        .expect("reads revenue before void");
+    // Giá trị fixture xác định tuyệt đối, không phải chặn dưới:
+    //   250,000 tiền phòng (seed_active_booking: total_price=250_000, 1 đêm,
+    //     check-in 2026-04-15 → checkout 2026-04-16, ghi nhận trọn đêm 04-15)
+    // +  120,000 dòng folio (seed_folio_line)
+    // +   80,000 phí huỷ (seed_transaction cancellation_fee)
+    // = 450,000
+    assert_eq!(
+        before, 450_000,
+        "fixture phải cộng đúng 450,000 để void làm mất đi, thấy {before}"
+    );
+
+    sqlx::query("UPDATE bookings SET status = 'voided' WHERE id = 'B-VOID'")
+        .execute(&pool)
+        .await
+        .expect("voids booking");
+
+    let after = revenue_queries::load_total_revenue(&pool, "2026-04-15", "2026-04-15")
+        .await
+        .expect("reads revenue after void");
+    assert_eq!(
+        after, 0,
+        "lượt đã xoá không được còn đồng nào trong doanh thu"
+    );
+
+    let analytics = revenue_queries::load_analytics(&pool, "2026-04-15", "2026-04-15", 1)
+        .await
+        .expect("reads analytics after void");
+    assert_eq!(
+        analytics
+            .revenue_by_source
+            .iter()
+            .map(|row| row.value)
+            .sum::<i64>(),
+        0,
+        "doanh thu theo nguồn cũng không được đếm lượt đã xoá"
+    );
+    assert_eq!(
+        analytics
+            .top_rooms
+            .iter()
+            .map(|row| row.revenue)
+            .sum::<i64>(),
+        0,
+        "top_rooms cũng không được đếm lượt đã xoá"
+    );
+}
+
+/// Bản xuất báo cáo booking có `WHERE` ba nhánh nối bằng `OR`; hai nhánh cho
+/// lượt `voided` lọt qua. Mỗi hàng mang `recognized_revenue` cộng từ charge +
+/// phí huỷ + folio, nên lượt đã xoá sẽ hiện nguyên tiền nếu không lọc.
+#[tokio::test]
+async fn voided_booking_disappears_from_the_booking_export() {
+    let pool = test_pool().await;
+    seed_room(&pool, "R-EXP").await.expect("seeds room");
+    seed_active_booking(&pool, "B-EXP", "R-EXP")
+        .await
+        .expect("seeds booking");
+    seed_transaction(
+        &pool,
+        "B-EXP",
+        250_000,
+        "charge",
+        "Tiền phòng",
+        "2026-04-15T10:00:00+07:00",
+    )
+    .await
+    .expect("seeds charge");
+    seed_transaction(
+        &pool,
+        "B-EXP",
+        90_000,
+        "cancellation_fee",
+        "Phí huỷ",
+        "2026-04-15T10:00:00+07:00",
+    )
+    .await
+    .expect("seeds cancellation fee");
+
+    let before = audit_queries::load_booking_export_rows(&pool, "2026-04-15", "2026-04-15")
+        .await
+        .expect("reads export before void");
+    assert!(
+        before.iter().any(|row| row.id == "B-EXP"),
+        "fixture phải xuất hiện trong bản xuất trước khi xoá"
+    );
+
+    sqlx::query("UPDATE bookings SET status = 'voided' WHERE id = 'B-EXP'")
+        .execute(&pool)
+        .await
+        .expect("voids booking");
+
+    let after = audit_queries::load_booking_export_rows(&pool, "2026-04-15", "2026-04-15")
+        .await
+        .expect("reads export after void");
+    assert!(
+        !after.iter().any(|row| row.id == "B-EXP"),
+        "lượt đã xoá không được còn trong bản xuất báo cáo"
+    );
+}
+
+/// DANH SÁCH TRẮNG các đường đọc `bookings` đã được dạy bộ lọc `voided`, tính
+/// đến vòng rà cuối trước khi merge (2026-08-09). Đây là hàng rào chống hồi
+/// quy cho CẢ LỚP bug, không phải một hàm đơn lẻ — ba vòng review độc lập đã
+/// tìm ra sáu đường rò khác nhau qua ba lần, đúng vì mỗi lần chỉ có một test
+/// hẹp canh đúng một hàm.
+///
+/// PHẠM VI THẬT, KHÔNG HƠN: tên hàm liệt kê đúng TÁM đường đọc dưới đây, đã
+/// đích thân kiểm chứng bằng test. Đây không phải toàn bộ các câu SQL từng
+/// đọc `bookings` trong repo — chỉ là tám đường mà ba vòng review đã lần lượt
+/// tìm ra và vá. Ai thêm một đường đọc `bookings` mới (hay sửa một đường cũ)
+/// mà quên lọc `voided` PHẢI làm một khối assert ở đây đỏ, và nếu đường đó
+/// không nằm trong tám đường bên dưới thì phải thêm một mục mới vào danh sách
+/// — nếu không, cái tên "tám đường đã kiểm" lại thành lời hứa sai, đúng lỗi đã
+/// khiến tên hàm cũ (hứa "mọi đường đọc bookings") bị đổi ở vòng rà này.
+///
+/// Danh sách (khớp đúng comment sửa ở từng file `queries/`):
+///  1. `booking_list_queries::load_bookings_with_guest` — mọi giá trị filter,
+///     kể cả `None`/rác, vì bộ lọc voided không được phép đi qua `status_clause`.
+///  2. `export_queries::load_booking_export_rows` — bản xuất CSV cho admin,
+///     KHÔNG PHẢI `audit_queries::load_booking_export_rows` (đã vá ở Task 2,
+///     hai hàm trùng tên khác file).
+///  3. `guest_queries::load_guest_summaries` — total_stays/total_spent/last_visit.
+///     Cùng file, `guest_queries::search_guest_summaries_by_phone` dùng chung
+///     hằng SQL `GUEST_SUMMARY_SELECT` với hàm này nên cũng đã được vá theo —
+///     không có test riêng ở đây vì không có gì để canh khác với mục này.
+///  4. `guest_queries::load_guest_bookings` — lịch sử ở của một khách.
+///  5. `activity_queries::load_recent_check_ins` — feed Dashboard.
+///  6. `activity_queries::load_recent_check_outs` — feed Dashboard.
+///  7. `group_queries::load_group_bookings` (qua `load_group_detail`) — tổng
+///     tiền đoàn. Void một booking thuộc đoàn hiện bị `void_booking_tx` chặn
+///     ở tầng service, nên trạng thái này chỉ tạo được bằng UPDATE thẳng như
+///     dưới đây — đúng thứ test này cố tình làm, vì lớp filter ở tầng đọc
+///     phải đứng vững bất kể `voided` sinh ra bằng đường nào, không chỉ đường
+///     duy nhất mà service hôm nay cho phép.
+///  8. `assistant_queries::load_stay_charges` — tool trợ lý AI đọc theo
+///     booking_id trực tiếp; không có gì chặn model hỏi lại một mã đã xoá nếu
+///     mã đó còn nằm trong lịch sử hội thoại từ trước khi bị xoá.
+#[tokio::test]
+async fn voided_booking_disappears_from_the_eight_audited_booking_read_paths() {
+    let pool = test_pool().await;
+
+    seed_room(&pool, "R-ALL").await.expect("seeds room");
+    seed_active_booking(&pool, "B-ALL", "R-ALL")
+        .await
+        .expect("seeds booking");
+    seed_folio_line(&pool, "B-ALL", 120_000, "2026-04-15T11:00:00+07:00")
+        .await
+        .expect("seeds folio line");
+    seed_transaction(
+        &pool,
+        "B-ALL",
+        80_000,
+        "cancellation_fee",
+        "Phí huỷ",
+        "2026-04-15T11:00:00+07:00",
+    )
+    .await
+    .expect("seeds cancellation fee");
+    sqlx::query(
+        "UPDATE bookings SET actual_checkout = '2026-04-16T10:00:00+07:00' WHERE id = 'B-ALL'",
+    )
+    .execute(&pool)
+    .await
+    .expect("sets actual_checkout so the check-out feed has a row to hide");
+
+    sqlx::query(
+        "INSERT INTO booking_groups (id, group_name, master_booking_id, organizer_name,
+                                      total_rooms, status, created_at)
+         VALUES ('GRP-ALL', 'Đoàn thử', 'B-ALL', 'Trưởng đoàn', 1, 'active',
+                 '2026-04-15T10:00:00+07:00')",
+    )
+    .execute(&pool)
+    .await
+    .expect("seeds booking group");
+    sqlx::query("UPDATE bookings SET group_id = 'GRP-ALL' WHERE id = 'B-ALL'")
+        .execute(&pool)
+        .await
+        .expect("links booking to group");
+
+    // Trước khi xoá: fixture phải thật sự xuất hiện ở mọi nơi, nếu không các
+    // assert "biến mất" bên dưới sẽ xanh vì lý do sai (chưa từng có mặt).
+    let guest_id = "guest-B-ALL";
+    assert!(
+        booking_list_queries::load_bookings_with_guest(&pool, None)
+            .await
+            .expect("list before void")
+            .iter()
+            .any(|b| b.id == "B-ALL"),
+        "fixture phải có mặt trong danh sách đặt phòng trước khi xoá"
+    );
+    assert!(
+        guest_queries::load_guest_summaries(&pool, None)
+            .await
+            .expect("guest summary before void")
+            .iter()
+            .any(|g| g.id == guest_id && g.total_stays == 1 && g.total_spent == 250_000),
+        "fixture phải cộng vào tổng chi tiêu của khách trước khi xoá"
+    );
+    assert!(
+        !activity_queries::load_recent_check_ins(&pool, 50)
+            .await
+            .expect("check-ins before void")
+            .is_empty(),
+        "fixture phải có mặt trong feed nhận phòng trước khi xoá"
+    );
+    assert!(
+        !activity_queries::load_recent_check_outs(&pool, 50)
+            .await
+            .expect("check-outs before void")
+            .is_empty(),
+        "fixture phải có mặt trong feed trả phòng trước khi xoá"
+    );
+    let detail_before = group_queries::load_group_detail(&pool, "GRP-ALL")
+        .await
+        .expect("group detail before void");
+    assert_eq!(
+        detail_before.grand_total, 250_000,
+        "fixture phải cộng vào tổng tiền đoàn trước khi xoá"
+    );
+    assert!(
+        assistant_queries::load_stay_charges(&pool, "B-ALL")
+            .await
+            .expect("assistant stay charges before void")
+            .is_some(),
+        "trợ lý phải đọc được lượt này trước khi xoá"
+    );
+
+    sqlx::query("UPDATE bookings SET status = 'voided' WHERE id = 'B-ALL'")
+        .execute(&pool)
+        .await
+        .expect("voids booking");
+
+    // 1. Danh sách đặt phòng — bất kể filter là gì, kể cả filter khớp trạng
+    //    thái cũ của booking (đã có trạng thái mới là 'voided' rồi nên không
+    //    filter nào khớp được nữa, kể cả 'active').
+    for status in [
+        None,
+        Some("active"),
+        Some("booked"),
+        Some("completed"),
+        Some("bậy bạ"),
+    ] {
+        let filter = BookingFilter {
+            status: status.map(str::to_string),
+            from: None,
+            to: None,
+        };
+        let list = booking_list_queries::load_bookings_with_guest(&pool, Some(filter))
+            .await
+            .unwrap_or_else(|e| panic!("list with filter {status:?}: {e}"));
+        assert!(
+            !list.iter().any(|b| b.id == "B-ALL"),
+            "lượt đã xoá lọt qua danh sách đặt phòng với filter {status:?}"
+        );
+    }
+    let unfiltered = booking_list_queries::load_bookings_with_guest(&pool, None)
+        .await
+        .expect("list with no filter object at all");
+    assert!(
+        !unfiltered.iter().any(|b| b.id == "B-ALL"),
+        "lượt đã xoá lọt qua danh sách đặt phòng khi không truyền filter"
+    );
+
+    // 2. Bản xuất CSV cho admin (`export_queries`, khác `audit_queries`).
+    let export = export_queries::load_booking_export_rows(&pool)
+        .await
+        .expect("export after void");
+    assert!(
+        !export.iter().any(|row| row.id == "B-ALL"),
+        "lượt đã xoá lọt qua bản xuất CSV admin"
+    );
+
+    // 3 & 4. Tổng chi tiêu và lịch sử ở của khách.
+    let guest_after = guest_queries::load_guest_summaries(&pool, None)
+        .await
+        .expect("guest summary after void")
+        .into_iter()
+        .find(|g| g.id == guest_id)
+        .expect("guest itself must still exist");
+    assert_eq!(
+        guest_after.total_stays, 0,
+        "total_stays vẫn đếm lượt đã xoá"
+    );
+    assert_eq!(
+        guest_after.total_spent, 0,
+        "total_spent vẫn cộng tiền của lượt đã xoá"
+    );
+    assert_eq!(
+        guest_after.last_visit, None,
+        "last_visit vẫn trỏ vào lượt đã xoá"
+    );
+    let guest_bookings_after = guest_queries::load_guest_bookings(&pool, guest_id)
+        .await
+        .expect("guest bookings after void");
+    assert!(
+        guest_bookings_after.is_empty(),
+        "lịch sử ở của khách vẫn còn lượt đã xoá"
+    );
+
+    // 5 & 6. Feed hoạt động gần đây trên Dashboard.
+    let check_ins_after = activity_queries::load_recent_check_ins(&pool, 50)
+        .await
+        .expect("check-ins after void");
+    assert!(
+        check_ins_after.is_empty(),
+        "feed nhận phòng vẫn còn lượt đã xoá"
+    );
+    let check_outs_after = activity_queries::load_recent_check_outs(&pool, 50)
+        .await
+        .expect("check-outs after void");
+    assert!(
+        check_outs_after.is_empty(),
+        "feed trả phòng vẫn còn lượt đã xoá"
+    );
+
+    // 7. Tổng tiền đoàn.
+    let detail_after = group_queries::load_group_detail(&pool, "GRP-ALL")
+        .await
+        .expect("group detail after void");
+    assert!(
+        detail_after.bookings.is_empty(),
+        "danh sách phòng của đoàn vẫn còn lượt đã xoá"
+    );
+    assert_eq!(
+        detail_after.grand_total, 0,
+        "tổng tiền đoàn vẫn cộng lượt đã xoá"
+    );
+
+    // 8. Tool trợ lý AI đọc theo booking_id.
+    let charges_after = assistant_queries::load_stay_charges(&pool, "B-ALL")
+        .await
+        .expect("assistant stay charges after void");
+    assert!(
+        charges_after.is_none(),
+        "trợ lý vẫn đọc được tiền của lượt đã xoá qua booking_id"
+    );
+}

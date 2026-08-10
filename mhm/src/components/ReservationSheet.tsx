@@ -3,6 +3,7 @@ import { useHotelStore } from "../stores/useHotelStore";
 import { CalendarDays, User, Phone, CreditCard, AlertTriangle, FileText } from "lucide-react";
 import { Sheet, SheetContent, SheetHeader, SheetTitle } from "@/components/ui/sheet";
 import { Button } from "@/components/ui/button";
+import RateOverrideField from "@/components/shared/RateOverrideField";
 import { useAvailability } from "@/hooks/useAvailability";
 import { usePricePreview } from "@/hooks/usePricePreview";
 import { useInvoiceDialog } from "@/hooks/useInvoiceDialog";
@@ -10,7 +11,7 @@ import { formatAppError } from "@/lib/appError";
 import { createCorrelationId } from "@/lib/correlationId";
 import { fmtNumber } from "@/lib/format";
 import { invokeWriteCommand } from "@/lib/invokeCommand";
-import { optionalMoneyVnd } from "@/lib/money";
+import { assertNonNegativeMoneyVnd, optionalMoneyVnd } from "@/lib/money";
 import { addDaysIso, localDateIso, nightsBetween } from "@/lib/timelineSelection";
 import { toast } from "sonner";
 import InvoiceDialog from "./InvoiceDialog";
@@ -47,6 +48,16 @@ export default function ReservationSheet({ open, onOpenChange, preSelectedRoomId
     const [guestsTouched, setGuestsTouched] = useState(false);
     const nights = nightsBetween(checkInDate, checkOutDate);
     const datesValid = nights > 0;
+    // Giá tay lễ tân gõ đè, đơn vị mỗi đêm. Chỉ có tác dụng ở nhánh tạo mới —
+    // `ModifyReservationRequest` phía Rust không có trường này (xem handleSubmit).
+    const [rateOverride, setRateOverride] = useState<number | null>(null);
+    // I-1 (review Task 17): tăng lên mỗi lần sheet mở. Chỉ đặt `rateOverride`
+    // về null (data) là chưa đủ để RateOverrideField quay lại nút hiển thị —
+    // trạng thái "đang sửa" của nó nằm nội bộ component con (Task 16, không
+    // sửa lại), chỉ mất đi khi remount. `key` của RateOverrideField ghép số
+    // này với roomId nên remount xảy ra cả khi đổi phòng LẪN khi mở lại một
+    // phiên mới (kể cả cùng phòng) — xem chú thích ở JSX render bên dưới.
+    const [formSession, setFormSession] = useState(0);
     const [deposit, setDeposit] = useState("");
     const [source, setSource] = useState("phone");
     const [notes, setNotes] = useState("");
@@ -77,6 +88,17 @@ export default function ReservationSheet({ open, onOpenChange, preSelectedRoomId
     useEffect(() => {
         if (open) {
             fetchRooms();
+            // I-1 (review Task 17): giá tay của khách trước không được rò
+            // sang lần mở sheet kế tiếp. Effect `[roomId]` bên dưới không cứu
+            // được khi mở lại ĐÚNG phòng cũ (roomId không đổi thì effect đó
+            // không chạy) — sheet không unmount giữa hai lần đóng/mở
+            // (Reservations.tsx chỉ đổi prop `open`), nên state cũ vẫn còn
+            // nguyên. Đặt reset ở đây vì effect này (phụ thuộc `open`) đảm
+            // bảo chạy trên MỌI lần đóng→mở, giống cách `closeAll()` của
+            // CheckinSheet chạy trên mọi đường đóng — không cần sửa
+            // Reservations.tsx (checkout dùng chung, tránh đụng khi không cần).
+            setRateOverride(null);
+            setFormSession((s) => s + 1);
             if (editBooking) {
                 // Pre-fill form with existing booking data
                 setRoomId(editBooking.room_id);
@@ -114,6 +136,15 @@ export default function ReservationSheet({ open, onOpenChange, preSelectedRoomId
     useEffect(() => {
         if (preSelectedRoomId) setRoomId(preSelectedRoomId);
     }, [preSelectedRoomId]);
+
+    // Quyết định mục 4: đổi phòng thì bỏ giá tay đã gõ, không mang sang phòng
+    // mới — giá thương lượng gắn với một phòng cụ thể, mang nguyên số đó sang
+    // phòng vừa đổi tới là im lặng thu sai giá của phòng mới. Đổi NGÀY (tức
+    // đổi số đêm, vì nights suy ra từ ngày) không rơi vào effect này: đơn vị
+    // override là giá/đêm nên tổng tự tính lại đúng, không có gì để bỏ.
+    useEffect(() => {
+        setRateOverride(null);
+    }, [roomId]);
 
     // Tracks the room the guest count was last loaded for, so this effect only
     // reloads on an actual room *change* — not merely because `rooms` got a
@@ -155,7 +186,7 @@ export default function ReservationSheet({ open, onOpenChange, preSelectedRoomId
     }, [isEditMode, editBooking, rooms, guestsTouched]);
 
     // Mọi phòng đều liệt kê được. Trạng thái phòng (`vacant`/`occupied`/
-    // `cleaning`/`booked`) mô tả HÔM NAY, còn đặt phòng trước hỏi về một
+    // `booked`) mô tả HÔM NAY, còn đặt phòng trước hỏi về một
     // khoảng ngày khác hẳn — lọc theo nó là trả lời sai câu hỏi. Một phòng
     // đang có khách trả phòng ngày 3/8 vẫn trống nguyên từ 12/8, nhưng vẫn
     // biến mất khỏi ô chọn, và chủ khách sạn không có cách nào đặt cho nó.
@@ -241,6 +272,12 @@ export default function ReservationSheet({ open, onOpenChange, preSelectedRoomId
             } else {
                 const depositAmount =
                     optionalMoneyVnd(deposit.trim() ? Number(deposit) : null, "deposit_amount") ?? null;
+                // Khoá tường minh, kể cả khi giữ giá hệ thống: `null` đọc log ra
+                // thấy được là "đã hỏi và giữ giá engine", không lẫn với thiếu khoá.
+                const rateOverridePerNight =
+                    rateOverride != null
+                        ? assertNonNegativeMoneyVnd(rateOverride, "rate_override_per_night")
+                        : null;
                 await invokeWriteCommand("create_reservation", {
                     req: {
                         room_id: roomId,
@@ -254,6 +291,7 @@ export default function ReservationSheet({ open, onOpenChange, preSelectedRoomId
                         deposit_amount: depositAmount,
                         source,
                         notes: notes || null,
+                        rate_override_per_night: rateOverridePerNight,
                     },
                 }, {
                     correlationId,
@@ -285,6 +323,7 @@ export default function ReservationSheet({ open, onOpenChange, preSelectedRoomId
         setNotes("");
         setGuests(2);
         setGuestsTouched(false);
+        setRateOverride(null);
         resetAvailability();
     }
 
@@ -496,15 +535,34 @@ export default function ReservationSheet({ open, onOpenChange, preSelectedRoomId
                                 <div className="text-sm text-slate-500">Đang tính giá...</div>
                             ) : preview ? (
                                 <>
-                                    {preview.breakdown.map((line, i) => (
-                                        <div key={i} className="flex justify-between text-sm">
-                                            <span className="text-slate-600">{line.label}</span>
-                                            <span className="text-slate-700">{fmtNumber(line.amount)}₫</span>
-                                        </div>
-                                    ))}
-                                    <div className="flex justify-between text-sm pt-1 border-t border-blue-100">
-                                        <span className="text-slate-600">Tổng</span>
-                                        <span className="font-bold text-slate-800">{fmtNumber(preview.total)}₫</span>
+                                    {/* Danh sách phụ thu mô tả giá engine — ẩn khi có giá tay
+                                        đè lên, vì lúc đó nó không còn khớp con số đang thu. */}
+                                    {rateOverride == null &&
+                                        preview.breakdown.map((line, i) => (
+                                            <div key={i} className="flex justify-between text-sm">
+                                                <span className="text-slate-600">{line.label}</span>
+                                                <span className="text-slate-700">{fmtNumber(line.amount)}₫</span>
+                                            </div>
+                                        ))}
+                                    <div className="flex justify-between items-start text-sm pt-1 border-t border-blue-100">
+                                        <span className="text-slate-600 pt-0.5">Tổng</span>
+                                        {isEditMode ? (
+                                            <span className="font-bold text-slate-800">{fmtNumber(preview.total)}₫</span>
+                                        ) : (
+                                            <RateOverrideField
+                                                // Xem chú thích tương tự ở CheckinSheet.tsx: `key` ép
+                                                // remount khi đổi phòng, vì trạng thái "đang sửa" của
+                                                // ô này nằm trong component con, effect reset
+                                                // rateOverride (data) không chạm tới được. Ghép thêm
+                                                // formSession (I-1) để remount CẢ khi mở lại sheet
+                                                // (kể cả cùng phòng), không chỉ khi đổi phòng.
+                                                key={`${roomId}:${formSession}`}
+                                                engineTotal={preview.total}
+                                                nights={nights}
+                                                value={rateOverride}
+                                                onChange={setRateOverride}
+                                            />
+                                        )}
                                     </div>
                                     {deposit && parseFloat(deposit) > 0 && (
                                         <div className="flex justify-between text-sm">

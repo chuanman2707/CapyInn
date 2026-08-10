@@ -19,6 +19,7 @@ import { useExperimentalRuntimeStatus } from "@/lib/experimentalProfile";
 import { useAuthStore } from "@/stores/useAuthStore";
 
 import AppearanceSection from "./AppearanceSection";
+import { AssistantSection } from "./AssistantSection";
 import CheckinRulesSection from "./CheckinRulesSection";
 import CeoAgentSection from "./CeoAgentSection";
 import DataSection from "./DataSection";
@@ -42,6 +43,7 @@ type SettingsSectionKey =
   | "data"
   | "gateway"
   | "ceo-agent"
+  | "assistant"
   | "updates"
   | "pricing"
   | "peak-season"
@@ -65,11 +67,16 @@ export default function SettingsPage() {
       ? [{ key: "gateway" as const, label: "MCP Gateway", icon: Wifi }]
       : []),
     { key: "updates" as const, label: "Software Update", icon: RefreshCcw },
+    // CEO Agent vẫn thí nghiệm nên vẫn đứng sau cờ môi trường. "Trợ lý quầy"
+    // thì không: nó dành cho lễ tân, mà lễ tân bấm icon mở app chứ không gõ
+    // biến môi trường. Cổng thật của nó là API key + opt-in trong chính màn
+    // hình này — xem `agent/assistant/config.rs::evaluate_assistant_gate`.
     ...(isCurrentAdmin && experimentalRuntime.agentRuntimeEnabled
       ? [{ key: "ceo-agent" as const, label: "CEO Agent", icon: Bot }]
       : []),
     ...(isCurrentAdmin
       ? [
+        { key: "assistant" as const, label: "Trợ lý quầy", icon: Bot },
         { key: "pricing" as const, label: "Pricing", icon: DollarSign },
         { key: "peak-season" as const, label: "Peak Season", icon: CalendarDays },
         { key: "users" as const, label: "Users", icon: Users },
@@ -83,7 +90,8 @@ export default function SettingsPage() {
       (
         activeSection === "ceo-agent" &&
         (!isCurrentAdmin || !experimentalRuntime.agentRuntimeEnabled)
-      )
+      ) ||
+      (activeSection === "assistant" && !isCurrentAdmin)
     ) {
       setActiveSection("hotel");
     }
@@ -133,6 +141,7 @@ export default function SettingsPage() {
           experimentalRuntime.agentRuntimeEnabled && (
             <CeoAgentSection />
           )}
+        {activeSection === "assistant" && isCurrentAdmin && <AssistantSection />}
         {activeSection === "pricing" && isCurrentAdmin && <PricingSection />}
         {activeSection === "peak-season" && isCurrentAdmin && <SpecialDatesSection />}
         {activeSection === "users" && isCurrentAdmin && <UserManagement />}

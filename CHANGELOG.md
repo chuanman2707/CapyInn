@@ -9,13 +9,74 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Void a booking that was entered by mistake: an admin holds a red button for two
+  seconds to remove a reservation, an in-house stay, or a checked-out stay from the
+  reports, after a confirmation box that reads the money impact from the backend.
+  Money rows are never deleted — the amounts leave the reports through a status
+  filter, and an issued invoice keeps its number and is marked voided. Per-room
+  voiding inside a group booking is not supported yet
+- Manual nightly rate: click the quoted price on the check-in, reservation, or group
+  check-in sheet and type a negotiated rate per night. The rate is stored per night,
+  so confirming or modifying a reservation re-applies it to that operation's number
+  of nights instead of silently reverting to the engine price
+- Front-desk AI assistant: a chat panel beside the PMS that reads the live data to
+  answer questions and drafts a check-in the receptionist confirms on a card, with
+  the confirmation running the ordinary `check_in` command. An admin configures the
+  provider in Settings; nothing reaches the provider until an API key is stored and
+  the cloud opt-in is switched on, and turning that opt-in off closes it again
+- Temporary residence declaration workspace (khai báo tạm trú): its own declaration
+  module, extraction and validation, XLSX and XML writers generated from the official
+  template, a declaration page with a sidebar badge and reconcile loop, and a
+  `--check-resources` mode on the probe CLI
+- Mid-stay room change for a guest already in house, with the valid target rooms
+  listed for the booking and an option to keep the original price or charge the
+  difference between the two rooms
+- Reservation calendar timeline: click or drag across empty cells to open a check-in
+  or a reservation with those dates already prefilled
+- Backfill sheet for recording a stay that already happened, with the matching
+  `backfill_stay` service and Tauri command behind it
+- Read-only booking detail popup for checked-out guests, and a read-first
+  `viewInvoice` that shows an already-issued invoice without creating a new one
+- Peak seasons: declare one as a date range in Settings, delete it, and have
+  contiguous declared days group back into a single season
+- Extra-guest pricing: a flat per-guest, per-night charge above the room's included
+  headcount, with reservations storing a guest count and being priced with it
+- Room-keyed price preview so the reservation sheet quotes what the engine will
+  actually charge, with the breakdown in Vietnamese
+- Restore drill now asserts backup freshness, schema version, and a row baseline
+- Frontend experimental runtime profile
 - open-source repository metadata and community files
 - CI workflow and GitHub issue / PR templates
 
 ### Changed
 
+- Reservation timeline columns now stretch to fill the window instead of sitting at a
+  fixed 80px, so the same sixteen days use the whole width on a wide screen
+- Room cards show the room type's configured rate instead of `rooms.base_price`,
+  which the pricing model does not honour as a price
+- The reservation sheet takes a checkout date from a calendar instead of a nights box
+- Night audit and the sheets close the day by the local day rather than a
+  UTC-derived one
 - public repository cleanup for internal agent files and docs layout
 - README restructuring for public contributors and onboarding-based setup
+
+### Removed
+
+- Housekeeping. A room is vacant the moment it checks out, with no cleaning step in
+  between and no cleaning ticket to close. The hotel handles cleaning internally, so the
+  software no longer models it. Existing housekeeping history stays in the database and
+  is not deleted
+
+### Fixed
+
+- Clicking the narrow strip above or below a guest's bar on the reservation timeline
+  opened a new-booking form for a night that was already taken. The whole row height now
+  belongs to the bar and opens that guest's details
+- Peak-season uplift is charged per night inside the season, not once per check-in day
+- Vietnamese room type names no longer lose their configured price: room types are
+  matched case-insensitively with the same folding on both sides of the comparison
+- The guest charge survives extend-stay, early checkout, modify, and check-in
+- Previews fail visibly instead of quoting a default the front desk will not honour
 
 ### Security
 

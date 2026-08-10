@@ -476,6 +476,16 @@ pub(crate) fn checked_add_money(a: MoneyVnd, b: MoneyVnd, field: &str) -> Result
     validate_transport_money_vnd(value, field).map_err(|error| error.message)
 }
 
+/// See `checked_mul_money` — same reasoning. `shorten_stay` needs the mirror of
+/// `checked_add_money` so a removed night goes through the same transport-safe
+/// guard as the night that added it.
+pub(crate) fn checked_sub_money(a: MoneyVnd, b: MoneyVnd, field: &str) -> Result<MoneyVnd, String> {
+    let value = a
+        .checked_sub(b)
+        .ok_or_else(|| format!("{field} overflowed"))?;
+    validate_transport_money_vnd(value, field).map_err(|error| error.message)
+}
+
 fn sum_lines(lines: &[PricingLine], field: &str) -> Result<MoneyVnd, String> {
     lines.iter().try_fold(0, |total, line| {
         checked_add_money(total, line.amount, field)

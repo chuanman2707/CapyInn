@@ -25,9 +25,11 @@ use super::{
     },
     guest_service::{create_reservation_guest_manifest, link_booking_guests},
     pricing_service::calculate_stay_price_tx,
+    stay_lifecycle::MAX_RATE_PER_NIGHT_VND,
     support::{
         ensure_one_row_affected, insert_room_calendar_rows, invalid_state_transition,
-        read_money_vnd_or_zero, read_money_vnd_strict, validate_non_negative_booking_money,
+        lock_booking_and_read_room, merge_pricing_snapshot, read_money_vnd_or_zero,
+        read_money_vnd_strict, validate_non_negative_booking_money, FolioLock,
     },
 };
 
@@ -178,21 +180,18 @@ async fn resolve_reservation_lock(
     pool: Pool<Sqlite>,
     booking_id: String,
 ) -> CommandResult<ResolvedWriteCommandGuard<ReservationResolvedGuard>> {
-    let room_id = sqlx::query_scalar::<_, String>("SELECT room_id FROM bookings WHERE id = ?")
-        .bind(&booking_id)
-        .fetch_optional(&pool)
-        .await
-        .map_err(BookingError::from)
-        .map_err(map_reservation_command_error)?
-        .ok_or_else(|| {
-            CommandError::user(
-                codes::BOOKING_NOT_FOUND,
-                format!("Booking not found: {}", booking_id),
-            )
-        })?;
+    let (guard, room_id) = lock_booking_and_read_room(
+        &pool,
+        &booking_id,
+        FolioLock::Skip,
+        map_reservation_command_error,
+    )
+    .await?;
+    let guard = guard
+        .acquire_next(global_manager(), [room_key(&room_id)?])
+        .await?;
+    let lock_keys = guard.keys().to_vec();
 
-    let lock_keys = vec![booking_key(&booking_id)?, room_key(&room_id)?];
-    let guard = global_manager().acquire(lock_keys.clone()).await?;
     Ok(ResolvedWriteCommandGuard::new(
         ReservationResolvedGuard {
             room_id,
@@ -213,6 +212,7 @@ pub async fn create_reservation_tx(
 ) -> BookingResult<String> {
     let derived_nights =
         validate_requested_nights(&req.check_in_date, &req.check_out_date, req.nights)?;
+    validate_reservation_rate_override(req.rate_override_per_night)?;
 
     let conflicts = sqlx::query(
         "SELECT date FROM room_calendar WHERE room_id = ? AND date >= ? AND date < ? ORDER BY date ASC",
@@ -237,16 +237,86 @@ pub async fn create_reservation_tx(
         .map(|amount| validate_non_negative_booking_money(amount, "deposit_amount"))
         .transpose()?
         .unwrap_or(0);
-    let pricing = calculate_stay_price_tx(
-        tx,
-        &req.room_id,
-        &req.check_in_date,
-        &req.check_out_date,
-        "nightly",
-        req.guests,
-    )
-    .await?;
-    let total_price = pricing.total;
+
+    // Giá tay đè giá engine, và đè PHẲNG: tổng tiền là `rate × nights`, không
+    // cộng thêm dòng nào engine tính — cùng luật `check_in_tx` (Task 13).
+    let (total_price, rate_overridden_at, pricing_snapshot) = match req.rate_override_per_night {
+        Some(rate) => {
+            // `validate_reservation_rate_override` đã chặn giá ngoài biên
+            // trước khi tới được đây; giữ nguyên bản sao này làm lưới chặn ở
+            // tầng transaction, cùng hình "belt-and-braces" với
+            // `set_booking_rate_tx`/`check_in_tx`.
+            if rate <= 0 || rate > MAX_RATE_PER_NIGHT_VND {
+                return Err(BookingError::validation(
+                    "Giá mỗi đêm không hợp lệ".to_string(),
+                ));
+            }
+            let total =
+                crate::pricing::checked_mul_money(rate, i64::from(derived_nights), "total_price")
+                    .map_err(BookingError::validation)?;
+
+            // Giá engine chỉ tính để LƯU LẠI trong pricing_snapshot cho chủ
+            // khách sạn tra cứu sau này (đã giảm giá cho ai bao nhiêu), không
+            // dùng làm tiền thật — nên lỗi ở bước này không được làm hỏng cả
+            // lượt tạo đặt trước. Lỗi thì lưu `null` (không rõ), không lưu 0.
+            //
+            // Dùng `req.guests` THẬT (không viết cứng `None` như `check_in_tx`):
+            // đường không-override của reservation (nhánh `None` ngay dưới)
+            // cũng gọi engine với `req.guests`, nên đây mới là tham số khớp
+            // với "giá engine sẽ tính cho đúng lượt đặt này" — viết cứng
+            // `None` sẽ ghi một `engine_total` không thật, nói dối chủ khách
+            // sạn về việc đã giảm bao nhiêu.
+            let engine_total = calculate_stay_price_tx(
+                tx,
+                &req.room_id,
+                &req.check_in_date,
+                &req.check_out_date,
+                "nightly",
+                req.guests,
+            )
+            .await
+            .map(|pricing| pricing.total)
+            .ok();
+
+            let snapshot = merge_pricing_snapshot(
+                None,
+                "manual_rate",
+                json!({
+                    "rate_per_night": rate,
+                    "engine_total": engine_total,
+                    "set_at": now.clone(),
+                }),
+            );
+
+            (total, Some(now.clone()), Some(snapshot))
+        }
+        None => {
+            let pricing = calculate_stay_price_tx(
+                tx,
+                &req.room_id,
+                &req.check_in_date,
+                &req.check_out_date,
+                "nightly",
+                req.guests,
+            )
+            .await?;
+            (pricing.total, None, None)
+        }
+    };
+
+    // Cọc vượt tổng tiền đẩy booking vào ngõ cụt y hệt `check_in_tx`:
+    // `record_deposit_tx` dưới đây cộng thẳng `deposit_amount` vào
+    // `paid_amount`, `confirm_reservation_tx` mang `paid_amount` đó đi
+    // nguyên vẹn khi kích hoạt booking, và `check_out_tx` cuối cùng từ chối
+    // thẳng khi `already_paid > final_total`. Đặt SAU match ở trên vì đây là
+    // chỗ ĐẦU TIÊN cả hai nhánh (giá tay lẫn giá engine) đều đã có
+    // `total_price` thật trong tay — `validate_reservation_rate_override` chỉ
+    // chặn được nhánh giá tay, bỏ lọt đường không-override.
+    if deposit_amount > total_price {
+        return Err(BookingError::validation(format!(
+            "Tiền cọc {deposit_amount}đ, cao hơn tổng tiền {total_price}đ — sửa lại giá hoặc số tiền cọc"
+        )));
+    }
 
     let guest_manifest = create_reservation_guest_manifest(
         tx,
@@ -264,8 +334,8 @@ pub async fn create_reservation_tx(
             id, room_id, primary_guest_id, check_in_at, expected_checkout, actual_checkout,
             nights, total_price, paid_amount, status, source, notes, created_by,
             booking_type, pricing_type, deposit_amount, guest_phone, scheduled_checkin,
-            scheduled_checkout, pricing_snapshot, guests, created_at
-         ) VALUES (?, ?, ?, ?, ?, NULL, ?, ?, 0, ?, ?, ?, NULL, 'reservation', 'nightly', ?, ?, ?, ?, NULL, ?, ?)",
+            scheduled_checkout, pricing_snapshot, guests, rate_overridden_at, created_at
+         ) VALUES (?, ?, ?, ?, ?, NULL, ?, ?, 0, ?, ?, ?, NULL, 'reservation', 'nightly', ?, ?, ?, ?, ?, ?, ?, ?)",
     )
     .bind(&booking_id)
     .bind(&req.room_id)
@@ -281,7 +351,9 @@ pub async fn create_reservation_tx(
     .bind(req.guest_phone.as_deref())
     .bind(&req.check_in_date)
     .bind(&req.check_out_date)
+    .bind(&pricing_snapshot)
     .bind(req.guests)
+    .bind(&rate_overridden_at)
     .bind(&now)
     .execute(&mut **tx)
     .await
@@ -344,7 +416,7 @@ pub async fn fetch_booking_by_id_tx(
     let row = sqlx::query(
         "SELECT id, room_id, primary_guest_id, check_in_at, expected_checkout,
                 actual_checkout, nights, total_price, paid_amount, status,
-                source, notes, created_at
+                source, notes, created_at, rate_overridden_at
          FROM bookings WHERE id = ?",
     )
     .bind(booking_id)
@@ -368,6 +440,7 @@ pub async fn fetch_booking_by_id_tx(
         source: row.get("source"),
         notes: row.get("notes"),
         created_at: row.get("created_at"),
+        rate_overridden_at: row.get("rate_overridden_at"),
     })
 }
 
@@ -416,6 +489,12 @@ pub async fn create_reservation_idempotent(
         "source": source.clone(),
         "notes": req.notes.clone(),
         "deposit_vnd_units": deposit_vnd_units,
+        // Ảnh hưởng trực tiếp tới `total_price` như mọi trường khác ở trên —
+        // thiếu nó thì đổi giá tay dưới cùng một idempotency key sẽ bị lặp
+        // lại kết quả CŨ trong im lặng thay vì bị báo
+        // `CONFLICT_IDEMPOTENCY_HASH_MISMATCH`. Cùng lý do
+        // `build_check_in_hash_payload` ở `stay_lifecycle.rs`.
+        "rate_override_per_night": req.rate_override_per_night,
     });
 
     let ledger_intent = SanitizedLedgerIntent::from_pairs([
@@ -599,6 +678,16 @@ pub async fn confirm_reservation_tx(
     }
     reject_no_show_confirmation(tx, booking_id).await?;
 
+    // Đọc/kiểm giá tay TRƯỚC bất cứ ghi nào bên dưới (đầu tiên là DELETE +
+    // INSERT room_calendar) — một hàng dữ liệu không nhất quán bị chặn ở đây
+    // không để lại việc dở dang, cùng nguyên tắc "biên trước, ghi sau" của
+    // `create_reservation_tx`/`validate_reservation_rate_override`.
+    let manual_rate_per_night = resolve_manual_rate_per_night(
+        booking_id,
+        reservation.rate_overridden_at.as_deref(),
+        reservation.pricing_snapshot.as_deref(),
+    )?;
+
     let now = Local::now();
     let today = now.date_naive();
     let scheduled_checkout = parse_date(&reservation.scheduled_checkout)?;
@@ -608,17 +697,31 @@ pub async fn confirm_reservation_tx(
         scheduled_checkout
     };
     let effective_checkout = effective_checkout_date.format("%Y-%m-%d").to_string();
-    let pricing = calculate_stay_price_tx(
-        tx,
-        &reservation.room_id,
-        &today.format("%Y-%m-%d").to_string(),
-        &effective_checkout,
-        &reservation.pricing_type,
-        reservation.guests,
-    )
-    .await?;
-    let total_price = pricing.total;
+    // Số đêm THẬT của lượt xác nhận này — có thể khác số đêm lúc tạo đặt
+    // trước (khách tới trễ/sớm co giãn khoảng `today → effective_checkout`,
+    // xem `confirm_reservation_late_arrival_persists_effective_checkout`).
+    // Giá tay là giá MỖI ĐÊM đã chốt, nên phải nhân với số đêm MỚI này —
+    // mang tổng tiền CŨ đi nguyên xi mới là lỗi (tụt về đúng con số đã chốt
+    // cho một kỳ ở dài/ngắn khác).
     let actual_nights = (effective_checkout_date - today).num_days() as i32;
+    let total_price = match manual_rate_per_night {
+        Some(rate) => {
+            crate::pricing::checked_mul_money(rate, i64::from(actual_nights), "total_price")
+                .map_err(BookingError::validation)?
+        }
+        None => {
+            let pricing = calculate_stay_price_tx(
+                tx,
+                &reservation.room_id,
+                &today.format("%Y-%m-%d").to_string(),
+                &effective_checkout,
+                &reservation.pricing_type,
+                reservation.guests,
+            )
+            .await?;
+            pricing.total
+        }
+    };
     let check_in_at = now.to_rfc3339();
     // Cột `expected_checkout` của booking đang ở phải là RFC3339, giống hệt
     // đường walk-in trong `stay_lifecycle::check_in_tx`: `extend_stay` đọc cột
@@ -741,6 +844,14 @@ pub async fn modify_reservation_tx(
         )));
     }
 
+    // Đọc/kiểm giá tay TRƯỚC bất cứ ghi nào bên dưới (DELETE room_calendar là
+    // ghi đầu tiên) — cùng lý do đặt sớm trong `confirm_reservation_tx`.
+    let manual_rate_per_night = resolve_manual_rate_per_night(
+        &req.booking_id,
+        reservation.rate_overridden_at.as_deref(),
+        reservation.pricing_snapshot.as_deref(),
+    )?;
+
     sqlx::query("DELETE FROM room_calendar WHERE booking_id = ? AND status = ?")
         .bind(&req.booking_id)
         .bind(status::calendar::BOOKED)
@@ -765,16 +876,25 @@ pub async fn modify_reservation_tx(
     }
 
     let effective_guests = req.new_guests.or(reservation.guests);
-    let pricing = calculate_stay_price_tx(
-        tx,
-        &reservation.room_id,
-        &req.new_check_in_date,
-        &req.new_check_out_date,
-        &reservation.pricing_type,
-        effective_guests,
-    )
-    .await?;
-    let total_price = pricing.total;
+    // Số đêm MỚI của lần sửa này (`derived_nights`, đã kiểm ở
+    // `validate_requested_nights` phía trên) — giá tay là giá mỗi đêm đã
+    // chốt, nên áp lại lên số đêm mới, không mang tổng tiền cũ đi nguyên xi.
+    let total_price = match manual_rate_per_night {
+        Some(rate) => crate::pricing::checked_mul_money(rate, derived_nights, "total_price")
+            .map_err(BookingError::validation)?,
+        None => {
+            let pricing = calculate_stay_price_tx(
+                tx,
+                &reservation.room_id,
+                &req.new_check_in_date,
+                &req.new_check_out_date,
+                &reservation.pricing_type,
+                effective_guests,
+            )
+            .await?;
+            pricing.total
+        }
+    };
 
     let result = sqlx::query(
         "UPDATE bookings
@@ -1006,7 +1126,12 @@ pub async fn modify_reservation_idempotent(
 /// gì thay thế trần cũ, nên một lỗi gõ năm (`2036` thay vì `2026`) tạo ra một
 /// đặt phòng khoảng 3650 đêm, khoá phòng đó cả thập kỷ trong `room_calendar`.
 /// Đây là khôi phục lại trần cũ, không phải đặt ra chính sách mới.
-const MAX_RESERVATION_NIGHTS: i64 = 90;
+///
+/// `pub` vì tầng dựng thẻ của trợ lý (`agent::assistant::draft`) kiểm lại đúng
+/// trần này **trước** khi dựng thẻ đặt phòng, để lễ tân không bấm *Đồng ý* cho
+/// một cái thẻ mà lệnh chắc chắn sẽ từ chối. Hai chỗ đọc **cùng một** hằng số:
+/// chép tay con số 90 sang bên kia là dựng ra hai chính sách trôi độc lập.
+pub const MAX_RESERVATION_NIGHTS: i64 = 90;
 
 fn validate_requested_nights(
     check_in_date: &str,
@@ -1035,6 +1160,86 @@ fn validate_requested_nights(
     }
 
     Ok(derived_nights as i32)
+}
+
+/// Chặn giá tay ngoài biên NGAY TẠI ĐÂY, trước khi bất cứ phép nhân nào
+/// (`checked_mul_money`) có cơ hội chạy trên một `rate` chưa kiểm biên — nếu
+/// không, `checked_mul_money` có thể ăn một giá trị tràn số / không an toàn
+/// và trả thẳng ra người dùng một thông báo TIẾNG ANH (qua command error
+/// mapper), hoặc — với giá âm — để lọt xuống guard cọc-vượt-tổng, nơi đọc
+/// nhầm một tổng âm ra như một mức giá. Cùng thứ tự với `set_booking_rate_tx`
+/// và `validate_check_in_request` ở `stay_lifecycle.rs`: biên trước, phép
+/// nhân sau. Đây là finding Important của review Task 13, không được lặp lại.
+///
+/// Guard cọc-vượt-tổng KHÔNG nằm ở đây: ở đây (chưa mở transaction, chưa gọi
+/// engine) chỉ biết được tổng tiền khi có giá tay, nên không thể chặn đường
+/// không-override — guard đó nằm trong `create_reservation_tx`, sau khi
+/// `total_price` đã biết ở CẢ hai nhánh.
+fn validate_reservation_rate_override(
+    rate_override_per_night: Option<MoneyVnd>,
+) -> BookingResult<()> {
+    if let Some(rate) = rate_override_per_night {
+        if rate <= 0 || rate > MAX_RATE_PER_NIGHT_VND {
+            return Err(BookingError::validation(
+                "Giá mỗi đêm không hợp lệ".to_string(),
+            ));
+        }
+    }
+
+    Ok(())
+}
+
+/// Đọc lại giá tay đã chốt lúc `create_reservation_tx` ghi
+/// `pricing_snapshot.manual_rate.rate_per_night` (Task 14), để
+/// `confirm_reservation_tx`/`modify_reservation_tx` áp lại đúng giá đó lên số
+/// đêm MỚI của thao tác, thay vì âm thầm hỏi lại pricing engine — đó chính là
+/// lỗi đang được vá (giá tay "biến mất" ngay khi khách nhận phòng/khi đổi
+/// ngày).
+///
+/// `rate_overridden_at` là cột NGUỒN CHÂN LÝ cho "booking này có đang bị chốt
+/// giá tay hay không" — `None` nghĩa là chưa từng override, trả `Ok(None)` để
+/// gọi vào giữ nguyên đường engine như hôm nay.
+///
+/// `rate_overridden_at.is_some()` mà không đọc lại được một `rate_per_night`
+/// hợp lệ từ `pricing_snapshot` (thiếu cột, JSON hỏng, thiếu khoá
+/// `manual_rate`, `rate_per_night` không phải số nguyên, hoặc giá trị đọc lại
+/// nằm ngoài biên `MAX_RATE_PER_NIGHT_VND`) là một HÀNG DỮ LIỆU KHÔNG NHẤT
+/// QUÁN: cột đánh dấu "đã chốt giá tay" nhưng giá tay không đọc lại được an
+/// toàn. Âm thầm rơi về giá engine ở đây tái tạo NGUYÊN VĂN lỗi đang vá, nên
+/// thay vào đó hàm trả lỗi hệ thống và chặn hẳn thao tác — booking giữ nguyên
+/// trạng thái hiện tại (transaction rollback), còn hơn là âm thầm tính sai
+/// tiền khách. `MAX_RATE_PER_NIGHT_VND` có thể đổi theo thời gian, và giá trị
+/// này tới từ một cột JSON tự do, không phải input vừa được validate — nên
+/// phải kiểm lại biên, không kế thừa phép kiểm đã chạy lúc ghi.
+fn resolve_manual_rate_per_night(
+    booking_id: &str,
+    rate_overridden_at: Option<&str>,
+    pricing_snapshot: Option<&str>,
+) -> BookingResult<Option<MoneyVnd>> {
+    if rate_overridden_at.is_none() {
+        return Ok(None);
+    }
+
+    let inconsistent_row = || {
+        BookingError::database(format!(
+            "booking {booking_id} có rate_overridden_at nhưng không đọc lại được giá tay hợp lệ từ pricing_snapshot.manual_rate.rate_per_night — dữ liệu không nhất quán, từ chối tính tiền để tránh tính sai"
+        ))
+    };
+
+    let snapshot = pricing_snapshot.ok_or_else(inconsistent_row)?;
+    let parsed: serde_json::Value =
+        serde_json::from_str(snapshot).map_err(|_| inconsistent_row())?;
+    let rate = parsed
+        .get("manual_rate")
+        .and_then(|manual_rate| manual_rate.get("rate_per_night"))
+        .and_then(serde_json::Value::as_i64)
+        .ok_or_else(inconsistent_row)?;
+
+    if rate <= 0 || rate > MAX_RATE_PER_NIGHT_VND {
+        return Err(inconsistent_row());
+    }
+
+    Ok(Some(rate))
 }
 
 async fn insert_booked_calendar_rows(
@@ -1071,7 +1276,8 @@ async fn load_booked_reservation(
     booking_id: &str,
 ) -> BookingResult<BookedReservation> {
     let row = sqlx::query(
-        "SELECT room_id, status, paid_amount, scheduled_checkout, pricing_type, guests
+        "SELECT room_id, status, paid_amount, scheduled_checkout, pricing_type, guests,
+                rate_overridden_at, pricing_snapshot
          FROM bookings
          WHERE id = ?",
     )
@@ -1102,6 +1308,8 @@ async fn load_booked_reservation(
             .get::<Option<String>, _>("pricing_type")
             .unwrap_or_else(|| "nightly".to_string()),
         guests: row.get("guests"),
+        rate_overridden_at: row.get("rate_overridden_at"),
+        pricing_snapshot: row.get("pricing_snapshot"),
     })
 }
 
@@ -1133,6 +1341,15 @@ struct BookedReservation {
     scheduled_checkout: String,
     pricing_type: String,
     guests: Option<i32>,
+    /// Xem `Booking::rate_overridden_at`. `Some` nghĩa là giá đã bị lễ tân đè
+    /// tay lúc tạo đặt trước (Task 14) — `confirm_reservation_tx` và
+    /// `modify_reservation_tx` phải áp lại giá này lên số đêm MỚI của chính
+    /// thao tác đó, không được hỏi lại pricing engine.
+    rate_overridden_at: Option<String>,
+    /// Cột JSON dùng chung của booking (`checkout_settlement`, `room_stays`,
+    /// `manual_rate`, ...). `resolve_manual_rate_per_night` chỉ đọc khoá
+    /// `manual_rate.rate_per_night` từ đây; không ghi.
+    pricing_snapshot: Option<String>,
 }
 
 fn parse_date(value: &str) -> BookingResult<NaiveDate> {
@@ -1142,8 +1359,90 @@ fn parse_date(value: &str) -> BookingResult<NaiveDate> {
 
 #[cfg(test)]
 mod tests {
-    use super::mark_write_db_error;
+    use super::{mark_write_db_error, resolve_manual_rate_per_night, MAX_RATE_PER_NIGHT_VND};
     use crate::domain::booking::BookingError;
+
+    /// Toàn bộ battery `manual_rate_*_rejects_*` (Task 14) chỉ phủ đường
+    /// INPUT — giá tay gõ lúc tạo/sửa đặt phòng. Hàm này là đường ĐỌC LẠI:
+    /// nó lấy `rate_per_night` từ `pricing_snapshot`, một cột JSON tự do
+    /// không đi qua validate ở input nữa (`confirm_reservation_tx` /
+    /// `modify_reservation_tx` gọi lại nó mỗi lần tính giá). Hai reviewer độc
+    /// lập cùng xoá dòng `if rate <= 0 || rate > MAX_RATE_PER_NIGHT_VND` và
+    /// 1406/1406 test vẫn xanh — nghĩa là hàng rào RE-CHECK này, dù có mặt
+    /// trong code, không có bằng chứng tự động nào chứng minh nó còn ở đó.
+    fn snapshot_with_rate(rate: i64) -> String {
+        serde_json::json!({ "manual_rate": { "rate_per_night": rate } }).to_string()
+    }
+
+    #[test]
+    fn resolve_manual_rate_per_night_returns_none_when_never_overridden() {
+        let resolved =
+            resolve_manual_rate_per_night("B1", None, None).expect("no override, no error");
+
+        assert_eq!(resolved, None);
+    }
+
+    #[test]
+    fn resolve_manual_rate_per_night_returns_the_stored_rate_when_valid() {
+        let snapshot = snapshot_with_rate(700_000);
+
+        let resolved =
+            resolve_manual_rate_per_night("B1", Some("2026-04-01T00:00:00+07:00"), Some(&snapshot))
+                .expect("a valid in-range rate must resolve");
+
+        assert_eq!(resolved, Some(700_000));
+    }
+
+    #[test]
+    fn resolve_manual_rate_per_night_rejects_a_zero_rate_read_back_from_the_snapshot() {
+        let snapshot = snapshot_with_rate(0);
+
+        let error =
+            resolve_manual_rate_per_night("B1", Some("2026-04-01T00:00:00+07:00"), Some(&snapshot))
+                .expect_err(
+                    "0đ/đêm đọc lại từ snapshot phải bị từ chối, không phải phòng miễn phí",
+                );
+
+        assert!(matches!(error, BookingError::Database(_)));
+    }
+
+    #[test]
+    fn resolve_manual_rate_per_night_rejects_a_negative_rate_read_back_from_the_snapshot() {
+        let snapshot = snapshot_with_rate(-500_000);
+
+        let error =
+            resolve_manual_rate_per_night("B1", Some("2026-04-01T00:00:00+07:00"), Some(&snapshot))
+                .expect_err("giá âm đọc lại từ snapshot phải bị từ chối");
+
+        assert!(matches!(error, BookingError::Database(_)));
+    }
+
+    #[test]
+    fn resolve_manual_rate_per_night_rejects_a_rate_above_the_cap_read_back_from_the_snapshot() {
+        let snapshot = snapshot_with_rate(MAX_RATE_PER_NIGHT_VND + 1);
+
+        let error =
+            resolve_manual_rate_per_night("B1", Some("2026-04-01T00:00:00+07:00"), Some(&snapshot))
+                .expect_err(
+                    "giá vượt trần đọc lại từ snapshot phải bị từ chối, kể cả khi input lúc \
+                     ghi từng hợp lệ (trần có thể đã bị hạ sau đó)",
+                );
+
+        assert!(matches!(error, BookingError::Database(_)));
+    }
+
+    /// Biên dương: đúng bằng trần phải QUA — chứng minh phép so là `>`, không
+    /// phải `>=`.
+    #[test]
+    fn resolve_manual_rate_per_night_accepts_a_rate_exactly_at_the_cap() {
+        let snapshot = snapshot_with_rate(MAX_RATE_PER_NIGHT_VND);
+
+        let resolved =
+            resolve_manual_rate_per_night("B1", Some("2026-04-01T00:00:00+07:00"), Some(&snapshot))
+                .expect("a rate exactly at the cap must resolve, not error");
+
+        assert_eq!(resolved, Some(MAX_RATE_PER_NIGHT_VND));
+    }
 
     #[test]
     fn mark_write_db_error_promotes_database_errors_but_preserves_missing_record() {

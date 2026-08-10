@@ -38,6 +38,7 @@ pub async fn load_booking_export_rows(
                 b.total_price, b.paid_amount, b.status, b.source
          FROM bookings b
          JOIN guests g ON g.id = b.primary_guest_id
+         WHERE b.status != 'voided'
          ORDER BY b.check_in_at DESC",
     )
     .fetch_all(pool)

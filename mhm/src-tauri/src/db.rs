@@ -145,7 +145,67 @@ async fn ensure_setting_default(
 /// Schema version a database reaches after `run_migrations` finishes on this
 /// build. Bump this together with every new migration block below; the
 /// `migrations_run_to_latest_schema_version` test fails otherwise.
-pub(crate) const LATEST_SCHEMA_VERSION: i32 = 22;
+///
+/// 23 and 24 are deliberately skipped, not free: 23 belongs to
+/// `design/kbtt-ux-simplify` (`migrate_v23_stay_snapshot`) and has already
+/// shipped to the hotel's machine, 24 was claimed briefly by
+/// `feat/room-drawer-stay-edits` (`migrate_v24_booking_rate_override`, see its
+/// commit 4c5c1c3, which renumbered away from this same collision). Reusing a
+/// number another branch already shipped is silent and fatal: the gate
+/// `current < N` is false on a database already at N, so the migration never
+/// runs and every query touching the new column dies at runtime. Before
+/// claiming the next number, survey every ref — `git for-each-ref` +
+/// `git show <ref>:mhm/src-tauri/src/db.rs | grep LATEST_SCHEMA_VERSION` — and
+/// read the live database, not the brief. Gaps are harmless; collisions are not.
+///
+/// **The same trap bites backwards, and that is the easier half to miss.** A
+/// branch written earlier and merged later is just as broken: once a build
+/// ships and the hotel's database reads 25, a branch still sitting at 24 has a
+/// gate `current < 24` that can never fire again, so its
+/// `bookings.rate_overridden_at` would never be created. Picking a number
+/// higher than every *branch* is not enough; it must also be higher than
+/// whatever the live database has already reached by the time you merge. So the
+/// survey is not a one-off at the start of the work: re-run it immediately
+/// before merging, and if the shipped version has moved past yours, renumber
+/// above it. Nothing warns you — the app simply starts up and fails on the
+/// first query that touches the missing column.
+///
+/// Trạng thái sau khi merge `feat/room-drawer-stay-edits` vào main: 25 là
+/// `migrate_v25_invoice_settlement_note` (đến từ main), 26 là
+/// `migrate_v26_booking_rate_override` (đến từ nhánh này, đã dời khỏi 24 ở
+/// commit 009bc07). 26 nằm trên mọi số đã phát hành, kể cả 25 mà máy thật đang
+/// đọc, nên cổng `current < 26` vẫn nổ đúng một lần trên DB của khách sạn.
+///   sqlite3 "file:$HOME/CapyInn/capyinn.db?immutable=1" "SELECT MAX(version) FROM schema_version"
+///
+/// 27 là `migrate_v27_assistant_conversations` (nhánh
+/// `feat/assistant-ui-airtable`). Khảo sát lúc chốt số ngày 2026-08-04: mọi ref
+/// đều ở 26 và DB thật của khách sạn cũng 26. Đó là ảnh chụp tại thời điểm đó,
+/// KHÔNG phải giấy thông hành — người merge nhánh này PHẢI chạy lại khảo sát
+/// ngay trước khi merge. Lúc chốt số vẫn còn nhánh anh em đang sống cũng ở 26,
+/// nên hoàn toàn có thể một nhánh khác chiếm mất 27 trước, và va chạm đó im
+/// lặng: canary chạy trên DB rỗng nên vẫn xanh, chỉ máy khách sạn mới chết.
+///
+/// 28 là `migrate_v28_booking_void` (nhánh `feat/void-booking-and-manual-rate`,
+/// task 1 — dấu vết xoá một lượt nhập sai trên booking). Khảo sát lúc chốt số
+/// ngày 2026-08-07: mọi ref đều ở 27 và DB thật của khách sạn cũng 27. Đó là
+/// ảnh chụp tại thời điểm đó, KHÔNG phải giấy thông hành — người merge nhánh
+/// này PHẢI chạy lại khảo sát ngay trước khi merge. Lúc chốt số vẫn còn nhánh
+/// anh em đang sống cũng ở 27 (ví dụ `feat/assistant-rail`,
+/// `feat/assistant-stay-dates`), nên hoàn toàn có thể một nhánh khác chiếm mất
+/// 28 trước, và va chạm đó im lặng: canary chạy trên DB rỗng nên vẫn xanh, chỉ
+/// máy khách sạn mới chết.
+///
+/// 29 là `migrate_v29_drop_cleaning_room_status` (nhánh
+/// `feat/bo-housekeeping-va-timeline-ux`, task 1 — đưa phòng `cleaning` về
+/// `vacant` khi housekeeping được gỡ). Khảo sát lúc chốt số ngày 2026-08-09:
+/// gốc của nhánh này ở 28, DB thật của khách sạn cũng 28; `origin/main` lúc
+/// đó còn tụt lại ở 27. Chọn theo số cao nhất trong ba — 28 — nên 29 là số
+/// đúng. Đó là ảnh chụp tại thời điểm đó, KHÔNG phải giấy thông hành — người
+/// merge nhánh này PHẢI chạy lại khảo sát ngay trước khi merge:
+/// `git grep -n set_schema_version` trên mọi ref để xác nhận chưa nhánh anh
+/// em nào chiếm mất 29 trước. Va chạm đó im lặng — canary chạy trên DB rỗng
+/// nên vẫn xanh, chỉ máy khách sạn mới chết.
+pub(crate) const LATEST_SCHEMA_VERSION: i32 = 29;
 
 async fn get_schema_version(pool: &Pool<Sqlite>) -> Result<i32, sqlx::Error> {
     sqlx::query(
@@ -320,6 +380,41 @@ pub(crate) async fn run_migrations(pool: &Pool<Sqlite>) -> Result<(), sqlx::Erro
     // -- V22: số khách trên booking, để tính phụ thu thêm người --
     if current < 22 {
         core_extensions::migrate_v22_booking_guest_count(pool).await?;
+    }
+
+    // -- V25: lời quyết toán in được cho khách, tách khỏi ghi chú nội bộ --
+    // (23 đã bị nhánh kbtt chiếm và đã chạy trên máy thật, 24 là của nhánh
+    //  room-drawer — xem chú thích ở LATEST_SCHEMA_VERSION)
+    if current < 25 {
+        core_extensions::migrate_v25_invoice_settlement_note(pool).await?;
+    }
+
+    // -- V26: dấu thời gian đổi giá thủ công trên booking --
+    // Phải đứng SAU gate V25: mỗi migration tự `set_schema_version` số của
+    // mình, nên chạy 26 trước 25 sẽ kéo phiên bản tụt lại về 25.
+    if current < 26 {
+        core_extensions::migrate_v26_booking_rate_override(pool).await?;
+    }
+
+    // -- V27: sổ hội thoại của trợ lý quầy --
+    // Phải đứng SAU gate V26: mỗi migration tự `set_schema_version` số của
+    // mình, nên chạy 27 trước 26 sẽ kéo phiên bản tụt lại về 26.
+    if current < 27 {
+        core_extensions::migrate_v27_assistant_conversations(pool).await?;
+    }
+
+    // -- V28: dấu vết xoá lượt nhập sai trên booking --
+    // Phải đứng SAU gate V27: mỗi migration tự `set_schema_version` số của
+    // mình, nên chạy 28 trước 27 sẽ kéo phiên bản tụt lại về 27.
+    if current < 28 {
+        core_extensions::migrate_v28_booking_void(pool).await?;
+    }
+
+    // -- V29: bỏ trạng thái phòng `cleaning` --
+    // Phải đứng SAU gate V28: mỗi migration tự `set_schema_version` số của
+    // mình, nên chạy 29 trước 28 sẽ kéo phiên bản tụt lại về 28.
+    if current < 29 {
+        core_extensions::migrate_v29_drop_cleaning_room_status(pool).await?;
     }
     Ok(())
 }
@@ -814,6 +909,22 @@ mod tests {
             .await
             .expect("creates legacy bookings table");
 
+        // Same reason, for v29's migration: a real database sitting at v10+ went
+        // through v1, so it already has `rooms`. This fixture jumps straight past
+        // v1, so it has to stand the table up itself.
+        sqlx::query("CREATE TABLE rooms (id TEXT PRIMARY KEY, status TEXT)")
+            .execute(pool)
+            .await
+            .expect("creates legacy rooms table");
+
+        // Same reason, for v23's ALTER: a real database sitting at v10 or v11
+        // went through v8, so it already has `invoices`. This fixture jumps
+        // straight past v8, so it has to stand the table up itself.
+        sqlx::query("CREATE TABLE invoices (id TEXT PRIMARY KEY)")
+            .execute(pool)
+            .await
+            .expect("creates legacy invoices table");
+
         sqlx::query(
             "CREATE TABLE transactions (
                 id          TEXT PRIMARY KEY,
@@ -872,7 +983,7 @@ mod tests {
             .await
             .expect("reads final schema version");
 
-        assert_eq!(version, 22);
+        assert_eq!(version, 29);
 
         assert_table_group_exists(&pool, "PMS core", PMS_CORE_TABLES).await;
         assert_table_group_exists(&pool, "command safety", COMMAND_SAFETY_TABLES).await;
@@ -893,7 +1004,7 @@ mod tests {
             .expect("reads version")
             .get("version");
 
-        assert_eq!(version, 22);
+        assert_eq!(version, 29);
         assert_money_columns_are_integer(&pool).await;
     }
 
@@ -1181,7 +1292,7 @@ mod tests {
             .expect("reads final schema version")
             .get("version");
 
-        assert_eq!(version, 22);
+        assert_eq!(version, 29);
     }
 
     #[tokio::test]
@@ -1248,7 +1359,7 @@ mod tests {
             .expect("reads final schema version")
             .get("version");
 
-        assert_eq!(version, 22);
+        assert_eq!(version, 29);
     }
 
     #[tokio::test]
@@ -1328,7 +1439,7 @@ mod tests {
         );
 
         let version = get_schema_version(&pool).await.expect("schema version");
-        assert_eq!(version, 22);
+        assert_eq!(version, 29);
     }
 
     #[tokio::test]
@@ -1368,7 +1479,7 @@ mod tests {
 
         assert_outbox_shape(&pool).await;
         let version = get_schema_version(&pool).await.expect("schema version");
-        assert_eq!(version, 22);
+        assert_eq!(version, 29);
     }
 
     #[tokio::test]
@@ -1386,7 +1497,7 @@ mod tests {
 
         assert_outbox_shape(&pool).await;
         let version = get_schema_version(&pool).await.expect("schema version");
-        assert_eq!(version, 22);
+        assert_eq!(version, 29);
     }
 
     #[tokio::test]
@@ -1416,7 +1527,7 @@ mod tests {
             1
         );
         let version = get_schema_version(&pool).await.expect("schema version");
-        assert_eq!(version, 22);
+        assert_eq!(version, 29);
     }
 
     #[tokio::test]
@@ -1429,7 +1540,7 @@ mod tests {
 
         assert_agent_safety_shape(&pool).await;
         let version = get_schema_version(&pool).await.expect("schema version");
-        assert_eq!(version, 22);
+        assert_eq!(version, 29);
     }
 
     #[tokio::test]
@@ -1438,6 +1549,107 @@ mod tests {
         run_migrations(&pool).await.expect("runs migrations");
 
         assert_agent_digest_runs_shape(&pool).await;
+    }
+
+    /// The decisive migration test, modelled on
+    /// `migration_v24_alter_actually_runs_on_a_genuinely_pre_v24_database`
+    /// (commit 4c5c1c3, which renumbered away from this same collision).
+    ///
+    /// Rewinding `schema_version` while the column is still present proves
+    /// nothing: the replayed ALTER lands in `execute_compat_alter`'s
+    /// duplicate-column swallow and the assertion passes on the column the
+    /// FIRST run created. It stays green even when the gate never fires —
+    /// exactly the production failure this branch shipped, where the hotel's
+    /// database was already at 23 (claimed by another branch), `current < 23`
+    /// was false, `settlement_note` was never created, and the first
+    /// `generate_invoice` died on `no such column`.
+    ///
+    /// So: DROP the column to build a database that has genuinely never seen
+    /// this migration, rewind to the true predecessor, and require the real
+    /// ALTER path to put it back.
+    #[tokio::test]
+    async fn migration_v25_alter_actually_runs_on_a_genuinely_pre_v25_database() {
+        let pool = SqlitePool::connect("sqlite::memory:")
+            .await
+            .expect("connects in-memory sqlite");
+        run_migrations(&pool)
+            .await
+            .expect("runs migrations to latest");
+
+        sqlx::query("ALTER TABLE invoices DROP COLUMN settlement_note")
+            .execute(&pool)
+            .await
+            .expect("drops settlement_note to simulate a pre-v25 database");
+        assert_eq!(
+            invoices_settlement_note_column_count(&pool).await,
+            0,
+            "tiền đề của test: DB phải thật sự chưa có cột settlement_note"
+        );
+
+        // 24 is the true predecessor — the highest number claimed by any other
+        // branch. A database sitting at 23 or 24 must still be upgraded.
+        sqlx::query("UPDATE schema_version SET version = 24")
+            .execute(&pool)
+            .await
+            .expect("rewinds schema version to a genuinely pre-v25 state");
+
+        run_migrations(&pool)
+            .await
+            .expect("v25 migration adds the column back via a real ALTER TABLE");
+
+        assert_eq!(
+            invoices_settlement_note_column_count(&pool).await,
+            1,
+            "ALTER TABLE thật phải chạy và tạo lại cột settlement_note"
+        );
+
+        // Replaying must be a no-op, not a half-applied upgrade that dies on
+        // the hotel's database: `execute_compat_alter` swallows the
+        // duplicate-column error the second ALTER would raise.
+        run_migrations(&pool)
+            .await
+            .expect("v25 migration is idempotent");
+        assert_eq!(invoices_settlement_note_column_count(&pool).await, 1);
+
+        let version = get_schema_version(&pool).await.expect("schema version");
+        assert_eq!(version, 29);
+    }
+
+    /// A database still sitting at kbtt's 23 — the version the hotel's machine
+    /// actually reports — must be carried all the way to the latest version,
+    /// not stall because some intermediate number was skipped.
+    #[tokio::test]
+    async fn migration_v25_upgrades_a_database_left_at_the_shipped_v23() {
+        let pool = SqlitePool::connect("sqlite::memory:")
+            .await
+            .expect("connects in-memory sqlite");
+        run_migrations(&pool)
+            .await
+            .expect("runs migrations to latest");
+
+        sqlx::query("ALTER TABLE invoices DROP COLUMN settlement_note")
+            .execute(&pool)
+            .await
+            .expect("drops settlement_note");
+        sqlx::query("UPDATE schema_version SET version = 23")
+            .execute(&pool)
+            .await
+            .expect("rewinds to the version the live database reports");
+
+        run_migrations(&pool).await.expect("v25 runs from v23");
+
+        assert_eq!(invoices_settlement_note_column_count(&pool).await, 1);
+        let version = get_schema_version(&pool).await.expect("schema version");
+        assert_eq!(version, 29);
+    }
+
+    async fn invoices_settlement_note_column_count(pool: &SqlitePool) -> i64 {
+        sqlx::query_scalar(
+            "SELECT COUNT(*) FROM pragma_table_info('invoices') WHERE name = 'settlement_note'",
+        )
+        .fetch_one(pool)
+        .await
+        .expect("reads invoices columns")
     }
 
     #[tokio::test]
@@ -1462,7 +1674,7 @@ mod tests {
 
         assert_agent_digest_runs_shape(&pool).await;
         let version = get_schema_version(&pool).await.expect("schema version");
-        assert_eq!(version, 22);
+        assert_eq!(version, 29);
     }
 
     #[tokio::test]
@@ -1486,7 +1698,159 @@ mod tests {
 
         assert_agent_safety_shape(&pool).await;
         let version = get_schema_version(&pool).await.expect("schema version");
-        assert_eq!(version, 22);
+        assert_eq!(version, 29);
+    }
+
+    #[tokio::test]
+    async fn migration_v26_leaves_existing_bookings_with_a_null_rate_override() {
+        let pool = SqlitePool::connect("sqlite::memory:")
+            .await
+            .expect("connects in-memory sqlite");
+        // Chạy migrations đầy đủ trước, giống DB thật ở thời điểm bản build
+        // này ra mắt, rồi seed một booking như thể nó đã tồn tại từ trước —
+        // KHÔNG set rate_overridden_at, đúng như dữ liệu thật: booking đó
+        // chưa từng được đổi giá thủ công.
+        run_migrations(&pool).await.expect("runs migrations");
+
+        sqlx::query(
+            "INSERT INTO rooms (
+                id, name, type, floor, has_balcony, base_price, max_guests, extra_person_fee, status
+             ) VALUES ('R23', 'Room R23', 'standard', 1, 0, 250000, 2, 0, 'vacant')",
+        )
+        .execute(&pool)
+        .await
+        .expect("seeds room");
+        sqlx::query(
+            "INSERT INTO guests (id, guest_type, full_name, doc_number, created_at)
+             VALUES ('G23', 'domestic', 'Existing Guest', 'DOC23', '2026-04-30T08:00:00+07:00')",
+        )
+        .execute(&pool)
+        .await
+        .expect("seeds guest");
+        sqlx::query(
+            "INSERT INTO bookings (
+                id, room_id, primary_guest_id, check_in_at, expected_checkout,
+                nights, total_price, status, created_at
+             ) VALUES ('B23', 'R23', 'G23', '2026-04-30', '2026-05-01', 1, 250000, 'active', '2026-04-30T08:00:00+07:00')",
+        )
+        .execute(&pool)
+        .await
+        .expect("seeds booking");
+
+        // Giả lập DB thật đang ở v23, chưa từng thấy migration v26 — rồi cho
+        // chạy lại migrations như lúc app khởi động với bản build mới.
+        sqlx::query("UPDATE schema_version SET version = 23")
+            .execute(&pool)
+            .await
+            .expect("rewinds schema version");
+
+        run_migrations(&pool)
+            .await
+            .expect("v26 migration runs against a populated database");
+
+        let rate_overridden_at: Option<String> =
+            sqlx::query_scalar("SELECT rate_overridden_at FROM bookings WHERE id = 'B23'")
+                .fetch_one(&pool)
+                .await
+                .expect("reads rate_overridden_at");
+        assert_eq!(
+            rate_overridden_at, None,
+            "booking có sẵn trước migration không được suy diễn thành đã bị đổi giá tay"
+        );
+
+        let version = get_schema_version(&pool).await.expect("schema version");
+        assert_eq!(version, 29);
+    }
+
+    /// Migration test trên hoạt động bằng cách rewind `schema_version` SAU KHI
+    /// `run_migrations` đã tạo sẵn cột `rate_overridden_at` — nên ALTER TABLE
+    /// ở lần chạy lại luôn đụng "duplicate column" và bị `execute_compat_alter`
+    /// nuốt lỗi. Nó không bao giờ chạy đường ALTER thật, nên không phát hiện
+    /// được lỗi va số hiệu schema_version như production build này từng gặp:
+    /// nếu `migrate_v26_booking_rate_override` không chạy (vì gate sai số,
+    /// hoặc số hiệu 24 đã bị migration khác chiếm mất), test rewind vẫn xanh
+    /// vì cột đã có sẵn từ trước.
+    ///
+    /// Test này dựng một DB thật sự chưa từng thấy cột `rate_overridden_at`
+    /// (DROP COLUMN sau khi migrate lên latest, rồi rewind `schema_version`
+    /// về 23) trước khi seed dữ liệu và chạy lại `run_migrations` — buộc
+    /// `execute_compat_alter` phải đi qua nhánh ALTER thật, không phải nhánh
+    /// nuốt lỗi duplicate-column.
+    #[tokio::test]
+    async fn migration_v26_alter_actually_runs_on_a_genuinely_pre_v26_database() {
+        let pool = SqlitePool::connect("sqlite::memory:")
+            .await
+            .expect("connects in-memory sqlite");
+
+        run_migrations(&pool)
+            .await
+            .expect("runs migrations to latest");
+
+        // Xoá cột mà v26 tạo ra, để mô phỏng trung thực một DB thật sự chưa
+        // từng chạy qua migrate_v26_booking_rate_override — chứ không chỉ
+        // giả vờ bằng cách rewind schema_version trong khi cột vẫn còn đó.
+        sqlx::query("ALTER TABLE bookings DROP COLUMN rate_overridden_at")
+            .execute(&pool)
+            .await
+            .expect("drops rate_overridden_at to simulate a pre-v26 database");
+
+        sqlx::query(
+            "INSERT INTO rooms (
+                id, name, type, floor, has_balcony, base_price, max_guests, extra_person_fee, status
+             ) VALUES ('R24', 'Room R24', 'standard', 1, 0, 250000, 2, 0, 'vacant')",
+        )
+        .execute(&pool)
+        .await
+        .expect("seeds room");
+        sqlx::query(
+            "INSERT INTO guests (id, guest_type, full_name, doc_number, created_at)
+             VALUES ('G24', 'domestic', 'Existing Guest', 'DOC24', '2026-04-30T08:00:00+07:00')",
+        )
+        .execute(&pool)
+        .await
+        .expect("seeds guest");
+        sqlx::query(
+            "INSERT INTO bookings (
+                id, room_id, primary_guest_id, check_in_at, expected_checkout,
+                nights, total_price, status, created_at
+             ) VALUES ('B24', 'R24', 'G24', '2026-04-30', '2026-05-01', 1, 250000, 'active', '2026-04-30T08:00:00+07:00')",
+        )
+        .execute(&pool)
+        .await
+        .expect("seeds booking");
+
+        sqlx::query("UPDATE schema_version SET version = 23")
+            .execute(&pool)
+            .await
+            .expect("rewinds schema version to a genuinely pre-v26 state");
+
+        run_migrations(&pool)
+            .await
+            .expect("v26 migration adds the column back via a real ALTER TABLE");
+
+        let column_count = sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM pragma_table_info('bookings') WHERE name = 'rate_overridden_at'",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("reads pragma_table_info");
+        assert_eq!(
+            column_count, 1,
+            "ALTER TABLE thật phải chạy và tạo lại cột rate_overridden_at"
+        );
+
+        let rate_overridden_at: Option<String> =
+            sqlx::query_scalar("SELECT rate_overridden_at FROM bookings WHERE id = 'B24'")
+                .fetch_one(&pool)
+                .await
+                .expect("reads rate_overridden_at");
+        assert_eq!(
+            rate_overridden_at, None,
+            "cột mới thêm phải backfill NULL cho booking có sẵn, không suy diễn đã đổi giá tay"
+        );
+
+        let version = get_schema_version(&pool).await.expect("schema version");
+        assert_eq!(version, 29);
     }
 
     #[tokio::test]
@@ -1588,5 +1952,241 @@ mod tests {
             .await
             .expect("legacy folio line with NULL origin remains valid");
         }
+    }
+
+    /// Hai bảng hội thoại phải tồn tại sau migration, và xoá hội thoại phải
+    /// kéo tin nhắn con đi theo. Cascade là lối ra duy nhất cho dữ liệu định
+    /// danh khách trong sổ chat — chủ nhà đã chọn không tự xoá.
+    #[tokio::test]
+    async fn v27_creates_conversation_tables_with_working_cascade() {
+        let pool = test_pool().await;
+        run_migrations(&pool).await.expect("chạy migration");
+
+        sqlx::query(
+            "INSERT INTO assistant_conversations (id, user_id, title, created_at, updated_at)
+             VALUES ('c1', 'u1', 'Hỏi phòng trống', '2026-08-04T10:00:00+07:00', '2026-08-04T10:00:00+07:00')",
+        )
+        .execute(&pool)
+        .await
+        .expect("chèn hội thoại");
+
+        sqlx::query(
+            "INSERT INTO assistant_messages (id, conversation_id, kind, text, created_at)
+             VALUES ('m1', 'c1', 'user', 'Tối nay còn phòng nào trống?', '2026-08-04T10:00:00+07:00')",
+        )
+        .execute(&pool)
+        .await
+        .expect("chèn tin nhắn");
+
+        sqlx::query("DELETE FROM assistant_conversations WHERE id = 'c1'")
+            .execute(&pool)
+            .await
+            .expect("xoá hội thoại");
+
+        let remaining: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM assistant_messages WHERE conversation_id = 'c1'",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("đếm tin nhắn còn lại");
+
+        assert_eq!(remaining, 0, "xoá hội thoại phải kéo tin nhắn con đi theo");
+    }
+
+    /// Spec dòng 633. Và spec dòng 252 nói rõ vì sao nó phải là một **test**:
+    /// "bảo đảm **cấu trúc**, không phải bảo đảm bằng kỷ luật".
+    ///
+    /// Kỷ luật ở đây là một câu chú thích trong `migrate_v27_assistant_conversations`
+    /// ("Đừng thêm cột JSON vào đây"). Chú thích không đỏ. Cái nó canh thì đắt:
+    /// `ProposedAction` gồm `{ kind, payload, display, preview, warnings,
+    /// built_at_ms }`, và `approve()` cần **đúng** `action.payload` để bắn
+    /// `check_in`. Chừng nào database không giữ nổi `payload` thì không tồn tại
+    /// đường nào duyệt lại một thẻ nhận phòng từ lịch sử — tiền thật, và không
+    /// dựng lại được từ một hàng chỉ có chữ. Thêm một cột JSON là mở lại đúng
+    /// đường ấy, im lặng; còn hạn 5 phút (`built_at_ms`) thì hiện chỉ được ép ở
+    /// frontend nên nó cũng không chặn hộ.
+    ///
+    /// **Hai khẳng định, cố ý không gộp.**
+    ///
+    /// Khẳng định thứ nhất là tripwire theo TÊN: `payload` và `built_at_ms`
+    /// không được xuất hiện dù dưới hình dạng nào. Nó sống sót cả khi ai đó cập
+    /// nhật danh sách bên dưới — đúng bài học Task 4, nơi một hàng rào bị vô
+    /// hiệu chỉ bằng cách sửa hai chỗ cùng lúc.
+    ///
+    /// Khẳng định thứ hai ghim **toàn bộ** danh sách cột, vì một cột tên
+    /// `action_json` lách được tripwire kia mà vẫn chứa đủ thứ để duyệt lại. Nó
+    /// đỏ với mọi cột mới, kể cả cột vô hại — đó là chủ ý: thêm cột vào hai bảng
+    /// này phải là một quyết định có người đọc, không phải một dòng đi lọt trong
+    /// một migration khác.
+    #[tokio::test]
+    async fn v27_tables_have_no_column_that_could_hold_a_replayable_action() {
+        let pool = test_pool().await;
+        run_migrations(&pool).await.expect("chạy migration");
+
+        for (table, expected) in [
+            (
+                "assistant_conversations",
+                ["id", "user_id", "title", "created_at", "updated_at"].as_slice(),
+            ),
+            (
+                "assistant_messages",
+                ["id", "conversation_id", "kind", "text", "created_at"].as_slice(),
+            ),
+        ] {
+            let columns: Vec<String> = sqlx::query_scalar::<_, String>(&format!(
+                "SELECT name FROM pragma_table_info('{table}') ORDER BY cid"
+            ))
+            .fetch_all(&pool)
+            .await
+            .expect("đọc pragma_table_info");
+
+            assert!(
+                !columns.is_empty(),
+                "bảng `{table}` không tồn tại sau migration — `pragma_table_info` \
+                 trả RỖNG cho một bảng không có, nên hai khẳng định dưới đây sẽ \
+                 xanh giả nếu không chặn ở đây"
+            );
+
+            for column in &columns {
+                let lowered = column.to_lowercase();
+                assert!(
+                    !lowered.contains("payload") && !lowered.contains("built_at_ms"),
+                    "`{table}.{column}` giữ được dữ liệu để DUYỆT LẠI một thẻ \
+                     nhận phòng từ lịch sử. Bảng này cố ý không chứa nổi \
+                     `payload`/`built_at_ms` (spec dòng 246-252); mở lại đường ấy \
+                     là mở lại một lệnh nhận phòng thật, tiền thật, từ một bản \
+                     ghi cũ"
+                );
+            }
+
+            assert_eq!(
+                columns, expected,
+                "cột của `{table}` vừa đổi. Đây không phải chỗ sed cho xanh: hai \
+                 bảng này chỉ được giữ CHỮ. Muốn thêm cột thì đọc lại spec dòng \
+                 246-252 trước, rồi mới sửa danh sách này"
+            );
+        }
+    }
+
+    /// Cùng lý do với test v26 phía trên: rewind `schema_version` mà cột vẫn
+    /// còn thì `execute_compat_alter` nuốt lỗi duplicate-column và không bao
+    /// giờ đi qua nhánh ALTER thật. DROP COLUMN trước để buộc nó phải chạy.
+    #[tokio::test]
+    async fn migration_v28_alter_actually_runs_on_a_genuinely_pre_v28_database() {
+        let pool = SqlitePool::connect("sqlite::memory:")
+            .await
+            .expect("connects in-memory sqlite");
+
+        run_migrations(&pool)
+            .await
+            .expect("runs migrations to latest");
+
+        for column in ["voided_at", "voided_by", "void_reason"] {
+            sqlx::query(&format!("ALTER TABLE bookings DROP COLUMN {column}"))
+                .execute(&pool)
+                .await
+                .unwrap_or_else(|error| panic!("drops {column}: {error}"));
+        }
+
+        sqlx::query("UPDATE schema_version SET version = 27")
+            .execute(&pool)
+            .await
+            .expect("rewinds schema_version to 27");
+
+        run_migrations(&pool)
+            .await
+            .expect("re-runs migrations from a genuinely pre-v28 database");
+
+        let version = get_schema_version(&pool)
+            .await
+            .expect("reads schema version");
+        assert_eq!(version, super::LATEST_SCHEMA_VERSION);
+
+        for column in ["voided_at", "voided_by", "void_reason"] {
+            let exists: i64 = sqlx::query_scalar(
+                "SELECT COUNT(*) FROM pragma_table_info('bookings') WHERE name = ?",
+            )
+            .bind(column)
+            .fetch_one(&pool)
+            .await
+            .unwrap_or_else(|error| panic!("reads pragma for {column}: {error}"));
+            assert_eq!(exists, 1, "migration v28 must create column {column}");
+        }
+    }
+
+    #[tokio::test]
+    async fn v29_moves_rooms_left_at_cleaning_to_vacant() {
+        let pool = connect_configured_sqlite_pool("sqlite::memory:")
+            .await
+            .expect("connects configured in-memory sqlite pool");
+        run_migrations(&pool).await.expect("runs migrations");
+
+        // Một bản cũ đã để phòng này ở `cleaning` trước khi housekeeping bị gỡ.
+        sqlx::query(
+            "INSERT INTO rooms (id, name, type, floor, has_balcony, base_price, status)
+             VALUES ('V29-DIRTY', 'V29-DIRTY', 'standard', 1, 0, 300000, 'cleaning')",
+        )
+        .execute(&pool)
+        .await
+        .expect("seeds a room left at cleaning");
+
+        super::core_extensions::migrate_v29_drop_cleaning_room_status(&pool)
+            .await
+            .expect("v29 runs");
+
+        let status: String = sqlx::query_scalar("SELECT status FROM rooms WHERE id = 'V29-DIRTY'")
+            .fetch_one(&pool)
+            .await
+            .expect("reads room status");
+        assert_eq!(status, "vacant");
+        assert_eq!(get_schema_version(&pool).await.expect("reads version"), 29);
+    }
+
+    /// Test ở trên gọi thẳng `migrate_v29_drop_cleaning_room_status`, bỏ qua
+    /// cổng `if current < 29` trong `run_migrations`. Nó không ghim được giá
+    /// trị `29` viết trong cổng đó — nếu ai đó lỡ đổi thành `if current < 28`,
+    /// test kia vẫn xanh vì nó xuất phát từ `current = 0` (mọi migration đều
+    /// chạy). Trên DB thật của khách sạn đang đứng ở 28, `28 < 28` là false,
+    /// v29 không bao giờ chạy, và phòng kẹt vĩnh viễn ở `cleaning`. Test này
+    /// đi QUA CỔNG thật, từ một database đứng đúng ở 28 — giống hệt máy khách
+    /// sạn — để cổng đó phải tự chứng minh nó đúng, không phải bị bỏ qua.
+    #[tokio::test]
+    async fn v29_room_stuck_at_cleaning_is_vacated_through_the_run_migrations_gate() {
+        let pool = SqlitePool::connect("sqlite::memory:")
+            .await
+            .expect("connects in-memory sqlite");
+        run_migrations(&pool)
+            .await
+            .expect("runs migrations to latest");
+
+        // Một bản cũ đã để phòng này ở `cleaning` trước khi housekeeping bị
+        // gỡ, và cơ sở dữ liệu khi đó đứng ở 28 — chưa từng chạy qua v29.
+        sqlx::query(
+            "INSERT INTO rooms (id, name, type, floor, has_balcony, base_price, status)
+             VALUES ('V29-GATE', 'V29-GATE', 'standard', 1, 0, 300000, 'cleaning')",
+        )
+        .execute(&pool)
+        .await
+        .expect("seeds a room left at cleaning");
+
+        sqlx::query("UPDATE schema_version SET version = 28")
+            .execute(&pool)
+            .await
+            .expect("rewinds schema_version to a genuinely pre-v29 state");
+
+        run_migrations(&pool)
+            .await
+            .expect("run_migrations gate must fire v29 from a real v28 database");
+
+        let status: String = sqlx::query_scalar("SELECT status FROM rooms WHERE id = 'V29-GATE'")
+            .fetch_one(&pool)
+            .await
+            .expect("reads room status");
+        assert_eq!(
+            status, "vacant",
+            "cổng `if current < 29` phải tự nổ trên DB đứng ở 28, không chỉ \
+             khi gọi migration trực tiếp"
+        );
+        assert_eq!(get_schema_version(&pool).await.expect("reads version"), 29);
     }
 }

@@ -14,7 +14,6 @@ const FRONTEND_SRC_ROOT = join(process.cwd(), "src");
 const PMS_WRITE_COMMANDS_REQUIRING_WRAPPER = new Set([
   "save_pricing_rule",
   "save_settings",
-  "update_housekeeping",
 ]);
 
 const RAW_INVOKE_ALLOWED_COMMANDS: Record<string, string> = {
@@ -39,11 +38,11 @@ const RAW_INVOKE_ALLOWED_COMMANDS: Record<string, string> = {
   get_expenses: "read-only expense lookup",
   get_experimental_runtime_status: "runtime profile read used to hide experimental surfaces",
   get_guest_history: "read-only guest history lookup",
-  get_housekeeping_tasks: "read-only housekeeping task lookup",
   get_invoice: "read-only invoice lookup checked before falling back to generate_invoice",
   get_pending_crash_report: "diagnostics recovery read",
   get_pricing_rules: "read-only pricing rules lookup",
   get_recent_activity: "read-only activity feed lookup",
+  get_room_change_options: "read-only room change move options lookup",
   get_room_detail: "read-only room detail lookup",
   get_room_types: "read-only room type lookup",
   get_room_type_rates: "read-only listed nightly rate per room type",
@@ -223,7 +222,7 @@ describe("frontend invoke wrapper guardrails", () => {
 
       invoke<Result<Foo>>("save_pricing_rule");
       tauriInvoke("save_settings");
-      tauriCore.invoke(\`update_housekeeping\`);
+      tauriCore.invoke(\`change_room\`);
     `;
 
     expect(
@@ -233,7 +232,7 @@ describe("frontend invoke wrapper guardrails", () => {
     ).toEqual([
       "save_pricing_rule",
       "save_settings",
-      "update_housekeeping",
+      "change_room",
     ]);
   });
 

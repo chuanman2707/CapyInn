@@ -11,14 +11,24 @@ use crate::db::local_day::local_date_sql;
 use crate::db::row::{get_money_vnd, get_optional_money_vnd};
 use crate::models::{BookingFilter, BookingWithGuest};
 
+// `b.status != 'voided'` đứng trong hằng số gốc, KHÔNG trong `status_clause`:
+// `status_clause` chỉ chạy khi `filter.status` khớp một trong ba nhánh của nó,
+// và `filter: null` (hay một chuỗi lạ) thì không nhánh nào áp — đây là màn
+// hình phát ra chính lệnh xoá (Đặt phòng), nên lượt đã xoá phải biến mất bất
+// kể caller truyền filter gì. Đây LÀ danh sách đen thay vì danh sách trắng
+// một cách cố ý: ngữ nghĩa mặc định của hàm này là "hiện mọi trạng thái trừ
+// khi có filter thu hẹp" (xem doc `status_clause`), nên trạng thái hợp lệ nào
+// xuất hiện sau này (nếu có) vẫn hiện ra như thiết kế — chỉ `voided` là ngoại
+// lệ tường minh.
 const BOOKING_LIST_SQL: &str = "SELECT b.id, b.room_id, r.name as room_name, g.full_name as guest_name,
                 b.check_in_at, b.expected_checkout, b.actual_checkout,
                 b.nights, b.total_price, b.paid_amount, b.status, b.source,
-                b.booking_type, b.deposit_amount, b.scheduled_checkin, b.scheduled_checkout, b.guest_phone, b.guests
+                b.booking_type, b.deposit_amount, b.scheduled_checkin, b.scheduled_checkout, b.guest_phone, b.guests,
+                b.group_id
          FROM bookings b
          JOIN rooms r ON r.id = b.room_id
          JOIN guests g ON g.id = b.primary_guest_id
-         WHERE 1=1";
+         WHERE b.status != 'voided'";
 
 /// The UI's vocabulary is not the database's: `completed` means `checked_out`.
 /// An unrecognised value filters nothing rather than erroring, which is the
@@ -108,6 +118,7 @@ fn map_booking_with_guest(row: &sqlx::sqlite::SqliteRow) -> BookingWithGuest {
         scheduled_checkout: row.get("scheduled_checkout"),
         guest_phone: row.get("guest_phone"),
         guests: row.get("guests"),
+        group_id: row.get("group_id"),
     }
 }
 

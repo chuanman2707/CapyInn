@@ -1,0 +1,578 @@
+use crate::{
+    agent::secrets::{AgentSecretKind, AgentSecretStore},
+    app_error::{codes, CommandError, CommandResult},
+    services::settings_store,
+};
+use serde::{Deserialize, Serialize};
+use sqlx::{Pool, Sqlite};
+
+pub const ASSISTANT_CONFIG_SETTING: &str = "assistant_config";
+pub const ASSISTANT_CLOUD_DATA_OPT_IN_SETTING: &str = "assistant_cloud_data_opt_in";
+
+/// Bản sao trong database của câu hỏi "đã có khoá API chưa".
+///
+/// Không phải cache cho nhanh — là để **không đụng keychain lúc khởi động**.
+/// macOS hỏi mật khẩu keychain mỗi lần một binary lạ đọc một mục có sẵn, và
+/// bản dựng CapyInn ký `adhoc` nên mỗi lần build lại là một binary lạ: bấm
+/// "Always Allow" chỉ yên tới lần cài kế tiếp. Trước đây `load_settings` đọc
+/// keychain chỉ để biết có khoá hay chưa, mà `MainShell` gọi nó ngay khi mở
+/// app — thành ra lễ tân gặp hộp hỏi mật khẩu mỗi sáng.
+///
+/// Giá trị này ghi đúng hai chỗ: lúc nhập khoá và lúc xoá khoá. Keychain chỉ
+/// còn bị đọc khi thật sự cần chính cái khoá đó để gọi nhà cung cấp.
+pub const ASSISTANT_API_KEY_PRESENT_SETTING: &str = "assistant_api_key_present";
+
+pub const DEEPSEEK_BASE_URL: &str = "https://api.deepseek.com/v1/chat/completions";
+pub const DEEPSEEK_MODEL: &str = "deepseek-chat";
+pub const OPENROUTER_BASE_URL: &str = "https://openrouter.ai/api/v1/chat/completions";
+
+const MAX_BASE_URL_CHARS: usize = 2_048;
+const MAX_MODEL_CHARS: usize = 128;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AssistantPreset {
+    DeepSeek,
+    OpenRouter,
+    Custom,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AssistantConfig {
+    pub preset: AssistantPreset,
+    pub base_url: String,
+    pub model: String,
+}
+
+impl AssistantConfig {
+    pub fn default_for(preset: AssistantPreset) -> Self {
+        match preset {
+            AssistantPreset::DeepSeek => Self {
+                preset,
+                base_url: DEEPSEEK_BASE_URL.to_string(),
+                model: DEEPSEEK_MODEL.to_string(),
+            },
+            AssistantPreset::OpenRouter => Self {
+                preset,
+                base_url: OPENROUTER_BASE_URL.to_string(),
+                model: String::new(),
+            },
+            AssistantPreset::Custom => Self {
+                preset,
+                base_url: String::new(),
+                model: String::new(),
+            },
+        }
+    }
+}
+
+impl Default for AssistantConfig {
+    fn default() -> Self {
+        Self::default_for(AssistantPreset::DeepSeek)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AssistantGateMissing {
+    ApiKey,
+    CloudDataOptIn,
+    Model,
+    BaseUrl,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AssistantGateStatus {
+    pub ready: bool,
+    pub missing: Vec<AssistantGateMissing>,
+}
+
+/// Cổng **duy nhất** của trợ lý quầy. Không còn cổng nào đứng trước nó.
+///
+/// Trước đây có thêm một cổng nữa, `ensure_agent_runtime_enabled`, đọc cờ môi
+/// trường `CAPYINN_EXPERIMENTAL_AGENT_RUNTIME`. Cờ đó đã bị gỡ khỏi trợ lý
+/// (vẫn còn cho CEO Telegram, xem `agent/supervisor.rs`) vì nó chỉ bật được
+/// bằng dòng lệnh lúc khởi động — thứ mà lễ tân bấm icon mở app không bao giờ
+/// có. Một tính năng dành cho lễ tân mà chỉ người biết gõ biến môi trường mới
+/// mở được thì coi như không tồn tại.
+///
+/// Gỡ được vì cổng này đã làm đúng việc mà cờ kia định làm, lại làm tốt hơn:
+/// nó nằm trong database nên nhớ qua mọi lần khởi động, và nó có giao diện nên
+/// admin tự tắt được. Không có `opt_in` thì `ready = false`, và
+/// `commands::assistant::assistant_turn` dừng **trước khi** dựng prompt — không
+/// byte dữ liệu khách nào rời máy. Đó vẫn là chỗ chủ nhà thu lại sự đồng ý.
+///
+/// Đừng thêm cổng cờ môi trường trở lại mà không đồng thời sửa
+/// `pages/settings/index.tsx`: cờ tắt mà tab cài đặt biến mất trong khi panel
+/// vẫn chạy là đúng cái lỗ hổng đã sửa ở 6d2c1d1 — mất luôn chỗ để tắt opt-in.
+pub fn evaluate_assistant_gate(
+    config: &AssistantConfig,
+    has_api_key: bool,
+    opt_in: bool,
+) -> AssistantGateStatus {
+    let mut missing = Vec::new();
+
+    if config.base_url.trim().is_empty() {
+        missing.push(AssistantGateMissing::BaseUrl);
+    }
+    if config.model.trim().is_empty() {
+        missing.push(AssistantGateMissing::Model);
+    }
+    if !has_api_key {
+        missing.push(AssistantGateMissing::ApiKey);
+    }
+    if !opt_in {
+        missing.push(AssistantGateMissing::CloudDataOptIn);
+    }
+
+    AssistantGateStatus {
+        ready: missing.is_empty(),
+        missing,
+    }
+}
+
+pub fn validate_assistant_base_url(raw: &str) -> CommandResult<String> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Err(invalid_input("Chưa nhập địa chỉ máy chủ AI."));
+    }
+    if trimmed.chars().count() > MAX_BASE_URL_CHARS {
+        return Err(invalid_input("Địa chỉ máy chủ AI quá dài."));
+    }
+
+    // Repo không có crate `url` riêng — dùng lại `reqwest::Url`, đúng như
+    // `agent/receptionist_demo.rs:265` đang làm. Đừng thêm dependency thứ hai.
+    let url = reqwest::Url::parse(trimmed)
+        .map_err(|_| invalid_input("Địa chỉ máy chủ AI không hợp lệ."))?;
+    let host = url.host_str().unwrap_or_default();
+    let is_loopback = host == "127.0.0.1" || host == "localhost" || host == "::1";
+
+    match url.scheme() {
+        "https" => Ok(trimmed.to_string()),
+        "http" if is_loopback => Ok(trimmed.to_string()),
+        "http" => Err(invalid_input(
+            "Địa chỉ ra ngoài máy phải dùng https, không dùng http.",
+        )),
+        _ => Err(invalid_input("Địa chỉ máy chủ AI phải là http hoặc https.")),
+    }
+}
+
+pub fn validate_assistant_model(raw: &str) -> CommandResult<String> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Err(invalid_input("Chưa nhập tên model."));
+    }
+    if trimmed.chars().count() > MAX_MODEL_CHARS {
+        return Err(invalid_input("Tên model quá dài."));
+    }
+    if trimmed.chars().any(char::is_control) {
+        return Err(invalid_input("Tên model chứa ký tự không hợp lệ."));
+    }
+    Ok(trimmed.to_string())
+}
+
+pub async fn get_assistant_config(pool: &Pool<Sqlite>) -> CommandResult<AssistantConfig> {
+    let raw = settings_store::get_setting(pool, ASSISTANT_CONFIG_SETTING)
+        .await
+        .map_err(read_settings_error)?;
+
+    let Some(raw) = raw else {
+        return Ok(AssistantConfig::default());
+    };
+
+    // Cấu hình hỏng không được làm chết trợ lý: rơi về mặc định để người dùng
+    // còn vào màn hình cài đặt sửa lại được.
+    Ok(serde_json::from_str(&raw).unwrap_or_default())
+}
+
+pub async fn save_assistant_config(
+    pool: &Pool<Sqlite>,
+    config: &AssistantConfig,
+) -> CommandResult<()> {
+    let encoded = serde_json::to_string(config).map_err(|error| {
+        CommandError::system(
+            codes::SYSTEM_INTERNAL_ERROR,
+            format!("Failed to encode assistant config: {error}"),
+        )
+    })?;
+
+    settings_store::save_setting(pool, ASSISTANT_CONFIG_SETTING, &encoded)
+        .await
+        .map_err(write_settings_error)
+}
+
+pub async fn get_assistant_cloud_data_opt_in(pool: &Pool<Sqlite>) -> CommandResult<bool> {
+    let value = settings_store::get_setting(pool, ASSISTANT_CLOUD_DATA_OPT_IN_SETTING)
+        .await
+        .map_err(read_settings_error)?;
+
+    Ok(value
+        .as_deref()
+        .map(|value| {
+            let normalized = value.trim().to_ascii_lowercase();
+            normalized == "true" || normalized == "1"
+        })
+        .unwrap_or(false))
+}
+
+pub async fn set_assistant_cloud_data_opt_in(
+    pool: &Pool<Sqlite>,
+    enabled: bool,
+) -> CommandResult<()> {
+    settings_store::save_setting(
+        pool,
+        ASSISTANT_CLOUD_DATA_OPT_IN_SETTING,
+        if enabled { "true" } else { "false" },
+    )
+    .await
+    .map_err(write_settings_error)
+}
+
+/// `None` nghĩa là chưa từng ghi — khác hẳn `Some(false)` là "đã biết, không có
+/// khoá". Phân biệt được hai thứ đó là điều kiện để nạp một lần rồi thôi.
+pub async fn get_assistant_api_key_present(pool: &Pool<Sqlite>) -> CommandResult<Option<bool>> {
+    let value = settings_store::get_setting(pool, ASSISTANT_API_KEY_PRESENT_SETTING)
+        .await
+        .map_err(read_settings_error)?;
+
+    Ok(value.as_deref().map(|value| {
+        let normalized = value.trim().to_ascii_lowercase();
+        normalized == "true" || normalized == "1"
+    }))
+}
+
+pub async fn set_assistant_api_key_present(
+    pool: &Pool<Sqlite>,
+    present: bool,
+) -> CommandResult<()> {
+    settings_store::save_setting(
+        pool,
+        ASSISTANT_API_KEY_PRESENT_SETTING,
+        if present { "true" } else { "false" },
+    )
+    .await
+    .map_err(write_settings_error)
+}
+
+/// Trả lời "đã có khoá API chưa", đụng keychain **nhiều nhất một lần trong đời
+/// máy đó** — và không lần nào nữa sau đó.
+///
+/// Nhánh nạp tồn tại vì những máy đã nhập khoá trước bản vá này: keychain có
+/// khoá, database chưa có cờ. Nếu cứ thế trả `false` thì trợ lý tự tắt và chủ
+/// nhà phải đi nhập lại khoá mà không hiểu tại sao. Nạp một lần rồi ghi cờ,
+/// nên hộp hỏi mật khẩu xuất hiện đúng một lần cuối cùng.
+///
+/// Cờ có thể lệch thật nếu ai đó xoá mục trong Keychain Access: cờ nói có,
+/// keychain nói không. Chấp nhận có chủ ý — `assistant_turn` đọc khoá thật
+/// trước khi gọi nhà cung cấp và trả `AGENT_SECRET_MISSING`, tức lệch thì
+/// hỏng ở chỗ nhìn thấy được, không hỏng âm thầm.
+pub async fn resolve_assistant_api_key_present(
+    pool: &Pool<Sqlite>,
+    store: &dyn AgentSecretStore,
+) -> CommandResult<bool> {
+    if let Some(known) = get_assistant_api_key_present(pool).await? {
+        return Ok(known);
+    }
+
+    let present = store
+        .get_secret(AgentSecretKind::AssistantApiKey)?
+        .is_some();
+    set_assistant_api_key_present(pool, present).await?;
+    Ok(present)
+}
+
+fn invalid_input(message: &str) -> CommandError {
+    CommandError::user(codes::VALIDATION_INVALID_INPUT, message)
+}
+
+fn read_settings_error(error: String) -> CommandError {
+    CommandError::system(
+        codes::SYSTEM_INTERNAL_ERROR,
+        format!("Failed to read assistant setting: {error}"),
+    )
+}
+
+fn write_settings_error(error: String) -> CommandError {
+    CommandError::system(
+        codes::SYSTEM_INTERNAL_ERROR,
+        format!("Failed to save assistant setting: {error}"),
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use sqlx::sqlite::SqlitePoolOptions;
+
+    async fn test_pool() -> Pool<Sqlite> {
+        let database_url = format!(
+            "sqlite://file:{}?mode=memory&cache=shared",
+            uuid::Uuid::new_v4()
+        );
+        let pool = SqlitePoolOptions::new()
+            .max_connections(5)
+            .connect(&database_url)
+            .await
+            .expect("failed to open sqlite test pool");
+        crate::db::run_migrations(&pool)
+            .await
+            .expect("failed to run migrations");
+        pool
+    }
+
+    #[tokio::test]
+    async fn missing_config_falls_back_to_the_deepseek_preset() {
+        let pool = test_pool().await;
+
+        let config = get_assistant_config(&pool).await.expect("read config");
+
+        assert_eq!(config.preset, AssistantPreset::DeepSeek);
+        assert_eq!(
+            config.base_url,
+            "https://api.deepseek.com/v1/chat/completions"
+        );
+        assert_eq!(config.model, "deepseek-chat");
+    }
+
+    #[tokio::test]
+    async fn config_round_trips_through_settings() {
+        let pool = test_pool().await;
+        let config = AssistantConfig {
+            preset: AssistantPreset::OpenRouter,
+            base_url: "https://openrouter.ai/api/v1/chat/completions".to_string(),
+            model: "deepseek/deepseek-chat".to_string(),
+        };
+
+        save_assistant_config(&pool, &config).await.expect("save");
+
+        assert_eq!(get_assistant_config(&pool).await.expect("read"), config);
+    }
+
+    /// Đếm số lần keychain bị đọc. Con số đó mới là thứ hai test dưới đây
+    /// canh — không phải giá trị trả về, mà là **có đụng keychain hay không**.
+    struct CountingSecretStore {
+        stored: Option<String>,
+        reads: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    impl AgentSecretStore for CountingSecretStore {
+        fn get_secret(&self, _kind: AgentSecretKind) -> CommandResult<Option<String>> {
+            self.reads.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok(self.stored.clone())
+        }
+
+        fn set_secret(&self, _kind: AgentSecretKind, _value: &str) -> CommandResult<()> {
+            Ok(())
+        }
+
+        fn clear_secret(&self, _kind: AgentSecretKind) -> CommandResult<()> {
+            Ok(())
+        }
+    }
+
+    fn counting_store(
+        stored: Option<&str>,
+    ) -> (
+        CountingSecretStore,
+        std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    ) {
+        let reads = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        (
+            CountingSecretStore {
+                stored: stored.map(str::to_string),
+                reads: std::sync::Arc::clone(&reads),
+            },
+            reads,
+        )
+    }
+
+    /// Mở app không được đụng keychain. Đây là cả lý do tồn tại của cờ này:
+    /// mỗi lần đọc keychain là một lần macOS có thể hỏi mật khẩu, và bản dựng
+    /// ký `adhoc` nên "Always Allow" không sống qua lần cài kế tiếp.
+    #[tokio::test]
+    async fn presence_lookup_never_touches_the_keychain_once_the_flag_is_written() {
+        let pool = test_pool().await;
+        set_assistant_api_key_present(&pool, true)
+            .await
+            .expect("ghi cờ");
+        let (store, reads) = counting_store(Some("khoa-that"));
+
+        for _ in 0..3 {
+            assert!(resolve_assistant_api_key_present(&pool, &store)
+                .await
+                .expect("đọc cờ"));
+        }
+
+        assert_eq!(
+            reads.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "database đã biết câu trả lời thì không được hỏi keychain lần nào"
+        );
+    }
+
+    /// Máy đã nhập khoá trước bản vá: keychain có, database chưa có cờ. Phải
+    /// nạp đúng một lần rồi thôi — nếu nạp mỗi lần thì bản vá này vô nghĩa,
+    /// còn nếu không nạp thì chủ nhà mất khoá đang dùng.
+    #[tokio::test]
+    async fn presence_lookup_seeds_from_the_keychain_exactly_once() {
+        let pool = test_pool().await;
+        let (store, reads) = counting_store(Some("khoa-cu"));
+
+        for _ in 0..3 {
+            assert!(resolve_assistant_api_key_present(&pool, &store)
+                .await
+                .expect("nạp rồi đọc cờ"));
+        }
+
+        assert_eq!(
+            reads.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "máy có khoá từ trước chỉ được hỏi mật khẩu đúng một lần cuối cùng"
+        );
+        assert_eq!(
+            get_assistant_api_key_present(&pool).await.expect("đọc cờ"),
+            Some(true),
+            "nạp xong phải ghi cờ, không thì lần sau lại hỏi"
+        );
+    }
+
+    /// Chưa từng nhập khoá cũng phải ghi cờ, không thì mỗi lần mở app lại đi
+    /// hỏi keychain một câu mà câu trả lời luôn là "không có".
+    #[tokio::test]
+    async fn presence_lookup_records_a_missing_key_too() {
+        let pool = test_pool().await;
+        let (store, reads) = counting_store(None);
+
+        assert!(!resolve_assistant_api_key_present(&pool, &store)
+            .await
+            .expect("nạp"));
+        assert!(!resolve_assistant_api_key_present(&pool, &store)
+            .await
+            .expect("đọc cờ"));
+
+        assert_eq!(reads.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert_eq!(
+            get_assistant_api_key_present(&pool).await.expect("đọc cờ"),
+            Some(false)
+        );
+    }
+
+    #[tokio::test]
+    async fn opt_in_defaults_to_false_and_round_trips() {
+        let pool = test_pool().await;
+
+        assert!(!get_assistant_cloud_data_opt_in(&pool).await.expect("read"));
+
+        set_assistant_cloud_data_opt_in(&pool, true)
+            .await
+            .expect("enable");
+        assert!(get_assistant_cloud_data_opt_in(&pool).await.expect("read"));
+
+        set_assistant_cloud_data_opt_in(&pool, false)
+            .await
+            .expect("revoke");
+        assert!(!get_assistant_cloud_data_opt_in(&pool).await.expect("read"));
+    }
+
+    #[test]
+    fn base_url_must_be_https_unless_it_is_loopback() {
+        assert!(
+            validate_assistant_base_url("https://api.deepseek.com/v1/chat/completions").is_ok()
+        );
+        assert!(validate_assistant_base_url("http://127.0.0.1:8080/v1/chat/completions").is_ok());
+        assert!(validate_assistant_base_url("http://localhost:8080/v1/chat/completions").is_ok());
+
+        let error = validate_assistant_base_url("http://api.deepseek.com/v1/chat/completions")
+            .expect_err("http tới host xa phải bị chặn");
+        assert_eq!(error.code, codes::VALIDATION_INVALID_INPUT);
+
+        assert!(validate_assistant_base_url("").is_err());
+        assert!(validate_assistant_base_url("khong-phai-url").is_err());
+        assert!(validate_assistant_base_url("ftp://example.com/x").is_err());
+    }
+
+    #[test]
+    fn gate_is_closed_until_key_and_opt_in_are_both_present() {
+        let config = AssistantConfig::default_for(AssistantPreset::DeepSeek);
+
+        let no_key = evaluate_assistant_gate(&config, false, true);
+        assert!(!no_key.ready);
+        assert!(no_key.missing.contains(&AssistantGateMissing::ApiKey));
+
+        let no_opt_in = evaluate_assistant_gate(&config, true, false);
+        assert!(!no_opt_in.ready);
+        assert!(no_opt_in
+            .missing
+            .contains(&AssistantGateMissing::CloudDataOptIn));
+
+        let ready = evaluate_assistant_gate(&config, true, true);
+        assert!(ready.ready);
+        assert!(ready.missing.is_empty());
+    }
+
+    #[test]
+    fn gate_reports_a_blank_model_as_missing() {
+        let config = AssistantConfig {
+            preset: AssistantPreset::Custom,
+            base_url: "https://example.com/v1/chat/completions".to_string(),
+            model: "   ".to_string(),
+        };
+
+        let status = evaluate_assistant_gate(&config, true, true);
+
+        assert!(!status.ready);
+        assert!(status.missing.contains(&AssistantGateMissing::Model));
+    }
+
+    /// Cổng thật của trợ lý là opt-in, không phải cờ môi trường — và nó **không**
+    /// nhìn vào môi trường chút nào.
+    ///
+    /// Test này thay hai test cũ đã bị xoá cùng `ensure_agent_runtime_enabled`.
+    /// Cũ: "gỡ cờ thì trợ lý phải từ chối". Mới: gỡ cờ chẳng đổi gì, vì cờ không
+    /// còn dính đến trợ lý; thứ duy nhất đóng cổng là chủ nhà tắt opt-in trong
+    /// Cài đặt. Đặt cả ba biến môi trường vào trạng thái "tắt sạch" rồi vẫn thấy
+    /// `ready = true` chính là cách chứng minh hai bên đã tách rời.
+    #[test]
+    fn the_gate_ignores_the_experimental_environment_flags_entirely() {
+        let _guard = crate::runtime_config::env_lock().lock().unwrap();
+
+        for name in [
+            "CAPYINN_EXPERIMENTAL_RUNTIME",
+            "CAPYINN_EXPERIMENTAL_AGENT_RUNTIME",
+            "CAPYINN_DISABLE_CEO_TELEGRAM",
+        ] {
+            std::env::remove_var(name);
+        }
+
+        let config = AssistantConfig::default();
+
+        assert!(
+            evaluate_assistant_gate(&config, true, true).ready,
+            "không cờ nào bật mà trợ lý vẫn phải mở — lễ tân không gõ biến môi trường"
+        );
+        assert!(
+            !crate::runtime_config::effective_experimental_agent_runtime_enabled(),
+            "phải đang ở đúng trạng thái không cờ thì khẳng định trên mới có nghĩa"
+        );
+
+        let closed = evaluate_assistant_gate(&config, true, false);
+        assert!(
+            !closed.ready,
+            "tắt opt-in là công tắc tắt duy nhất còn lại — nó phải đóng được"
+        );
+        assert!(closed
+            .missing
+            .contains(&AssistantGateMissing::CloudDataOptIn));
+    }
+
+    #[test]
+    fn gate_reports_a_blank_base_url_as_missing() {
+        let config = AssistantConfig::default_for(AssistantPreset::Custom);
+
+        let status = evaluate_assistant_gate(&config, true, true);
+
+        assert!(!status.ready);
+        assert!(status.missing.contains(&AssistantGateMissing::BaseUrl));
+        assert!(status.missing.contains(&AssistantGateMissing::Model));
+    }
+}
