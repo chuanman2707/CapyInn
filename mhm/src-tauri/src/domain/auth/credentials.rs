@@ -42,3 +42,6 @@ mod tests {
         assert_ne!(pin_hash(""), pin_hash("0"));
     }
 }
+
+#[path = "../../optimistic_version.rs"]
+pub mod optimistic_version;
