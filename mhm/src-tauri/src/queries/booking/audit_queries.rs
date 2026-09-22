@@ -58,7 +58,7 @@ pub async fn load_night_audit_snapshot(
         total_revenue: room_revenue + folio_revenue + cancellation_fee_revenue,
         room_revenue,
         folio_revenue,
-        total_expenses: get_money_vnd(&expenses, "value"),
+        total_expenses: get_money_vnd(&expenses, "value")?,
         occupancy_pct,
         rooms_sold: rooms_sold.0,
         total_rooms: total_rooms.0,
@@ -76,22 +76,23 @@ pub async fn list_audit_logs(pool: &Pool<Sqlite>) -> Result<Vec<AuditLog>, sqlx:
     .fetch_all(pool)
     .await?;
 
-    Ok(rows
-        .iter()
-        .map(|row| AuditLog {
-            id: row.get("id"),
-            audit_date: row.get("audit_date"),
-            total_revenue: get_money_vnd(row, "total_revenue"),
-            room_revenue: get_money_vnd(row, "room_revenue"),
-            folio_revenue: get_money_vnd(row, "folio_revenue"),
-            total_expenses: get_money_vnd(row, "total_expenses"),
-            occupancy_pct: get_f64(row, "occupancy_pct"),
-            rooms_sold: row.get("rooms_sold"),
-            total_rooms: row.get("total_rooms"),
-            notes: row.get("notes"),
-            created_at: row.get("created_at"),
+    rows.iter()
+        .map(|row| {
+            Ok(AuditLog {
+                id: row.get("id"),
+                audit_date: row.get("audit_date"),
+                total_revenue: get_money_vnd(row, "total_revenue")?,
+                room_revenue: get_money_vnd(row, "room_revenue")?,
+                folio_revenue: get_money_vnd(row, "folio_revenue")?,
+                total_expenses: get_money_vnd(row, "total_expenses")?,
+                occupancy_pct: get_f64(row, "occupancy_pct"),
+                rooms_sold: row.get("rooms_sold"),
+                total_rooms: row.get("total_rooms"),
+                notes: row.get("notes"),
+                created_at: row.get("created_at"),
+            })
         })
-        .collect())
+        .collect()
 }
 
 pub async fn load_booking_export_rows(
@@ -173,27 +174,28 @@ pub async fn load_booking_export_rows(
     .fetch_all(pool)
     .await?;
 
-    Ok(rows
-        .iter()
-        .map(|row| BookingExportRow {
-            id: row.get("id"),
-            room_id: row.get("room_id"),
-            guest_name: row.get("guest_name"),
-            doc_number: row.get("doc_number"),
-            phone: row.get("phone"),
-            check_in_at: row.get("check_in_at"),
-            expected_checkout: row.get("expected_checkout"),
-            actual_checkout: row.get("actual_checkout"),
-            nights: row.get("nights"),
-            room_price: get_money_vnd(row, "total_price"),
-            charge_total: get_money_vnd(row, "charge_total"),
-            cancellation_fee_total: get_money_vnd(row, "cancellation_fee_total"),
-            folio_total: get_money_vnd(row, "folio_total"),
-            recognized_revenue: get_money_vnd(row, "recognized_revenue"),
-            paid_amount: get_money_vnd(row, "paid_amount"),
-            status: row.get("status"),
-            pricing_type: row.get("pricing_type"),
-            source: row.get("source"),
+    rows.iter()
+        .map(|row| {
+            Ok(BookingExportRow {
+                id: row.get("id"),
+                room_id: row.get("room_id"),
+                guest_name: row.get("guest_name"),
+                doc_number: row.get("doc_number"),
+                phone: row.get("phone"),
+                check_in_at: row.get("check_in_at"),
+                expected_checkout: row.get("expected_checkout"),
+                actual_checkout: row.get("actual_checkout"),
+                nights: row.get("nights"),
+                room_price: get_money_vnd(row, "total_price")?,
+                charge_total: get_money_vnd(row, "charge_total")?,
+                cancellation_fee_total: get_money_vnd(row, "cancellation_fee_total")?,
+                folio_total: get_money_vnd(row, "folio_total")?,
+                recognized_revenue: get_money_vnd(row, "recognized_revenue")?,
+                paid_amount: get_money_vnd(row, "paid_amount")?,
+                status: row.get("status"),
+                pricing_type: row.get("pricing_type"),
+                source: row.get("source"),
+            })
         })
-        .collect())
+        .collect()
 }

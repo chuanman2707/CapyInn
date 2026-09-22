@@ -58,9 +58,11 @@ pub async fn generate_invoice_tx(
     let guest_name: String = b.get("guest_name");
     let guest_phone: Option<String> = b.get("guest_phone");
     let nights: i32 = b.get("nights");
-    let total_price = get_money_vnd(&b, "total_price");
-    let paid_amount = get_money_vnd(&b, "paid_amount");
-    let deposit_amount = get_optional_money_vnd(&b, "deposit_amount").unwrap_or(0);
+    let total_price = get_money_vnd(&b, "total_price").map_err(|e| e.to_string())?;
+    let paid_amount = get_money_vnd(&b, "paid_amount").map_err(|e| e.to_string())?;
+    let deposit_amount = get_optional_money_vnd(&b, "deposit_amount")
+        .map_err(|e| e.to_string())?
+        .unwrap_or(0);
     let notes: Option<String> = b.get("notes");
     let pricing_snapshot: Option<String> = b.get("pricing_snapshot");
     let snapshot_value: Option<serde_json::Value> = pricing_snapshot
@@ -360,10 +362,10 @@ pub async fn get_invoice(
                 check_out: r.get("check_out"),
                 nights: r.get("nights"),
                 pricing_breakdown: breakdown,
-                subtotal: get_money_vnd(&r, "subtotal"),
-                deposit_amount: get_money_vnd(&r, "deposit_amount"),
-                total: get_money_vnd(&r, "total"),
-                balance_due: get_money_vnd(&r, "balance_due"),
+                subtotal: get_money_vnd(&r, "subtotal").map_err(|e| e.to_string())?,
+                deposit_amount: get_money_vnd(&r, "deposit_amount").map_err(|e| e.to_string())?,
+                total: get_money_vnd(&r, "total").map_err(|e| e.to_string())?,
+                balance_due: get_money_vnd(&r, "balance_due").map_err(|e| e.to_string())?,
                 policy_text: r.get("policy_text"),
                 notes: r.get("notes"),
                 settlement_note: r.get("settlement_note"),

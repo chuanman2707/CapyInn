@@ -16,16 +16,17 @@ pub async fn list_folio_lines(
     .fetch_all(pool)
     .await?;
 
-    Ok(rows
-        .iter()
-        .map(|row| FolioLine {
-            id: row.get("id"),
-            booking_id: row.get("booking_id"),
-            category: row.get("category"),
-            description: row.get("description"),
-            amount: get_money_vnd(row, "amount"),
-            created_by: row.get("created_by"),
-            created_at: row.get("created_at"),
+    rows.iter()
+        .map(|row| {
+            Ok(FolioLine {
+                id: row.get("id"),
+                booking_id: row.get("booking_id"),
+                category: row.get("category"),
+                description: row.get("description"),
+                amount: get_money_vnd(row, "amount")?,
+                created_by: row.get("created_by"),
+                created_at: row.get("created_at"),
+            })
         })
-        .collect())
+        .collect()
 }

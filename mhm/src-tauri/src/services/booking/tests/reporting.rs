@@ -154,6 +154,44 @@ async fn revenue_queries_use_local_rfc3339_booking_dates_for_business_day() {
 }
 
 #[tokio::test]
+async fn prorated_room_revenue_stays_whole_vnd_when_total_does_not_divide_evenly() {
+    let pool = test_pool().await;
+    seed_room(&pool, "R500").await.unwrap();
+    // 400.000đ / 3 đêm không chia hết. Trước đây JULIANDAY trả REAL nên SUM ra
+    // 133.333,33 và get_money_vnd panic — treo luôn invoke promise phía UI.
+    // Phân bổ phải nguyên từng ngày và cộng lại đúng 400.000.
+    seed_active_booking_with_terms(
+        &pool,
+        "B500",
+        "R500",
+        "2026-04-15T17:00:00+07:00",
+        "2026-04-18T17:00:00+07:00",
+        3,
+        400_000,
+        Some(0),
+    )
+    .await
+    .unwrap();
+
+    let day1 = revenue_queries::load_room_revenue(&pool, "2026-04-15", "2026-04-15")
+        .await
+        .unwrap();
+    let day2 = revenue_queries::load_room_revenue(&pool, "2026-04-16", "2026-04-16")
+        .await
+        .unwrap();
+    let day3 = revenue_queries::load_room_revenue(&pool, "2026-04-17", "2026-04-17")
+        .await
+        .unwrap();
+    let whole = revenue_queries::load_room_revenue(&pool, "2026-04-15", "2026-04-17")
+        .await
+        .unwrap();
+
+    assert_eq!((day1, day2, day3), (133_333, 133_333, 133_334));
+    assert_eq!(day1 + day2 + day3, 400_000);
+    assert_eq!(whole, 400_000);
+}
+
+#[tokio::test]
 async fn night_audit_snapshot_uses_local_rfc3339_booking_dates_for_occupancy() {
     let pool = test_pool().await;
     seed_room(&pool, "R431").await.unwrap();

@@ -12,7 +12,7 @@ pub async fn load_rooms(pool: &Pool<Sqlite>) -> Result<Vec<Room>, sqlx::Error> {
     .fetch_all(pool)
     .await?;
 
-    Ok(rows.iter().map(map_room).collect())
+    rows.iter().map(map_room).collect()
 }
 
 pub async fn load_room_detail(
@@ -24,7 +24,7 @@ pub async fn load_room_detail(
         .fetch_one(pool)
         .await?;
 
-    let room = map_room(&row);
+    let room = map_room(&row)?;
 
     let booking_row = sqlx::query(
         "SELECT id, room_id, primary_guest_id, check_in_at, expected_checkout, actual_checkout, nights, total_price, paid_amount, status, source, notes, created_at, rate_overridden_at, group_id
@@ -39,7 +39,7 @@ pub async fn load_room_detail(
     let group_id: Option<String> = booking_row
         .as_ref()
         .and_then(|r| r.get::<Option<String>, _>("group_id"));
-    let booking = booking_row.map(|r| map_booking(&r));
+    let booking = booking_row.map(|r| map_booking(&r)).transpose()?;
 
     let guests = if let Some(ref b) = booking {
         let rows = sqlx::query(
@@ -156,14 +156,15 @@ pub async fn load_rooms_availability(
     let mut results = Vec::new();
 
     for rr in &room_rows {
-        let room = map_room(rr);
+        let room = map_room(rr)?;
 
         let current_booking =
             sqlx::query("SELECT * FROM bookings WHERE room_id = ? AND status = 'active' LIMIT 1")
                 .bind(&room.id)
                 .fetch_optional(pool)
                 .await?
-                .map(|r| map_booking(&r));
+                .map(|r| map_booking(&r))
+                .transpose()?;
 
         let res_rows = sqlx::query(
             "SELECT b.id, g.full_name, b.scheduled_checkin, b.scheduled_checkout, b.deposit_amount, b.status
@@ -179,19 +180,21 @@ pub async fn load_rooms_availability(
 
         let upcoming: Vec<UpcomingReservation> = res_rows
             .iter()
-            .map(|r| UpcomingReservation {
-                booking_id: r.get("id"),
-                guest_name: r.get("full_name"),
-                scheduled_checkin: r
-                    .get::<Option<String>, _>("scheduled_checkin")
-                    .unwrap_or_default(),
-                scheduled_checkout: r
-                    .get::<Option<String>, _>("scheduled_checkout")
-                    .unwrap_or_default(),
-                deposit_amount: get_optional_money_vnd(r, "deposit_amount").unwrap_or(0),
-                status: r.get("status"),
+            .map(|r| {
+                Ok(UpcomingReservation {
+                    booking_id: r.get("id"),
+                    guest_name: r.get("full_name"),
+                    scheduled_checkin: r
+                        .get::<Option<String>, _>("scheduled_checkin")
+                        .unwrap_or_default(),
+                    scheduled_checkout: r
+                        .get::<Option<String>, _>("scheduled_checkout")
+                        .unwrap_or_default(),
+                    deposit_amount: get_optional_money_vnd(r, "deposit_amount")?.unwrap_or(0),
+                    status: r.get("status"),
+                })
             })
-            .collect();
+            .collect::<Result<Vec<_>, sqlx::Error>>()?;
 
         let next_until = upcoming.first().map(|u| u.scheduled_checkin.clone());
 
@@ -206,22 +209,22 @@ pub async fn load_rooms_availability(
     Ok(results)
 }
 
-pub(crate) fn map_room(row: &SqliteRow) -> Room {
-    Room {
+pub(crate) fn map_room(row: &SqliteRow) -> Result<Room, sqlx::Error> {
+    Ok(Room {
         id: row.get("id"),
         name: row.get("name"),
         room_type: row.get("type"),
         floor: row.get("floor"),
         has_balcony: row.get::<i32, _>("has_balcony") == 1,
-        base_price: get_money_vnd(row, "base_price"),
+        base_price: get_money_vnd(row, "base_price")?,
         max_guests: row.try_get::<i32, _>("max_guests").unwrap_or(2),
-        extra_person_fee: get_money_vnd(row, "extra_person_fee"),
+        extra_person_fee: get_money_vnd(row, "extra_person_fee")?,
         status: row.get("status"),
-    }
+    })
 }
 
-fn map_booking(row: &SqliteRow) -> Booking {
-    Booking {
+fn map_booking(row: &SqliteRow) -> Result<Booking, sqlx::Error> {
+    Ok(Booking {
         id: row.get("id"),
         room_id: row.get("room_id"),
         primary_guest_id: row.get("primary_guest_id"),
@@ -229,14 +232,14 @@ fn map_booking(row: &SqliteRow) -> Booking {
         expected_checkout: row.get("expected_checkout"),
         actual_checkout: row.get("actual_checkout"),
         nights: row.get("nights"),
-        total_price: get_money_vnd(row, "total_price"),
-        paid_amount: get_money_vnd(row, "paid_amount"),
+        total_price: get_money_vnd(row, "total_price")?,
+        paid_amount: get_money_vnd(row, "paid_amount")?,
         status: row.get("status"),
         source: row.get("source"),
         notes: row.get("notes"),
         created_at: row.get("created_at"),
         rate_overridden_at: row.get("rate_overridden_at"),
-    }
+    })
 }
 
 fn map_guest(row: &SqliteRow) -> Guest {

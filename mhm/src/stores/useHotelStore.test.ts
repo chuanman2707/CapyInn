@@ -225,6 +225,45 @@ describe("useHotelStore monitoring context", () => {
     expect(invoke).not.toHaveBeenCalledWith("extend_stay", expect.anything());
   });
 
+  // `get_dashboard_stats` panic phía backend không reject mà treo invoke
+  // promise mãi mãi — mini-tab từng "đơ" sau mỗi action vì `fetchStats` nằm
+  // trong chuỗi await của mọi write. Lỗi đọc stats không được phép làm hỏng
+  // một write đã commit thành công.
+  it("extendStay resolves when the stats refresh rejects", async () => {
+    invoke.mockImplementation(async (command: string) => {
+      if (command === "get_dashboard_stats") {
+        throw new Error("money column value must be a whole VND amount");
+      }
+      if (command === "get_rooms") return [];
+      if (command === "get_all_groups") return [];
+      throw new Error(`Unhandled invoke ${command}`);
+    });
+
+    await expect(
+      useHotelStore.getState().extendStay("booking-extend-1"),
+    ).resolves.toBeUndefined();
+  });
+
+  it("extendStay resolves when the stats refresh never resolves", async () => {
+    vi.useFakeTimers();
+    try {
+      invoke.mockImplementation((command: string) => {
+        if (command === "get_dashboard_stats") {
+          return new Promise(() => {});
+        }
+        if (command === "get_rooms") return Promise.resolve([]);
+        if (command === "get_all_groups") return Promise.resolve([]);
+        return Promise.reject(new Error(`Unhandled invoke ${command}`));
+      });
+
+      const action = useHotelStore.getState().extendStay("booking-extend-1");
+      await vi.advanceTimersByTimeAsync(30_000);
+      await expect(action).resolves.toBeUndefined();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   // `void_booking` (`src-tauri/src/commands/bookings.rs`) nhận `req:
   // VoidBookingRequest` — struct đó không có `#[serde(rename_all = ...)]`, nên
   // field JSON phải giữ snake_case (`booking_id`, `reason`), không phải

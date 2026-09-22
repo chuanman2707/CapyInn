@@ -23,7 +23,7 @@ pub async fn load_room(pool: &Pool<Sqlite>, room_id: &str) -> Result<Option<Room
         .fetch_optional(pool)
         .await?;
 
-    Ok(row.as_ref().map(map_room))
+    row.as_ref().map(map_room).transpose()
 }
 
 /// Vacant rooms, optionally of one type, ordered by floor then id.
@@ -50,7 +50,7 @@ pub async fn load_vacant_rooms(
         }
     };
 
-    Ok(rows.iter().map(map_room).collect())
+    rows.iter().map(map_room).collect()
 }
 
 pub async fn room_exists(pool: &Pool<Sqlite>, room_id: &str) -> Result<bool, sqlx::Error> {

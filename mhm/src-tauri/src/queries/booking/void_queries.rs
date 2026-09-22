@@ -47,10 +47,10 @@ pub async fn load_void_preview(
 
     let previous_status: String = row.get("status");
     let nights_total: i32 = row.get("nights");
-    let total_price = get_money_vnd(&row, "total_price");
-    let deposit_amount = get_optional_money_vnd(&row, "deposit_amount").unwrap_or(0);
-    let folio_total = get_money_vnd(&row, "folio_total");
-    let cancellation_fee_total = get_money_vnd(&row, "cancellation_fee_total");
+    let total_price = get_money_vnd(&row, "total_price")?;
+    let deposit_amount = get_optional_money_vnd(&row, "deposit_amount")?.unwrap_or(0);
+    let folio_total = get_money_vnd(&row, "folio_total")?;
+    let cancellation_fee_total = get_money_vnd(&row, "cancellation_fee_total")?;
     let group_id: Option<String> = row.get("group_id");
     let check_in_at: String = row.get("check_in_at");
     let actual_checkout: Option<String> = row.get("actual_checkout");

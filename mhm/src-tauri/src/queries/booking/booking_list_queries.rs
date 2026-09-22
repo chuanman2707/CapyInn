@@ -95,11 +95,11 @@ pub async fn load_bookings_with_guest(
 
     let rows = query.fetch_all(pool).await?;
 
-    Ok(rows.iter().map(map_booking_with_guest).collect())
+    rows.iter().map(map_booking_with_guest).collect()
 }
 
-fn map_booking_with_guest(row: &sqlx::sqlite::SqliteRow) -> BookingWithGuest {
-    BookingWithGuest {
+fn map_booking_with_guest(row: &sqlx::sqlite::SqliteRow) -> Result<BookingWithGuest, sqlx::Error> {
+    Ok(BookingWithGuest {
         id: row.get("id"),
         room_id: row.get("room_id"),
         room_name: row.get("room_name"),
@@ -108,18 +108,18 @@ fn map_booking_with_guest(row: &sqlx::sqlite::SqliteRow) -> BookingWithGuest {
         expected_checkout: row.get("expected_checkout"),
         actual_checkout: row.get("actual_checkout"),
         nights: row.get("nights"),
-        total_price: get_money_vnd(row, "total_price"),
-        paid_amount: get_money_vnd(row, "paid_amount"),
+        total_price: get_money_vnd(row, "total_price")?,
+        paid_amount: get_money_vnd(row, "paid_amount")?,
         status: row.get("status"),
         source: row.get("source"),
         booking_type: row.get("booking_type"),
-        deposit_amount: get_optional_money_vnd(row, "deposit_amount"),
+        deposit_amount: get_optional_money_vnd(row, "deposit_amount")?,
         scheduled_checkin: row.get("scheduled_checkin"),
         scheduled_checkout: row.get("scheduled_checkout"),
         guest_phone: row.get("guest_phone"),
         guests: row.get("guests"),
         group_id: row.get("group_id"),
-    }
+    })
 }
 
 #[cfg(test)]

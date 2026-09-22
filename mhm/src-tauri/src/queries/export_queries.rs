@@ -44,21 +44,22 @@ pub async fn load_booking_export_rows(
     .fetch_all(pool)
     .await?;
 
-    Ok(rows
-        .iter()
-        .map(|row| BookingExportRow {
-            id: row.get("id"),
-            room_id: row.get("room_id"),
-            guest_name: row.get("full_name"),
-            check_in_at: row.get("check_in_at"),
-            expected_checkout: row.get("expected_checkout"),
-            nights: row.get("nights"),
-            total_price: get_money_vnd(row, "total_price"),
-            paid_amount: get_money_vnd(row, "paid_amount"),
-            status: row.get("status"),
-            source: row.get::<Option<String>, _>("source").unwrap_or_default(),
+    rows.iter()
+        .map(|row| {
+            Ok(BookingExportRow {
+                id: row.get("id"),
+                room_id: row.get("room_id"),
+                guest_name: row.get("full_name"),
+                check_in_at: row.get("check_in_at"),
+                expected_checkout: row.get("expected_checkout"),
+                nights: row.get("nights"),
+                total_price: get_money_vnd(row, "total_price")?,
+                paid_amount: get_money_vnd(row, "paid_amount")?,
+                status: row.get("status"),
+                source: row.get::<Option<String>, _>("source").unwrap_or_default(),
+            })
         })
-        .collect())
+        .collect()
 }
 
 pub async fn load_guest_export_rows(
