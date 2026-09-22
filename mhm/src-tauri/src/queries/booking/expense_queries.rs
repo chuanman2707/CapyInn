@@ -25,15 +25,16 @@ pub async fn load_expenses_between(
     .fetch_all(pool)
     .await?;
 
-    Ok(rows
-        .iter()
-        .map(|row| Expense {
-            id: row.get("id"),
-            category: row.get("category"),
-            amount: get_money_vnd(row, "amount"),
-            note: row.get("note"),
-            expense_date: row.get("expense_date"),
-            created_at: row.get("created_at"),
+    rows.iter()
+        .map(|row| {
+            Ok(Expense {
+                id: row.get("id"),
+                category: row.get("category"),
+                amount: get_money_vnd(row, "amount")?,
+                note: row.get("note"),
+                expense_date: row.get("expense_date"),
+                created_at: row.get("created_at"),
+            })
         })
-        .collect())
+        .collect()
 }

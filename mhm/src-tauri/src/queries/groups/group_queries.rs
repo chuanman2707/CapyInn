@@ -69,7 +69,7 @@ pub async fn load_group_bookings(
         .fetch_all(pool)
         .await?;
 
-    Ok(rows.iter().map(map_group_booking).collect())
+    rows.iter().map(map_group_booking).collect()
 }
 
 pub async fn load_group_services(
@@ -81,7 +81,7 @@ pub async fn load_group_services(
         .fetch_all(pool)
         .await?;
 
-    Ok(rows.iter().map(map_group_service).collect())
+    rows.iter().map(map_group_service).collect()
 }
 
 /// The group, its rooms, its services, and what they add up to.
@@ -133,8 +133,8 @@ fn map_group(row: &sqlx::sqlite::SqliteRow) -> BookingGroup {
     }
 }
 
-fn map_group_booking(row: &sqlx::sqlite::SqliteRow) -> BookingWithGuest {
-    BookingWithGuest {
+fn map_group_booking(row: &sqlx::sqlite::SqliteRow) -> Result<BookingWithGuest, sqlx::Error> {
+    Ok(BookingWithGuest {
         id: row.get("id"),
         room_id: row.get("room_id"),
         room_name: row.get("room_name"),
@@ -143,33 +143,33 @@ fn map_group_booking(row: &sqlx::sqlite::SqliteRow) -> BookingWithGuest {
         expected_checkout: row.get("expected_checkout"),
         actual_checkout: row.get("actual_checkout"),
         nights: row.get("nights"),
-        total_price: get_money_vnd(row, "total_price"),
-        paid_amount: get_money_vnd(row, "paid_amount"),
+        total_price: get_money_vnd(row, "total_price")?,
+        paid_amount: get_money_vnd(row, "paid_amount")?,
         status: row.get("status"),
         source: row.get("source"),
         booking_type: row.get("booking_type"),
-        deposit_amount: get_optional_money_vnd(row, "deposit_amount"),
+        deposit_amount: get_optional_money_vnd(row, "deposit_amount")?,
         scheduled_checkin: row.get("scheduled_checkin"),
         scheduled_checkout: row.get("scheduled_checkout"),
         guest_phone: row.get("guest_phone"),
         guests: row.get("guests"),
         group_id: row.get("group_id"),
-    }
+    })
 }
 
-fn map_group_service(row: &sqlx::sqlite::SqliteRow) -> GroupService {
-    GroupService {
+fn map_group_service(row: &sqlx::sqlite::SqliteRow) -> Result<GroupService, sqlx::Error> {
+    Ok(GroupService {
         id: row.get("id"),
         group_id: row.get("group_id"),
         booking_id: row.get("booking_id"),
         name: row.get("name"),
         quantity: row.get("quantity"),
-        unit_price: get_money_vnd(row, "unit_price"),
-        total_price: get_money_vnd(row, "total_price"),
+        unit_price: get_money_vnd(row, "unit_price")?,
+        total_price: get_money_vnd(row, "total_price")?,
         note: row.get("note"),
         created_by: row.get("created_by"),
         created_at: row.get("created_at"),
-    }
+    })
 }
 
 #[cfg(test)]

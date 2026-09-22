@@ -66,7 +66,7 @@ pub async fn load_guest_summaries(
         None => sqlx::query(&summary_sql("", None)).fetch_all(pool).await?,
     };
 
-    Ok(rows.iter().map(map_guest_summary).collect())
+    rows.iter().map(map_guest_summary).collect()
 }
 
 /// Guests whose phone number contains `phone`, most recent visit first.
@@ -80,7 +80,7 @@ pub async fn search_guest_summaries_by_phone(
         .fetch_all(pool)
         .await?;
 
-    Ok(rows.iter().map(map_guest_summary).collect())
+    rows.iter().map(map_guest_summary).collect()
 }
 
 pub async fn load_guest(pool: &Pool<Sqlite>, guest_id: &str) -> Result<Guest, sqlx::Error> {
@@ -121,29 +121,30 @@ pub async fn load_guest_bookings(
     .fetch_all(pool)
     .await?;
 
-    Ok(rows
-        .iter()
-        .map(|row| BookingWithRoom {
-            booking_id: row.get("booking_id"),
-            room_id: row.get("room_id"),
-            check_in_at: row.get("check_in_at"),
-            expected_checkout: row.get("expected_checkout"),
-            total_price: get_money_vnd(row, "total_price"),
-            status: row.get("status"),
+    rows.iter()
+        .map(|row| {
+            Ok(BookingWithRoom {
+                booking_id: row.get("booking_id"),
+                room_id: row.get("room_id"),
+                check_in_at: row.get("check_in_at"),
+                expected_checkout: row.get("expected_checkout"),
+                total_price: get_money_vnd(row, "total_price")?,
+                status: row.get("status"),
+            })
         })
-        .collect())
+        .collect()
 }
 
-fn map_guest_summary(row: &sqlx::sqlite::SqliteRow) -> GuestSummary {
-    GuestSummary {
+fn map_guest_summary(row: &sqlx::sqlite::SqliteRow) -> Result<GuestSummary, sqlx::Error> {
+    Ok(GuestSummary {
         id: row.get("id"),
         full_name: row.get("full_name"),
         doc_number: row.get("doc_number"),
         nationality: row.get("nationality"),
         total_stays: row.get::<i32, _>("total_stays"),
-        total_spent: get_money_vnd(row, "total_spent"),
+        total_spent: get_money_vnd(row, "total_spent")?,
         last_visit: row.get("last_visit"),
-    }
+    })
 }
 
 #[cfg(test)]

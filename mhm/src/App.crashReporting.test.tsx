@@ -134,7 +134,7 @@ describe("App crash reporting flow", () => {
     await user.click(screen.getByRole("button", { name: "Export report" }));
 
     expect(invoke).toHaveBeenCalledWith("export_crash_report", {
-      bundle_id: "bundle-1",
+      bundleId: "bundle-1",
     });
 
     expect(
@@ -185,7 +185,7 @@ describe("App crash reporting flow", () => {
     await user.click(screen.getByRole("button", { name: "Don't send" }));
 
     expect(invoke).toHaveBeenCalledWith("mark_crash_report_dismissed", {
-      bundle_id: "bundle-1",
+      bundleId: "bundle-1",
     });
     await waitFor(() => {
       expect(screen.queryByText("App encountered a serious error")).not.toBeInTheDocument();

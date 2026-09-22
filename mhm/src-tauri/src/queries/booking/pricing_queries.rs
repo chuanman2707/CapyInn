@@ -153,11 +153,13 @@ impl Default for RoomGuestPricing {
     }
 }
 
-fn room_guest_pricing_from_row(row: &sqlx::sqlite::SqliteRow) -> RoomGuestPricing {
-    RoomGuestPricing {
+fn room_guest_pricing_from_row(
+    row: &sqlx::sqlite::SqliteRow,
+) -> Result<RoomGuestPricing, sqlx::Error> {
+    Ok(RoomGuestPricing {
         base_guests: row.get("max_guests"),
-        extra_person_fee: get_money_vnd(row, "extra_person_fee"),
-    }
+        extra_person_fee: get_money_vnd(row, "extra_person_fee")?,
+    })
 }
 
 async fn load_room_guest_pricing_tx(
@@ -173,6 +175,8 @@ async fn load_room_guest_pricing_tx(
     Ok(row
         .as_ref()
         .map(room_guest_pricing_from_row)
+        .transpose()
+        .map_err(database_error)?
         .unwrap_or_default())
 }
 
@@ -189,15 +193,19 @@ async fn load_room_guest_pricing_for_type(
     Ok(row
         .as_ref()
         .map(room_guest_pricing_from_row)
+        .transpose()
+        .map_err(database_error)?
         .unwrap_or_default())
 }
 
-pub(crate) fn stored_rule_from_row(row: &sqlx::sqlite::SqliteRow) -> StoredPricingRule {
-    StoredPricingRule {
+pub(crate) fn stored_rule_from_row(
+    row: &sqlx::sqlite::SqliteRow,
+) -> Result<StoredPricingRule, sqlx::Error> {
+    Ok(StoredPricingRule {
         room_type: row.get("room_type"),
-        hourly_rate: get_money_vnd(row, "hourly_rate"),
-        overnight_rate: get_money_vnd(row, "overnight_rate"),
-        daily_rate: get_money_vnd(row, "daily_rate"),
+        hourly_rate: get_money_vnd(row, "hourly_rate")?,
+        overnight_rate: get_money_vnd(row, "overnight_rate")?,
+        daily_rate: get_money_vnd(row, "daily_rate")?,
         overnight_start: row.get("overnight_start"),
         overnight_end: row.get("overnight_end"),
         daily_checkin: row.get("daily_checkin"),
@@ -205,7 +213,7 @@ pub(crate) fn stored_rule_from_row(row: &sqlx::sqlite::SqliteRow) -> StoredPrici
         early_checkin_surcharge_pct: get_f64(row, "early_checkin_surcharge_pct"),
         late_checkout_surcharge_pct: get_f64(row, "late_checkout_surcharge_pct"),
         weekend_uplift_pct: get_f64(row, "weekend_uplift_pct"),
-    }
+    })
 }
 
 pub(crate) async fn load_stay_pricing_inputs_tx(
@@ -338,6 +346,8 @@ async fn load_room_guest_pricing(
     Ok(row
         .as_ref()
         .map(room_guest_pricing_from_row)
+        .transpose()
+        .map_err(database_error)?
         .unwrap_or_default())
 }
 
@@ -375,7 +385,10 @@ async fn load_stored_pricing_rule(
         .await
         .map_err(database_error)?;
 
-    Ok(row.as_ref().map(stored_rule_from_row))
+    row.as_ref()
+        .map(stored_rule_from_row)
+        .transpose()
+        .map_err(database_error)
 }
 
 async fn load_fallback_base_price(
@@ -388,7 +401,10 @@ async fn load_fallback_base_price(
         .await
         .map_err(database_error)?;
 
-    Ok(row.as_ref().map(|row| get_money_vnd(row, "base_price")))
+    row.as_ref()
+        .map(|row| get_money_vnd(row, "base_price"))
+        .transpose()
+        .map_err(database_error)
 }
 
 /// Ngày lễ trong khoảng kỳ ở.
@@ -440,13 +456,14 @@ pub(crate) async fn load_pricing_rule_listings(
         .fetch_all(pool)
         .await?;
 
-    Ok(rows
-        .iter()
-        .map(|row| PricingRuleListing {
-            id: row.get("id"),
-            rule: stored_rule_from_row(row),
+    rows.iter()
+        .map(|row| {
+            Ok(PricingRuleListing {
+                id: row.get("id"),
+                rule: stored_rule_from_row(row)?,
+            })
         })
-        .collect())
+        .collect()
 }
 
 pub async fn load_special_dates(pool: &Pool<Sqlite>) -> Result<Vec<SpecialDate>, sqlx::Error> {
@@ -485,7 +502,10 @@ async fn load_stored_pricing_rule_tx(
         .await
         .map_err(database_error)?;
 
-    Ok(row.as_ref().map(stored_rule_from_row))
+    row.as_ref()
+        .map(stored_rule_from_row)
+        .transpose()
+        .map_err(database_error)
 }
 
 async fn load_fallback_base_price_tx(
@@ -498,9 +518,11 @@ async fn load_fallback_base_price_tx(
         .await
         .map_err(database_error)?;
 
-    Ok(fallback_row
+    fallback_row
         .as_ref()
-        .map(|row| get_money_vnd(row, "base_price")))
+        .map(|row| get_money_vnd(row, "base_price"))
+        .transpose()
+        .map_err(database_error)
 }
 
 #[cfg(test)]
@@ -529,7 +551,7 @@ mod tests {
         .await
         .unwrap();
 
-        let rule = stored_rule_from_row(&row);
+        let rule = stored_rule_from_row(&row).unwrap();
 
         assert_eq!(rule.room_type, "deluxe");
         assert_eq!(rule.hourly_rate, 120_000);

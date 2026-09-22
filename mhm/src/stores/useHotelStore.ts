@@ -150,8 +150,21 @@ export const useHotelStore = create<HotelStore>((set, get) => {
     },
 
     fetchStats: async () => {
-      const stats = await invoke<DashboardStats>("get_dashboard_stats");
-      set({ stats });
+      try {
+        // Panic phía backend không reject mà treo invoke promise mãi mãi —
+        // mini-tab từng "đơ" vì hàm này nằm trong chuỗi await của mọi write.
+        // Race timeout + catch: lỗi đọc stats giữ số liệu cũ, không được phép
+        // khoá một action đã commit thành công.
+        const stats = await Promise.race([
+          invoke<DashboardStats>("get_dashboard_stats"),
+          new Promise<never>((_, reject) =>
+            setTimeout(() => reject(new Error("get_dashboard_stats timed out")), 10_000),
+          ),
+        ]);
+        set({ stats });
+      } catch (err) {
+        console.error("get_dashboard_stats error:", err);
+      }
     },
 
     markDashboardDataChanged: () =>

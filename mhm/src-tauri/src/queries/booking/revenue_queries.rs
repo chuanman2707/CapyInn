@@ -125,11 +125,13 @@ pub async fn load_analytics(
 
     let revenue_by_source = source_rows
         .iter()
-        .map(|row| SourceRevenue {
-            name: row.get("source"),
-            value: get_money_vnd(row, "value"),
+        .map(|row| {
+            Ok(SourceRevenue {
+                name: row.get("source"),
+                value: get_money_vnd(row, "value")?,
+            })
         })
-        .collect();
+        .collect::<Result<Vec<_>, sqlx::Error>>()?;
 
     let expense_rows = sqlx::query(
         "SELECT category, COALESCE(SUM(amount), 0) AS amount
@@ -145,11 +147,13 @@ pub async fn load_analytics(
 
     let expenses_by_category = expense_rows
         .iter()
-        .map(|row| CategoryExpense {
-            category: row.get("category"),
-            amount: get_money_vnd(row, "amount"),
+        .map(|row| {
+            Ok(CategoryExpense {
+                category: row.get("category"),
+                amount: get_money_vnd(row, "amount")?,
+            })
         })
-        .collect();
+        .collect::<Result<Vec<_>, sqlx::Error>>()?;
 
     let room_rows_sql = format!(
         "SELECT room_id, COALESCE(SUM(amount), 0) AS value
@@ -184,11 +188,13 @@ pub async fn load_analytics(
 
     let top_rooms = room_rows
         .iter()
-        .map(|row| RoomRevenue {
-            room: row.get("room_id"),
-            revenue: get_money_vnd(row, "value"),
+        .map(|row| {
+            Ok(RoomRevenue {
+                room: row.get("room_id"),
+                revenue: get_money_vnd(row, "value")?,
+            })
         })
-        .collect();
+        .collect::<Result<Vec<_>, sqlx::Error>>()?;
 
     Ok(AnalyticsData {
         total_revenue,
@@ -222,7 +228,7 @@ pub async fn load_room_revenue(
         .fetch_one(pool)
         .await?;
 
-    Ok(get_money_vnd(&row, "value"))
+    get_money_vnd(&row, "value")
 }
 
 pub async fn load_folio_revenue(
@@ -247,7 +253,7 @@ pub async fn load_folio_revenue(
     .fetch_one(pool)
     .await?;
 
-    Ok(get_money_vnd(&row, "value"))
+    get_money_vnd(&row, "value")
 }
 
 pub async fn load_cancellation_fee_revenue(
@@ -271,7 +277,7 @@ pub async fn load_cancellation_fee_revenue(
     .fetch_one(pool)
     .await?;
 
-    Ok(get_money_vnd(&row, "value"))
+    get_money_vnd(&row, "value")
 }
 
 pub async fn load_total_revenue(
@@ -398,15 +404,29 @@ fn recognized_room_revenue_amount_sql(column_prefix: &str) -> String {
     let check_in_date = date_sql(&format!("{column_prefix}check_in_at"));
     let range_start = date_sql("?2");
     let range_end_exclusive = date_plus_days_sql("?1", 1);
+    // Phân bổ nguyên kiểu "luỹ kế trừ nhau": với k đêm đã trôi của lượt ở,
+    // ghi nhận tích luỹ floor(total × k / nights); phần trong window =
+    // cum(đến cuối window) − cum(đến đầu window). Cộng dồn các window kề nhau
+    // ra đúng total_price (dư lẻ tự rơi vào ngày phân bổ cuối), và mọi phép
+    // tính đều INTEGER — trước đây JULIANDAY trả REAL khiến
+    // total_price * days / nights ra số lẻ, làm get_money_vnd panic và treo
+    // invoke promise phía UI.
+    // MIN(nights, …) chặn trường hợp mốc ngày thực tế dài hơn cột nights.
+    let cumulative_recognized = |day_bound: String| {
+        format!(
+            "{column_prefix}total_price * CAST(
+                MIN({column_prefix}nights, MAX(0, {day_bound} - JULIANDAY({check_in_date})))
+            AS INTEGER) / {column_prefix}nights"
+        )
+    };
+    let recognized_upto_end = cumulative_recognized(format!(
+        "JULIANDAY(MIN(DATE({recognized_checkout}), {range_end_exclusive}))"
+    ));
+    let recognized_upto_start =
+        cumulative_recognized(format!("JULIANDAY(MAX({check_in_date}, {range_start}))"));
     format!(
         "CASE
-            WHEN {column_prefix}nights > 0 THEN {column_prefix}total_price * (
-                MAX(
-                    0,
-                    JULIANDAY(MIN(DATE({recognized_checkout}), {range_end_exclusive})) -
-                    JULIANDAY(MAX({check_in_date}, {range_start}))
-                )
-            ) / {column_prefix}nights
+            WHEN {column_prefix}nights > 0 THEN {recognized_upto_end} - {recognized_upto_start}
             ELSE 0
         END"
     )

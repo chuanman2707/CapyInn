@@ -84,7 +84,7 @@ pub async fn list_unpaid_balances(
     );
     let rows = sqlx::query(&sql).fetch_all(pool).await?;
 
-    Ok(rows.iter().map(row_to_booking_summary).collect())
+    rows.iter().map(row_to_booking_summary).collect()
 }
 
 pub async fn summarize_operational_risks(
@@ -160,22 +160,22 @@ async fn load_booking_summaries(
         .fetch_all(pool)
         .await?;
 
-    Ok(rows.iter().map(row_to_booking_summary).collect())
+    rows.iter().map(row_to_booking_summary).collect()
 }
 
-fn row_to_booking_summary(row: &sqlx::sqlite::SqliteRow) -> CeoBookingSummary {
-    CeoBookingSummary {
+fn row_to_booking_summary(row: &sqlx::sqlite::SqliteRow) -> Result<CeoBookingSummary, sqlx::Error> {
+    Ok(CeoBookingSummary {
         booking_id: row.get("booking_id"),
         room_id: row.get("room_id"),
         guest_name: row.get("guest_name"),
         scheduled_checkin: row.get("scheduled_checkin"),
         scheduled_checkout: row.get("scheduled_checkout"),
         expected_checkout: row.get("expected_checkout"),
-        total_price: get_money_vnd(row, "total_price"),
-        paid_amount: get_money_vnd(row, "paid_amount"),
-        balance_due: get_money_vnd(row, "balance_due"),
+        total_price: get_money_vnd(row, "total_price")?,
+        paid_amount: get_money_vnd(row, "paid_amount")?,
+        balance_due: get_money_vnd(row, "balance_due")?,
         status: row.get("status"),
-    }
+    })
 }
 
 fn local_date(expression: &str) -> String {
