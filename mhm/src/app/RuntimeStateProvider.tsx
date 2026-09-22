@@ -224,13 +224,13 @@ export function RuntimeStateProvider({ children }: { children: ReactNode }) {
           try {
             await submitCrashBundle(pending);
           } catch {
-            await invoke("mark_crash_report_send_failed", { bundle_id: pending.bundle_id });
+            await invoke("mark_crash_report_send_failed", { bundleId: pending.bundle_id });
             setPendingCrashReport(pending);
             return;
           }
 
           try {
-            await invoke("mark_crash_report_submitted", { bundle_id: pending.bundle_id });
+            await invoke("mark_crash_report_submitted", { bundleId: pending.bundle_id });
             return;
           } catch {
             toast.error("Crash report đã gửi nhưng không thể dọn bundle cục bộ");
@@ -257,7 +257,7 @@ export function RuntimeStateProvider({ children }: { children: ReactNode }) {
       sendSucceeded = true;
     } catch {
       await invoke("mark_crash_report_send_failed", {
-        bundle_id: pendingCrashReport.bundle_id,
+        bundleId: pendingCrashReport.bundle_id,
       });
       toast.error("Gửi crash report thất bại");
       return;
@@ -270,7 +270,7 @@ export function RuntimeStateProvider({ children }: { children: ReactNode }) {
     try {
       await invoke("set_crash_reporting_preference", { enabled: true });
       await invoke("mark_crash_report_submitted", {
-        bundle_id: pendingCrashReport.bundle_id,
+        bundleId: pendingCrashReport.bundle_id,
       });
       setPendingCrashReport(null);
       setCrashExportPath(null);
@@ -290,7 +290,7 @@ export function RuntimeStateProvider({ children }: { children: ReactNode }) {
     setCrashPromptBusy(true);
     try {
       await invoke("mark_crash_report_dismissed", {
-        bundle_id: report.bundle_id,
+        bundleId: report.bundle_id,
       });
     } catch {
       toast.error("Không thể dọn crash report cục bộ. Prompt sẽ được ẩn cho phiên này.");
@@ -309,7 +309,7 @@ export function RuntimeStateProvider({ children }: { children: ReactNode }) {
     setCrashPromptBusy(true);
     try {
       const path = await invoke<string>("export_crash_report", {
-        bundle_id: pendingCrashReport.bundle_id,
+        bundleId: pendingCrashReport.bundle_id,
       });
       setCrashExportPath(path);
     } finally {
